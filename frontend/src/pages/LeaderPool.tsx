@@ -19,6 +19,7 @@ import {
   Statistic,
   Table,
   Tag,
+  Tooltip,
   Typography,
   message
 } from 'antd'
@@ -44,6 +45,9 @@ const formatDate = (timestamp?: number) => {
   if (!timestamp) return '-'
   return dayjs(timestamp).format('YYYY-MM-DD HH:mm')
 }
+
+const canCreateTrialConfig = (item: LeaderPoolItem) =>
+  !item.researchCandidateId || item.researchState === 'TRIAL_READY'
 
 const LeaderPool: React.FC = () => {
   const { t } = useTranslation()
@@ -333,36 +337,46 @@ const LeaderPool: React.FC = () => {
       key: 'actions',
       fixed: 'right' as const,
       width: 320,
-      render: (_: unknown, item: LeaderPoolItem) => (
-        <Space wrap size={4}>
-          <Button size="small" icon={<EyeOutlined />} onClick={() => window.open(item.profileUrl, '_blank', 'noopener,noreferrer')}>
-            Profile
-          </Button>
-          <Button size="small" onClick={() => openStatusModal(item)}>
-            {t('leaderPool.updateStatus')}
-          </Button>
-          <Button size="small" onClick={() => openPlanModal(item)}>
-            {t('leaderPool.editPlan')}
-          </Button>
+      render: (_: unknown, item: LeaderPoolItem) => {
+        const trialAllowed = canCreateTrialConfig(item)
+        const trialButton = (
           <Button
             size="small"
             type="primary"
             loading={creatingMap[item.id]}
-            disabled={creatingMap[item.id]}
+            disabled={creatingMap[item.id] || !trialAllowed}
             onClick={() => openTrialModal(item)}
           >
             {t('leaderPool.createTrial')}
           </Button>
-          <Popconfirm
-            title={t('leaderPool.removeConfirm')}
-            okText={t('common.confirm')}
-            cancelText={t('common.cancel')}
-            onConfirm={() => handleRemove(item)}
-          >
-            <Button size="small" danger>{t('common.delete')}</Button>
-          </Popconfirm>
-        </Space>
-      )
+        )
+        return (
+          <Space wrap size={4}>
+            <Button size="small" icon={<EyeOutlined />} onClick={() => window.open(item.profileUrl, '_blank', 'noopener,noreferrer')}>
+              Profile
+            </Button>
+            <Button size="small" onClick={() => openStatusModal(item)}>
+              {t('leaderPool.updateStatus')}
+            </Button>
+            <Button size="small" onClick={() => openPlanModal(item)}>
+              {t('leaderPool.editPlan')}
+            </Button>
+            {trialAllowed ? trialButton : (
+              <Tooltip title={t('leaderPool.trialRequiresResearchReady')}>
+                <span>{trialButton}</span>
+              </Tooltip>
+            )}
+            <Popconfirm
+              title={t('leaderPool.removeConfirm')}
+              okText={t('common.confirm')}
+              cancelText={t('common.cancel')}
+              onConfirm={() => handleRemove(item)}
+            >
+              <Button size="small" danger>{t('common.delete')}</Button>
+            </Popconfirm>
+          </Space>
+        )
+      }
     }
   ]
 

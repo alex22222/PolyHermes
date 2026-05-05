@@ -619,6 +619,7 @@
     "createTrial": "Create Trial Config",
     "trialConfirmTitle": "This creates a disabled FIXED small trial config",
     "trialConfirmDesc": "Confirm fixed amount, max daily orders, max daily loss, price range, and max position before submitting.",
+    "trialRequiresResearchReady": "Research candidates must be trial-ready before a trial config can be created.",
     "account": "Account",
     "selectAccount": "Please select an account",
     "noAccounts": "No accounts yet",

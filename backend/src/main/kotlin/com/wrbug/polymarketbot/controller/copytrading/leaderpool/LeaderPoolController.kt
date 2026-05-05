@@ -6,6 +6,7 @@ import com.wrbug.polymarketbot.service.copytrading.leaderpool.LeaderPoolAlreadyE
 import com.wrbug.polymarketbot.service.copytrading.leaderpool.LeaderPoolConfirmRequiredException
 import com.wrbug.polymarketbot.service.copytrading.leaderpool.LeaderPoolDuplicateTrialConfigException
 import com.wrbug.polymarketbot.service.copytrading.leaderpool.LeaderPoolNotFoundException
+import com.wrbug.polymarketbot.service.copytrading.leaderpool.LeaderPoolResearchCandidateNotReadyException
 import com.wrbug.polymarketbot.service.copytrading.leaderpool.LeaderPoolService
 import org.slf4j.LoggerFactory
 import org.springframework.context.MessageSource
@@ -146,6 +147,7 @@ class LeaderPoolController(
             is LeaderPoolAlreadyExistsException -> ErrorCode.LEADER_POOL_ALREADY_EXISTS
             is LeaderPoolDuplicateTrialConfigException -> ErrorCode.LEADER_POOL_DUPLICATE_TRIAL_CONFIG
             is LeaderPoolConfirmRequiredException -> ErrorCode.LEADER_POOL_CONFIRM_REQUIRED
+            is LeaderPoolResearchCandidateNotReadyException -> ErrorCode.LEADER_RESEARCH_CANDIDATE_NOT_READY
             is IllegalArgumentException -> when (e.message) {
                 "账户不存在" -> ErrorCode.ACCOUNT_NOT_FOUND
                 "Leader 不存在" -> ErrorCode.LEADER_NOT_FOUND
@@ -166,6 +168,7 @@ class LeaderPoolController(
             errorCode == ErrorCode.LEADER_POOL_ALREADY_EXISTS ||
             errorCode == ErrorCode.LEADER_POOL_DUPLICATE_TRIAL_CONFIG ||
             errorCode == ErrorCode.LEADER_POOL_CONFIRM_REQUIRED ||
+            errorCode == ErrorCode.LEADER_RESEARCH_CANDIDATE_NOT_READY ||
             errorCode == ErrorCode.ACCOUNT_NOT_FOUND ||
             errorCode == ErrorCode.LEADER_NOT_FOUND
     }

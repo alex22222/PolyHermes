@@ -12,6 +12,7 @@ import com.wrbug.polymarketbot.entity.CopyTrading
 import com.wrbug.polymarketbot.entity.Leader
 import com.wrbug.polymarketbot.entity.LeaderPool
 import com.wrbug.polymarketbot.enums.LeaderPoolStatus
+import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.repository.AccountRepository
 import com.wrbug.polymarketbot.repository.CopyTradingRepository
 import com.wrbug.polymarketbot.repository.LeaderPoolRepository
@@ -181,6 +182,20 @@ class LeaderPoolServiceTest {
     }
 
     @Test
+    fun `research pool item must be trial ready before creating trial config`() {
+        Mockito.`when`(leaderPoolRepository.findById(10L)).thenReturn(
+            Optional.of(pool(researchCandidateId = 99, researchState = LeaderResearchState.PAPER))
+        )
+
+        val result = service.createTrialConfig(LeaderPoolCreateTrialConfigRequest(poolId = 10, accountId = 2))
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is LeaderPoolResearchCandidateNotReadyException)
+        Mockito.verify(accountRepository, Mockito.never()).findById(2L)
+        Mockito.verify(copyTradingService, Mockito.never()).createCopyTrading(anyCreateRequest())
+    }
+
+    @Test
     fun `create trial failure leaves pool status unchanged`() {
         Mockito.`when`(leaderPoolRepository.findById(10L)).thenReturn(Optional.of(pool()))
         Mockito.`when`(accountRepository.findById(2L)).thenReturn(Optional.of(account()))
@@ -261,11 +276,15 @@ class LeaderPoolServiceTest {
     private fun pool(
         id: Long = 10,
         leaderId: Long = 1,
-        status: LeaderPoolStatus = LeaderPoolStatus.CANDIDATE
+        status: LeaderPoolStatus = LeaderPoolStatus.CANDIDATE,
+        researchCandidateId: Long? = null,
+        researchState: LeaderResearchState? = null
     ) = LeaderPool(
         id = id,
         leaderId = leaderId,
         status = status,
+        researchCandidateId = researchCandidateId,
+        researchState = researchState,
         suggestedFixedAmount = BigDecimal("1"),
         suggestedMaxDailyOrders = 10,
         suggestedMaxDailyLoss = BigDecimal("5"),

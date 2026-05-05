@@ -5,6 +5,7 @@ import com.wrbug.polymarketbot.entity.CopyTrading
 import com.wrbug.polymarketbot.entity.Leader
 import com.wrbug.polymarketbot.entity.LeaderPool
 import com.wrbug.polymarketbot.enums.LeaderPoolStatus
+import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.repository.AccountRepository
 import com.wrbug.polymarketbot.repository.CopyTradingRepository
 import com.wrbug.polymarketbot.repository.LeaderPoolRepository
@@ -207,6 +208,15 @@ class LeaderPoolService(
         }
 
         return try {
+            if (pool.researchCandidateId != null && pool.researchState != LeaderResearchState.TRIAL_READY) {
+                logger.warn(
+                    "拒绝从未试跟建议的研究候选创建 Leader 池试跟配置: poolId={}, leaderId={}, researchState={}",
+                    pool.id,
+                    pool.leaderId,
+                    pool.researchState
+                )
+                return Result.failure(LeaderPoolResearchCandidateNotReadyException())
+            }
             if (request.enableImmediately && !request.confirm) {
                 logger.warn("拒绝未确认的立即启用试跟配置: poolId={}, leaderId={}", pool.id, pool.leaderId)
                 return Result.failure(LeaderPoolConfirmRequiredException())

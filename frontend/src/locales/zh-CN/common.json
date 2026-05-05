@@ -619,6 +619,7 @@
     "createTrial": "创建试跟配置",
     "trialConfirmTitle": "将创建默认禁用的小额 FIXED 跟单配置",
     "trialConfirmDesc": "提交前请确认固定金额、每日最大单数、每日最大亏损、价格区间和最大持仓。",
+    "trialRequiresResearchReady": "研究候选进入建议试跟后才能创建试跟配置",
     "account": "账户",
     "selectAccount": "请选择账户",
     "noAccounts": "暂无账户，请先添加账户",
