@@ -39,6 +39,7 @@ import BacktestList from './pages/BacktestList'
 import BacktestDetail from './pages/BacktestDetail'
 import CryptoTailStrategyList from './pages/CryptoTailStrategyList'
 import CryptoTailMonitor from './pages/CryptoTailMonitor'
+import BridgeTradeRecordList from './pages/BridgeTradeRecordList'
 import { wsManager } from './services/websocket'
 import type { OrderPushMessage } from './types'
 import { apiService } from './services/api'
@@ -285,6 +286,7 @@ function App() {
           <Route path="/copy-trading/filtered-orders/:id" element={<ProtectedRoute><FilteredOrdersList /></ProtectedRoute>} />
           <Route path="/backtest" element={<ProtectedRoute><BacktestList /></ProtectedRoute>} />
           <Route path="/backtest/detail/:id" element={<ProtectedRoute><BacktestDetail /></ProtectedRoute>} />
+          <Route path="/bridge-trade-records" element={<ProtectedRoute><BridgeTradeRecordList /></ProtectedRoute>} />
           <Route path="/config" element={<ProtectedRoute><ConfigPage /></ProtectedRoute>} />
           <Route path="/positions" element={<ProtectedRoute><PositionList /></ProtectedRoute>} />
           <Route path="/statistics" element={<ProtectedRoute><Statistics /></ProtectedRoute>} />

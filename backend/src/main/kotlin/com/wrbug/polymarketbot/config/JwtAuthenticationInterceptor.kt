@@ -27,7 +27,13 @@ class JwtAuthenticationInterceptor(
     private val excludePaths = setOf(
         "/api/auth/login",
         "/api/auth/reset-password",
-        "/api/auth/check-first-use"
+        "/api/auth/check-first-use",
+        // 桥接交易记录为只读查询，开发测试期间免鉴权；生产环境建议移除
+        "/api/bridge/trades/list",
+        "/api/bridge/trades/detail",
+        // 桥接日志同样为只读，开发测试期间免鉴权
+        "/api/bridge/logs/list",
+        "/api/bridge/logs/content"
     )
     
     override fun preHandle(

@@ -1,0 +1,15 @@
+# Secrets / local config
+.env
+
+# Browser profile (contains cookies/session)
+browser_profile/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Logs
+*.log
+/tmp/

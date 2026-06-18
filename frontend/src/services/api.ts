@@ -1,6 +1,12 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import type {
   ApiResponse,
+  BridgeLogContentRequest,
+  BridgeLogContentResponse,
+  BridgeLogInfo,
+  BridgeTradeRecord,
+  BridgeTradeRecordListRequest,
+  BridgeTradeRecordListResponse,
   LeaderPoolAddRequest,
   LeaderPoolCreateTrialConfigRequest,
   LeaderPoolItem,
@@ -950,6 +956,40 @@ export const apiService = {
           total?: number
         }
       }>>('/announcements/detail', data)
+  },
+
+  /**
+   * 桥接交易记录 API
+   */
+  bridgeTradeRecords: {
+    /**
+     * 查询桥接交易记录列表
+     */
+    list: (data: BridgeTradeRecordListRequest = {}) =>
+      apiClient.post<ApiResponse<BridgeTradeRecordListResponse>>('/bridge/trades/list', data),
+
+    /**
+     * 查询桥接交易记录详情
+     */
+    detail: (data: { id: number }) =>
+      apiClient.post<ApiResponse<BridgeTradeRecord>>('/bridge/trades/detail', data)
+  },
+
+  /**
+   * 桥接日志 API
+   */
+  bridgeLogs: {
+    /**
+     * 查询可查看的日志列表
+     */
+    list: () =>
+      apiClient.post<ApiResponse<BridgeLogInfo[]>>('/bridge/logs/list', {}),
+
+    /**
+     * 获取指定日志内容
+     */
+    content: (data: BridgeLogContentRequest) =>
+      apiClient.post<ApiResponse<BridgeLogContentResponse>>('/bridge/logs/content', data)
   }
 }
 

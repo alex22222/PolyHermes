@@ -116,3 +116,15 @@ landing-page/
 clob-client-v2/
 settings.local.json
 .gstack/
+
+# Local JDK bundle
+jdk17/
+
+# Python virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Polymtrade bridge local state
+polymtrade-bridge/.last_leader_event_id

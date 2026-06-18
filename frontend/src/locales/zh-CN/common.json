@@ -338,7 +338,28 @@
     "logout": "退出登录",
     "logoutConfirm": "确认退出",
     "logoutConfirmDesc": "确定要退出登录吗？",
-    "navigation": "导航菜单"
+    "navigation": "导航菜单",
+    "bridgeTradeRecords": "桥接交易记录"
+  },
+  "bridgeTradeRecord": {
+    "title": "桥接交易记录",
+    "fetchFailed": "获取桥接交易记录失败",
+    "recordsTab": "交易记录",
+    "logsTab": "运行日志",
+    "id": "ID",
+    "market": "市场",
+    "side": "方向",
+    "outcome": "结果",
+    "quantity": "数量",
+    "price": "价格",
+    "amount": "金额",
+    "status": "状态",
+    "executedAt": "执行时间",
+    "logs": {
+      "bridge": "Bridge 运行日志",
+      "poller": "Leader Event Poller 日志",
+      "loading": "加载中..."
+    }
   },
   "apiHealthStatus": {
     "title": "API 健康状态",

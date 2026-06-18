@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  polymtrade-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polymtrade-bridge
+    ports:
+      - "8080:8080"
+    environment:
+      - POLYMTRADE_URL=https://polym.trade
+      # Set your proxy here if needed, e.g. http://host.docker.internal:7890
+      - BROWSER_PROXY=${BROWSER_PROXY:-}
+      - HEADLESS=${HEADLESS:-false}
+      - BROWSER_PROFILE_DIR=/app/browser_profile
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - polymtrade-browser-profile:/app/browser_profile
+      # Mount docker socket so log watcher can read PolyHermes logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - polyhermes-network
+    restart: unless-stopped
+
+volumes:
+  polymtrade-browser-profile:
+
+networks:
+  polyhermes-network:
+    external: true

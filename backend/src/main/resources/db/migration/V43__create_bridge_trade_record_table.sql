@@ -1,0 +1,25 @@
+CREATE TABLE IF NOT EXISTS bridge_trade_record (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '桥接交易记录ID',
+    bridge_id VARCHAR(100) NOT NULL COMMENT '桥ID',
+    external_trade_id VARCHAR(100) DEFAULT NULL COMMENT '外部Leader交易ID',
+    market_id VARCHAR(100) NOT NULL COMMENT '市场ID/conditionId',
+    market_title VARCHAR(500) DEFAULT NULL COMMENT '市场标题',
+    side VARCHAR(20) NOT NULL COMMENT '方向: BUY/SELL',
+    outcome VARCHAR(50) DEFAULT NULL COMMENT '结果',
+    outcome_index INT DEFAULT NULL COMMENT '结果索引',
+    quantity DECIMAL(20, 8) NOT NULL COMMENT '数量(shares)',
+    price DECIMAL(20, 8) NOT NULL COMMENT '价格',
+    amount DECIMAL(20, 8) NOT NULL COMMENT '金额(USDC)',
+    fee DECIMAL(20, 8) NOT NULL DEFAULT 0.0 COMMENT '手续费',
+    status VARCHAR(30) NOT NULL DEFAULT 'PENDING' COMMENT '状态: PENDING/SUCCESS/FAILED',
+    error_message TEXT DEFAULT NULL COMMENT '错误信息',
+    raw_payload TEXT DEFAULT NULL COMMENT '原始信号JSON',
+    executed_at BIGINT DEFAULT NULL COMMENT '执行时间',
+    created_at BIGINT NOT NULL COMMENT '创建时间',
+    updated_at BIGINT NOT NULL COMMENT '更新时间',
+
+    UNIQUE KEY uk_bridge_trade_record_bridge_trade (bridge_id, external_trade_id),
+    INDEX idx_bridge_trade_record_status (status),
+    INDEX idx_bridge_trade_record_executed_at (executed_at),
+    INDEX idx_bridge_trade_record_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='外部桥交易记录表';

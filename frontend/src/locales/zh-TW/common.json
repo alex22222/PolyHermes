@@ -338,7 +338,28 @@
     "logout": "退出登錄",
     "logoutConfirm": "確認退出",
     "logoutConfirmDesc": "確定要退出登錄嗎？",
-    "navigation": "導航菜單"
+    "navigation": "導航菜單",
+    "bridgeTradeRecords": "橋接交易記錄"
+  },
+  "bridgeTradeRecord": {
+    "title": "橋接交易記錄",
+    "fetchFailed": "獲取橋接交易記錄失敗",
+    "recordsTab": "交易記錄",
+    "logsTab": "運行日誌",
+    "id": "ID",
+    "market": "市場",
+    "side": "方向",
+    "outcome": "結果",
+    "quantity": "數量",
+    "price": "價格",
+    "amount": "金額",
+    "status": "狀態",
+    "executedAt": "執行時間",
+    "logs": {
+      "bridge": "Bridge 運行日誌",
+      "poller": "Leader Event Poller 日誌",
+      "loading": "加載中..."
+    }
   },
   "languageSettings": {
     "title": "語言設置",

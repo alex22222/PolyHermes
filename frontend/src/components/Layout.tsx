@@ -24,7 +24,8 @@ import {
   LineChartOutlined,
   RocketOutlined,
   DashboardOutlined,
-  ExperimentOutlined
+  ExperimentOutlined,
+  SwapOutlined
 } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 import type { ReactNode } from 'react'
@@ -202,6 +203,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       key: '/statistics',
       icon: <BarChartOutlined />,
       label: t('menu.statistics')
+    },
+    {
+      key: '/bridge-trade-records',
+      icon: <SwapOutlined />,
+      label: t('menu.bridgeTradeRecords') || '桥接交易记录'
     },
     {
       key: '/users',

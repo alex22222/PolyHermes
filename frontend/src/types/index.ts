@@ -1671,3 +1671,80 @@ export interface TemplateVariablesResponse {
   categories: TemplateVariableCategory[]  // 分类列表
   variables: TemplateVariable[]  // 变量列表
 }
+
+/**
+ * 桥接交易记录（由 Polymtrade Bridge 等外部执行器写入）
+ */
+export interface BridgeTradeRecord {
+  id: number
+  bridgeId: string
+  externalTradeId?: string
+  marketId: string
+  marketTitle?: string
+  side: string
+  outcome?: string
+  outcomeIndex?: number
+  quantity: string
+  price: string
+  amount: string
+  fee: string
+  status: string
+  errorMessage?: string
+  rawPayload?: string
+  executedAt?: number
+  createdAt: number
+  updatedAt: number
+}
+
+/**
+ * 桥接交易记录列表响应
+ */
+export interface BridgeTradeRecordListResponse {
+  list: BridgeTradeRecord[]
+  total: number
+  page: number
+  size: number
+}
+
+/**
+ * 桥接交易记录列表请求
+ */
+export interface BridgeTradeRecordListRequest {
+  bridgeId?: string
+  status?: string
+  page?: number
+  size?: number
+}
+
+/**
+ * 桥接交易记录详情请求
+ */
+export interface BridgeTradeRecordDetailRequest {
+  id: number
+}
+
+/**
+ * 桥接日志信息
+ */
+export interface BridgeLogInfo {
+  name: string
+  displayName: string
+  path: string
+}
+
+/**
+ * 桥接日志内容请求
+ */
+export interface BridgeLogContentRequest {
+  name: string
+  lines?: number
+}
+
+/**
+ * 桥接日志内容响应
+ */
+export interface BridgeLogContentResponse {
+  name: string
+  content: string
+  lines: number
+}

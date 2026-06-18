@@ -338,7 +338,28 @@
     "logout": "Logout",
     "logoutConfirm": "Confirm Logout",
     "logoutConfirmDesc": "Are you sure you want to logout?",
-    "navigation": "Navigation Menu"
+    "navigation": "Navigation Menu",
+    "bridgeTradeRecords": "Bridge Trade Records"
+  },
+  "bridgeTradeRecord": {
+    "title": "Bridge Trade Records",
+    "fetchFailed": "Failed to fetch bridge trade records",
+    "recordsTab": "Trade Records",
+    "logsTab": "Runtime Logs",
+    "id": "ID",
+    "market": "Market",
+    "side": "Side",
+    "outcome": "Outcome",
+    "quantity": "Quantity",
+    "price": "Price",
+    "amount": "Amount",
+    "status": "Status",
+    "executedAt": "Executed At",
+    "logs": {
+      "bridge": "Bridge Runtime Log",
+      "poller": "Leader Event Poller Log",
+      "loading": "Loading..."
+    }
   },
   "languageSettings": {
     "title": "Language Settings",
