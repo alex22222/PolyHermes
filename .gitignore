@@ -128,3 +128,4 @@ env/
 
 # Polymtrade bridge local state
 polymtrade-bridge/.last_leader_event_id
+polymtrade-bridge/.polymtrade-bridge.pid

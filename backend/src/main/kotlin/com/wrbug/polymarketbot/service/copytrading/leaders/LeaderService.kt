@@ -33,8 +33,11 @@ class LeaderService(
     @Transactional
     fun addLeader(request: LeaderAddRequest): Result<LeaderDto> {
         return try {
+            // 统一使用小写地址，避免大小写不一致导致的问题
+            val normalizedAddress = request.leaderAddress.lowercase()
+
             // 1. 验证地址格式
-            if (!isValidWalletAddress(request.leaderAddress)) {
+            if (!isValidWalletAddress(normalizedAddress)) {
                 return Result.failure(IllegalArgumentException("无效的钱包地址格式"))
             }
             
@@ -43,26 +46,32 @@ class LeaderService(
                 CategoryValidator.validate(request.category)
             }
             
-            // 3. 检查是否已存在
-            if (leaderRepository.existsByLeaderAddress(request.leaderAddress)) {
-                return Result.failure(IllegalArgumentException("该 Leader 地址已存在"))
+            // 3. 检查是否已存在，返回更具体的提示信息
+            val existingLeader = leaderRepository.findByLeaderAddress(normalizedAddress)
+            if (existingLeader != null) {
+                val displayName = existingLeader.leaderName?.takeIf { it.isNotBlank() } ?: "Leader ${existingLeader.id}"
+                return Result.failure(
+                    IllegalArgumentException(
+                        "该 Leader 地址已存在（ID: ${existingLeader.id}, 名称: $displayName），请直接编辑或先删除后重新添加"
+                    )
+                )
             }
             
             // 4. 验证 Leader 地址不能与自己的地址相同
-            if (accountRepository.existsByWalletAddress(request.leaderAddress)) {
+            if (accountRepository.existsByWalletAddress(normalizedAddress)) {
                 return Result.failure(IllegalArgumentException("Leader 地址不能与自己的账户地址相同"))
             }
             
             // 5. 创建 Leader
             // 如果 website 为空，自动设置为 polymarket profile 页
             val website = if (request.website.isNullOrBlank()) {
-                "https://polymarket.com/profile/${request.leaderAddress}"
+                "https://polymarket.com/profile/${normalizedAddress}"
             } else {
                 request.website
             }
             
             val leader = Leader(
-                leaderAddress = request.leaderAddress,
+                leaderAddress = normalizedAddress,
                 leaderName = request.leaderName?.takeIf { it.isNotBlank() },
                 category = request.category,
                 remark = request.remark?.takeIf { it.isNotBlank() },

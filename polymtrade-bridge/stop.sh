@@ -26,4 +26,7 @@ pkill -f "python $SCRIPT_DIR/main.py" 2>/dev/null || true
 pkill -f "python $SCRIPT_DIR/leader_event_poller.py" 2>/dev/null || true
 pkill -f "python $SCRIPT_DIR/log_watcher.py" 2>/dev/null || true
 
+# Remove singleton lock so the next start is not blocked by a stale PID file.
+rm -f "$SCRIPT_DIR/.polymtrade-bridge.pid"
+
 echo "Polymtrade Bridge and Leader Event Poller stopped."

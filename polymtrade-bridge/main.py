@@ -1,12 +1,16 @@
 import asyncio
 import json
 import logging
+import os
+import re
 import sys
+import uuid
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from polymtrade_executor import PolymtradeExecutor
 from copy_trading_config import CopyTradingRuleEngine
@@ -20,6 +24,52 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+
+# Singleton PID lock to prevent multiple bridge instances from competing for the
+# same browser profile and opening multiple Chrome windows.
+PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".polymtrade-bridge.pid")
+
+
+def _is_process_alive(pid: int) -> bool:
+    """Return True if a process with the given PID is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def acquire_singleton_lock() -> bool:
+    """Check/create PID file. Return True if this instance may start."""
+    current_pid = os.getpid()
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, "r", encoding="utf-8") as f:
+                existing_pid = int(f.read().strip())
+            if existing_pid != current_pid and _is_process_alive(existing_pid):
+                logger.error(
+                    f"Another Polymtrade Bridge instance is already running (PID {existing_pid}). "
+                    f"Refusing to start a second instance to avoid multiple Chrome windows."
+                )
+                return False
+        except (ValueError, OSError) as e:
+            logger.warning(f"Could not read PID file {PID_FILE}: {e}")
+    try:
+        with open(PID_FILE, "w", encoding="utf-8") as f:
+            f.write(str(current_pid))
+        return True
+    except OSError as e:
+        logger.error(f"Could not write PID file {PID_FILE}: {e}")
+        return False
+
+
+def release_singleton_lock():
+    """Remove PID file on shutdown."""
+    try:
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
+    except OSError as e:
+        logger.warning(f"Could not remove PID file {PID_FILE}: {e}")
 
 
 class LeaderTradeSignal(BaseModel):
@@ -42,11 +92,16 @@ class LeaderTradeSignal(BaseModel):
 
 
 class ExecuteRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     market_slug: str
     side: str = "BUY"
     outcome: str
     amount_usdc: float = 1.0
     condition_id: Optional[str] = Field(None, alias="conditionId")
+    size_shares: Optional[float] = Field(None, alias="sizeShares")
+    outcome_index: Optional[int] = Field(None, alias="outcomeIndex")
+    market_title: Optional[str] = Field(None, alias="marketTitle")
 
 
 # Global executor instance
@@ -55,38 +110,47 @@ rule_engine: Optional[CopyTradingRuleEngine] = None
 recorder: Optional[BridgeTradeRecorder] = None
 position_ledger: Optional[PositionLedger] = None
 _trade_lock = asyncio.Lock()
+_portfolio_lock = asyncio.Lock()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global executor, rule_engine, recorder, position_ledger
-    logger.info("Initializing Polymtrade executor...")
-    executor = PolymtradeExecutor()
-    await executor.start()
-    logger.info("Polymtrade executor initialized")
 
-    logger.info("Initializing copy-trading rule engine...")
-    rule_engine = CopyTradingRuleEngine()
+    if not acquire_singleton_lock():
+        logger.error("Singleton lock not acquired, shutting down.")
+        sys.exit(1)
+
     try:
-        rule_engine.refresh_if_needed()
-    except Exception as e:
-        logger.warning(f"Rule engine not available (DB may be unreachable): {e}")
-    logger.info("Copy-trading rule engine initialized")
+        logger.info("Initializing Polymtrade executor...")
+        executor = PolymtradeExecutor()
+        await executor.start()
+        logger.info("Polymtrade executor initialized")
 
-    logger.info("Initializing bridge trade recorder...")
-    recorder = BridgeTradeRecorder()
-    logger.info("Bridge trade recorder initialized")
+        logger.info("Initializing copy-trading rule engine...")
+        rule_engine = CopyTradingRuleEngine()
+        try:
+            rule_engine.refresh_if_needed()
+        except Exception as e:
+            logger.warning(f"Rule engine not available (DB may be unreachable): {e}")
+        logger.info("Copy-trading rule engine initialized")
 
-    logger.info("Initializing position ledger...")
-    position_ledger = PositionLedger()
-    logger.info("Position ledger initialized")
+        logger.info("Initializing bridge trade recorder...")
+        recorder = BridgeTradeRecorder()
+        logger.info("Bridge trade recorder initialized")
 
-    yield
+        logger.info("Initializing position ledger...")
+        position_ledger = PositionLedger()
+        logger.info("Position ledger initialized")
 
-    logger.info("Shutting down Polymtrade executor...")
-    if executor:
-        await executor.stop()
-    logger.info("Polymtrade executor stopped")
+        yield
+
+    finally:
+        logger.info("Shutting down Polymtrade executor...")
+        if executor:
+            await executor.stop()
+        logger.info("Polymtrade executor stopped")
+        release_singleton_lock()
 
 
 app = FastAPI(title="PolyHermes → Polymtrade Bridge", lifespan=lifespan)
@@ -192,6 +256,71 @@ async def debug_eval(request: dict):
     return await executor.eval_js(expr)
 
 
+@app.get("/account")
+async def account_info():
+    """Expose the currently logged-in Polymtrade account address.
+
+    Used by PolyHermes backend to link this Bridge account as a read-only
+    position-management account.
+    """
+    if not executor or not executor.is_ready():
+        raise HTTPException(status_code=503, detail="Executor not ready")
+    if not executor.is_logged_in():
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    try:
+        # Navigate to the portfolio page where the referral link contains the full wallet address.
+        info = await executor.navigate_to("https://polym.trade/portfolio")
+        text = info.get("text_sample", "") + " " + info.get("title", "")
+
+        # The referral link is the most reliable full-address source.
+        ref_match = re.search(r'[?&]ref=(0x[a-fA-F0-9]{40})', text)
+        if ref_match:
+            address = ref_match.group(1)
+        else:
+            # Fallback: any full Ethereum address visible on the page.
+            addresses = re.findall(r'0x[a-fA-F0-9]{40}', text)
+            if not addresses:
+                raise HTTPException(status_code=404, detail="Wallet address not found in page")
+            address = addresses[0]
+
+        # If an email is visible on the page, assume Magic (Privy embedded wallet);
+        # otherwise treat as a Safe/Web3 wallet.
+        has_email = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}', text) is not None
+        wallet_type = "magic" if has_email else "safe"
+
+        return {
+            "wallet_address": address.lower(),
+            "wallet_type": wallet_type,
+            "source": "page_text",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to extract account info: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to extract account info: {e}")
+
+
+@app.get("/portfolio")
+async def portfolio_positions():
+    """Return the current open positions scraped from Polymtrade portfolio page.
+
+    Used by PolyHermes backend to keep Bridge read-only account positions in sync
+    with the actual Polymtrade holdings.
+    """
+    if not executor or not executor.is_ready():
+        raise HTTPException(status_code=503, detail="Executor not ready")
+    if not executor.is_logged_in():
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    # Serialize page access to avoid concurrent Playwright navigation/evaluation.
+    async with _portfolio_lock:
+        result = await executor.fetch_portfolio_positions()
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
 @app.post("/signal")
 async def receive_signal(signal: LeaderTradeSignal, background_tasks: BackgroundTasks):
     if not executor or not executor.is_ready():
@@ -209,23 +338,72 @@ async def receive_signal(signal: LeaderTradeSignal, background_tasks: Background
 async def execute_trade(request: ExecuteRequest, background_tasks: BackgroundTasks):
     if not executor or not executor.is_ready():
         raise HTTPException(status_code=503, detail="Executor not ready")
+    if not executor.is_logged_in():
+        raise HTTPException(status_code=401, detail="Not logged in")
 
-    background_tasks.add_task(
-        executor.execute_trade,
-        market_slug=request.market_slug,
-        side=request.side,
+    side_upper = request.side.upper()
+    if side_upper not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail="side must be BUY or SELL")
+
+    external_trade_id = f"manual-{uuid.uuid4()}"
+
+    # 记录 PENDING，后续由后台任务更新为 SUCCESS/FAILED
+    record_id = recorder.record_pending(
+        external_trade_id=external_trade_id,
+        market_id=request.condition_id or request.market_slug,
+        market_title=request.market_title or request.market_slug,
+        side=side_upper,
         outcome=request.outcome,
-        amount_usdc=request.amount_usdc,
-        condition_id=request.condition_id,
+        outcome_index=request.outcome_index,
+        quantity=Decimal(str(request.size_shares)) if request.size_shares is not None else Decimal("0"),
+        price=Decimal("0"),
+        amount=Decimal("0"),
+        raw_payload=request.model_dump(by_alias=True),
     )
 
-    return {"status": "accepted", "request": request.model_dump()}
+    background_tasks.add_task(
+        _execute_and_record,
+        record_id=record_id,
+        request=request,
+        external_trade_id=external_trade_id,
+    )
+
+    return {
+        "status": "accepted",
+        "record_id": record_id,
+        "external_trade_id": external_trade_id,
+        "request": request.model_dump(by_alias=True),
+    }
+
+
+async def _execute_and_record(record_id: int, request: ExecuteRequest, external_trade_id: str):
+    """执行交易并更新 bridge_trade_record 状态。"""
+    try:
+        result = await executor.execute_trade(
+            market_slug=request.market_slug,
+            side=request.side.upper(),
+            outcome=request.outcome,
+            amount_usdc=request.amount_usdc,
+            condition_id=request.condition_id,
+            size_shares=request.size_shares,
+            market_title=request.market_title,
+        )
+        logger.info(f"Manual trade executed: {external_trade_id}, result={result}")
+        recorder.update_status(record_id, "SUCCESS")
+    except Exception as e:
+        logger.error(f"Manual trade failed: {external_trade_id}, error={e}", exc_info=True)
+        recorder.update_status(record_id, "FAILED", error_message=str(e))
 
 
 async def handle_signal(signal: LeaderTradeSignal):
     try:
         if not signal.market_slug:
             logger.warning(f"Signal missing market_slug, cannot execute: {signal.transaction_hash}")
+            return
+
+        # Idempotency: skip if this external trade has already been processed
+        if recorder and recorder.exists(signal.transaction_hash):
+            logger.debug(f"Signal {signal.transaction_hash} already processed, skipping")
             return
 
         if not rule_engine:
@@ -341,6 +519,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                             outcome=signal.outcome or "Yes",
                             amount_usdc=float(amount),
                             condition_id=signal.condition_id,
+                            market_title=signal.title,
                         )
                     else:
                         await executor.execute_trade(
@@ -350,6 +529,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                             amount_usdc=0.0,
                             condition_id=signal.condition_id,
                             size_shares=float(quantity),
+                            market_title=signal.title,
                         )
                 if record_id and recorder:
                     recorder.update_status(record_id, "SUCCESS")
