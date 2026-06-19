@@ -97,6 +97,22 @@ class BridgeTradeRecorder:
                 conn.commit()
         logger.info(f"Updated bridge trade {record_id} to {status}")
 
+    def exists(self, external_trade_id: str) -> bool:
+        """Check whether a record with the given external trade id already exists."""
+        sql = """
+        SELECT 1 FROM bridge_trade_record
+        WHERE bridge_id = %s AND external_trade_id = %s
+        LIMIT 1
+        """
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (self.bridge_id, external_trade_id))
+                    return cur.fetchone() is not None
+        except Exception as e:
+            logger.warning(f"Failed to check existing bridge trade: {e}")
+            return False
+
     def record_result(
         self,
         external_trade_id: Optional[str],

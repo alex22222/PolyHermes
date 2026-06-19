@@ -43,6 +43,15 @@ data class CheckProxyOptionsResponse(
 )
 
 /**
+ * Bridge 关联账户请求（只读，用于在仓位管理模块显示 Bridge 当前账户）
+ */
+data class BridgeLinkRequest(
+    val walletAddress: String,  // EOA 钱包地址（必需）
+    val walletType: String = "magic",  // 钱包类型：magic 或 safe
+    val accountName: String? = null  // 自定义账户名称（可选）
+)
+
+/**
  * 账户更新请求
  */
 data class AccountUpdateRequest(
@@ -104,6 +113,7 @@ data class AccountDto(
     val proxyAddress: String,  // Polymarket 代理钱包地址
     val accountName: String?,
     val isEnabled: Boolean,  // 是否启用（用于订单推送等功能的开关）
+    val readOnly: Boolean = false,  // 是否只读（Bridge 关联账户无私钥）
     val walletType: String = "magic",  // 钱包类型：magic（邮箱/OAuth登录）或 safe（MetaMask浏览器钱包）
     val apiKeyConfigured: Boolean,  // API Key 是否已配置（不返回实际 Key）
     val apiSecretConfigured: Boolean,  // API Secret 是否已配置
@@ -208,6 +218,29 @@ data class PositionSellRequest(
     val quantity: String? = null,  // 卖出数量（可选，BigDecimal字符串，手动输入时使用）
     val percent: String? = null,   // 卖出百分比（可选，BigDecimal字符串，支持小数，0-100之间，选择百分比按钮时使用）
     val price: String? = null      // 限价价格（限价订单必需，市价订单不需要）
+)
+
+/**
+ * Bridge 只读账户仓位卖出请求
+ * 不通过 PolyHermes 签名，而是转发给 Bridge 执行
+ */
+data class BridgePositionSellRequest(
+    val accountId: Long,           // 账户ID（必需）
+    val marketId: String,          // 市场 conditionId（必需）
+    val side: String,              // 结果名称（如 "YES", "NO"）（必需）
+    val outcomeIndex: Int? = null, // 结果索引（推荐提供）
+    val orderType: String,         // 当前只支持 MARKET
+    val quantity: String? = null,  // 卖出数量（shares，与 percent 二选一）
+    val percent: String? = null    // 卖出百分比（0-100，与 quantity 二选一）
+)
+
+/**
+ * Bridge 只读账户仓位卖出响应
+ */
+data class BridgePositionSellResponse(
+    val recordId: Long? = null,
+    val externalTradeId: String? = null,
+    val status: String = "accepted"
 )
 
 /**

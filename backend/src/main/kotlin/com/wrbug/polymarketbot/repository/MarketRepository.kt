@@ -8,5 +8,7 @@ import org.springframework.stereotype.Repository
 interface MarketRepository : JpaRepository<Market, Long> {
     fun findByMarketId(marketId: String): Market?
     fun findByMarketIdIn(marketIds: List<String>): List<Market>
+    fun findByTitle(title: String): Market?
+    fun findByTitleIn(titles: List<String>): List<Market>
 }
 

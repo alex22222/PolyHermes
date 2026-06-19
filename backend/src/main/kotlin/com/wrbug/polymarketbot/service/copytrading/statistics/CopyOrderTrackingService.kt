@@ -95,8 +95,10 @@ open class CopyOrderTrackingService(
      * 解密账户私钥
      */
     private fun decryptPrivateKey(account: Account): String {
+        val privateKey = account.privateKey
+            ?: throw IllegalStateException("账户未配置私钥: accountId=${account.id}")
         return try {
-            cryptoUtils.decrypt(account.privateKey)
+            cryptoUtils.decrypt(privateKey)
         } catch (e: Exception) {
             logger.error("解密私钥失败: accountId=${account.id}", e)
             throw RuntimeException("解密私钥失败: ${e.message}", e)

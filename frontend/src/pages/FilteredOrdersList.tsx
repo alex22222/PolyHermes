@@ -76,7 +76,7 @@ const FilteredOrdersList: React.FC = () => {
   
   const getMarketLink = (order: FilteredOrder) => {
     if (order.marketSlug) {
-      return `https://polymarket.com/event/${order.marketSlug}`
+      return `https://polymarket.com/market/${order.marketSlug}`
     }
     if (order.marketId && order.marketId.startsWith('0x')) {
       return `https://polymarket.com/condition/${order.marketId}`

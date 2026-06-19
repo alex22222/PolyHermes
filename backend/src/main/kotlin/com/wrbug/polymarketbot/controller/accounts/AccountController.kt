@@ -3,6 +3,7 @@ package com.wrbug.polymarketbot.controller.accounts
 import com.wrbug.polymarketbot.dto.*
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.accounts.AccountService
+import com.wrbug.polymarketbot.service.accounts.BridgePositionSellService
 import com.wrbug.polymarketbot.util.toSafeBigDecimal
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -18,7 +19,8 @@ import java.math.BigDecimal
 @RequestMapping("/api/accounts")
 class AccountController(
     private val accountService: AccountService,
-    private val messageSource: MessageSource
+    private val messageSource: MessageSource,
+    private val bridgePositionSellService: BridgePositionSellService
 ) {
 
     private val logger = LoggerFactory.getLogger(AccountController::class.java)
@@ -106,6 +108,39 @@ class AccountController(
             )
         } catch (e: Exception) {
             logger.error("导入账户异常: ${e.message}", e)
+            ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ACCOUNT_IMPORT_FAILED, e.message, messageSource))
+        }
+    }
+
+    /**
+     * 关联 Bridge 当前账户为只读账户（用于仓位管理展示 Bridge 账户持仓）
+     */
+    @PostMapping("/bridge-link")
+    fun linkBridgeAccount(@RequestBody request: BridgeLinkRequest): ResponseEntity<ApiResponse<AccountDto>> {
+        return try {
+            if (request.walletAddress.isBlank()) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_WALLET_ADDRESS_EMPTY, messageSource = messageSource))
+            }
+
+            val result = accountService.linkBridgeAccount(request)
+            result.fold(
+                onSuccess = { account ->
+                    ResponseEntity.ok(ApiResponse.success(account))
+                },
+                onFailure = { e ->
+                    logger.error("关联 Bridge 账户失败: ${e.message}", e)
+                    when (e) {
+                        is IllegalArgumentException -> if (e.message == "ACCOUNT_ALREADY_EXISTS") {
+                            ResponseEntity.ok(ApiResponse.error(ErrorCode.ACCOUNT_ALREADY_EXISTS, messageSource = messageSource))
+                        } else {
+                            ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, e.message, messageSource))
+                        }
+                        else -> ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ACCOUNT_IMPORT_FAILED, e.message, messageSource))
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            logger.error("关联 Bridge 账户异常: ${e.message}", e)
             ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ACCOUNT_IMPORT_FAILED, e.message, messageSource))
         }
     }
@@ -453,6 +488,46 @@ class AccountController(
             )
         } catch (e: Exception) {
             logger.error("创建卖出订单异常: ${e.message}", e)
+            ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ACCOUNT_ORDER_CREATE_FAILED, e.message, messageSource))
+        }
+    }
+
+    /**
+     * Bridge 只读账户仓位卖出
+     * 由 Bridge 在浏览器会话中实际执行卖出
+     */
+    @PostMapping("/positions/sell-bridge")
+    fun sellBridgePosition(@RequestBody request: BridgePositionSellRequest): ResponseEntity<ApiResponse<BridgePositionSellResponse>> {
+        return try {
+            if (request.accountId <= 0) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ACCOUNT_ID_INVALID, messageSource = messageSource))
+            }
+            if (request.marketId.isBlank()) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_MARKET_ID_EMPTY, messageSource = messageSource))
+            }
+            if (request.side.isBlank()) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_SIDE_EMPTY, messageSource = messageSource))
+            }
+            if (request.quantity.isNullOrBlank() && request.percent.isNullOrBlank()) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_QUANTITY_EMPTY, messageSource = messageSource))
+            }
+
+            val result = bridgePositionSellService.sellBridgePosition(request)
+            result.fold<ResponseEntity<ApiResponse<BridgePositionSellResponse>>, BridgePositionSellResponse>(
+                onSuccess = { response ->
+                    ResponseEntity.ok(ApiResponse.success(response))
+                },
+                onFailure = { e ->
+                    logger.error("Bridge 仓位卖出失败: ${e.message}", e)
+                    when (e) {
+                        is IllegalArgumentException -> ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, e.message, messageSource))
+                        is IllegalStateException -> ResponseEntity.ok(ApiResponse.error(ErrorCode.BUSINESS_ERROR, e.message, messageSource))
+                        else -> ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ACCOUNT_ORDER_CREATE_FAILED, e.message, messageSource))
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            logger.error("Bridge 仓位卖出异常: ${e.message}", e)
             ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ACCOUNT_ORDER_CREATE_FAILED, e.message, messageSource))
         }
     }

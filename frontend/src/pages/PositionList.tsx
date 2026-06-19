@@ -3,7 +3,7 @@ import { Card, Table, Tag, message, Space, Input, Radio, Select, Button, Row, Co
 import { SearchOutlined, AppstoreOutlined, UnorderedListOutlined, UpOutlined, DownOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { apiService } from '../services/api'
-import type { AccountPosition, Account, PositionPushMessage, PositionSellRequest, MarketPriceResponse, RedeemablePositionsSummary, PositionRedeemRequest } from '../types'
+import type { AccountPosition, Account, PositionPushMessage, PositionSellRequest, MarketPriceResponse, RedeemablePositionsSummary, PositionRedeemRequest, BridgePositionSellRequest } from '../types'
 import { getPositionKey } from '../types'
 import { useMediaQuery } from 'react-responsive'
 import { useWebSocketSubscription } from '../hooks/useWebSocket'
@@ -511,6 +511,45 @@ const PositionList: React.FC = () => {
 
       setSubmitting(true)
 
+      const account = accounts.find(a => a.id === selectedPosition.accountId)
+      const isBridgeReadOnly = account?.readOnly === true
+
+      // Bridge 只读账户通过 Bridge 执行卖出，当前只支持市价单
+      if (isBridgeReadOnly) {
+        if (orderType !== 'MARKET') {
+          message.warning('Bridge 只读账户当前只支持市价卖出')
+          setSubmitting(false)
+          return
+        }
+
+        const request: BridgePositionSellRequest = {
+          accountId: selectedPosition.accountId,
+          marketId: selectedPosition.marketId,
+          side: selectedPosition.side,
+          outcomeIndex: selectedPosition.outcomeIndex,
+          orderType: 'MARKET',
+          ...(selectedPercent != null
+            ? { percent: selectedPercent }
+            : { quantity: sellQuantity }
+          )
+        }
+
+        const response = await apiService.accounts.sellBridgePosition(request)
+
+        if (response.data.code === 0) {
+          message.success('已通知 Bridge 执行卖出，请稍后查看交易记录')
+          setSellModalVisible(false)
+          setSellQuantity('')
+          setLimitPrice('')
+          setSelectedPercent(null)
+          form.resetFields()
+        } else {
+          message.error(response.data.msg || '通知 Bridge 卖出失败')
+        }
+        setSubmitting(false)
+        return
+      }
+
       const request: PositionSellRequest = {
         accountId: selectedPosition.accountId,
         marketId: selectedPosition.marketId,
@@ -627,9 +666,11 @@ const PositionList: React.FC = () => {
                     )}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       {position.marketTitle ? (
-                        (position.eventSlug || position.marketSlug) ? (
+                        (position.marketSlug || position.eventSlug) ? (
                           <a
-                            href={`https://polymarket.com/event/${position.eventSlug || position.marketSlug}`}
+                            href={position.marketSlug
+                              ? `https://polymarket.com/market/${position.marketSlug}`
+                              : `https://polymarket.com/event/${position.eventSlug}`}
                             target="_blank"
                             rel="noopener noreferrer"
                             onClick={(e) => e.stopPropagation()}
@@ -882,9 +923,11 @@ const PositionList: React.FC = () => {
         dataIndex: 'marketTitle',
         key: 'marketTitle',
         render: (text: string | undefined, record: AccountPosition) => {
-          const url = record.eventSlug || record.marketSlug
-            ? `https://polymarket.com/event/${record.eventSlug || record.marketSlug}`
-            : null
+          const url = record.marketSlug
+            ? `https://polymarket.com/market/${record.marketSlug}`
+            : record.eventSlug
+              ? `https://polymarket.com/event/${record.eventSlug}`
+              : null
 
           const handleTitleClick = (e: React.MouseEvent) => {
             e.preventDefault()

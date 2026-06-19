@@ -13,8 +13,8 @@ data class Account(
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     val id: Long? = null,
     
-    @Column(name = "private_key", nullable = false, length = 500)
-    val privateKey: String,  // 私钥（AES 加密存储）
+    @Column(name = "private_key", nullable = true, length = 500)
+    val privateKey: String? = null,  // 私钥（AES 加密存储），Bridge 只读账户可为空
     
     @Column(name = "wallet_address", nullable = false, length = 42)
     val walletAddress: String,  // 钱包地址（从私钥推导），同一 EOA 可有多个账户（不同代理类型）
@@ -39,6 +39,9 @@ data class Account(
     
     @Column(name = "is_enabled", nullable = false)
     val isEnabled: Boolean = true,  // 是否启用（用于订单推送等功能的开关）
+    
+    @Column(name = "read_only", nullable = false)
+    val isReadOnly: Boolean = false,  // 是否只读（Bridge 关联账户无私钥，不能卖出/赎回）
     
     @Column(name = "wallet_type", nullable = false, length = 20)
     val walletType: String = "magic",  // 钱包类型：magic（邮箱/OAuth登录）或 safe（MetaMask浏览器钱包）

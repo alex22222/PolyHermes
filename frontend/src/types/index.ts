@@ -16,6 +16,7 @@ export interface Account {
   proxyAddress: string  // Polymarket 代理钱包地址
   accountName?: string
   isEnabled?: boolean  // 是否启用
+  readOnly?: boolean  // 是否只读（Bridge 关联账户）
   walletType?: string  // 钱包类型：magic（邮箱/OAuth登录）或 safe（MetaMask浏览器钱包）
   apiKeyConfigured: boolean
   apiSecretConfigured: boolean
@@ -832,6 +833,28 @@ export interface PositionSellResponse {
   price?: string
   status: string
   createdAt: number
+}
+
+/**
+ * Bridge 只读账户仓位卖出请求
+ */
+export interface BridgePositionSellRequest {
+  accountId: number
+  marketId: string
+  side: string
+  outcomeIndex?: number
+  orderType: 'MARKET' | 'LIMIT'
+  quantity?: string
+  percent?: string
+}
+
+/**
+ * Bridge 只读账户仓位卖出响应
+ */
+export interface BridgePositionSellResponse {
+  recordId?: number
+  externalTradeId?: string
+  status: string
 }
 
 /**

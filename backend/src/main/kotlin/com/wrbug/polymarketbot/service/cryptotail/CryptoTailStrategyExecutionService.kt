@@ -133,6 +133,10 @@ class CryptoTailStrategyExecutionService(
         val account = accountRepository.findById(strategy.accountId).orElse(null) ?: return null
         if (account.apiKey == null || account.apiSecret == null || account.apiPassphrase == null) return null
 
+        if (account.privateKey == null) {
+            logger.warn("加密价差策略周期上下文: 账户未配置私钥 accountId=${account.id}")
+            return null
+        }
         val decryptedKey = try {
             cryptoUtils.decrypt(account.privateKey) ?: return null
         } catch (e: Exception) {
@@ -571,6 +575,21 @@ class CryptoTailStrategyExecutionService(
         val priceStr = price.toPlainString()
         val size = computeSize(amountUsdc, price)
 
+        if (account.privateKey == null) {
+            logger.warn("账户未配置私钥，跳过触发: accountId=${account.id}")
+            saveTriggerRecord(
+                strategy,
+                periodStartUnix,
+                marketTitle,
+                outcomeIndex,
+                price,
+                amountUsdc,
+                null,
+                "fail",
+                "账户未配置私钥"
+            )
+            return
+        }
         val decryptedKey = try {
             cryptoUtils.decrypt(account.privateKey) ?: ""
         } catch (e: Exception) {

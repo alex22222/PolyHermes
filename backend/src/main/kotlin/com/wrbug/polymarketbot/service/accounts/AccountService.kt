@@ -46,7 +46,8 @@ class AccountService(
     private val marketService: MarketService,  // 市场信息服务
     private val telegramNotificationService: TelegramNotificationService? = null,  // 可选，避免循环依赖
     private val relayClientService: RelayClientService,
-    private val jsonUtils: JsonUtils
+    private val jsonUtils: JsonUtils,
+    private val bridgePositionService: BridgePositionService
 ) {
 
     private val logger = LoggerFactory.getLogger(AccountService::class.java)
@@ -174,6 +175,78 @@ class AccountService(
             Result.success(toDto(saved))
         } catch (e: Exception) {
             logger.error("导入账户失败", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 关联 Bridge 当前账户为只读账户
+     * 无需私钥，仅用于仓位管理模块展示该账户持仓
+     */
+    @Transactional
+    fun linkBridgeAccount(request: BridgeLinkRequest): Result<AccountDto> {
+        return try {
+            // 1. 验证钱包地址格式
+            if (!isValidWalletAddress(request.walletAddress)) {
+                return Result.failure(IllegalArgumentException("无效的钱包地址格式"))
+            }
+
+            // 2. 解析钱包类型
+            val walletTypeEnum = WalletType.fromStringOrDefault(request.walletType, WalletType.MAGIC)
+
+            // 3. 计算代理地址
+            val proxyAddress = runBlocking {
+                val proxyResult = blockchainService.getProxyAddress(request.walletAddress, walletTypeEnum)
+                if (proxyResult.isSuccess) {
+                    val address = proxyResult.getOrNull()
+                    if (address != null) {
+                        address
+                    } else {
+                        logger.error("获取代理地址返回空值")
+                        throw IllegalStateException("获取代理地址失败：返回值为空")
+                    }
+                } else {
+                    val error = proxyResult.exceptionOrNull()
+                    logger.error("获取代理地址失败: ${error?.message}")
+                    throw IllegalStateException("获取代理地址失败: ${error?.message}")
+                }
+            }
+
+            // 4. 按代理地址去重
+            if (accountRepository.existsByProxyAddress(proxyAddress)) {
+                return Result.failure(IllegalArgumentException("ACCOUNT_ALREADY_EXISTS"))
+            }
+
+            // 5. 生成账户名称
+            val accountName = if (request.accountName.isNullOrBlank()) {
+                val typeLabel = walletTypeEnum.name.uppercase()
+                val suffix = request.walletAddress.takeLast(4).uppercase()
+                "Bridge-$typeLabel-$suffix"
+            } else {
+                request.accountName.trim()
+            }
+
+            // 6. 创建只读账户（无私钥、无 API 凭证）
+            val account = Account(
+                privateKey = null,
+                walletAddress = request.walletAddress.lowercase(),
+                proxyAddress = proxyAddress,
+                apiKey = null,
+                apiSecret = null,
+                apiPassphrase = null,
+                accountName = accountName,
+                isDefault = false,
+                isEnabled = true,
+                isReadOnly = true,
+                walletType = walletTypeEnum.value,
+                createdAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis()
+            )
+
+            val saved = accountRepository.save(account)
+            Result.success(toDto(saved))
+        } catch (e: Exception) {
+            logger.error("关联 Bridge 账户失败", e)
             Result.failure(e)
         }
     }
@@ -720,6 +793,7 @@ class AccountService(
             proxyAddress = account.proxyAddress,
             accountName = account.accountName,
             isEnabled = account.isEnabled,
+            readOnly = account.isReadOnly,
             walletType = account.walletType,
             apiKeyConfigured = account.apiKey != null,
             apiSecretConfigured = account.apiSecret != null,
@@ -745,6 +819,7 @@ class AccountService(
                 proxyAddress = account.proxyAddress,
                 accountName = account.accountName,
                 isEnabled = account.isEnabled,
+                readOnly = account.isReadOnly,
                 walletType = account.walletType,
                 apiKeyConfigured = account.apiKey != null,
                 apiSecretConfigured = account.apiSecret != null,
@@ -932,8 +1007,10 @@ class AccountService(
      * 解密账户私钥
      */
     fun decryptPrivateKey(account: Account): String {
+        val privateKey = account.privateKey
+            ?: throw IllegalStateException("账户未配置私钥: accountId=${account.id}")
         return try {
-            cryptoUtils.decrypt(account.privateKey)
+            cryptoUtils.decrypt(privateKey)
         } catch (e: Exception) {
             logger.error("解密私钥失败: accountId=${account.id}", e)
             throw RuntimeException("解密私钥失败: ${e.message}", e)
@@ -1013,6 +1090,14 @@ class AccountService(
             accounts.forEach { account ->
                 if (account.proxyAddress.isNotBlank()) {
                     try {
+                        // Bridge 只读账户没有私钥，且 Polymtrade 的 Magic 钱包实际代理地址
+                        // 与 PolyHermes 计算的代理地址可能不一致，因此通过 Bridge 交易记录计算净仓位
+                        if (account.isReadOnly) {
+                            val bridgePositions = bridgePositionService.getPositionsForAccount(account)
+                            currentPositions.addAll(bridgePositions)
+                            return@forEach
+                        }
+
                         // 查询所有仓位（不限制 sortBy，获取当前和历史仓位）
                         val positionsResult = blockchainService.getPositions(account.proxyAddress)
                         if (positionsResult.isSuccess) {
@@ -1100,6 +1185,10 @@ class AccountService(
             // 1. 验证账户是否存在且已配置API凭证
             val account = accountRepository.findById(request.accountId).orElse(null)
                 ?: return Result.failure(IllegalArgumentException("账户不存在"))
+
+            if (account.isReadOnly) {
+                return Result.failure(IllegalStateException("只读账户不能卖出仓位"))
+            }
 
             if (account.apiKey == null || account.apiSecret == null || account.apiPassphrase == null) {
                 return Result.failure(IllegalStateException("账户未配置API凭证，无法创建订单"))
@@ -1643,6 +1732,9 @@ class AccountService(
             for (accountId in positionsByAccount.keys) {
                 val account = accountRepository.findById(accountId).orElse(null)
                     ?: return Result.failure(IllegalArgumentException("账户不存在: $accountId"))
+                if (account.isReadOnly) {
+                    return Result.failure(IllegalStateException("只读账户不能赎回仓位: accountId=$accountId"))
+                }
                 accounts[accountId] = account
             }
 
@@ -1917,6 +2009,9 @@ class AccountService(
             ?: return Result.failure(IllegalArgumentException("账户不存在"))
         if (account.proxyAddress.isBlank()) {
             return Result.failure(IllegalStateException("账户代理地址不存在"))
+        }
+        if (account.isReadOnly || account.privateKey == null) {
+            return Result.failure(IllegalStateException("只读账户不能执行 wrap 操作"))
         }
         val privateKey = cryptoUtils.decrypt(account.privateKey)
         val walletType = WalletType.fromStringOrDefault(account.walletType, WalletType.SAFE)

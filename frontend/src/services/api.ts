@@ -29,7 +29,9 @@ import type {
   NotificationConfigUpdateRequest,
   NotificationTemplate,
   TemplateTypeInfo,
-  TemplateVariablesResponse
+  TemplateVariablesResponse,
+  BridgePositionSellRequest,
+  BridgePositionSellResponse
 } from '../types'
 import { getToken, setToken, removeToken } from '../utils'
 import { wsManager } from './websocket'
@@ -305,6 +307,12 @@ export const apiService = {
      */
     sellPosition: (data: any) => 
       apiClient.post<ApiResponse<any>>('/accounts/positions/sell', data),
+
+    /**
+     * Bridge 只读账户仓位卖出
+     */
+    sellBridgePosition: (data: BridgePositionSellRequest) =>
+      apiClient.post<ApiResponse<BridgePositionSellResponse>>('/accounts/positions/sell-bridge', data),
     
     /**
      * 获取可赎回仓位统计

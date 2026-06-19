@@ -12,6 +12,7 @@ import com.wrbug.polymarketbot.repository.LeaderRepository
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderActivityIngestionService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchSourceHealthService
 import com.wrbug.polymarketbot.service.copytrading.statistics.CopyOrderTrackingService
+import com.wrbug.polymarketbot.service.bridge.BridgeWebhookClient
 import com.wrbug.polymarketbot.util.fromJson
 import com.wrbug.polymarketbot.constants.PolymarketConstants
 import com.wrbug.polymarketbot.websocket.PolymarketWebSocketClient
@@ -36,6 +37,7 @@ class PolymarketActivityWsService(
     private val leaderRepository: LeaderRepository,
     private val researchIngestionProvider: ObjectProvider<LeaderActivityIngestionService>,
     private val researchSourceHealthProvider: ObjectProvider<LeaderResearchSourceHealthService>,
+    private val bridgeWebhookClient: BridgeWebhookClient,
     @Value("\${leader.research.global-capture.enabled:false}") private val researchGlobalCaptureEnabled: Boolean,
     @Value("\${leader.research.global-capture.max-writes-per-minute:120}") private val researchGlobalCaptureMaxWritesPerMinute: Long
 ) {
@@ -385,6 +387,29 @@ class PolymarketActivityWsService(
             val trade = parseActivityTrade(payload, leaderId)
             if (trade != null) {
                 logger.info("✅ 检测到 Leader 交易: leaderId=$leaderId, address=$traderAddress, side=${trade.side}, market=${trade.market}, size=${trade.size}")
+
+                // 发送 webhook 到 Bridge，实现无日志依赖的实时信号推送
+                try {
+                    bridgeWebhookClient.sendLeaderTrade(
+                        BridgeWebhookClient.BridgeSignal(
+                            timestamp = trade.timestamp.toLongOrNull() ?: System.currentTimeMillis(),
+                            leaderAddress = traderAddress,
+                            leaderName = payload.trader?.name ?: payload.name,
+                            transactionHash = trade.id,
+                            conditionId = trade.market,
+                            marketSlug = payload.slug ?: payload.eventSlug,
+                            title = null,
+                            side = trade.side,
+                            outcome = trade.outcome,
+                            outcomeIndex = trade.outcomeIndex,
+                            price = trade.price.toDoubleOrNull() ?: 0.0,
+                            size = trade.size.toDoubleOrNull() ?: 0.0,
+                            source = tradeMessage.topic
+                        )
+                    )
+                } catch (e: Exception) {
+                    logger.error("发送 Bridge webhook 失败: txHash=${trade.id}", e)
+                }
 
                 // 异步处理交易（避免阻塞消息处理）
                 scope.launch {
