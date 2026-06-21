@@ -5,6 +5,8 @@ import com.wrbug.polymarketbot.dto.BridgeTradeRecordDetailRequest
 import com.wrbug.polymarketbot.dto.BridgeTradeRecordDto
 import com.wrbug.polymarketbot.dto.BridgeTradeRecordListRequest
 import com.wrbug.polymarketbot.dto.BridgeTradeRecordListResponse
+import com.wrbug.polymarketbot.dto.BridgeTradeStatisticsRequest
+import com.wrbug.polymarketbot.dto.BridgeTradeStatisticsResponse
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.bridge.BridgeTradeRecordService
 import org.slf4j.LoggerFactory
@@ -88,6 +90,35 @@ class BridgeTradeRecordController(
             )
         } catch (e: Exception) {
             logger.error("查询桥接交易记录详情异常", e)
+            ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
+        }
+    }
+
+    /**
+     * 查询桥接交易统计
+     * POST /api/bridge/trades/statistics
+     */
+    @PostMapping("/statistics")
+    fun getBridgeTradeStatistics(
+        @RequestBody request: BridgeTradeStatisticsRequest
+    ): ResponseEntity<ApiResponse<BridgeTradeStatisticsResponse>> {
+        return try {
+            if (request.startTime != null && request.endTime != null && request.startTime > request.endTime) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, "开始时间不能晚于结束时间", messageSource))
+            }
+
+            val result = bridgeTradeRecordService.getBridgeTradeStatistics(request)
+            result.fold(
+                onSuccess = { response ->
+                    ResponseEntity.ok(ApiResponse.success(response))
+                },
+                onFailure = { e ->
+                    logger.error("查询桥接交易统计失败", e)
+                    ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
+                }
+            )
+        } catch (e: Exception) {
+            logger.error("查询桥接交易统计异常", e)
             ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
         }
     }

@@ -18,6 +18,15 @@ data class BridgeTradeRecordDetailRequest(
 )
 
 /**
+ * 桥接交易统计请求
+ */
+data class BridgeTradeStatisticsRequest(
+    val bridgeId: String? = null,
+    val startTime: Long? = null,
+    val endTime: Long? = null
+)
+
+/**
  * 桥接交易记录列表响应
  */
 data class BridgeTradeRecordListResponse(
@@ -25,6 +34,39 @@ data class BridgeTradeRecordListResponse(
     val total: Long,
     val page: Int,
     val size: Int
+)
+
+/**
+ * 桥接交易统计响应
+ */
+data class BridgeTradeStatisticsResponse(
+    val bridgeId: String?,
+    val totalTrades: Long,
+    val successTrades: Long,
+    val failedTrades: Long,
+    val pendingTrades: Long,
+    val buyTrades: Long,
+    val sellTrades: Long,
+    val successBuyTrades: Long,
+    val successSellTrades: Long,
+    val successBuyAmount: String,
+    val successSellAmount: String,
+    val totalFees: String,
+    val netCashflow: String,
+    val totalPnl: String,
+    val successRate: String,
+    val avgSuccessTradeAmount: String,
+    val openPositionCount: Long,
+    val openPositionQuantity: String,
+    val openPositionValue: String,
+    val openPositionPnl: String,
+    val maxPositionProfit: String,
+    val maxPositionLoss: String,
+    val statisticsSource: String,
+    val latestTradeAt: Long?,
+    val latestBuyAt: Long?,
+    val latestSellAt: Long?,
+    val latestSnapshotSyncedAt: Long?
 )
 
 /**
@@ -48,5 +90,10 @@ data class BridgeTradeRecordDto(
     val rawPayload: String?,
     val executedAt: Long?,
     val createdAt: Long,
-    val updatedAt: Long
+    val updatedAt: Long,
+    val ledgerNetQuantity: String? = null,
+    val snapshotQuantity: String? = null,
+    val snapshotSyncedAt: Long? = null,
+    val positionMismatch: Boolean = false,
+    val positionMismatchReason: String? = null
 )

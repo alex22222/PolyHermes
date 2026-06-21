@@ -28,6 +28,8 @@ data class ActivityTradePayload(
     val eventSlug: String? = null,             // 事件 slug
     
     val slug: String? = null,                  // 市场 slug
+
+    val title: String? = null,                 // 市场标题
     
     val outcome: String? = null,               // 结果方向 (Yes/No/Up/Down)
     
@@ -61,4 +63,3 @@ data class ActivityTrader(
     val name: String? = null,             // 交易者用户名（可选）
     val address: String? = null           // 交易者钱包地址 ⭐ 关键字段
 )
-

@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS leader_scanner_candidate_pool (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'Candidate pool ID',
+    category VARCHAR(50) NOT NULL COMMENT 'Leader category: politics/sports/crypto/finance',
+    normalized_wallet VARCHAR(42) NOT NULL COMMENT 'Lower-case wallet address',
+    source VARCHAR(50) NOT NULL COMMENT 'Discovery source: ACTIVITY_EVENT, BRIDGE_RECORD, SEED_WALLET, HOT_MARKET, EXISTING_LEADER, RESEARCH_CANDIDATE',
+    source_detail VARCHAR(500) DEFAULT NULL COMMENT 'Market slug, event id, etc.',
+    discovery_score INT NOT NULL DEFAULT 0 COMMENT 'Hit count / confidence for ranking',
+    first_discovered_at BIGINT NOT NULL COMMENT 'First time this wallet was discovered',
+    last_seen_at BIGINT NOT NULL COMMENT 'Last time this wallet was seen',
+    analysis_state VARCHAR(20) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING / ANALYZED / PROMOTED / REJECTED',
+    analyzed_at BIGINT DEFAULT NULL,
+    promoted_at BIGINT DEFAULT NULL,
+    last_analysis_result TEXT DEFAULT NULL COMMENT 'JSON summary of last analysis metrics',
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    UNIQUE KEY uk_leader_scanner_candidate_pool_cat_wallet (category, normalized_wallet),
+    INDEX idx_leader_scanner_candidate_pool_pending_score (category, analysis_state, discovery_score DESC),
+    INDEX idx_leader_scanner_candidate_pool_last_seen (last_seen_at),
+    INDEX idx_leader_scanner_candidate_pool_wallet (normalized_wallet)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Durable candidate pool for leader scanner discovery layer';

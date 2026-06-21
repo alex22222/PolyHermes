@@ -34,8 +34,6 @@ stop_children() {
         kill "$(cat "$LOG_DIR/polymtrade-logwatcher.pid")" 2>/dev/null || true
     fi
     pkill -f "python $SCRIPT_DIR/main.py" 2>/dev/null || true
-    pkill -f "python $SCRIPT_DIR/leader_event_poller.py" 2>/dev/null || true
-    pkill -f "python $SCRIPT_DIR/log_watcher.py" 2>/dev/null || true
 }
 
 # Clean up children when launchd stops the job (or the user hits Ctrl-C).

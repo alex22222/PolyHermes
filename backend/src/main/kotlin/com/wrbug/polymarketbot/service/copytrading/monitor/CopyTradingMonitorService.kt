@@ -65,33 +65,37 @@ class CopyTradingMonitorService(
      * 1. Activity WebSocket - 低延迟（< 100ms），优先使用
      * 2. OnChain WebSocket - 高可靠性（~2-3s），作为兜底
      * 同时启动跟单账户的链上 WebSocket 监听（用于检测卖出/赎回事件）
+     *
+     * 如果全局 research capture 开启，即使没有跟单配置也会启动 Activity WebSocket。
      */
     suspend fun startMonitoring() {
         // 1. 获取所有启用的跟单关系
         val enabledCopyTradings = copyTradingRepository.findByEnabledTrue()
-        
-        if (enabledCopyTradings.isEmpty()) {
-            return
-        }
-        
+
         // 2. 获取所有需要监听的Leader（去重）
         val leaderIds = enabledCopyTradings.map { it.leaderId }.distinct()
         val leaders = leaderIds.mapNotNull { leaderId ->
             leaderRepository.findById(leaderId).orElse(null)
         }
-        
+
         // 3. 获取所有需要监听的跟单账户（去重）
         val accountIds = enabledCopyTradings.map { it.accountId }.distinct()
         val accounts = accountIds.mapNotNull { accountId ->
             accountRepository.findById(accountId).orElse(null)
         }
-        
+
         // 4. 启动 Activity WebSocket 监听（优先，低延迟）
+        //    全局 research capture 开启时，没有 Leader 也会连接，用于发现候选交易者
         activityWsService.start(leaders)
-        
+
+        if (enabledCopyTradings.isEmpty()) {
+            logger.info("没有启用的跟单配置，仅启动 Activity WebSocket 全局 research capture")
+            return
+        }
+
         // 5. 启动链上 WebSocket 监听（兜底，高可靠性）
         onChainWsService.start(leaders)
-        
+
         // 6. 启动跟单账户的链上 WebSocket 监听（用于检测卖出/赎回事件）
         accountOnChainMonitorService.start(accounts)
     }

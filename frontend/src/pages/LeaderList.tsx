@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Card, Table, Button, Space, Tag, Popconfirm, message, List, Empty, Spin, Divider, Typography, Modal, Descriptions, Statistic, Row, Col, Tooltip, Badge } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, GlobalOutlined, EyeOutlined, ReloadOutlined, WalletOutlined, CopyOutlined, LineChartOutlined, TeamOutlined } from '@ant-design/icons'
+import { Alert, Card, Table, Button, Space, Tag, Popconfirm, message, List, Empty, Spin, Divider, Typography, Modal, Descriptions, Statistic, Row, Col, Tooltip, Badge, Segmented } from 'antd'
+import { PlusOutlined, EditOutlined, DeleteOutlined, GlobalOutlined, EyeOutlined, ReloadOutlined, WalletOutlined, CopyOutlined, LineChartOutlined, TeamOutlined, SearchOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import { apiService } from '../services/api'
-import type { Leader, LeaderBalanceResponse } from '../types'
+import type { Leader, LeaderBalanceResponse, LeaderScanBatchResponse } from '../types'
 import { useMediaQuery } from 'react-responsive'
 import { formatUSDC } from '../utils'
 
@@ -19,6 +19,10 @@ const LeaderList: React.FC = () => {
   const [balanceMap, setBalanceMap] = useState<Record<number, { total: string; available: string; position: string }>>({})
   const [balanceLoading, setBalanceLoading] = useState<Record<number, boolean>>({})
   const [addingToPool, setAddingToPool] = useState<Record<number, boolean>>({})
+  const [scanLoading, setScanLoading] = useState(false)
+  const [scoreLoading, setScoreLoading] = useState(false)
+  const [categoryFilter, setCategoryFilter] = useState<string>('all')
+  const [lastScanResult, setLastScanResult] = useState<LeaderScanBatchResponse | null>(null)
 
   // 详情 Modal
   const [detailModalVisible, setDetailModalVisible] = useState(false)
@@ -28,12 +32,74 @@ const LeaderList: React.FC = () => {
 
   useEffect(() => {
     fetchLeaders()
-  }, [])
+  }, [categoryFilter])
+
+  const categoryOptions = [
+    { label: t('leaderList.categoryAll') || '全部', value: 'all' },
+    { label: t('leaderList.categoryPolitics') || '政治', value: 'politics' },
+    { label: t('leaderList.categorySports') || '体育', value: 'sports' },
+    { label: t('leaderList.categoryCrypto') || '加密货币', value: 'crypto' },
+    { label: t('leaderList.categoryFinance') || '金融', value: 'finance' }
+  ]
+
+  const getCategoryLabel = (category?: string) => {
+    const option = categoryOptions.find((item) => item.value === category)
+    return option?.label || category || '-'
+  }
+
+  const getCategoryColor = (category?: string) => {
+    switch (category) {
+      case 'politics':
+        return 'purple'
+      case 'sports':
+        return 'blue'
+      case 'crypto':
+        return 'green'
+      case 'finance':
+        return 'gold'
+      default:
+        return 'default'
+    }
+  }
+
+  const getResearchTagColor = (tag?: string) => {
+    switch (tag) {
+      case 'ELITE':
+        return 'green'
+      case 'TRADEABLE':
+        return 'blue'
+      case 'CANDIDATE':
+        return 'orange'
+      case 'WATCH':
+        return 'gold'
+      case 'RISKY':
+        return 'red'
+      default:
+        return 'default'
+    }
+  }
+
+  const getResearchTagLabel = (tag?: string) => {
+    switch (tag) {
+      case 'ELITE':
+        return t('leaderList.researchTagElite') || '优质'
+      case 'TRADEABLE':
+        return t('leaderList.researchTagTradeable') || '可跟单'
+      case 'CANDIDATE':
+        return t('leaderList.researchTagCandidate') || '候选'
+      case 'WATCH':
+        return t('leaderList.researchTagWatch') || '观察'
+      case 'RISKY':
+        return t('leaderList.researchTagRisky') || '风险'
+      default:
+        return t('leaderList.researchTagUnscored') || '未评分'
+    }
+  }
 
   const fetchLeaders = async () => {
     setLoading(true)
     try {
-      const response = await apiService.leaders.list()
+      const response = await apiService.leaders.list(categoryFilter === 'all' ? {} : { category: categoryFilter })
       if (response.data.code === 0 && response.data.data) {
         setLeaders(response.data.data.list || [])
       } else {
@@ -43,6 +109,56 @@ const LeaderList: React.FC = () => {
       message.error(error.message || t('leaderList.fetchFailed'))
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleScan = async () => {
+    setScanLoading(true)
+    try {
+      const response = await apiService.leaderScanner.run(categoryFilter === 'all' ? { dryRun: false } : { category: categoryFilter, dryRun: false })
+      if (response.data.code === 0 && response.data.data) {
+        const result = response.data.data
+        setLastScanResult(result)
+        const totalCandidates = result.totalCandidateCount ?? result.previews?.reduce((sum, item) => sum + item.candidates.length, 0) ?? 0
+        const analyzedWallets = result.totalAnalyzedWalletCount ?? result.previews?.reduce((sum, item) => sum + item.analyzedWalletCount, 0) ?? 0
+        message.success(t('leaderList.scanComplete', {
+          candidates: totalCandidates,
+          analyzed: analyzedWallets,
+          created: result.createdCount,
+          updated: result.updatedCount,
+          duration: result.durationMs || 0
+        }))
+
+        if (categoryFilter !== 'all' && totalCandidates === 0) {
+          message.info(t('leaderList.scanNoCategoryCandidates'))
+          setCategoryFilter('all')
+        } else {
+          fetchLeaders()
+        }
+      } else {
+        message.error(response.data.msg || t('leaderList.scanFailed'))
+      }
+    } catch (error: any) {
+      message.error(error.message || t('leaderList.scanFailed'))
+    } finally {
+      setScanLoading(false)
+    }
+  }
+
+  const handleScoreLeaders = async () => {
+    setScoreLoading(true)
+    try {
+      const response = await apiService.leaderScanner.researchScore()
+      if (response.data.code === 0 && response.data.data) {
+        message.success(t('leaderList.scoreLeaderComplete', { count: response.data.data.scoredCount }))
+        fetchLeaders()
+      } else {
+        message.error(response.data.msg || t('leaderList.scoreLeaderFailed'))
+      }
+    } catch (error: any) {
+      message.error(error.message || t('leaderList.scoreLeaderFailed'))
+    } finally {
+      setScoreLoading(false)
     }
   }
 
@@ -251,24 +367,32 @@ const LeaderList: React.FC = () => {
       title: t('leaderList.leaderName'),
       dataIndex: 'leaderName',
       key: 'leaderName',
-      width: 200,
+      width: 240,
       render: (text: string, record: Leader) => (
         <Space direction="vertical" size={0}>
-          <Text strong style={{ fontSize: '14px' }}>{text || `Leader ${record.id}`}</Text>
+          <Space size={4} align="center">
+            <Text strong style={{ fontSize: '14px' }}>{text || `Leader ${record.id}`}</Text>
+            {record.remark && (
+              <Tooltip title={record.remark} placement="top">
+                <Tag color="orange" style={{ cursor: 'help', fontSize: '11px', padding: '0 4px', lineHeight: '16px', margin: 0 }}>
+                  {t('leaderList.remark')}
+                </Tag>
+              </Tooltip>
+            )}
+          </Space>
           <Text type="secondary" style={{ fontSize: '12px', fontFamily: 'monospace' }}>{record.leaderAddress}</Text>
         </Space>
       )
     },
     {
-      title: t('leaderList.remark'),
-      dataIndex: 'remark',
-      key: 'remark',
-      width: 180,
-      ellipsis: true,
-      render: (remark: string | undefined) => {
-        if (!remark) return <Text type="secondary">-</Text>
-        return <Text ellipsis={{ tooltip: remark }} style={{ maxWidth: 160 }}>{remark}</Text>
-      }
+      title: t('leaderList.category') || '分类',
+      dataIndex: 'category',
+      key: 'category',
+      width: 100,
+      align: 'center' as const,
+      render: (category: string | undefined) => (
+        <Tag color={getCategoryColor(category)}>{getCategoryLabel(category)}</Tag>
+      )
     },
     {
       title: t('leaderDetail.availableBalance'),
@@ -287,6 +411,87 @@ const LeaderList: React.FC = () => {
             </Text>
           </Space>
         )
+      }
+    },
+    {
+      title: t('leaderList.smartMoneyRank'),
+      dataIndex: 'smartMoneyRank',
+      key: 'smartMoneyRank',
+      width: 100,
+      align: 'center' as const,
+      render: (rank: number | undefined) => {
+        if (!rank) return <Text type="secondary">-</Text>
+        const color = rank <= 3 ? 'gold' : rank <= 6 ? 'blue' : 'default'
+        return (
+          <Badge count={rank} style={{ backgroundColor: color === 'gold' ? '#faad14' : color === 'blue' ? '#1890ff' : undefined }} />
+        )
+      }
+    },
+    {
+      title: t('leaderList.researchTag') || '研究标签',
+      key: 'researchTag',
+      width: 110,
+      align: 'center' as const,
+      render: (_: any, record: Leader) => {
+        const tag = record.researchTag
+        const score = record.researchScore
+        const flags = record.researchRiskFlags
+        return (
+          <Tooltip title={flags ? `${t('leaderList.riskFlags') || '风险'}: ${flags}` : ''}>
+            <Tag color={getResearchTagColor(tag)} style={{ fontSize: '12px', fontWeight: 600 }}>
+              {getResearchTagLabel(tag)}
+              {score != null && <span style={{ marginLeft: 4, opacity: 0.85 }}>{score.toFixed(0)}</span>}
+            </Tag>
+          </Tooltip>
+        )
+      }
+    },
+    {
+      title: t('leaderList.winRate'),
+      dataIndex: 'winRate',
+      key: 'winRate',
+      width: 100,
+      align: 'center' as const,
+      render: (winRate: number | undefined) => {
+        if (winRate == null) return <Text type="secondary">-</Text>
+        const color = winRate >= 60 ? '#52c41a' : winRate >= 40 ? '#faad14' : '#ff4d4f'
+        return <Text style={{ color, fontWeight: 600 }}>{winRate.toFixed(1)}%</Text>
+      }
+    },
+    {
+      title: t('leaderList.totalPnl'),
+      dataIndex: 'totalPnl',
+      key: 'totalPnl',
+      width: 120,
+      align: 'right' as const,
+      render: (pnl: string | undefined) => {
+        if (!pnl) return <Text type="secondary">-</Text>
+        const num = parseFloat(pnl)
+        const color = num > 0 ? '#52c41a' : num < 0 ? '#ff4d4f' : '#8c8c8c'
+        return <Text style={{ color, fontWeight: 500 }}>${formatUSDC(pnl)}</Text>
+      }
+    },
+    {
+      title: t('leaderList.totalTrades'),
+      dataIndex: 'totalTrades',
+      key: 'totalTrades',
+      width: 90,
+      align: 'center' as const,
+      render: (trades: number | undefined) => {
+        if (trades == null) return <Text type="secondary">-</Text>
+        return <Tag color="processing">{trades}</Tag>
+      }
+    },
+    {
+      title: t('leaderList.activityScore'),
+      dataIndex: 'activityScore',
+      key: 'activityScore',
+      width: 100,
+      align: 'center' as const,
+      render: (score: number | undefined) => {
+        if (score == null) return <Text type="secondary">-</Text>
+        const color = score >= 70 ? 'success' : score >= 40 ? 'warning' : 'error'
+        return <Badge status={color as any} text={score.toFixed(0)} />
       }
     },
     {
@@ -467,10 +672,65 @@ const LeaderList: React.FC = () => {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
         <h2 style={{ margin: 0, fontSize: isMobile ? '20px' : '24px' }}>{t('leaderList.title')}</h2>
-        <Tooltip title={t('leaderList.addLeader')}>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/leaders/add')} size={isMobile ? 'middle' : 'large'} style={{ borderRadius: '8px', height: isMobile ? '40px' : '48px', fontSize: isMobile ? '14px' : '16px' }} />
-        </Tooltip>
+        <Space wrap>
+          <Segmented
+            value={categoryFilter}
+            onChange={(value) => setCategoryFilter(value as string)}
+            options={categoryOptions}
+          />
+          <Tooltip title={t('leaderList.scanTooltip') || '扫描 Polymarket 活跃 Leader'}>
+            <Button
+              icon={<SearchOutlined />}
+              onClick={handleScan}
+              loading={scanLoading}
+              size={isMobile ? 'middle' : 'large'}
+              style={{ borderRadius: '8px', height: isMobile ? '40px' : '48px', fontSize: isMobile ? '14px' : '16px' }}
+            >
+              {t('leaderList.scan') || '扫链'}
+            </Button>
+          </Tooltip>
+          <Tooltip title={t('leaderList.scoreLeaderTooltip') || '为所有 Leader 计算研究模块 copyability 评分'}>
+            <Button
+              icon={<LineChartOutlined />}
+              onClick={handleScoreLeaders}
+              loading={scoreLoading}
+              size={isMobile ? 'middle' : 'large'}
+              style={{ borderRadius: '8px', height: isMobile ? '40px' : '48px', fontSize: isMobile ? '14px' : '16px' }}
+            >
+              {t('leaderList.scoreLeader') || '研究评分'}
+            </Button>
+          </Tooltip>
+          <Tooltip title={t('leaderList.addLeader')}>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/leaders/add')} size={isMobile ? 'middle' : 'large'} style={{ borderRadius: '8px', height: isMobile ? '40px' : '48px', fontSize: isMobile ? '14px' : '16px' }} />
+          </Tooltip>
+        </Space>
       </div>
+
+      {lastScanResult && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: '16px' }}
+          message={t('leaderList.lastScanResult')}
+          description={
+            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+              <Space wrap>
+                <Tag color="blue">{t('leaderList.scanCandidates', { count: lastScanResult.totalCandidateCount ?? 0 })}</Tag>
+                <Tag color="cyan">{t('leaderList.scanAnalyzed', { count: lastScanResult.totalAnalyzedWalletCount ?? 0 })}</Tag>
+                <Tag color="green">{t('leaderList.scanCreated', { count: lastScanResult.createdCount })}</Tag>
+                <Tag color="orange">{t('leaderList.scanUpdated', { count: lastScanResult.updatedCount })}</Tag>
+              </Space>
+              <Space wrap>
+                {(lastScanResult.previews || []).map((preview) => (
+                  <Tag key={preview.category} color={preview.candidates.length > 0 ? getCategoryColor(preview.category) : 'default'}>
+                    {getCategoryLabel(preview.category)}: {preview.candidates.length}/{preview.analyzedWalletCount}
+                  </Tag>
+                ))}
+              </Space>
+            </Space>
+          }
+        />
+      )}
 
       <Card style={{ borderRadius: '12px', boxShadow: '0 2px 8px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8' }} bodyStyle={{ padding: isMobile ? '12px' : '24px' }}>
         {isMobile ? (
@@ -506,13 +766,24 @@ const LeaderList: React.FC = () => {
                         color: '#fff'
                       }}>
                         <div style={{ fontSize: '15px', fontWeight: '600', marginBottom: '2px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                          <span>{leader.leaderName || `Leader ${leader.id}`}</span>
-                          {leader.website && (
-                            <GlobalOutlined
-                              style={{ fontSize: '13px', cursor: 'pointer', opacity: 0.8 }}
-                              onClick={() => window.open(leader.website, '_blank', 'noopener,noreferrer')}
-                            />
-                          )}
+                          <Space size={6}>
+                            <span>{leader.leaderName || `Leader ${leader.id}`}</span>
+                            <Tag color={getCategoryColor(leader.category)} style={{ marginRight: 0 }}>{getCategoryLabel(leader.category)}</Tag>
+                          </Space>
+                          <Space size={6}>
+                            {leader.researchTag && (
+                              <Tag color={getResearchTagColor(leader.researchTag)} style={{ fontSize: '11px', fontWeight: 600, marginRight: 0 }}>
+                                {getResearchTagLabel(leader.researchTag)}
+                                {leader.researchScore != null && <span style={{ marginLeft: 3, opacity: 0.85 }}>{leader.researchScore.toFixed(0)}</span>}
+                              </Tag>
+                            )}
+                            {leader.website && (
+                              <GlobalOutlined
+                                style={{ fontSize: '13px', cursor: 'pointer', opacity: 0.8 }}
+                                onClick={() => window.open(leader.website, '_blank', 'noopener,noreferrer')}
+                              />
+                            )}
+                          </Space>
                         </div>
                         <div style={{ fontSize: '10px', opacity: '0.85', fontFamily: 'monospace', wordBreak: 'break-all' }}>
                           {leader.leaderAddress}
@@ -547,6 +818,51 @@ const LeaderList: React.FC = () => {
                           </div>
                         </div>
                       </div>
+
+                      {/* 扫描数据区域 - 移动端 */}
+                      {(leader.smartMoneyRank != null || leader.winRate != null || leader.totalPnl != null) && (
+                        <div style={{
+                          padding: '8px 12px',
+                          backgroundColor: '#f6ffed',
+                          borderBottom: '1px solid #b7eb8f',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: '4px'
+                        }}>
+                          {leader.smartMoneyRank != null && (
+                            <div style={{ textAlign: 'center' }}>
+                              <div style={{ fontSize: '10px', color: '#8c8c8c' }}>{t('leaderList.smartMoneyRank')}</div>
+                              <div style={{ fontSize: '13px', fontWeight: '600', color: '#faad14' }}>#{leader.smartMoneyRank}</div>
+                            </div>
+                          )}
+                          {leader.winRate != null && (
+                            <div style={{ textAlign: 'center' }}>
+                              <div style={{ fontSize: '10px', color: '#8c8c8c' }}>{t('leaderList.winRate')}</div>
+                              <div style={{ fontSize: '13px', fontWeight: '600', color: leader.winRate >= 60 ? '#52c41a' : '#faad14' }}>{leader.winRate.toFixed(1)}%</div>
+                            </div>
+                          )}
+                          {leader.totalPnl != null && (
+                            <div style={{ textAlign: 'center' }}>
+                              <div style={{ fontSize: '10px', color: '#8c8c8c' }}>{t('leaderList.totalPnl')}</div>
+                              <div style={{ fontSize: '13px', fontWeight: '600', color: parseFloat(leader.totalPnl) > 0 ? '#52c41a' : '#ff4d4f' }}>${formatUSDC(leader.totalPnl)}</div>
+                            </div>
+                          )}
+                          {leader.totalTrades != null && (
+                            <div style={{ textAlign: 'center' }}>
+                              <div style={{ fontSize: '10px', color: '#8c8c8c' }}>{t('leaderList.totalTrades')}</div>
+                              <div style={{ fontSize: '13px', fontWeight: '600', color: '#1890ff' }}>{leader.totalTrades}</div>
+                            </div>
+                          )}
+                          {leader.activityScore != null && (
+                            <div style={{ textAlign: 'center' }}>
+                              <div style={{ fontSize: '10px', color: '#8c8c8c' }}>{t('leaderList.activityScore')}</div>
+                              <div style={{ fontSize: '13px', fontWeight: '600', color: leader.activityScore >= 70 ? '#52c41a' : '#faad14' }}>{leader.activityScore.toFixed(0)}</div>
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {/* 备注区域 */}
                       {leader.remark && (
@@ -720,6 +1036,86 @@ const LeaderList: React.FC = () => {
             </Descriptions>
 
             <Divider />
+
+            {/* 聪明钱分析 */}
+            {(detailLeader.smartMoneyRank != null || detailLeader.winRate != null || detailLeader.totalPnl != null) && (
+              <>
+                <Descriptions
+                  title={
+                    <Space>
+                      <SearchOutlined />
+                      <span style={{ fontSize: '16px', fontWeight: 'bold' }}>{t('leaderDetail.smartMoneyAnalysis')}</span>
+                    </Space>
+                  }
+                  bordered
+                  column={isMobile ? 1 : 2}
+                  size={isMobile ? 'small' : 'default'}
+                >
+                  <Descriptions.Item label={t('leaderDetail.smartMoneyRank')}>
+                    {detailLeader.smartMoneyRank ? (
+                      <Tag color={detailLeader.smartMoneyRank <= 3 ? 'gold' : detailLeader.smartMoneyRank <= 6 ? 'blue' : 'default'}>
+                        #{detailLeader.smartMoneyRank}
+                      </Tag>
+                    ) : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.winRate')}>
+                    {detailLeader.winRate != null ? (
+                      <Text style={{ color: detailLeader.winRate >= 60 ? '#52c41a' : detailLeader.winRate >= 40 ? '#faad14' : '#ff4d4f', fontWeight: 600 }}>
+                        {detailLeader.winRate.toFixed(1)}%
+                      </Text>
+                    ) : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.totalPnl')}>
+                    {detailLeader.totalPnl ? (
+                      <Text style={{ color: parseFloat(detailLeader.totalPnl) > 0 ? '#52c41a' : parseFloat(detailLeader.totalPnl) < 0 ? '#ff4d4f' : '#8c8c8c', fontWeight: 500 }}>
+                        ${formatUSDC(detailLeader.totalPnl)}
+                      </Text>
+                    ) : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.totalVolume')}>
+                    {detailLeader.totalVolume ? `$${formatUSDC(detailLeader.totalVolume)}` : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.totalTrades')}>
+                    {detailLeader.totalTrades != null ? <Tag color="processing">{detailLeader.totalTrades}</Tag> : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.avgTradeSize')}>
+                    {detailLeader.avgTradeSize ? `$${formatUSDC(detailLeader.avgTradeSize)}` : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.activityScore')}>
+                    {detailLeader.activityScore != null ? (
+                      <Badge status={detailLeader.activityScore >= 70 ? 'success' : detailLeader.activityScore >= 40 ? 'warning' : 'error'} text={detailLeader.activityScore.toFixed(0)} />
+                    ) : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.scanSource')}>
+                    <Tag color={detailLeader.scanSource === 'auto_scan' ? 'blue' : 'default'}>{detailLeader.scanSource || '-'}</Tag>
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.researchTag') || '研究标签'}>
+                    {detailLeader.researchTag ? (
+                      <Tag color={getResearchTagColor(detailLeader.researchTag)}>
+                        {getResearchTagLabel(detailLeader.researchTag)}
+                      </Tag>
+                    ) : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.researchScore') || '研究评分'}>
+                    {detailLeader.researchScore != null ? (
+                      <Text strong>{detailLeader.researchScore.toFixed(1)}</Text>
+                    ) : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.researchRiskFlags') || '风险标记'}>
+                    {detailLeader.researchRiskFlags ? (
+                      <Text type="warning">{detailLeader.researchRiskFlags}</Text>
+                    ) : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.lastScan')}>
+                    {detailLeader.scannedAt ? formatTimestamp(detailLeader.scannedAt) : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.lastTrade')}>
+                    {detailLeader.lastTradeAt ? formatTimestamp(detailLeader.lastTradeAt) : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                </Descriptions>
+                <Divider />
+              </>
+            )}
 
             {/* 余额信息 */}
             <div style={{ marginBottom: '16px' }}>

@@ -1,21 +1,30 @@
 import asyncio
+import argparse
 import json
 import logging
 import os
 import re
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from pydantic import BaseModel, Field, ConfigDict
 
 from polymtrade_executor import PolymtradeExecutor
 from copy_trading_config import CopyTradingRuleEngine
 from bridge_recorder import BridgeTradeRecorder
 from position_ledger import PositionLedger
+from bridge_reliability_audit import (
+    audit as run_bridge_reliability_audit,
+    load_reconciliations,
+    reconciliation_file_path,
+    reconciliation_key,
+    save_reconciliations,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -102,6 +111,18 @@ class ExecuteRequest(BaseModel):
     size_shares: Optional[float] = Field(None, alias="sizeShares")
     outcome_index: Optional[int] = Field(None, alias="outcomeIndex")
     market_title: Optional[str] = Field(None, alias="marketTitle")
+
+
+class AuditReconciliationRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    market_id: str = Field(..., alias="marketId")
+    market_title: Optional[str] = Field(None, alias="marketTitle")
+    outcome: str
+    outcome_index: Optional[int] = Field(None, alias="outcomeIndex")
+    status: str = "externally_closed"
+    note: Optional[str] = None
+    actor: str = "operator"
 
 
 # Global executor instance
@@ -321,6 +342,194 @@ async def portfolio_positions():
     return result
 
 
+@app.get("/audit")
+async def reliability_audit(
+    limit: int = Query(100, ge=1, le=500),
+    ledger_limit: int = Query(1000, ge=1, le=5000),
+    failure_limit: int = Query(20, ge=0, le=100),
+    pending_timeout_ms: int = Query(120000, ge=1000),
+    stale_mismatch_ms: int = Query(1800000, ge=1000),
+    min_quantity_ratio: float = Query(0.5, ge=0.0, le=1.0),
+    quantity_tolerance: float = Query(0.05, ge=0.0),
+    portfolio_timeout: float = Query(90.0, ge=1.0, le=180.0),
+):
+    """Return read-only Bridge reliability audit metrics.
+
+    This exposes the same reconciliation checks as bridge_reliability_audit.py:
+    PENDING timeouts, SUCCESS ledger vs live portfolio mismatches, and
+    unexpected live portfolio positions. SUCCESS mismatches older than
+    stale_mismatch_ms are marked as historical/stale. It never places trades.
+    """
+    args = argparse.Namespace(
+        limit=limit,
+        ledger_limit=ledger_limit,
+        failure_limit=failure_limit,
+        pending_timeout_ms=pending_timeout_ms,
+        stale_mismatch_ms=stale_mismatch_ms,
+        reconciliation_file=str(reconciliation_file_path()),
+        portfolio_url=os.getenv("BRIDGE_PORTFOLIO_URL", "http://127.0.0.1:8080/portfolio"),
+        portfolio_timeout=portfolio_timeout,
+        min_quantity_ratio=Decimal(str(min_quantity_ratio)),
+        quantity_tolerance=Decimal(str(quantity_tolerance)),
+        strict=False,
+    )
+    try:
+        return await asyncio.to_thread(run_bridge_reliability_audit, args)
+    except Exception as e:
+        logger.error(f"Bridge reliability audit failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Bridge reliability audit failed: {e}")
+
+
+@app.get("/audit/reconciliations")
+async def audit_reconciliations():
+    """Return local operator annotations used by /audit."""
+    annotations = await asyncio.to_thread(load_reconciliations)
+    return {
+        "file": str(reconciliation_file_path()),
+        "count": len(annotations),
+        "annotations": annotations,
+    }
+
+
+@app.post("/audit/reconciliations")
+async def upsert_audit_reconciliation(request: AuditReconciliationRequest):
+    """Persist an operator reconciliation annotation for stale audit drift.
+
+    This marks an audit key as accepted/external/manual-close evidence. It does
+    not place trades or modify bridge_trade_record rows.
+    """
+    allowed_statuses = {"externally_closed", "manual_closed", "accepted_stale", "wrong_market_known"}
+    status_value = request.status.strip().lower()
+    if status_value not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of {sorted(allowed_statuses)}",
+        )
+
+    key = reconciliation_key(
+        bridge_id=os.getenv("BRIDGE_ID", "polymtrade-bridge"),
+        market_id=request.market_id,
+        market_title=request.market_title,
+        outcome=request.outcome,
+        outcome_index=request.outcome_index,
+    )
+    now_ms = int(time.time() * 1000)
+    annotations = await asyncio.to_thread(load_reconciliations)
+    annotations[key] = {
+        "status": status_value,
+        "note": request.note,
+        "actor": request.actor,
+        "market_id": request.market_id,
+        "market_title": request.market_title,
+        "outcome": request.outcome,
+        "outcome_index": request.outcome_index,
+        "reconciled_at": now_ms,
+        "updated_at": now_ms,
+    }
+    file_path = await asyncio.to_thread(save_reconciliations, annotations)
+    return {
+        "status": "saved",
+        "key": key,
+        "file": str(file_path),
+        "annotation": annotations[key],
+    }
+
+
+def _normalize_market_id(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_market_title(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_outcome(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    mapping = {
+        "yes": "yes",
+        "y": "yes",
+        "是": "yes",
+        "no": "no",
+        "n": "no",
+        "否": "no",
+    }
+    return mapping.get(text, text)
+
+
+def _decimal_from_any(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value or "0"))
+    except Exception:
+        return Decimal("0")
+
+
+async def _get_live_position_quantity(
+    *,
+    market_id: str,
+    market_title: Optional[str],
+    outcome: Optional[str],
+) -> Decimal:
+    """Return current live portfolio quantity for a market/outcome."""
+    if not executor or not executor.is_ready() or not executor.is_logged_in():
+        logger.warning("Live portfolio check skipped because executor is not ready/logged in")
+        return Decimal("0")
+
+    async with _portfolio_lock:
+        portfolio = await executor.fetch_portfolio_positions()
+    if "error" in portfolio:
+        logger.warning(f"Live portfolio check failed: {portfolio.get('error')}")
+        return Decimal("0")
+
+    target_market_id = _normalize_market_id(market_id)
+    target_title = _normalize_market_title(market_title)
+    target_outcome = _normalize_outcome(outcome)
+    total = Decimal("0")
+    for pos in portfolio.get("positions") or []:
+        pos_market_id = _normalize_market_id(pos.get("conditionId") or pos.get("marketId"))
+        pos_title = _normalize_market_title(pos.get("marketTitle"))
+        pos_outcome = _normalize_outcome(pos.get("side"))
+        market_matches = (
+            (target_market_id and pos_market_id == target_market_id)
+            or (target_title and pos_title == target_title)
+        )
+        if market_matches and pos_outcome == target_outcome:
+            total += _decimal_from_any(pos.get("quantity"))
+    return total
+
+
+async def _wait_for_live_position_decrease(
+    *,
+    market_id: str,
+    market_title: Optional[str],
+    outcome: Optional[str],
+    before_quantity: Decimal,
+    poll_attempts: int = 4,
+    poll_delay_seconds: float = 2.0,
+) -> Decimal:
+    """Wait until live portfolio quantity is lower after a SELL."""
+    tolerance = Decimal("0.01")
+    last_quantity = before_quantity
+    for attempt in range(poll_attempts):
+        if attempt > 0:
+            await asyncio.sleep(poll_delay_seconds)
+        last_quantity = await _get_live_position_quantity(
+            market_id=market_id,
+            market_title=market_title,
+            outcome=outcome,
+        )
+        logger.info(
+            "SELL post-submit portfolio check: "
+            f"before={before_quantity}, after={last_quantity}, attempt={attempt + 1}/{poll_attempts}"
+        )
+        if last_quantity <= before_quantity - tolerance:
+            return last_quantity
+
+    raise RuntimeError(
+        "SELL post-submit verification failed: live portfolio quantity did not decrease "
+        f"(before={before_quantity}, after={last_quantity})"
+    )
+
+
 @app.post("/signal")
 async def receive_signal(signal: LeaderTradeSignal, background_tasks: BackgroundTasks):
     if not executor or not executor.is_ready():
@@ -379,15 +588,62 @@ async def execute_trade(request: ExecuteRequest, background_tasks: BackgroundTas
 async def _execute_and_record(record_id: int, request: ExecuteRequest, external_trade_id: str):
     """执行交易并更新 bridge_trade_record 状态。"""
     try:
-        result = await executor.execute_trade(
-            market_slug=request.market_slug,
-            side=request.side.upper(),
-            outcome=request.outcome,
-            amount_usdc=request.amount_usdc,
-            condition_id=request.condition_id,
-            size_shares=request.size_shares,
-            market_title=request.market_title,
+        side_upper = request.side.upper()
+        before_quantity: Optional[Decimal] = None
+        can_verify_live_sell = side_upper == "SELL" and bool(
+            request.condition_id or request.market_title
         )
+
+        async with _trade_lock:
+            if can_verify_live_sell:
+                before_quantity = await _get_live_position_quantity(
+                    market_id=request.condition_id or "",
+                    market_title=request.market_title,
+                    outcome=request.outcome,
+                )
+                requested_quantity = (
+                    Decimal(str(request.size_shares))
+                    if request.size_shares is not None and request.size_shares > 0
+                    else None
+                )
+                if requested_quantity is not None and before_quantity < requested_quantity:
+                    raise RuntimeError(
+                        "Live portfolio insufficient position, skipped "
+                        f"(available={before_quantity}, required={requested_quantity})"
+                    )
+                if requested_quantity is None and before_quantity <= Decimal("0"):
+                    raise RuntimeError(
+                        "Live portfolio insufficient position, skipped "
+                        f"(available={before_quantity}, required=full position)"
+                    )
+            elif side_upper == "SELL":
+                logger.warning(
+                    "Manual SELL live portfolio verification skipped because "
+                    "condition_id and market_title are missing"
+                )
+
+            result = await executor.execute_trade(
+                market_slug=request.market_slug,
+                side=side_upper,
+                outcome=request.outcome,
+                amount_usdc=request.amount_usdc,
+                condition_id=request.condition_id,
+                size_shares=request.size_shares,
+                market_title=request.market_title,
+            )
+
+            if can_verify_live_sell and before_quantity is not None:
+                after_quantity = await _wait_for_live_position_decrease(
+                    market_id=request.condition_id or "",
+                    market_title=request.market_title,
+                    outcome=request.outcome,
+                    before_quantity=before_quantity,
+                )
+                logger.info(
+                    f"Manual SELL verified by live portfolio decrease: "
+                    f"before={before_quantity}, after={after_quantity}"
+                )
+
         logger.info(f"Manual trade executed: {external_trade_id}, result={result}")
         recorder.update_status(record_id, "SUCCESS")
     except Exception as e:
@@ -522,6 +778,16 @@ async def handle_signal(signal: LeaderTradeSignal):
                             market_title=signal.title,
                         )
                     else:
+                        live_quantity = await _get_live_position_quantity(
+                            market_id=signal.condition_id or signal.market_slug or "",
+                            market_title=signal.title,
+                            outcome=signal.outcome,
+                        )
+                        if live_quantity < quantity:
+                            raise RuntimeError(
+                                "Live portfolio insufficient position, skipped "
+                                f"(available={live_quantity}, required={quantity})"
+                            )
                         await executor.execute_trade(
                             market_slug=signal.market_slug,
                             side="SELL",
@@ -530,6 +796,16 @@ async def handle_signal(signal: LeaderTradeSignal):
                             condition_id=signal.condition_id,
                             size_shares=float(quantity),
                             market_title=signal.title,
+                        )
+                        after_quantity = await _wait_for_live_position_decrease(
+                            market_id=signal.condition_id or signal.market_slug or "",
+                            market_title=signal.title,
+                            outcome=signal.outcome,
+                            before_quantity=live_quantity,
+                        )
+                        logger.info(
+                            f"SELL verified by live portfolio decrease: "
+                            f"before={live_quantity}, after={after_quantity}"
                         )
                 if record_id and recorder:
                     recorder.update_status(record_id, "SUCCESS")

@@ -6,6 +6,7 @@ import com.wrbug.polymarketbot.enums.LeaderResearchSourceStatus
 import com.wrbug.polymarketbot.enums.LeaderResearchSourceType
 import com.wrbug.polymarketbot.repository.LeaderActivityEventRepository
 import com.wrbug.polymarketbot.repository.LeaderRepository
+import com.wrbug.polymarketbot.service.bridge.BridgeWebhookClient
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderActivityIngestionService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchSourceHealthService
 import com.wrbug.polymarketbot.service.copytrading.statistics.CopyOrderTrackingService
@@ -21,6 +22,7 @@ class PolymarketActivityWsResearchCaptureTest {
     private val activityEventRepository: LeaderActivityEventRepository = mock()
     private val ingestionService = LeaderActivityIngestionService(activityEventRepository, Gson())
     private val healthService: LeaderResearchSourceHealthService = mock()
+    private val bridgeWebhookClient: BridgeWebhookClient = mock()
 
     @Test
     fun `disabled global capture records disabled source health without parsing message`() {
@@ -88,6 +90,7 @@ class PolymarketActivityWsResearchCaptureTest {
         leaderRepository = leaderRepository,
         researchIngestionProvider = provider(ingestionService),
         researchSourceHealthProvider = provider(healthService),
+        bridgeWebhookClient = bridgeWebhookClient,
         researchGlobalCaptureEnabled = globalCaptureEnabled,
         researchGlobalCaptureMaxWritesPerMinute = maxWritesPerMinute
     )

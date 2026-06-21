@@ -291,6 +291,18 @@ open class CopyOrderTrackingService(
                         continue
                     }
 
+                    val leader = leaderRepository.findById(copyTrading.leaderId).orElse(null)
+                    if (leader == null) {
+                        logger.warn("Leader 不存在，跳过创建订单: leaderId=${copyTrading.leaderId}, copyTradingId=${copyTrading.id}")
+                        continue
+                    }
+                    if (!isMarketAllowedForLeaderCategory(leader, effectiveMarketId)) {
+                        logger.info(
+                            "Leader 分类与市场分类不匹配，跳过跟单: copyTradingId=${copyTrading.id}, leaderId=${leader.id}, leaderCategory=${leader.category}, marketId=$effectiveMarketId"
+                        )
+                        continue
+                    }
+
                     // 先计算跟单金额（用于仓位检查）
                     // 注意：这里先计算金额，即使后续被过滤也会记录
                     val tradePrice = trade.price.toSafeBigDecimal()
@@ -697,6 +709,18 @@ open class CopyOrderTrackingService(
                 try {
                     // 检查是否支持卖出
                     if (!copyTrading.supportSell) {
+                        continue
+                    }
+
+                    val leader = leaderRepository.findById(copyTrading.leaderId).orElse(null)
+                    if (leader == null) {
+                        logger.warn("Leader 不存在，跳过卖出匹配: leaderId=${copyTrading.leaderId}, copyTradingId=${copyTrading.id}")
+                        continue
+                    }
+                    if (!isMarketAllowedForLeaderCategory(leader, trade.market)) {
+                        logger.info(
+                            "Leader 分类与卖出市场分类不匹配，跳过卖出: copyTradingId=${copyTrading.id}, leaderId=${leader.id}, leaderCategory=${leader.category}, marketId=${trade.market}"
+                        )
                         continue
                     }
 
@@ -1578,7 +1602,7 @@ open class CopyOrderTrackingService(
      * 从trade中提取side（结果名称）
      *
      * 说明：
-     * - 根据设计文档，系统只支持sports和crypto分类，这些通常是二元市场（YES/NO）
+     * - 系统按 politics/sports/crypto/finance 分领域跟单，多数 Polymarket 市场是二元市场（YES/NO）
      * - TradeResponse中的side是BUY/SELL（订单方向），不是YES/NO（outcome）
      * - 在二元市场中：
      *   - outcomeIndex 0 = 第一个 outcome（通常是 YES）
@@ -1630,5 +1654,27 @@ open class CopyOrderTrackingService(
         logger.warn("无法确定 side，默认返回第一个outcome: marketId=$marketId, tradeSide=$tradeSide, outcomeIndex=$outcomeIndex, outcome=$outcome")
         return "YES"  // 默认返回第一个 outcome
     }
-}
 
+    private fun isMarketAllowedForLeaderCategory(leader: Leader, marketId: String): Boolean {
+        val leaderCategory = CategoryValidator.normalizeCategory(leader.category)
+            ?: return true
+        if (marketId.isBlank()) {
+            logger.warn("Leader 有分类但交易缺少 marketId，拒绝跟单: leaderId=${leader.id}, category=$leaderCategory")
+            return false
+        }
+
+        val marketCategory = try {
+            CategoryValidator.normalizeCategory(marketService.getMarket(marketId)?.category)
+        } catch (e: Exception) {
+            logger.warn("获取市场分类失败，拒绝跨领域跟单: leaderId=${leader.id}, marketId=$marketId, error=${e.message}")
+            null
+        }
+
+        if (marketCategory == null) {
+            logger.warn("市场分类未知，拒绝分类 Leader 跟单: leaderId=${leader.id}, leaderCategory=$leaderCategory, marketId=$marketId")
+            return false
+        }
+
+        return leaderCategory == marketCategory
+    }
+}

@@ -51,8 +51,8 @@ class PolymarketActivityWsService(
     // 单例 WebSocket 客户端
     private var wsClient: PolymarketWebSocketClient? = null
 
-    // 要监听的 Leader 地址集合（小写地址 -> leaderId）
-    private val monitoredAddresses = ConcurrentHashMap<String, Long>()
+    // 要监听的 Leader 地址集合（小写地址 -> leaderIds）。同一钱包可按不同分类存在多个 Leader。
+    private val monitoredAddresses = ConcurrentHashMap<String, MutableSet<Long>>()
 
     // 存储已处理的交易哈希，用于去重（LRU 缓存，保留最近 100 条）
     // 因为同时订阅 trades 和 orders_matched，同一个交易可能被推送两次
@@ -84,23 +84,32 @@ class PolymarketActivityWsService(
 
     /**
      * 启动监听
+     * 当全局 research capture 开启时，即使没有 Leader 也会连接 WebSocket，
+     * 用于发现新的候选交易者；有 Leader 时仍保持原有跟单监听功能。
      */
     fun start(leaders: List<Leader>) {
         monitoredAddresses.clear()
         leaders.forEach { leader ->
             val leaderId = leader.id
             if (leaderId != null) {
-                monitoredAddresses[leader.leaderAddress.lowercase()] = leaderId
+                monitoredAddresses.compute(leader.leaderAddress.lowercase()) { _, existing ->
+                    (existing ?: ConcurrentHashMap.newKeySet<Long>()).apply { add(leaderId) }
+                }
             }
         }
 
-        if (monitoredAddresses.isEmpty()) {
-            logger.info("没有需要监听的 Leader，停止 Activity WebSocket")
+        val hasLeaders = monitoredAddresses.isNotEmpty()
+        if (!hasLeaders && !researchGlobalCaptureEnabled) {
+            logger.info("没有需要监听的 Leader 且全局 research capture 未开启，停止 Activity WebSocket")
             stop()
             return
         }
 
-        logger.info("启动 Activity WebSocket 监听（trades + orders_matched），监控 ${monitoredAddresses.size} 个 Leader 地址")
+        if (hasLeaders) {
+            logger.info("启动 Activity WebSocket 监听（trades + orders_matched），监控 ${monitoredAddresses.size} 个 Leader 地址")
+        } else {
+            logger.info("启动 Activity WebSocket 全局 research capture（无 Leader 监听）")
+        }
         connectAndSubscribe()
     }
 
@@ -114,16 +123,18 @@ class PolymarketActivityWsService(
         }
 
         val address = leader.leaderAddress.lowercase()
-        val existingLeaderId = monitoredAddresses[address]
+        val existingLeaderIds = monitoredAddresses[address]
 
-        if (existingLeaderId != null && existingLeaderId == leader.id) {
+        if (existingLeaderIds?.contains(leader.id) == true) {
             logger.debug("Leader 已在监听列表中: ${leader.leaderName} (${address})")
             return
         }
 
         val leaderId = leader.id
         if (leaderId != null) {
-            monitoredAddresses[address] = leaderId
+            monitoredAddresses.compute(address) { _, existing ->
+                (existing ?: ConcurrentHashMap.newKeySet<Long>()).apply { add(leaderId) }
+            }
             logger.info("添加 Leader 到 Activity WS 监听: ${leader.leaderName} (${address})")
 
             // 如果 WebSocket 未连接，连接
@@ -139,15 +150,18 @@ class PolymarketActivityWsService(
      */
     fun removeLeader(leaderId: Long) {
         val addressToRemove = monitoredAddresses.entries
-            .find { it.value == leaderId }?.key
+            .find { it.value.contains(leaderId) }?.key
 
         if (addressToRemove != null) {
-            monitoredAddresses.remove(addressToRemove)
+            monitoredAddresses.computeIfPresent(addressToRemove) { _, existing ->
+                existing.remove(leaderId)
+                if (existing.isEmpty()) null else existing
+            }
             logger.info("从 Activity WS 监听移除 Leader: leaderId=$leaderId, address=$addressToRemove")
         }
 
-        // 如果没有 Leader 了，停止监听
-        if (monitoredAddresses.isEmpty()) {
+        // 如果没有 Leader 了，但全局 research capture 开启，则保持连接
+        if (monitoredAddresses.isEmpty() && !researchGlobalCaptureEnabled) {
             logger.info("没有 Leader 需要监听了，停止 Activity WebSocket")
             stop()
         }
@@ -299,7 +313,7 @@ class PolymarketActivityWsService(
         }
 
         // 遍历所有监听的地址
-        for ((address, leaderId) in monitoredAddresses) {
+        for (address in monitoredAddresses.keys) {
             // 检查 proxyWallet：格式为 "proxyWallet":"0x..."
             if (message.contains("\"proxyWallet\":\"$address\"", ignoreCase = true)) {
                 addressMatchMessages++
@@ -379,14 +393,14 @@ class PolymarketActivityWsService(
 
             // 二次验证：确认地址匹配
             val normalizedAddress = traderAddress.lowercase()
-            val leaderId = monitoredAddresses[normalizedAddress] ?: run {
+            val leaderIds = monitoredAddresses[normalizedAddress]?.toList()?.takeIf { it.isNotEmpty() } ?: run {
                 return
             }
 
             // 解析交易数据
-            val trade = parseActivityTrade(payload, leaderId)
+            val trade = parseActivityTrade(payload, leaderIds.first())
             if (trade != null) {
-                logger.info("✅ 检测到 Leader 交易: leaderId=$leaderId, address=$traderAddress, side=${trade.side}, market=${trade.market}, size=${trade.size}")
+                logger.info("✅ 检测到 Leader 交易: leaderIds=$leaderIds, address=$traderAddress, side=${trade.side}, market=${trade.market}, size=${trade.size}")
 
                 // 发送 webhook 到 Bridge，实现无日志依赖的实时信号推送
                 try {
@@ -398,7 +412,7 @@ class PolymarketActivityWsService(
                             transactionHash = trade.id,
                             conditionId = trade.market,
                             marketSlug = payload.slug ?: payload.eventSlug,
-                            title = null,
+                            title = payload.title,
                             side = trade.side,
                             outcome = trade.outcome,
                             outcomeIndex = trade.outcomeIndex,
@@ -411,20 +425,27 @@ class PolymarketActivityWsService(
                     logger.error("发送 Bridge webhook 失败: txHash=${trade.id}", e)
                 }
 
-                // 异步处理交易（避免阻塞消息处理）
-                scope.launch {
-                    try {
-                        copyOrderTrackingService.processTrade(
-                            leaderId = leaderId,
-                            trade = trade,
-                            source = "activity-ws"
-                        )
-                    } catch (e: Exception) {
-                        logger.error("处理 Activity WS 交易失败: leaderId=$leaderId, tradeId=${trade.id}", e)
+                for (leaderId in leaderIds) {
+                    val leaderTrade = if (leaderId == leaderIds.first()) trade else parseActivityTrade(payload, leaderId)
+                    if (leaderTrade == null) {
+                        logger.warn("解析交易数据失败: leaderId=$leaderId, address=$traderAddress, asset=${payload.asset}, side=${payload.side}")
+                        continue
+                    }
+                    // 异步处理交易（避免阻塞消息处理）
+                    scope.launch {
+                        try {
+                            copyOrderTrackingService.processTrade(
+                                leaderId = leaderId,
+                                trade = leaderTrade,
+                                source = "activity-ws"
+                            )
+                        } catch (e: Exception) {
+                            logger.error("处理 Activity WS 交易失败: leaderId=$leaderId, tradeId=${leaderTrade.id}", e)
+                        }
                     }
                 }
             } else {
-                logger.warn("解析交易数据失败: leaderId=$leaderId, address=$traderAddress, asset=${payload.asset}, side=${payload.side}")
+                logger.warn("解析交易数据失败: leaderIds=$leaderIds, address=$traderAddress, asset=${payload.asset}, side=${payload.side}")
             }
         } catch (e: Exception) {
             logger.error("处理 Activity WebSocket 消息失败: ${e.message}", e)
@@ -663,6 +684,26 @@ class PolymarketActivityWsService(
         monitoredAddresses.clear()
         processedTxHashes.invalidateAll()  // 清空去重缓存
         lastActivityTime = 0
+    }
+
+    /**
+     * 显式启动全局 research capture（供外部调用）。
+     * 如果已经处于连接状态，仅确保订阅已发送。
+     */
+    fun ensureGlobalResearchCapture() {
+        if (!researchGlobalCaptureEnabled) {
+            logger.info("全局 research capture 未开启，跳过")
+            return
+        }
+        val client = wsClient
+        if (client != null && client.isConnected()) {
+            if (!isSubscribed) {
+                subscribeAllActivity()
+            }
+            return
+        }
+        logger.info("启动 Activity WebSocket 全局 research capture")
+        connectAndSubscribe()
     }
 
     /**

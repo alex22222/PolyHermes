@@ -8,6 +8,58 @@ export interface ApiResponse<T> {
 }
 
 /**
+ * Leader 扫描状态
+ */
+export interface LeaderScanStatus {
+  isRunning: boolean
+  lastScanAt?: number
+  lastScanDurationMs?: number
+  lastScanResult?: string
+  nextScheduledScan?: string
+}
+
+/**
+ * Leader 扫描结果项
+ */
+export interface LeaderScanResultItem {
+  leaderAddress: string
+  leaderName?: string
+  category?: string
+  totalTrades?: number
+  winRate?: number
+  totalPnl?: string
+  totalVolume?: string
+  activityScore?: number
+  smartMoneyRank?: number
+  source: string
+}
+
+/**
+ * Leader 扫描预览响应
+ */
+export interface LeaderScanPreviewResponse {
+  category: string
+  candidates: LeaderScanResultItem[]
+  marketCount: number
+  analyzedWalletCount: number
+}
+
+/**
+ * Leader 批量扫描响应
+ */
+export interface LeaderScanBatchResponse {
+  success: boolean
+  message?: string
+  createdCount: number
+  updatedCount: number
+  categories: string[]
+  previews?: LeaderScanPreviewResponse[]
+  totalCandidateCount?: number
+  totalAnalyzedWalletCount?: number
+  durationMs?: number
+}
+
+/**
  * 账户信息
  */
 export interface Account {
@@ -100,6 +152,19 @@ export interface Leader {
   backtestCount: number  // 回测数量
   totalOrders?: number
   totalPnl?: string
+  totalTrades?: number  // 总交易数（扫描统计）
+  winRate?: number  // 胜率（百分比 0-100）
+  totalVolume?: string  // 总交易量（USDC）
+  avgTradeSize?: string  // 平均交易规模（USDC）
+  lastTradeAt?: number  // 最后交易时间（毫秒时间戳）
+  activityScore?: number  // 活跃度评分（0-100）
+  smartMoneyRank?: number  // 聪明钱排名（按类别）
+  scanSource?: string  // 扫描来源：auto_scan, manual
+  scannedAt?: number  // 最后扫描时间（毫秒时间戳）
+  researchScore?: number  // 研究模块 copyability 评分 (0-100)
+  researchTag?: string  // 研究标签: ELITE/TRADEABLE/CANDIDATE/WATCH/RISKY
+  researchRiskFlags?: string  // 风险标记,逗号分隔
+  researchScoredAt?: number  // 研究评分时间(毫秒时间戳)
   createdAt: number
   updatedAt: number
 }
@@ -766,6 +831,11 @@ export interface Statistics {
   avgPnl: string
   maxProfit: string
   maxLoss: string
+  openPositionCount?: number
+  openPositionValue?: string
+  attemptedOrders?: number
+  failedOrders?: number
+  pendingOrders?: number
 }
 
 /**
@@ -1714,6 +1784,11 @@ export interface BridgeTradeRecord {
   status: string
   errorMessage?: string
   rawPayload?: string
+  ledgerNetQuantity?: string
+  snapshotQuantity?: string
+  snapshotSyncedAt?: number
+  positionMismatch?: boolean
+  positionMismatchReason?: string
   executedAt?: number
   createdAt: number
   updatedAt: number
@@ -1747,27 +1822,85 @@ export interface BridgeTradeRecordDetailRequest {
 }
 
 /**
- * 桥接日志信息
+ * 桥接交易统计请求
  */
-export interface BridgeLogInfo {
-  name: string
-  displayName: string
-  path: string
+export interface BridgeTradeStatisticsRequest {
+  bridgeId?: string
+  startTime?: number
+  endTime?: number
 }
 
 /**
- * 桥接日志内容请求
+ * 桥接交易统计响应
  */
-export interface BridgeLogContentRequest {
-  name: string
-  lines?: number
+export interface BridgeTradeStatistics {
+  bridgeId?: string
+  totalTrades: number
+  successTrades: number
+  failedTrades: number
+  pendingTrades: number
+  buyTrades: number
+  sellTrades: number
+  successBuyTrades: number
+  successSellTrades: number
+  successBuyAmount: string
+  successSellAmount: string
+  totalFees: string
+  netCashflow: string
+  totalPnl: string
+  successRate: string
+  avgSuccessTradeAmount: string
+  openPositionCount: number
+  openPositionQuantity: string
+  openPositionValue: string
+  openPositionPnl: string
+  maxPositionProfit: string
+  maxPositionLoss: string
+  statisticsSource: string
+  latestTradeAt?: number
+  latestBuyAt?: number
+  latestSellAt?: number
+  latestSnapshotSyncedAt?: number
 }
 
 /**
- * 桥接日志内容响应
+ * Webhook 日志
  */
-export interface BridgeLogContentResponse {
-  name: string
-  content: string
-  lines: number
+export interface BridgeWebhookLog {
+  id: number
+  bridgeId: string
+  event: string
+  leaderAddress?: string
+  leaderName?: string
+  transactionHash?: string
+  conditionId?: string
+  marketSlug?: string
+  side?: string
+  outcome?: string
+  requestBody?: string
+  responseBody?: string
+  statusCode?: number
+  status: string
+  errorMessage?: string
+  createdAt: number
+  updatedAt: number
+}
+
+/**
+ * Webhook 日志列表响应
+ */
+export interface BridgeWebhookLogListResponse {
+  list: BridgeWebhookLog[]
+  total: number
+  page: number
+  size: number
+}
+
+/**
+ * Webhook 日志列表请求
+ */
+export interface BridgeWebhookLogListRequest {
+  status?: string
+  page?: number
+  size?: number
 }

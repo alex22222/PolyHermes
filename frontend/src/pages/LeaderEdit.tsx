@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Card, Form, Input, Button, message, Typography, Space, Spin } from 'antd'
+import { Card, Form, Input, Button, message, Typography, Space, Spin, Select } from 'antd'
 import { ArrowLeftOutlined } from '@ant-design/icons'
 import { apiService } from '../services/api'
 import { useMediaQuery } from 'react-responsive'
@@ -36,6 +36,7 @@ const LeaderEdit: React.FC = () => {
         const leader: Leader = response.data.data
         form.setFieldsValue({
           leaderName: leader.leaderName || '',
+          category: leader.category || undefined,
           remark: leader.remark || '',
           website: leader.website || ''
         })
@@ -62,6 +63,7 @@ const LeaderEdit: React.FC = () => {
       const response = await apiService.leaders.update({
         leaderId: parseInt(leaderId),
         leaderName: values.leaderName?.trim() || undefined,
+        category: values.category || undefined,
         remark: values.remark?.trim() || undefined,
         website: values.website?.trim() || undefined
       })
@@ -114,6 +116,23 @@ const LeaderEdit: React.FC = () => {
           >
             <Input placeholder={t('leaderEdit.leaderNamePlaceholder') || '可选，用于标识 Leader'} />
           </Form.Item>
+
+          <Form.Item
+            label={t('leaderEdit.category') || '分类'}
+            name="category"
+            tooltip={t('leaderEdit.categoryTooltip') || '选择后仅跟单该领域市场'}
+          >
+            <Select
+              allowClear
+              placeholder={t('leaderEdit.categoryPlaceholder') || '选择分类'}
+              options={[
+                { value: 'politics', label: t('leaderList.categoryPolitics') || '政治' },
+                { value: 'sports', label: t('leaderList.categorySports') || '体育' },
+                { value: 'crypto', label: t('leaderList.categoryCrypto') || '加密货币' },
+                { value: 'finance', label: t('leaderList.categoryFinance') || '金融' }
+              ]}
+            />
+          </Form.Item>
           
           <Form.Item
             label={t('leaderEdit.remark') || 'Leader 备注'}
@@ -164,4 +183,3 @@ const LeaderEdit: React.FC = () => {
 }
 
 export default LeaderEdit
-

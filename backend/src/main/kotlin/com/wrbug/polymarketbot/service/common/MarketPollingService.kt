@@ -64,7 +64,13 @@ class MarketPollingService(
             
             // 启动新的轮询任务
             pollingJob = scope.launch(Dispatchers.IO) {
-                // 启动时立即执行一次
+                // 启动时立即执行一次市场同步和活跃市场抓取
+                try {
+                    syncActiveMarkets()
+                } catch (e: Exception) {
+                    logger.error("初始同步活跃市场失败: ${e.message}", e)
+                }
+
                 try {
                     checkAndUpdateMissingMarkets()
                 } catch (e: Exception) {
@@ -72,15 +78,42 @@ class MarketPollingService(
                 }
                 
                 // 然后按间隔定期执行
+                var tickCount = 0
                 while (isActive) {
                     try {
                         delay(pollingInterval)
+                        tickCount++
+                        
+                        // 每 10 个 tick 同步一次活跃市场（默认 30s * 10 = 5分钟）
+                        if (tickCount % 10 == 0) {
+                            try {
+                                syncActiveMarkets()
+                            } catch (e: Exception) {
+                                logger.error("定期同步活跃市场失败: ${e.message}", e)
+                            }
+                        }
+                        
                         checkAndUpdateMissingMarkets()
                     } catch (e: Exception) {
                         logger.error("轮询市场信息失败: ${e.message}", e)
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * 从 Gamma API 同步活跃市场列表到数据库
+     * 不依赖订单数据，主动填充 markets 表
+     */
+    private suspend fun syncActiveMarkets() {
+        try {
+            val savedCount = marketService.fetchAndSaveActiveMarkets()
+            if (savedCount > 0) {
+                logger.info("MarketPollingService 同步活跃市场: 新增/更新 $savedCount 个市场")
+            }
+        } catch (e: Exception) {
+            logger.error("同步活跃市场失败: ${e.message}", e)
         }
     }
     

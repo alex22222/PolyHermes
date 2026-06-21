@@ -1,12 +1,13 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import type {
   ApiResponse,
-  BridgeLogContentRequest,
-  BridgeLogContentResponse,
-  BridgeLogInfo,
   BridgeTradeRecord,
+  BridgeWebhookLogListRequest,
+  BridgeWebhookLogListResponse,
   BridgeTradeRecordListRequest,
   BridgeTradeRecordListResponse,
+  BridgeTradeStatistics,
+  BridgeTradeStatisticsRequest,
   LeaderPoolAddRequest,
   LeaderPoolCreateTrialConfigRequest,
   LeaderPoolItem,
@@ -31,7 +32,10 @@ import type {
   TemplateTypeInfo,
   TemplateVariablesResponse,
   BridgePositionSellRequest,
-  BridgePositionSellResponse
+  BridgePositionSellResponse,
+  LeaderScanBatchResponse,
+  LeaderScanPreviewResponse,
+  LeaderScanStatus
 } from '../types'
 import { getToken, setToken, removeToken } from '../utils'
 import { wsManager } from './websocket'
@@ -39,16 +43,16 @@ import i18n from '../i18n/config'
 
 /**
  * API 基础配置
- * 默认使用相对路径 /api（通过反向代理转发）
- * 如果设置了 VITE_API_URL 环境变量，则使用完整 URL（用于跨域场景）
+ * 开发环境默认使用相对路径 /api（通过 Vite 反向代理转发，避免 CORS）
+ * 生产环境如果设置了 VITE_API_URL 环境变量，则使用完整 URL（用于跨域场景）
  */
 const getBaseURL = (): string => {
   const envApiUrl = import.meta.env.VITE_API_URL
-  if (envApiUrl) {
-    // 如果设置了环境变量，使用完整 URL（支持跨域）
+  if (envApiUrl && !import.meta.env.DEV) {
+    // 生产环境设置了环境变量，使用完整 URL（支持跨域）
     return `${envApiUrl}/api`
   }
-  // 否则使用相对路径（通过反向代理转发）
+  // 开发环境使用相对路径（通过 Vite 代理转发）
   return '/api'
 }
 
@@ -396,6 +400,35 @@ export const apiService = {
      */
     balance: (data: { leaderId: number }) =>
       apiClient.post<ApiResponse<any>>('/copy-trading/leaders/balance', data)
+  },
+
+  /**
+   * Leader 扫描 API（聪明钱分析 / 扫链）
+   */
+  leaderScanner: {
+    /**
+     * 触发手动扫描
+     */
+    run: (data: { category?: string; dryRun?: boolean } = {}) =>
+      apiClient.post<ApiResponse<LeaderScanBatchResponse>>('/copy-trading/leaders/scan/run', data),
+
+    /**
+     * 预览扫描结果（不写入数据库）
+     */
+    preview: (data: { category?: string } = {}) =>
+      apiClient.post<ApiResponse<LeaderScanPreviewResponse[]>>('/copy-trading/leaders/scan/preview', data),
+
+    /**
+     * 获取扫描状态
+     */
+    status: () =>
+      apiClient.post<ApiResponse<LeaderScanStatus>>('/copy-trading/leaders/scan/status', {}),
+
+    /**
+     * 为所有 Leader 计算研究模块 copyability 评分
+     */
+    researchScore: () =>
+      apiClient.post<ApiResponse<{ scoredCount: number; message: string }>>('/copy-trading/leaders/scan/research-score/run', {})
   },
 
   /**
@@ -980,24 +1013,24 @@ export const apiService = {
      * 查询桥接交易记录详情
      */
     detail: (data: { id: number }) =>
-      apiClient.post<ApiResponse<BridgeTradeRecord>>('/bridge/trades/detail', data)
+      apiClient.post<ApiResponse<BridgeTradeRecord>>('/bridge/trades/detail', data),
+
+    /**
+     * 查询桥接交易统计
+     */
+    statistics: (data: BridgeTradeStatisticsRequest = {}) =>
+      apiClient.post<ApiResponse<BridgeTradeStatistics>>('/bridge/trades/statistics', data)
   },
 
   /**
-   * 桥接日志 API
+   * Webhook 日志 API
    */
-  bridgeLogs: {
+  bridgeWebhookLogs: {
     /**
-     * 查询可查看的日志列表
+     * 查询 Webhook 调用日志列表
      */
-    list: () =>
-      apiClient.post<ApiResponse<BridgeLogInfo[]>>('/bridge/logs/list', {}),
-
-    /**
-     * 获取指定日志内容
-     */
-    content: (data: BridgeLogContentRequest) =>
-      apiClient.post<ApiResponse<BridgeLogContentResponse>>('/bridge/logs/content', data)
+    list: (data: BridgeWebhookLogListRequest) =>
+      apiClient.post<ApiResponse<BridgeWebhookLogListResponse>>('/bridge/webhook-logs/list', data)
   }
 }
 

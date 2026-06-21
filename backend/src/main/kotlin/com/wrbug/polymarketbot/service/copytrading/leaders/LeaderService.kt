@@ -41,13 +41,18 @@ class LeaderService(
                 return Result.failure(IllegalArgumentException("无效的钱包地址格式"))
             }
             
-            // 2. 验证分类
-            if (request.category != null) {
-                CategoryValidator.validate(request.category)
+            // 2. 验证并规范化分类
+            val normalizedCategory = request.category?.let {
+                CategoryValidator.normalizeCategory(it)
+                    ?: return Result.failure(IllegalArgumentException("不支持的分类: ${request.category}"))
             }
             
             // 3. 检查是否已存在，返回更具体的提示信息
-            val existingLeader = leaderRepository.findByLeaderAddress(normalizedAddress)
+            val existingLeader = if (normalizedCategory != null) {
+                leaderRepository.findByLeaderAddressAndCategory(normalizedAddress, normalizedCategory)
+            } else {
+                leaderRepository.findByLeaderAddress(normalizedAddress)
+            }
             if (existingLeader != null) {
                 val displayName = existingLeader.leaderName?.takeIf { it.isNotBlank() } ?: "Leader ${existingLeader.id}"
                 return Result.failure(
@@ -73,7 +78,7 @@ class LeaderService(
             val leader = Leader(
                 leaderAddress = normalizedAddress,
                 leaderName = request.leaderName?.takeIf { it.isNotBlank() },
-                category = request.category,
+                category = normalizedCategory,
                 remark = request.remark?.takeIf { it.isNotBlank() },
                 website = website
             )
@@ -96,9 +101,10 @@ class LeaderService(
             val leader = leaderRepository.findById(request.leaderId).orElse(null)
                 ?: return Result.failure(IllegalArgumentException("Leader 不存在"))
             
-            // 验证分类
-            if (request.category != null) {
-                CategoryValidator.validate(request.category)
+            // 验证并规范化分类
+            val normalizedCategory = request.category?.let {
+                CategoryValidator.normalizeCategory(it)
+                    ?: return Result.failure(IllegalArgumentException("不支持的分类: ${request.category}"))
             }
             
             // 处理更新逻辑：如果请求中的字段为 null 或空字符串，都设置为 null
@@ -111,7 +117,7 @@ class LeaderService(
             
             val updated = leader.copy(
                 leaderName = request.leaderName?.takeIf { it.isNotBlank() },
-                category = request.category,
+                category = normalizedCategory,
                 remark = request.remark?.takeIf { it.isNotBlank() },
                 website = website,
                 updatedAt = System.currentTimeMillis()
@@ -155,13 +161,13 @@ class LeaderService(
      */
     fun getLeaderList(request: LeaderListRequest): Result<LeaderListResponse> {
         return try {
-            // 验证分类
-            if (request.category != null) {
-                CategoryValidator.validate(request.category)
+            val normalizedCategory = request.category?.let {
+                CategoryValidator.normalizeCategory(it)
+                    ?: return Result.failure(IllegalArgumentException("不支持的分类: ${request.category}"))
             }
             
-            val leaders = if (request.category != null) {
-                leaderRepository.findByCategory(request.category)
+            val leaders = if (normalizedCategory != null) {
+                leaderRepository.findByCategory(normalizedCategory)
             } else {
                 leaderRepository.findAllByOrderByCreatedAtAsc()
             }
@@ -248,6 +254,21 @@ class LeaderService(
             website = leader.website,
             copyTradingCount = copyTradingCount,
             backtestCount = backtestCount,
+            totalOrders = leader.totalTrades?.toLong(),
+            totalPnl = leader.totalPnl,
+            totalTrades = leader.totalTrades,
+            winRate = leader.winRate?.toDouble(),
+            totalVolume = leader.totalVolume,
+            avgTradeSize = leader.avgTradeSize,
+            lastTradeAt = leader.lastTradeAt,
+            activityScore = leader.activityScore?.toDouble(),
+            smartMoneyRank = leader.smartMoneyRank,
+            scanSource = leader.scanSource,
+            scannedAt = leader.scannedAt,
+            researchScore = leader.researchScore?.toDouble(),
+            researchTag = leader.researchTag,
+            researchRiskFlags = leader.researchRiskFlags,
+            researchScoredAt = leader.researchScoredAt,
             createdAt = leader.createdAt,
             updatedAt = leader.updatedAt
         )
@@ -261,4 +282,3 @@ class LeaderService(
         return address.matches(Regex("^0x[a-fA-F0-9]{40}$"))
     }
 }
-

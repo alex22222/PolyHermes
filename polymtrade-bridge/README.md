@@ -1,6 +1,6 @@
 # PolyHermes → Polymtrade Bridge
 
-自动桥接系统：PolyHermes 检测到 Leader 交易信号 → Bridge Service 通过浏览器自动化在 Polymtrade 上执行跟单。
+自动桥接系统：PolyHermes 检测到 Leader 交易信号 → 通过 HTTP webhook 发送给 Bridge Service → Bridge 通过浏览器自动化在 Polymtrade 上执行跟单。
 
 ## 架构
 
@@ -8,7 +8,7 @@
 PolyHermes (检测 Leader)
     │
     ▼
-Log Watcher (解析日志 / 或 PolyHermes webhook)
+HTTP webhook → POST /signal
     │
     ▼
 Bridge Service (FastAPI + Playwright)
@@ -19,9 +19,9 @@ Polymtrade Web UI (自动下单)
 
 ## 文件说明
 
-- `main.py` — FastAPI 服务，接收信号并调度执行
+- `main.py` — FastAPI 服务，接收 `/signal` 信号并调度执行
 - `polymtrade_executor.py` — Playwright 浏览器自动化
-- `log_watcher.py` — 读取 PolyHermes Docker 日志并发送信号
+- `bridge_recorder.py` — 记录交易执行结果到 PolyHermes 数据库
 - `Dockerfile` / `docker-compose.yml` — 容器化部署
 
 ## 快速开始（本地运行）
@@ -37,19 +37,19 @@ cd polymtrade-bridge
 
 首次运行会打开浏览器窗口，访问 https://polym.trade。请手动完成登录（Privy 邮箱/钱包）。登录状态会保存在 `browser_profile/` 目录。
 
-### 3. 启动 Log Watcher
+### 3. 配置 PolyHermes Webhook
 
-另开一个终端：
+在启动 PolyHermes 后端前设置环境变量：
 
 ```bash
-cd polymtrade-bridge
-source .venv/bin/activate
-python log_watcher.py --bridge-url http://localhost:8080/signal
+export BRIDGE_WEBHOOK_URL='http://localhost:8080/signal'
 ```
 
-### 4. 测试
+当 PolyHermes 检测到 Leader 交易时，会直接 POST 到 Bridge 的 `/signal` 端点，Bridge 自动在 Polymtrade 上执行买入/卖出。
 
-当 PolyHermes 检测到 Leader 交易时，日志里会出现 `发现leader交易：`，Log Watcher 会解析并发送到 Bridge，Bridge 自动在 Polymtrade 上执行买入/卖出。
+### 4. 查看执行结果
+
+前端 **桥接交易记录** 页面可查看每条信号的下单结果；**Webhook 日志** 标签页可查看 PolyHermes 向后端/Bridge 发送信号的调用记录。
 
 ## Docker 部署
 

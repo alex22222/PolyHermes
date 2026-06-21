@@ -7,6 +7,7 @@ import com.wrbug.polymarketbot.api.PolymarketGammaApi
 import com.wrbug.polymarketbot.entity.Market
 import com.wrbug.polymarketbot.repository.MarketRepository
 import com.wrbug.polymarketbot.util.RetrofitFactory
+import com.wrbug.polymarketbot.util.CategoryValidator
 import com.wrbug.polymarketbot.util.getEventSlug
 import com.wrbug.polymarketbot.util.parseStringArray
 import kotlinx.coroutines.runBlocking
@@ -169,7 +170,7 @@ class MarketService(
                     title = marketResponse.question ?: existingMarket.title,
                     slug = slug ?: existingMarket.slug,
                     eventSlug = eventSlug ?: existingMarket.eventSlug,
-                    category = marketResponse.category ?: existingMarket.category,
+                    category = inferCategory(marketResponse) ?: existingMarket.category,
                     icon = marketResponse.icon ?: existingMarket.icon,
                     image = marketResponse.image ?: existingMarket.image,
                     description = marketResponse.description ?: existingMarket.description,
@@ -186,7 +187,7 @@ class MarketService(
                     title = marketResponse.question ?: marketId,
                     slug = slug,
                     eventSlug = eventSlug,
-                    category = marketResponse.category,
+                    category = inferCategory(marketResponse) ?: marketResponse.category,
                     icon = marketResponse.icon,
                     image = marketResponse.image,
                     description = marketResponse.description,
@@ -262,6 +263,19 @@ class MarketService(
         }
     }
 
+    private fun inferCategory(marketResponse: MarketResponse): String? {
+        val event = marketResponse.events?.firstOrNull()
+        return CategoryValidator.inferMarketCategory(
+            marketResponse.category,
+            event?.category,
+            marketResponse.question,
+            marketResponse.slug,
+            event?.title,
+            event?.slug,
+            marketResponse.description
+        )
+    }
+
     /**
      * 根据 conditionId 查询该市场是否为 Neg Risk（需使用 Neg Risk Exchange 签约）
      * 用于跟单下单时选择正确的 exchange 合约，避免 invalid signature
@@ -279,6 +293,48 @@ class MarketService(
         } catch (e: Exception) {
             logger.warn("查询市场 negRisk 失败: conditionId=$conditionId, error=${e.message}")
             null
+        }
+    }
+
+    /**
+     * 从 Gamma API 获取活跃市场列表并保存到数据库
+     * 用于 LeaderScanner 在市场表为空时主动填充市场数据
+     * @return 成功保存的市场数量
+     */
+    suspend fun fetchAndSaveActiveMarkets(): Int {
+        return try {
+            val gammaApi = retrofitFactory.createGammaApi()
+            val response = gammaApi.listMarkets(
+                conditionIds = null,
+                includeTag = true,
+                active = true,
+                closed = false,
+                limit = 100
+            )
+
+            if (!response.isSuccessful || response.body() == null) {
+                logger.warn("获取活跃市场列表失败: HTTP ${response.code()}")
+                return 0
+            }
+
+            val markets = response.body()!!
+            var savedCount = 0
+
+            for (marketResponse in markets) {
+                val conditionId = marketResponse.conditionId
+                if (conditionId.isNullOrBlank()) continue
+
+                val saved = saveMarketFromResponse(conditionId, marketResponse)
+                if (saved != null) {
+                    savedCount++
+                }
+            }
+
+            logger.info("从 Gamma API 同步活跃市场完成: 成功保存 $savedCount 个市场")
+            savedCount
+        } catch (e: Exception) {
+            logger.error("同步活跃市场失败: ${e.message}", e)
+            0
         }
     }
 }

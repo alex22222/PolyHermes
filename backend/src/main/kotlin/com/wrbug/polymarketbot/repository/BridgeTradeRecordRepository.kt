@@ -7,8 +7,8 @@ import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.stereotype.Repository
 
 /**
- * 外部桥交易记录 Repository
- */
+     * 外部桥交易记录 Repository
+     */
 @Repository
 interface BridgeTradeRecordRepository : JpaRepository<BridgeTradeRecord, Long> {
 
@@ -21,4 +21,9 @@ interface BridgeTradeRecordRepository : JpaRepository<BridgeTradeRecord, Long> {
     fun findByBridgeIdAndStatus(bridgeId: String, status: String, pageable: Pageable): Page<BridgeTradeRecord>
 
     fun findByExternalTradeId(externalTradeId: String): BridgeTradeRecord?
+
+    /**
+     * 查找所有包含原始 payload 的记录，用于 LeaderScanner 提取钱包地址
+     */
+    fun findByRawPayloadIsNotNull(): List<BridgeTradeRecord>
 }

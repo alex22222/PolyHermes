@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Form, Input, Button, Space } from 'antd'
+import { Form, Input, Button, Space, Select } from 'antd'
 import { apiService } from '../services/api'
 import { useMediaQuery } from 'react-responsive'
 import { useTranslation } from 'react-i18next'
@@ -28,6 +28,7 @@ const LeaderAddForm: React.FC<LeaderAddFormProps> = ({
       const response = await apiService.leaders.add({
         leaderAddress: values.leaderAddress.trim(),
         leaderName: values.leaderName?.trim() || undefined,
+        category: values.category || undefined,
         remark: values.remark?.trim() || undefined,
         website: values.website?.trim() || undefined
       })
@@ -83,6 +84,23 @@ const LeaderAddForm: React.FC<LeaderAddFormProps> = ({
       >
         <Input placeholder={t('leaderAdd.leaderNamePlaceholder') || '可选，用于标识 Leader'} />
       </Form.Item>
+
+      <Form.Item
+        label={t('leaderAdd.category') || '分类'}
+        name="category"
+        tooltip={t('leaderAdd.categoryTooltip') || '选择后仅跟单该领域市场'}
+      >
+        <Select
+          allowClear
+          placeholder={t('leaderAdd.categoryPlaceholder') || '选择分类'}
+          options={[
+            { value: 'politics', label: t('leaderList.categoryPolitics') || '政治' },
+            { value: 'sports', label: t('leaderList.categorySports') || '体育' },
+            { value: 'crypto', label: t('leaderList.categoryCrypto') || '加密货币' },
+            { value: 'finance', label: t('leaderList.categoryFinance') || '金融' }
+          ]}
+        />
+      </Form.Item>
       
       <Form.Item
         label={t('leaderAdd.remark') || 'Leader 备注'}
@@ -133,4 +151,3 @@ const LeaderAddForm: React.FC<LeaderAddFormProps> = ({
 }
 
 export default LeaderAddForm
-

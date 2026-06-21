@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start Polymtrade Bridge and PolyHermes Log Watcher as background daemons.
+# Start Polymtrade Bridge as a background daemon.
 # Intended for macOS launchd / manual use.
 
 set -e
@@ -18,9 +18,7 @@ mkdir -p "$LOG_DIR"
 
 # Stop existing instances (best effort)
 kill "$(cat "$LOG_DIR/polymtrade-bridge.pid" 2>/dev/null)" 2>/dev/null || true
-kill "$(cat "$LOG_DIR/polymtrade-logwatcher.pid" 2>/dev/null)" 2>/dev/null || true
 pkill -f "python $SCRIPT_DIR/main.py" 2>/dev/null || true
-pkill -f "python $SCRIPT_DIR/log_watcher.py" 2>/dev/null || true
 
 sleep 2
 
@@ -29,10 +27,5 @@ cd "$SCRIPT_DIR"
 nohup python "$SCRIPT_DIR/main.py" > "$LOG_DIR/polymtrade-bridge.log" 2>&1 &
 echo $! > "$LOG_DIR/polymtrade-bridge.pid"
 
-# Start log watcher
-nohup python "$SCRIPT_DIR/log_watcher.py" > "$LOG_DIR/polymtrade-logwatcher.log" 2>&1 &
-echo $! > "$LOG_DIR/polymtrade-logwatcher.pid"
-
 echo "Polymtrade Bridge started (pid $(cat "$LOG_DIR/polymtrade-bridge.pid"))"
-echo "Log Watcher started (pid $(cat "$LOG_DIR/polymtrade-logwatcher.pid"))"
-echo "Logs: $LOG_DIR/polymtrade-bridge.log , $LOG_DIR/polymtrade-logwatcher.log"
+echo "Logs: $LOG_DIR/polymtrade-bridge.log"

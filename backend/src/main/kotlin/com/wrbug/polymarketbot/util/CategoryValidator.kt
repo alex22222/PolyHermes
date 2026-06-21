@@ -2,14 +2,14 @@ package com.wrbug.polymarketbot.util
 
 /**
  * 分类验证工具类
- * 用于验证分类参数是否符合项目要求（仅支持 sports 和 crypto）
+ * 用于验证分类参数是否符合项目要求（politics/sports/crypto/finance）
  */
 object CategoryValidator {
     
     /**
      * 支持的分类列表
      */
-    private val SUPPORTED_CATEGORIES = setOf("sports", "crypto")
+    private val SUPPORTED_CATEGORIES = setOf("sports", "crypto", "finance", "politics")
     
     /**
      * 分类名称映射（将 Polymarket API 返回的分类名称映射到标准分类）
@@ -18,7 +18,11 @@ object CategoryValidator {
         "sports" to "sports",
         "crypto" to "crypto",
         "cryptocurrency" to "crypto",
-        "cryptocurrencies" to "crypto"
+        "cryptocurrencies" to "crypto",
+        "finance" to "finance",
+        "financial" to "finance",
+        "politics" to "politics",
+        "political" to "politics"
     )
     
     /**
@@ -50,6 +54,12 @@ object CategoryValidator {
         if (categoryLower.contains("crypto")) {
             return true
         }
+        if (categoryLower.contains("finance") || categoryLower.contains("financial")) {
+            return true
+        }
+        if (categoryLower.contains("politic") || categoryLower.contains("election")) {
+            return true
+        }
         
         return false
     }
@@ -57,7 +67,7 @@ object CategoryValidator {
     /**
      * 标准化分类名称
      * @param category 原始分类名称
-     * @return 标准化后的分类名称（sports 或 crypto）
+     * @return 标准化后的分类名称（politics/sports/crypto/finance）
      */
     fun normalizeCategory(category: String?): String? {
         if (category == null) {
@@ -78,7 +88,83 @@ object CategoryValidator {
         if (categoryLower.contains("crypto")) {
             return "crypto"
         }
+        if (categoryLower.contains("finance") || categoryLower.contains("financial")) {
+            return "finance"
+        }
+        if (categoryLower.contains("politic") || categoryLower.contains("election")) {
+            return "politics"
+        }
         
+        return null
+    }
+
+    fun inferMarketCategory(vararg values: String?): String? {
+        values.asSequence()
+            .mapNotNull { it?.lowercase() }
+            .flatMap { sequenceOf(it, it.replace("-", " ").replace("_", " ")) }
+            .forEach { text ->
+                normalizeCategory(text)?.let { return it }
+
+                if (
+                    text.contains("trump") || text.contains("biden") ||
+                    text.contains("election") || text.contains("president") ||
+                    text.contains("congress") || text.contains("senate") ||
+                    text.contains("supreme court") || text.contains("tariff") ||
+                    text.contains("taiwan") || text.contains("china") ||
+                    text.contains("israel") || text.contains("iran") ||
+                    text.contains("ukraine") || text.contains("russia")
+                ) {
+                    return "politics"
+                }
+
+                if (
+                    text.contains("world cup") || text.contains("fifa") ||
+                    text.contains("nba") || text.contains("nfl") ||
+                    text.contains("mlb") || text.contains("nhl") ||
+                    text.contains("ufc") || text.contains("tennis") ||
+                    text.contains("soccer") || text.contains("football") ||
+                    text.contains("baseball") || text.contains("basketball") ||
+                    text.contains("golf") || text.contains("championship") ||
+                    text.contains("premier league") ||
+                    text.contains("esports") || text.contains("e sports") ||
+                    text.contains("电竞") || text.contains("电子竞技") ||
+                    text.contains("counter strike") || text.contains("cs2") ||
+                    text.contains("csgo") || text.contains("valorant") ||
+                    text.contains("dota") || text.contains("league of legends") ||
+                    text.contains(" lol ") || text.contains("overwatch") ||
+                    text.contains("starcraft") || text.contains("bo3") ||
+                    text.contains("bo5") || text.contains("iem ") ||
+                    text.contains("major stage") || text.contains("natus vincere") ||
+                    text.contains(" navi ") || text.contains(" g2 ") ||
+                    text.contains("faze") || text.contains("vitality") ||
+                    text.contains("over/under") || text.contains(" o/u ")
+                ) {
+                    return "sports"
+                }
+
+                if (
+                    text.contains("bitcoin") || text.contains("btc") ||
+                    text.contains("ethereum") || text.contains("eth") ||
+                    text.contains("solana") || text.contains("sol ") ||
+                    text.contains("xrp") || text.contains("doge") ||
+                    text.contains("token") || text.contains("airdrop") ||
+                    text.contains("stablecoin") || text.contains("crypto")
+                ) {
+                    return "crypto"
+                }
+
+                if (
+                    text.contains("fed") || text.contains("interest rate") ||
+                    text.contains("inflation") || text.contains("cpi") ||
+                    text.contains("recession") || text.contains("nasdaq") ||
+                    text.contains("s&p") || text.contains("stock") ||
+                    text.contains("ipo") || text.contains("gdp") ||
+                    text.contains("treasury") || text.contains("oil price")
+                ) {
+                    return "finance"
+                }
+            }
+
         return null
     }
     
@@ -101,4 +187,3 @@ object CategoryValidator {
         return SUPPORTED_CATEGORIES
     }
 }
-

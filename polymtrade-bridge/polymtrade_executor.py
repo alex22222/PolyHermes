@@ -666,6 +666,52 @@ class PolymtradeExecutor:
                 pass
             raise
 
+    async def _wait_for_page_ready(self, timeout: float = 15.0):
+        """Wait until the event page has rendered market rows."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                has_content = await self.page.evaluate(
+                    """() => {
+                        const bodyText = (document.body?.innerText || '').trim();
+                        const hasMarkets = document.querySelectorAll('.market, [class*="market"], [class*="outcome"], li, [role="listitem"]').length > 0;
+                        return hasMarkets && bodyText.length > 200;
+                    }"""
+                )
+                if has_content:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        return False
+
+    async def _is_buy_dialog_open(self, timeout: float = 3.0) -> bool:
+        """Return True if a trade amount input is visible."""
+        selectors = [
+            "input[name='buyAmount']",
+            "input[inputmode='decimal']",
+            "input[type='number']",
+            "input[placeholder*='Amount' i]",
+            "input[placeholder*='amount' i]",
+            "input[placeholder*='USDC' i]",
+            "input[placeholder*='0.0' i]",
+            "input[placeholder*='数量' i]",
+            "input[placeholder*='金额' i]",
+            "input[class*='amount' i]",
+            "input[class*='trade-input' i]",
+        ]
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for selector in selectors:
+                try:
+                    el = await self.page.wait_for_selector(selector, timeout=500)
+                    if el and await el.is_visible():
+                        return True
+                except Exception:
+                    continue
+            await asyncio.sleep(0.2)
+        return False
+
     async def _execute_buy(
         self,
         event_id: str,
@@ -683,36 +729,36 @@ class PolymtradeExecutor:
         logger.info(f"Navigating to {market_url}")
         await self.page.goto(market_url, wait_until="load", timeout=60000)
         await asyncio.sleep(3)
+        if not await self._wait_for_page_ready(timeout=15.0):
+            logger.warning("Event page content did not render in time; proceeding anyway")
 
         # On Polymtrade a network/deposit modal may pop up when the user first
         # clicks an outcome. We try to click the outcome, dismiss the modal, and
         # retry a few times. If the modal keeps coming back the account likely
         # lacks sufficient deposit balance.
         buy_dialog_open = False
-        for attempt in range(3):
+        for attempt in range(4):
             await self._select_polymtrade_outcome(
                 outcome, market_slug=market_slug, market_title=market_title
             )
             await asyncio.sleep(0.8)
-            if not await self._is_network_modal_open():
-                logger.info("No network modal after outcome click")
+
+            if await self._is_network_modal_open():
+                logger.info(f"Network modal open after outcome click (attempt {attempt + 1}), dismissing")
+                dismissed = await self._dismiss_modal_dialogs()
+                if not dismissed:
+                    raise RuntimeError("Could not dismiss network/deposit modal")
+                await asyncio.sleep(0.5)
+                continue
+
+            if await self._is_buy_dialog_open(timeout=3.0):
+                logger.info("Buy dialog detected after outcome click")
                 buy_dialog_open = True
                 break
-            logger.info(f"Network modal open after outcome click (attempt {attempt + 1}), dismissing")
-            dismissed = await self._dismiss_modal_dialogs()
-            if not dismissed:
-                raise RuntimeError("Could not dismiss network/deposit modal")
-            await asyncio.sleep(0.5)
-        else:
-            # Loop exhausted: the modal was dismissed each time. Try one final
-            # outcome click to open the actual buy dialog.
-            if not await self._is_network_modal_open():
-                await self._select_polymtrade_outcome(
-                    outcome, market_slug=market_slug, market_title=market_title
-                )
-                await asyncio.sleep(0.8)
-                if not await self._is_network_modal_open():
-                    buy_dialog_open = True
+
+            logger.warning(f"Buy dialog not detected after outcome click (attempt {attempt + 1}), retrying")
+            # Page may have navigated; give it a moment to settle before retrying.
+            await asyncio.sleep(1.0)
 
         if not buy_dialog_open:
             if await self._is_network_modal_open():
@@ -720,8 +766,7 @@ class PolymtradeExecutor:
                     "Network/deposit modal keeps blocking the trade. "
                     "The Bridge account probably has insufficient USDC balance or needs a deposit."
                 )
-            # Modal is gone but no buy dialog either; fall through to _enter_amount
-            # which will report if the amount input cannot be found.
+            logger.warning("Buy dialog still not detected; will attempt to enter amount anyway")
 
         # Final safety check before entering the amount.
         if await self._is_network_modal_open():
@@ -823,8 +868,32 @@ class PolymtradeExecutor:
             "she", "we", "they", "my", "your", "his", "her", "our", "their", "score",
             "win", "lose", "reach", "final", "market", "event", "more", "than", "by",
             "points", "matchup", "game", "winner", "top", "can", "qat", "draw",
+            "world", "cup", "fifa", "2026", "nation", "national", "group",
         }
-        raw = (market_slug or market_title or "").lower()
+        aliases = {
+            "argentina": ["阿根廷"],
+            "belgium": ["比利时"],
+            "brazil": ["巴西"],
+            "canada": ["加拿大"],
+            "colombia": ["哥伦比亚"],
+            "croatia": ["克罗地亚"],
+            "curacao": ["库拉索"],
+            "denmark": ["丹麦"],
+            "england": ["英格兰"],
+            "france": ["法国"],
+            "germany": ["德国"],
+            "italy": ["意大利"],
+            "japan": ["日本"],
+            "mexico": ["墨西哥"],
+            "morocco": ["摩洛哥"],
+            "netherlands": ["荷兰"],
+            "portugal": ["葡萄牙"],
+            "spain": ["西班牙"],
+            "switzerland": ["瑞士"],
+            "uruguay": ["乌拉圭"],
+            "usa": ["美国"],
+        }
+        raw = " ".join(part for part in [market_title, market_slug] if part).lower()
         tokens = re.split(r"[^a-z0-9]+", raw)
         keywords = []
         for t in tokens:
@@ -835,6 +904,7 @@ class PolymtradeExecutor:
             if len(t) == 2 and not t.isdigit():
                 continue
             keywords.append(t)
+            keywords.extend(aliases.get(t, []))
         # Deduplicate while preserving order
         seen = set()
         result = []
@@ -843,6 +913,97 @@ class PolymtradeExecutor:
                 seen.add(k)
                 result.append(k)
         return result
+
+    @staticmethod
+    def _select_outcome_script() -> str:
+        """Return the browser-side outcome selector script.
+
+        Kept as a helper so static fixtures can exercise the same selector used
+        by the live BUY flow.
+        """
+        return """
+        (args) => {
+            const [outcome, sideLabels, keywords] = args;
+            const textOf = (el) => (el.innerText || el.textContent || "").trim();
+
+            // Helper: score a candidate element by how many keywords it contains.
+            function score(el) {
+                const text = textOf(el).toLowerCase();
+                let s = 0;
+                for (const kw of keywords) {
+                    if (text.includes(kw)) s += 1;
+                }
+                return s;
+            }
+
+            function findTarget(row) {
+                const buttons = Array.from(row.querySelectorAll('button, [role="button"], div[class*="button"], .cursor-pointer'));
+                for (const sideLabel of sideLabels) {
+                    const target = buttons.find(b => {
+                        const t = textOf(b);
+                        return t === sideLabel || t.toLowerCase() === sideLabel.toLowerCase() || t.startsWith(sideLabel);
+                    });
+                    if (target) return target;
+                }
+                return null;
+            }
+
+            // Find all candidate rows. Prefer rows that have the target side
+            // button, then prefer the most specific/smallest matching row.
+            const rows = Array.from(document.querySelectorAll('li, [role="listitem"], section, div'));
+            const scoredRows = rows
+                .map(row => {
+                    const rowText = textOf(row);
+                    return { row, s: score(row), target: findTarget(row), textLength: rowText.length };
+                })
+                .filter(item => item.s > 0)
+                .sort((a, b) => {
+                    if (!!a.target !== !!b.target) return a.target ? -1 : 1;
+                    if (b.s !== a.s) return b.s - a.s;
+                    return a.textLength - b.textLength;
+                });
+            const bestScore = scoredRows.length > 0 ? scoredRows[0].s : 0;
+
+            for (const { row, s, target } of scoredRows) {
+                if (target) {
+                    target.click();
+                    return {clicked: true, label: textOf(target), rowScore: s, rowText: textOf(row).slice(0, 80)};
+                }
+            }
+
+            // Fallback: search globally only when we have no market-specific
+            // keywords. On multi-market event pages, a global No/Yes fallback
+            // can click the wrong row.
+            if (keywords.length > 0) {
+                return {clicked: false, bestScore: bestScore, keywords: keywords, skippedGlobalFallback: true};
+            }
+
+            // Search globally for any element containing the outcome text,
+            // walk up to find a clickable side label.
+            const xpath = "//*[contains(text(), '" + outcome + "')]";
+            const iter = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
+            let node;
+            while ((node = iter.iterateNext())) {
+                let el = node;
+                for (let i = 0; i < 10; i++) {
+                    if (!el) break;
+                    const btns = Array.from(el.querySelectorAll('button, [role="button"], div[class*="button"], .cursor-pointer'));
+                    for (const sideLabel of sideLabels) {
+                        const target = btns.find(b => {
+                            const t = textOf(b);
+                            return t === sideLabel || t.toLowerCase() === sideLabel.toLowerCase() || t.startsWith(sideLabel);
+                        });
+                        if (target) {
+                            target.click();
+                            return {clicked: true, label: textOf(target), fallback: true};
+                        }
+                    }
+                    el = el.parentElement;
+                }
+            }
+            return {clicked: false, bestScore: bestScore, keywords: keywords};
+        }
+        """
 
     async def _select_polymtrade_outcome(
         self,
@@ -867,70 +1028,9 @@ class PolymtradeExecutor:
 
         keywords = self._extract_market_keywords(market_slug, market_title)
 
-        js = """
-        (args) => {
-            const [outcome, sideLabels, keywords] = args;
-            const textOf = (el) => (el.innerText || el.textContent || "").trim();
-
-            // Helper: score a candidate element by how many keywords it contains.
-            function score(el) {
-                const text = textOf(el).toLowerCase();
-                let s = 0;
-                for (const kw of keywords) {
-                    if (text.includes(kw)) s += 1;
-                }
-                return s;
-            }
-
-            // Find all candidate rows (li or section items). Prefer the highest-
-            // scoring row that actually contains a matching side label.
-            const rows = Array.from(document.querySelectorAll('li, [role="listitem"], section'));
-            const scoredRows = rows
-                .map(row => ({ row, s: score(row) }))
-                .filter(item => item.s > 0)
-                .sort((a, b) => b.s - a.s);
-
-            for (const { row, s } of scoredRows) {
-                const buttons = Array.from(row.querySelectorAll('button, [role="button"], div[class*="button"], .cursor-pointer'));
-                for (const sideLabel of sideLabels) {
-                    const target = buttons.find(b => {
-                        const t = textOf(b);
-                        return t === sideLabel || t.toLowerCase() === sideLabel.toLowerCase() || t.startsWith(sideLabel);
-                    });
-                    if (target) {
-                        target.click();
-                        return {clicked: true, label: textOf(target), rowScore: s, rowText: textOf(row).slice(0, 80)};
-                    }
-                }
-            }
-
-            // Fallback: search globally for any element containing the outcome text,
-            // walk up to find a clickable side label.
-            const xpath = "//*[contains(text(), '" + outcome + "')]";
-            const iter = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
-            let node;
-            while ((node = iter.iterateNext())) {
-                let el = node;
-                for (let i = 0; i < 10; i++) {
-                    if (!el) break;
-                    const btns = Array.from(el.querySelectorAll('button, [role="button"], div[class*="button"], .cursor-pointer'));
-                    for (const sideLabel of sideLabels) {
-                        const target = btns.find(b => {
-                            const t = textOf(b);
-                            return t === sideLabel || t.toLowerCase() === sideLabel.toLowerCase() || t.startsWith(sideLabel);
-                        });
-                        if (target) {
-                            target.click();
-                            return {clicked: true, label: textOf(target), fallback: true};
-                        }
-                    }
-                    el = el.parentElement;
-                }
-            }
-            return {clicked: false, bestScore, keywords};
-        }
-        """
-        result = await self.page.evaluate(js, [outcome, side_labels, keywords])
+        result = await self.page.evaluate(
+            self._select_outcome_script(), [outcome, side_labels, keywords]
+        )
         if not result or not result.get("clicked"):
             raise RuntimeError(f"Could not select outcome: {outcome} ({side_labels}), keywords={keywords}, rowScore={result.get('bestScore') if result else None}")
         logger.info(f"Selected outcome: {outcome} -> {result.get('label')} (rowScore={result.get('rowScore')}, keywords={keywords})")
@@ -1044,7 +1144,7 @@ class PolymtradeExecutor:
             return False
 
     async def _enter_amount(self, amount_usdc: float):
-        """Enter the trade amount in the buy dialog."""
+        """Enter the trade amount in the buy dialog with retries."""
         selectors = [
             "input[name='buyAmount']",
             "input[inputmode='decimal']",
@@ -1058,28 +1158,32 @@ class PolymtradeExecutor:
             "input[class*='amount' i]",
             "input[class*='trade-input' i]",
         ]
-        for selector in selectors:
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            for selector in selectors:
+                try:
+                    input_el = await self.page.wait_for_selector(selector, timeout=1500)
+                    if input_el and await input_el.is_visible():
+                        await input_el.fill(str(amount_usdc))
+                        logger.info(f"Entered amount: {amount_usdc}")
+                        return
+                except Exception:
+                    continue
+
+            # Fallback: try any visible input inside a trade dialog.
             try:
-                input_el = await self.page.wait_for_selector(selector, timeout=2000)
-                if input_el:
+                input_el = await self.page.wait_for_selector(
+                    "[role='dialog'] input, .trade-dialog input, [class*='dialog'] input[inputmode='decimal']",
+                    timeout=1500
+                )
+                if input_el and await input_el.is_visible():
                     await input_el.fill(str(amount_usdc))
-                    logger.info(f"Entered amount: {amount_usdc}")
+                    logger.info(f"Entered amount via fallback: {amount_usdc}")
                     return
             except Exception:
-                continue
+                pass
 
-        # Fallback: try any visible input inside a trade dialog.
-        try:
-            input_el = await self.page.wait_for_selector(
-                "[role='dialog'] input, .trade-dialog input, [class*='dialog'] input[inputmode='decimal']",
-                timeout=2000
-            )
-            if input_el:
-                await input_el.fill(str(amount_usdc))
-                logger.info(f"Entered amount via fallback: {amount_usdc}")
-                return
-        except Exception:
-            pass
+            await asyncio.sleep(0.5)
 
         raise RuntimeError("Could not enter trade amount")
 

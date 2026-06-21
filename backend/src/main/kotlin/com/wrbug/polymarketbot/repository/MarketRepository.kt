@@ -10,5 +10,7 @@ interface MarketRepository : JpaRepository<Market, Long> {
     fun findByMarketIdIn(marketIds: List<String>): List<Market>
     fun findByTitle(title: String): Market?
     fun findByTitleIn(titles: List<String>): List<Market>
+    fun findByCategoryAndActiveTrue(category: String): List<Market>
+    fun findByCategoryAndActiveTrueAndClosedFalse(category: String): List<Market>
 }
 

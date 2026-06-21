@@ -13,3 +13,6 @@ __pycache__/
 # Logs
 *.log
 /tmp/
+
+# Local audit operator annotations
+audit_reconciliations.json

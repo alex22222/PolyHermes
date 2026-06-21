@@ -39,7 +39,7 @@ enum class ErrorCode(
     PARAM_LEADER_ADDRESS_INVALID(1202, "Leader 地址格式无效", "error.param.leader_address_invalid"),
     PARAM_LEADER_ID_INVALID(1203, "Leader ID 无效", "error.param.leader_id_invalid"),
     PARAM_LEADER_NAME_EMPTY(1204, "Leader 名称不能为空", "error.param.leader_name_empty"),
-    PARAM_CATEGORY_INVALID(1205, "分类无效，只支持 sports 或 crypto", "error.param.category_invalid"),
+    PARAM_CATEGORY_INVALID(1205, "分类无效，只支持 sports, crypto, finance, politics", "error.param.category_invalid"),
     
     // 模板相关参数错误
     PARAM_TEMPLATE_NAME_EMPTY(1301, "模板名称不能为空", "error.param.template_name_empty"),
