@@ -419,6 +419,7 @@ const LeaderList: React.FC = () => {
       key: 'smartMoneyRank',
       width: 100,
       align: 'center' as const,
+      sorter: (a: Leader, b: Leader) => (a.smartMoneyRank ?? Number.MAX_VALUE) - (b.smartMoneyRank ?? Number.MAX_VALUE),
       render: (rank: number | undefined) => {
         if (!rank) return <Text type="secondary">-</Text>
         const color = rank <= 3 ? 'gold' : rank <= 6 ? 'blue' : 'default'
@@ -432,6 +433,7 @@ const LeaderList: React.FC = () => {
       key: 'researchTag',
       width: 110,
       align: 'center' as const,
+      sorter: (a: Leader, b: Leader) => (a.researchScore ?? -1) - (b.researchScore ?? -1),
       render: (_: any, record: Leader) => {
         const tag = record.researchTag
         const score = record.researchScore
@@ -452,6 +454,7 @@ const LeaderList: React.FC = () => {
       key: 'winRate',
       width: 100,
       align: 'center' as const,
+      sorter: (a: Leader, b: Leader) => (a.winRate ?? -1) - (b.winRate ?? -1),
       render: (winRate: number | undefined) => {
         if (winRate == null) return <Text type="secondary">-</Text>
         const color = winRate >= 60 ? '#52c41a' : winRate >= 40 ? '#faad14' : '#ff4d4f'
@@ -464,6 +467,7 @@ const LeaderList: React.FC = () => {
       key: 'totalPnl',
       width: 120,
       align: 'right' as const,
+      sorter: (a: Leader, b: Leader) => parseFloat(a.totalPnl || '0') - parseFloat(b.totalPnl || '0'),
       render: (pnl: string | undefined) => {
         if (!pnl) return <Text type="secondary">-</Text>
         const num = parseFloat(pnl)
@@ -477,6 +481,7 @@ const LeaderList: React.FC = () => {
       key: 'totalTrades',
       width: 90,
       align: 'center' as const,
+      sorter: (a: Leader, b: Leader) => (a.totalTrades ?? -1) - (b.totalTrades ?? -1),
       render: (trades: number | undefined) => {
         if (trades == null) return <Text type="secondary">-</Text>
         return <Tag color="processing">{trades}</Tag>
@@ -488,6 +493,7 @@ const LeaderList: React.FC = () => {
       key: 'activityScore',
       width: 100,
       align: 'center' as const,
+      sorter: (a: Leader, b: Leader) => (a.activityScore ?? -1) - (b.activityScore ?? -1),
       render: (score: number | undefined) => {
         if (score == null) return <Text type="secondary">-</Text>
         const color = score >= 70 ? 'success' : score >= 40 ? 'warning' : 'error'
