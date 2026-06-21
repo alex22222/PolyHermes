@@ -11,9 +11,14 @@ import java.math.RoundingMode
 /**
  * 将 Leader 研究模块的 copyability 评分思路适配到 copy_trading_leaders 表。
  *
- * 由于 Leader 行没有 paper session，这里基于 LeaderScannerService 已计算出的
- * 字段（totalTrades / winRate / totalPnl / activityScore / smartMoneyRank / lastTradeAt）
- * 计算一个 0-100 的研究评分和标签，用于在 Leader 列表中快速识别高质量地址。
+ * 基于 LeaderScannerService 已计算出的字段（totalTrades / winRate / totalPnl /
+ * activityScore / smartMoneyRank / lastTradeAt / totalVolume）计算一个 0-100 的研究
+ * 评分和标签，用于在 Leader 列表中快速识别高质量地址。
+ *
+ * 评分逻辑强调稳健性：
+ * - 高盈利但数据陈旧或波动过大时会被降档
+ * - 负盈利、低胜率、小样本均有额外惩罚
+ * - 标签上限避免短期爆发型地址被评为 ELITE
  */
 @Service
 class LeaderResearchScoreAdapterService(
@@ -92,14 +97,11 @@ class LeaderResearchScoreAdapterService(
         }
 
         // 6. 样本充足度 (0-5)
-        val sampleScore = if (trades >= 10) BigDecimal("5") else BigDecimal.ZERO
+        val sampleScore = if (trades >= MIN_TRADES_FOR_FULL_SCORE) BigDecimal("5") else BigDecimal.ZERO
 
         // 7. 数据新鲜度 (0-5)
-        val dataFreshness = if (lastTradeAt != null && (now - lastTradeAt) <= SOURCE_FRESH_MS) {
-            BigDecimal("5")
-        } else {
-            BigDecimal.ZERO
-        }
+        val isFresh = lastTradeAt != null && (now - lastTradeAt) <= SOURCE_FRESH_MS
+        val dataFreshness = if (isFresh) BigDecimal("5") else BigDecimal.ZERO
 
         // 8. 盈亏波动风险 (0-10)：pnl 占 volume 比例过大时扣分
         val pnlRatio = if (volume > BigDecimal.ZERO) {
@@ -127,24 +129,72 @@ class LeaderResearchScoreAdapterService(
 
         // 小样本封顶（借鉴研究模块思路）
         val sampleCapApplied = trades < MIN_TRADES_FOR_FULL_SCORE && rawTotal > SAMPLE_CAP
-        val total = if (sampleCapApplied) SAMPLE_CAP else rawTotal
+        val afterSampleCap = if (sampleCapApplied) SAMPLE_CAP else rawTotal
 
         // 风险标记
         val flags = mutableListOf<String>()
         if (trades < MIN_TRADES_FOR_FULL_SCORE) flags += "small_sample"
         if (pnl < BigDecimal.ZERO) flags += "negative_pnl"
         if (winRate > 0 && winRate < 40) flags += "low_win_rate"
-        if (lastTradeAt == null || (now - lastTradeAt) > SOURCE_FRESH_MS) flags += "stale_data"
+        if (!isFresh) flags += "stale_data"
         if (pnlRatio > BigDecimal("0.50")) flags += "high_pnl_volatility"
 
-        val tag = scoreToTag(total)
+        // 风险调整：根据风险标记对分数进行乘数惩罚并限制最高标签
+        val riskMultiplier = computeRiskMultiplier(flags)
+        val tagCap = computeTagCap(flags)
+
+        val adjustedScore = afterSampleCap.multiply(riskMultiplier)
+            .setScale(4, RoundingMode.HALF_UP)
+
+        val finalScore = capScoreByTag(adjustedScore, tagCap)
+        val tag = scoreToTag(finalScore)
         val riskFlags = flags.takeIf { it.isNotEmpty() }?.joinToString(",")
 
         return LeaderResearchScoreResult(
-            score = total,
+            score = finalScore,
             tag = tag,
             riskFlags = riskFlags
         )
+    }
+
+    /**
+     * 根据风险标记计算综合风险乘数。
+     */
+    private fun computeRiskMultiplier(flags: List<String>): BigDecimal {
+        var multiplier = BigDecimal.ONE
+        if (flags.contains("negative_pnl")) multiplier = multiplier.multiply(BigDecimal("0.65"))
+        if (flags.contains("stale_data")) multiplier = multiplier.multiply(BigDecimal("0.75"))
+        if (flags.contains("high_pnl_volatility")) multiplier = multiplier.multiply(BigDecimal("0.85"))
+        if (flags.contains("low_win_rate")) multiplier = multiplier.multiply(BigDecimal("0.90"))
+        if (flags.contains("small_sample")) multiplier = multiplier.multiply(BigDecimal("0.95"))
+        return multiplier
+    }
+
+    /**
+     * 根据风险标记限制最高可获得标签。
+     */
+    private fun computeTagCap(flags: List<String>): TagCap {
+        return when {
+            flags.contains("negative_pnl") -> TagCap.WATCH
+            flags.contains("small_sample") -> TagCap.CANDIDATE
+            flags.contains("stale_data") && flags.contains("high_pnl_volatility") -> TagCap.CANDIDATE
+            flags.contains("stale_data") -> TagCap.TRADEABLE
+            flags.contains("high_pnl_volatility") -> TagCap.TRADEABLE
+            else -> TagCap.ELITE
+        }
+    }
+
+    /**
+     * 将分数限制在指定标签上限以下。
+     */
+    private fun capScoreByTag(score: BigDecimal, cap: TagCap): BigDecimal {
+        val maxScore = when (cap) {
+            TagCap.ELITE -> BigDecimal("100")
+            TagCap.TRADEABLE -> BigDecimal("59.99")
+            TagCap.CANDIDATE -> BigDecimal("44.99")
+            TagCap.WATCH -> BigDecimal("29.99")
+        }
+        return score.min(maxScore)
     }
 
     private fun scoreToTag(score: BigDecimal): String {
@@ -170,6 +220,10 @@ class LeaderResearchScoreAdapterService(
         val tag: String,
         val riskFlags: String?
     )
+
+    private enum class TagCap {
+        ELITE, TRADEABLE, CANDIDATE, WATCH
+    }
 
     companion object {
         private const val MIN_TRADES_FOR_FULL_SCORE = 10

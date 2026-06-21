@@ -773,10 +773,13 @@ class LeaderScannerService(
             } else null
         }
 
+        val lastTradeAtSeconds = categoryActivities.maxOfOrNull { it.timestamp }
+        // Polymarket API 返回的时间戳可能是秒级或毫秒级，统一归一化为毫秒
+        val lastTradeAt = lastTradeAtSeconds?.let { normalizeTimestampToMillis(it) }
+
         val activityScore = if (totalTrades > 0) {
-            val lastTrade = categoryActivities.maxOfOrNull { it.timestamp }
-            val recencyScore = if (lastTrade != null) {
-                val hoursAgo = (System.currentTimeMillis() - lastTrade) / (1000 * 60 * 60)
+            val recencyScore = if (lastTradeAt != null) {
+                val hoursAgo = (System.currentTimeMillis() - lastTradeAt) / (1000 * 60 * 60)
                 (100 - hoursAgo).coerceIn(0, 100).toDouble()
             } else 0.0
             val freqScore = (totalTrades * 2.0).coerceAtMost(50.0)
@@ -784,8 +787,6 @@ class LeaderScannerService(
             BigDecimal(recencyScore + freqScore + positionScore).setScale(2, RoundingMode.HALF_UP).toDouble()
                 .coerceAtMost(100.0)
         } else null
-
-        val lastTradeAt = categoryActivities.maxOfOrNull { it.timestamp }
 
         return WalletMetrics(
             totalTrades = totalTrades,
@@ -796,6 +797,14 @@ class LeaderScannerService(
             lastTradeAt = lastTradeAt,
             activityScore = activityScore
         )
+    }
+
+    /**
+     * 将秒级或毫秒级时间戳统一归一化为毫秒。
+     * 阈值 1e12 毫秒约等于 2001-09-09，早于该时间则视为秒级。
+     */
+    private fun normalizeTimestampToMillis(ts: Long): Long {
+        return if (ts < 1_000_000_000_000L) ts * 1000L else ts
     }
 
     /**
