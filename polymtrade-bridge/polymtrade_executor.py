@@ -11,6 +11,8 @@ from typing import Optional, Tuple
 import httpx
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
+from bridge_metrics import metrics
+
 logger = logging.getLogger(__name__)
 
 
@@ -665,6 +667,7 @@ class PolymtradeExecutor:
         """Make a Gamma API request with exponential backoff on transient errors."""
         last_error = None
         resp = None
+        metrics.gamma_api_requests += 1
         for attempt in range(max_retries):
             try:
                 resp = await client.get(url, params=params, timeout=20.0)
@@ -682,8 +685,10 @@ class PolymtradeExecutor:
                 if is_transient and attempt < max_retries - 1:
                     delay = base_delay * (2 ** attempt)
                     logger.warning(f"Gamma request failed (attempt {attempt + 1}/{max_retries}): {e}; retrying in {delay}s")
+                    metrics.gamma_api_failures += 1
                     await asyncio.sleep(delay)
                     continue
+                metrics.gamma_api_failures += 1
                 raise
         raise last_error
 
@@ -1653,30 +1658,79 @@ class PolymtradeExecutor:
         outcome: str,
         market_slug: Optional[str] = None,
         market_title: Optional[str] = None,
+        max_attempts: int = 4,
     ):
         """Click the Yes/No button for the chosen outcome on the event page.
 
         For categorical event pages (e.g. World Cup golden boot) Polymtrade lists
         several sub-markets. We use `market_slug`/`market_title` keywords to find
         the correct row, then click the side (Yes/No) button inside that row.
+
+        This method retries with short waits to give lazy-rendered rows time to
+        appear, and scrolls the target element into view before clicking to
+        improve reliability.
         """
         outcome_norm = outcome.strip().lower()
         if outcome_norm in ("yes", "是", "true"):
-            side_labels = ["是", "Yes"]
+            side_labels = ["是", "Yes", "Buy Yes", "Long"]
         elif outcome_norm in ("no", "否", "false"):
-            side_labels = ["否", "No"]
+            side_labels = ["否", "No", "Buy No", "Short"]
         else:
             # For custom outcome names (e.g. "France") default to Yes/是 side.
-            side_labels = ["是", "Yes"]
+            side_labels = ["是", "Yes", outcome]
 
         keywords = self._extract_market_keywords(market_slug, market_title)
+        last_result = None
 
-        result = await self.page.evaluate(
-            self._select_outcome_script(), [outcome, side_labels, keywords]
+        for attempt in range(max_attempts):
+            # Lazy rows may need a moment; scroll the page to trigger rendering.
+            try:
+                await self.page.evaluate("() => { window.scrollTo(0, 0); }")
+                await asyncio.sleep(0.2)
+                await self.page.evaluate("() => { window.scrollTo(0, document.body.scrollHeight); }")
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+
+            result = await self.page.evaluate(
+                self._select_outcome_script(), [outcome, side_labels, keywords]
+            )
+            last_result = result
+
+            if result and result.get("clicked"):
+                # Scroll the clicked element into view and use Playwright click
+                # as a second confirmation. If the element is gone, the JS click
+                # already fired, so we still treat it as success.
+                try:
+                    # Try to find the button that was clicked by its label text.
+                    label = result.get("label", "")
+                    if label:
+                        clicked_el = await self.page.wait_for_selector(
+                            f"text={label}", timeout=1000
+                        )
+                        if clicked_el:
+                            await clicked_el.scroll_into_view_if_needed()
+                            await asyncio.sleep(0.1)
+                except Exception:
+                    pass
+                logger.info(
+                    f"Selected outcome: {outcome} -> {result.get('label')} "
+                    f"(rowScore={result.get('rowScore')}, strategy={result.get('strategy')}, "
+                    f"keywords={keywords}, attempt={attempt + 1})"
+                )
+                return
+
+            logger.warning(
+                f"Outcome selection failed (attempt {attempt + 1}/{max_attempts}): "
+                f"outcome={outcome}, keywords={keywords}, rowScore={result.get('bestScore') if result else None}"
+            )
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(1.5)
+
+        raise RuntimeError(
+            f"Could not select outcome: {outcome} ({side_labels}), keywords={keywords}, "
+            f"rowScore={last_result.get('bestScore') if last_result else None}"
         )
-        if not result or not result.get("clicked"):
-            raise RuntimeError(f"Could not select outcome: {outcome} ({side_labels}), keywords={keywords}, rowScore={result.get('bestScore') if result else None}")
-        logger.info(f"Selected outcome: {outcome} -> {result.get('label')} (rowScore={result.get('rowScore')}, keywords={keywords})")
 
     async def _is_network_modal_open(self) -> bool:
         """Return True if the network/token selection modal is visible."""
@@ -1773,6 +1827,8 @@ class PolymtradeExecutor:
         try:
             result = await self.page.evaluate(js, [preferred_network, preferred_token])
             if result and result.get("selected"):
+                metrics.modal_blocks += 1
+                metrics.modal_dismissals += 1
                 logger.info(
                     f"Selected network/token in modal: {result.get('network')} / {result.get('token')}"
                 )
@@ -1956,6 +2012,8 @@ class PolymtradeExecutor:
         try:
             result = await self.page.evaluate(js)
             if result and result.get("dismissed"):
+                metrics.modal_blocks += 1
+                metrics.modal_dismissals += 1
                 logger.info(f"Dismissed network selection modal: {result.get('text')}")
                 await asyncio.sleep(0.5)
                 # Verify the modal is really gone; if not, force-hide it.
@@ -2021,7 +2079,7 @@ class PolymtradeExecutor:
         return False
 
     async def _enter_amount(self, amount_usdc: float):
-        """Enter the trade amount in the buy dialog with retries."""
+        """Enter the trade amount in the buy dialog with retries and fallbacks."""
         selectors = [
             "input[name='buyAmount']",
             "input[inputmode='decimal']",
@@ -2030,39 +2088,65 @@ class PolymtradeExecutor:
             "input[placeholder*='amount' i]",
             "input[placeholder*='USDC' i]",
             "input[placeholder*='0.0' i]",
+            "input[placeholder*='0' i]",
             "input[placeholder*='数量' i]",
             "input[placeholder*='金额' i]",
             "input[class*='amount' i]",
             "input[class*='trade-input' i]",
+            "input[aria-label*='amount' i]",
+            "input[aria-label*='数量' i]",
+            "input[aria-label*='金额' i]",
+            "[data-test='trade-amount-input']",
         ]
-        deadline = time.time() + 12.0
+        deadline = time.time() + 18.0
+        last_error = None
         while time.time() < deadline:
+            # Prefer a visible input that is inside a dialog or trade area.
             for selector in selectors:
                 try:
-                    input_el = await self.page.wait_for_selector(selector, timeout=2000)
+                    input_el = await self.page.wait_for_selector(selector, timeout=1500)
                     if input_el and await input_el.is_visible() and await input_el.is_enabled():
+                        # Restrict to elements inside a dialog/trade panel to avoid
+                        # filling unrelated search inputs on the page.
+                        in_dialog = await input_el.evaluate(
+                            "el => !!el.closest('[role=\"dialog\"], .trade-dialog, [class*=\"trade\"], [class*=\"modal\"]')"
+                        )
+                        if not in_dialog:
+                            continue
                         if await self._fill_input_safely(input_el, str(amount_usdc)):
                             logger.info(f"Entered amount: {amount_usdc}")
                             return
-                except Exception:
+                except Exception as e:
+                    last_error = e
                     continue
 
-            # Fallback: try any visible input inside a trade dialog.
+            # Fallback: try any visible decimal/number input inside a dialog.
             try:
                 input_el = await self.page.wait_for_selector(
-                    "[role='dialog'] input, .trade-dialog input, [class*='dialog'] input[inputmode='decimal']",
-                    timeout=2000
+                    "[role='dialog'] input[inputmode='decimal'], "
+                    "[role='dialog'] input[type='number'], "
+                    ".trade-dialog input, "
+                    "[class*='dialog'] input[inputmode='decimal']",
+                    timeout=1500
                 )
                 if input_el and await input_el.is_visible() and await input_el.is_enabled():
                     if await self._fill_input_safely(input_el, str(amount_usdc)):
                         logger.info(f"Entered amount via fallback: {amount_usdc}")
                         return
-            except Exception:
+            except Exception as e:
+                last_error = e
                 pass
 
             await asyncio.sleep(0.5)
 
-        raise RuntimeError("Could not enter trade amount")
+        # Screenshot the dialog to help diagnose why the input could not be found.
+        try:
+            screenshot_path = "/tmp/trade_amount_input_error.png"
+            await self.page.screenshot(path=screenshot_path)
+            logger.warning(f"Amount input error screenshot saved: {screenshot_path}")
+        except Exception:
+            pass
+        raise RuntimeError(f"Could not enter trade amount: {last_error}")
 
     async def _enter_sell_shares(self, size_shares: float) -> bool:
         """Enter the sell shares amount in the sell dialog."""

@@ -25,6 +25,7 @@ from bridge_reliability_audit import (
     reconciliation_key,
     save_reconciliations,
 )
+from bridge_metrics import metrics
 
 # Configure logging
 logging.basicConfig(
@@ -214,6 +215,15 @@ async def status():
     }
 
 
+@app.get("/metrics")
+async def bridge_metrics():
+    """Return in-memory bridge counters for observability."""
+    return {
+        "status": "ok",
+        "metrics": metrics.to_dict(),
+    }
+
+
 @app.get("/debug/page")
 async def debug_page():
     if not executor or not executor.is_ready():
@@ -352,10 +362,12 @@ async def portfolio_positions():
     if not executor.is_logged_in():
         raise HTTPException(status_code=401, detail="Not logged in")
 
+    metrics.portfolio_requests += 1
     # Serialize page access to avoid concurrent Playwright navigation/evaluation.
     async with _portfolio_lock:
         result = await executor.fetch_portfolio_positions()
     if "error" in result:
+        metrics.portfolio_errors += 1
         raise HTTPException(status_code=500, detail=result["error"])
     return result
 
@@ -505,11 +517,26 @@ async def _get_live_position_quantity(
     for pos in portfolio.get("positions") or []:
         pos_market_id = _normalize_market_id(pos.get("conditionId") or pos.get("marketId"))
         pos_title = _normalize_market_title(pos.get("marketTitle"))
+        pos_market_slug = _normalize_market_id(pos.get("marketSlug"))
+        pos_event_slug = _normalize_market_id(pos.get("eventSlug"))
         pos_outcome = _normalize_outcome(pos.get("side"))
-        market_matches = (
-            (target_market_id and pos_market_id == target_market_id)
-            or (target_title and pos_title == target_title)
-        )
+
+        market_matches = False
+        if target_market_id and (
+            pos_market_id == target_market_id
+            or target_market_id in pos_market_slug
+            or target_market_id in pos_event_slug
+            or pos_market_id in target_market_id
+            or pos_market_slug in target_market_id
+        ):
+            market_matches = True
+        if not market_matches and target_title and (
+            pos_title == target_title
+            or target_title in pos_title
+            or pos_title in target_title
+        ):
+            market_matches = True
+
         if market_matches and pos_outcome == target_outcome:
             total += _decimal_from_any(pos.get("quantity"))
     return total
@@ -553,6 +580,7 @@ async def receive_signal(signal: LeaderTradeSignal, background_tasks: Background
     if not executor or not executor.is_ready():
         raise HTTPException(status_code=503, detail="Executor not ready")
 
+    metrics.signals_received += 1
     logger.info(f"Received leader trade signal: {signal.side} {signal.outcome} @ {signal.market_slug}")
 
     # Execute asynchronously to avoid blocking the response
@@ -698,15 +726,23 @@ async def handle_signal(signal: LeaderTradeSignal):
             logger.info(f"No copy-trading config matches leader {signal.leader_address}, skipping")
             return
 
+        side_upper = signal.side.upper()
+
         for cfg, reason in matching:
             if reason:
+                metrics.signals_filtered += 1
                 logger.info(f"Config {cfg.id} filtered for {signal.transaction_hash}: {reason}")
                 continue
+
+            metrics.signals_executed += 1
+            if side_upper == "BUY":
+                metrics.trades_buy_total += 1
+            else:
+                metrics.trades_sell_total += 1
 
             await rule_engine.sleep_delay(cfg)
 
             price_dec = Decimal(str(signal.price))
-            side_upper = signal.side.upper()
             quantity: Optional[Decimal] = None
             amount: Optional[Decimal] = None
 
@@ -762,6 +798,26 @@ async def handle_signal(signal: LeaderTradeSignal):
                             logger.warning(f"Failed to record skipped SELL: {rec_err}")
                     continue
 
+                # Live portfolio check: if our cached/ledger quantity overestimates
+                # the actual holdings, sell what we actually have instead of skipping.
+                live_quantity = await _get_live_position_quantity(
+                    market_id=signal.condition_id or signal.market_slug or "",
+                    market_title=signal.title,
+                    outcome=signal.outcome,
+                )
+                if live_quantity <= 0:
+                    raise RuntimeError(
+                        f"No live position available for SELL "
+                        f"(available={live_quantity}, required={quantity})"
+                    )
+                if live_quantity < quantity:
+                    logger.warning(
+                        f"Config {cfg.id}: Adjusting SELL quantity from {quantity} to {live_quantity} "
+                        f"due to live portfolio mismatch"
+                    )
+                    quantity = live_quantity
+                    amount = quantity * price_dec
+
             record_id = None
             if recorder:
                 try:
@@ -797,16 +853,6 @@ async def handle_signal(signal: LeaderTradeSignal):
                             market_title=signal.title,
                         )
                     else:
-                        live_quantity = await _get_live_position_quantity(
-                            market_id=signal.condition_id or signal.market_slug or "",
-                            market_title=signal.title,
-                            outcome=signal.outcome,
-                        )
-                        if live_quantity < quantity:
-                            raise RuntimeError(
-                                "Live portfolio insufficient position, skipped "
-                                f"(available={live_quantity}, required={quantity})"
-                            )
                         result = await executor.execute_trade(
                             market_slug=signal.market_slug,
                             side="SELL",
@@ -838,8 +884,22 @@ async def handle_signal(signal: LeaderTradeSignal):
                             )
                 if record_id and recorder:
                     recorder.update_status(record_id, "SUCCESS")
+                if side_upper == "BUY":
+                    metrics.trades_buy_success += 1
+                else:
+                    metrics.trades_sell_success += 1
             except Exception as exec_err:
                 logger.exception(f"Trade execution failed for config {cfg.id}: {exec_err}")
+                metrics.signals_failed += 1
+                err_msg = str(exec_err).lower()
+                if side_upper == "BUY":
+                    metrics.trades_buy_failed += 1
+                    if "outcome" in err_msg:
+                        metrics.outcome_selection_failures += 1
+                    if "enter trade amount" in err_msg:
+                        metrics.amount_input_failures += 1
+                else:
+                    metrics.trades_sell_failed += 1
                 if record_id and recorder:
                     recorder.update_status(record_id, "FAILED", str(exec_err))
     except Exception as e:

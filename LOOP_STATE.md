@@ -32,6 +32,7 @@
 - [x] 迭代 2：修复 `_enrich_position` 导致 `net::ERR_ABORTED` 的问题（已完成）
 - [x] 迭代 3：增强 BUY 后成交精确校验（已完成）
 - [x] 迭代 4：SELL 路径加固，减少假阴性（已完成）
+- [x] 迭代 5：BUY outcome/amount 鲁棒性、SELL 持仓降级、Bridge 指标（已完成）
 
 ## Done
 
@@ -168,6 +169,35 @@
 - “Target page/context/browser closed” 类错误主要由之前的 `ERR_ABORTED` 和多实例引起，本次修复后未再出现；若单实例浏览器本身崩溃，仍需要手动重启服务。
 - SELL 校验仍依赖 DOM 文本解析，后续可接入 CLOB/wallet API。
 - 当前未对 SELL 执行失败做自动重试整单（例如重新打开弹窗），如需可继续迭代。
+
+## Iteration 5 Log
+
+**目标**：降低 BUY 的 outcome 选择失败和金额输入失败，优化 SELL 持仓匹配避免误判，并增加 Bridge 可观测性指标。
+
+**改动文件**：
+- `polymtrade-bridge/polymtrade_executor.py`
+  - `_select_polymtrade_outcome()`：增加最多 4 次重试、页面滚动触发懒加载、扩展 side label 列表（Buy Yes/Buy No/Long/Short）、点击后滚动到视图。
+  - `_enter_amount()`：扩展 selector、限制在 dialog/trade 区域内查找、失败截图。
+  - `_get_live_position_quantity()`（被 `main.py` 调用）：匹配逻辑增加 `marketSlug`/`eventSlug`/标题子串。
+  - `_gamma_request_with_retry()`、`_select_network_and_token_in_modal()`、`_dismiss_modal_dialogs()`：增加指标埋点。
+- `polymtrade-bridge/main.py`
+  - SELL 分支：若 live portfolio 小于预期数量，自动降级为卖出全部可用数量，不再直接 FAILED。
+  - `handle_signal()`：增加信号过滤/执行/失败、BUY/SELL 成功失败、outcome/amount 失败等指标计数。
+  - `/portfolio`：增加 portfolio 请求/错误计数。
+  - 新增 `/metrics` 接口返回 JSON 指标。
+- `polymtrade-bridge/bridge_metrics.py`（新增）
+  - `BridgeMetrics` 内存计数器与 `/metrics` 导出。
+
+**验证结果**：
+- `python -m py_compile polymtrade_executor.py main.py bridge_metrics.py` 通过。
+- `test_buy_verification.py` 6 tests OK；`test_sell_verification.py` 5 tests OK；`test_selector_fixture.py` 14 tests OK；`test_enrichment.py` 7 tests OK；`test_copy_trading_config.py` 14 tests OK。
+- `launchctl kickstart -k` 重启服务，`/health`、`/portfolio`、`/metrics` 均正常响应。
+- `/metrics` 实测返回 `portfolio_requests=1`、`gamma_api_requests=4` 等，埋点生效。
+
+**已知限制 / 下一步可继续优化**：
+- outcome 选择仍有赖于页面 DOM 结构；若 Polymtrade 大改版，脚本可能再次失效。
+- 指标是内存级，Bridge 重启会清零；如需持久化可接入后端数据库或 Prometheus。
+- 第 3 点建议的"低余额告警/自动充值"尚未实现。
 
 ---
 

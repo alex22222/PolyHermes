@@ -44,18 +44,27 @@
 - [x] 7.6 `main.py` 不再因 live portfolio 校验未立即通过而将 SELL 标为 FAILED；改为记录警告并保持 SUCCESS，避免假阴性。
 - [x] 7.7 提高 `_wait_for_live_position_decrease()` 轮询次数与间隔（8 次 × 2.5 秒）。
 
-## 8. 测试与验证
+## 8. BUY outcome/amount 与 SELL 持仓匹配加固（迭代 5）
 
-- [x] 8.1 新增静态 HTML 测试覆盖网络/代币模态框选择（`test_selector_fixture.py`）。
-- [x] 8.2 新增静态 HTML 测试覆盖余额解析（`test_selector_fixture.py`）。
-- [x] 8.3 新增 enrichment 单元测试与 Gamma API 重试测试（`test_enrichment.py`）。
-- [x] 8.4 新增 BUY 校验单元测试（`test_buy_verification.py`）。
-- [x] 8.5 新增 SELL 校验单元测试（`test_sell_verification.py`）。
-- [x] 8.6 运行 `test_selector_fixture.py`、`test_enrichment.py`、`test_buy_verification.py`、`test_sell_verification.py`、`test_copy_trading_config.py` 全部通过。
-- [x] 8.7 运行 `python -m py_compile` 检查 `polymtrade_executor.py`、`main.py`、所有测试文件语法。
-- [x] 8.8 重启 launchd 服务，验证 `/health` 和 `/portfolio` 正常响应。
+- [x] 8.1 优化 `_select_polymtrade_outcome()`：增加重试、页面滚动、更多 side label、点击后滚动到视图。
+- [x] 8.2 优化 `_enter_amount()`：扩大 selector 范围、限制在 dialog/trade 区域内、失败时截图。
+- [x] 8.3 优化 SELL live portfolio 匹配：同时匹配 `marketSlug`/`eventSlug` 与标题子串。
+- [x] 8.4 SELL 实际持仓不足时自动降级为卖出全部可用数量，而非直接 FAILED。
+- [x] 8.5 新增 `bridge_metrics.py` 与 `/metrics` 接口，统计信号、交易、Gamma API、模态框、Portfolio 请求等指标。
+- [x] 8.6 在 `main.py` 与 `polymtrade_executor.py` 关键路径埋点更新指标。
 
-## 9. 文档与记录
+## 9. 测试与验证
 
-- [x] 9.1 更新 `openspec/changes/improve-polymtrade-bridge-buy-sell-reliability/specs/bridge-trade-reliability/spec.md` 记录需求。
-- [x] 9.2 更新 `LOOP_STATE.md` 记录迭代 1、2、3、4 进展。
+- [x] 9.1 新增静态 HTML 测试覆盖网络/代币模态框选择（`test_selector_fixture.py`）。
+- [x] 9.2 新增静态 HTML 测试覆盖余额解析（`test_selector_fixture.py`）。
+- [x] 9.3 新增 enrichment 单元测试与 Gamma API 重试测试（`test_enrichment.py`）。
+- [x] 9.4 新增 BUY 校验单元测试（`test_buy_verification.py`）。
+- [x] 9.5 新增 SELL 校验单元测试（`test_sell_verification.py`）。
+- [x] 9.6 运行 `test_selector_fixture.py`、`test_enrichment.py`、`test_buy_verification.py`、`test_sell_verification.py`、`test_copy_trading_config.py` 全部通过。
+- [x] 9.7 运行 `python -m py_compile` 检查 `polymtrade_executor.py`、`main.py`、所有测试文件语法。
+- [x] 9.8 重启 launchd 服务，验证 `/health`、`/portfolio`、`/metrics` 正常响应。
+
+## 10. 文档与记录
+
+- [x] 10.1 更新 `openspec/changes/improve-polymtrade-bridge-buy-sell-reliability/specs/bridge-trade-reliability/spec.md` 记录需求。
+- [x] 10.2 更新 `LOOP_STATE.md` 记录迭代 1、2、3、4、5 进展。
