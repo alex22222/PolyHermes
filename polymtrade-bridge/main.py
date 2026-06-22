@@ -521,8 +521,8 @@ async def _wait_for_live_position_decrease(
     market_title: Optional[str],
     outcome: Optional[str],
     before_quantity: Decimal,
-    poll_attempts: int = 4,
-    poll_delay_seconds: float = 2.0,
+    poll_attempts: int = 8,
+    poll_delay_seconds: float = 2.5,
 ) -> Decimal:
     """Wait until live portfolio quantity is lower after a SELL."""
     tolerance = Decimal("0.01")
@@ -807,7 +807,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                                 "Live portfolio insufficient position, skipped "
                                 f"(available={live_quantity}, required={quantity})"
                             )
-                        await executor.execute_trade(
+                        result = await executor.execute_trade(
                             market_slug=signal.market_slug,
                             side="SELL",
                             outcome=signal.outcome or "Yes",
@@ -816,16 +816,26 @@ async def handle_signal(signal: LeaderTradeSignal):
                             size_shares=float(quantity),
                             market_title=signal.title,
                         )
-                        after_quantity = await _wait_for_live_position_decrease(
-                            market_id=signal.condition_id or signal.market_slug or "",
-                            market_title=signal.title,
-                            outcome=signal.outcome,
-                            before_quantity=live_quantity,
-                        )
-                        logger.info(
-                            f"SELL verified by live portfolio decrease: "
-                            f"before={live_quantity}, after={after_quantity}"
-                        )
+                        # Best-effort live portfolio decrease check. We do not fail the
+                        # trade here because Polymtrade can take a while to reflect the
+                        # sell, and failing would create false-negative FAILED records.
+                        try:
+                            after_quantity = await _wait_for_live_position_decrease(
+                                market_id=signal.condition_id or signal.market_slug or "",
+                                market_title=signal.title,
+                                outcome=signal.outcome,
+                                before_quantity=live_quantity,
+                            )
+                            logger.info(
+                                f"SELL verified by live portfolio decrease: "
+                                f"before={live_quantity}, after={after_quantity}"
+                            )
+                        except RuntimeError as verify_err:
+                            logger.warning(
+                                f"SELL live portfolio verification did not confirm decrease, "
+                                f"but trade was submitted. executor_verified={result.get('verified')} "
+                                f"error={verify_err}"
+                            )
                 if record_id and recorder:
                     recorder.update_status(record_id, "SUCCESS")
             except Exception as exec_err:

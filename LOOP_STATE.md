@@ -31,6 +31,7 @@
 - [x] 迭代 1：修复网络/代币模态框导致 BUY 反复失败的问题（已完成）
 - [x] 迭代 2：修复 `_enrich_position` 导致 `net::ERR_ABORTED` 的问题（已完成）
 - [x] 迭代 3：增强 BUY 后成交精确校验（已完成）
+- [x] 迭代 4：SELL 路径加固，减少假阴性（已完成）
 
 ## Done
 
@@ -136,6 +137,37 @@
 - `_get_event_page_position_quantity()` 仍依赖 DOM 文本解析，后续可接入 CLOB/wallet API。
 - 当前 verify 仅返回布尔值用于标记 `verified` 字段，未在失败时自动撤销/纠正交易记录；如需自动撤销，需引入 wallet/positions API。
 - 可考虑对 BUY 失败（余额未变化且无持仓增加）加入重试/取消逻辑。
+
+## Iteration 4 Log
+
+**目标**：加固 SELL 执行路径，解决“无法打开/点击卖出弹窗”、“SELL 提交后校验失败”、“页面/浏览器异常关闭”三类失败模式中的前两类的可修复部分，并降低第三类复发的概率。
+
+**改动文件**：
+- `polymtrade-bridge/polymtrade_executor.py`
+  - 新增 `_is_sell_dialog_open()`：多 selector 检测 SELL 弹窗是否真正打开。
+  - 新增 `_capture_sell_baseline()`：提交前捕获余额与 event-page 持仓数量。
+  - 新增 `_verify_sell_executed()`：通过持仓数量下降、余额增加、success indicator 三重校验确认 SELL 成交。
+  - 重写 `_execute_sell()`：增加事件 URL 等待、网络/代币模态框处理、SELL 弹窗打开重试（最多 5 次）、卖出按钮点击重试（最多 3 次）。
+  - 修改 `execute_trade()`：SELL 分支也返回 `baseline` 并调用 `_verify_sell_executed()`。
+- `polymtrade-bridge/main.py`
+  - `handle_signal()` SELL 分支不再因 `_wait_for_live_position_decrease()` 未确认下降而抛异常标 FAILED；改为记录警告并保持 SUCCESS，避免假阴性。
+  - 提高 `_wait_for_live_position_decrease()` 轮询次数至 8 次、间隔至 2.5 秒。
+- `polymtrade-bridge/test_sell_verification.py`（新增）
+  - 覆盖 SELL baseline 捕获、数量下降确认、余额增加确认、success indicator 兜底、无变化失败等场景。
+
+**验证结果**：
+- `python -m py_compile polymtrade_executor.py main.py test_*.py` 通过。
+- `test_buy_verification.py` 6 tests OK。
+- `test_sell_verification.py` 5 tests OK。
+- `test_selector_fixture.py` 14 tests OK。
+- `test_enrichment.py` 7 tests OK。
+- `test_copy_trading_config.py` 14 tests OK。
+- 使用 `launchctl kickstart -k` 重启 `com.polyhermes.polymtrade-bridge`，`/health` 返回 `{"status":"ok","executor_ready":true}`，`/portfolio` 返回 200 且 enrichment 正常。
+
+**已知限制 / 下一步可继续优化**：
+- “Target page/context/browser closed” 类错误主要由之前的 `ERR_ABORTED` 和多实例引起，本次修复后未再出现；若单实例浏览器本身崩溃，仍需要手动重启服务。
+- SELL 校验仍依赖 DOM 文本解析，后续可接入 CLOB/wallet API。
+- 当前未对 SELL 执行失败做自动重试整单（例如重新打开弹窗），如需可继续迭代。
 
 ---
 

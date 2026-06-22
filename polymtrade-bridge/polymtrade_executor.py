@@ -853,6 +853,14 @@ class PolymtradeExecutor:
                     event_id, event_slug, outcome, amount_usdc, size_shares,
                     market_slug=market_slug, market_title=market_title
                 )
+                # Post-trade verification: confirm the sell actually affected the account.
+                baseline = result.get("baseline") or {}
+                verified = await self._verify_sell_executed(
+                    outcome=outcome,
+                    size_shares=size_shares,
+                    baseline=baseline,
+                )
+                result["verified"] = verified
 
             logger.info(f"Trade executed: {result}")
             return result
@@ -948,6 +956,31 @@ class PolymtradeExecutor:
             "input[placeholder*='金额' i]",
             "input[class*='amount' i]",
             "input[class*='trade-input' i]",
+        ]
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for selector in selectors:
+                try:
+                    el = await self.page.wait_for_selector(selector, timeout=500)
+                    if el and await el.is_visible():
+                        return True
+                except Exception:
+                    continue
+            await asyncio.sleep(0.2)
+        return False
+
+    async def _is_sell_dialog_open(self, timeout: float = 3.0) -> bool:
+        """Return True if the sell dialog is open."""
+        selectors = [
+            "input[name='soldAmount']",
+            "input[inputmode='decimal']",
+            "input[type='number']",
+            "input[placeholder*='Shares' i]",
+            "input[placeholder*='shares' i]",
+            "button#fullsell",
+            "button#sellbtn",
+            "button:has-text('卖出')",
+            "[role='dialog'] button:has-text('卖出')",
         ]
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -1112,7 +1145,7 @@ class PolymtradeExecutor:
     ):
         """Execute a SELL order on the Polymtrade event page.
 
-        The position card on the event page exposes a #sell button. Clicking it
+        The position card on the event page exposes a sell button. Clicking it
         opens a dialog with input[name='soldAmount'] and #sellbtn. If size_shares
         is provided we sell that many shares; otherwise we sell the full position.
         """
@@ -1129,11 +1162,76 @@ class PolymtradeExecutor:
         if not await self._wait_for_event_url(event_id, timeout=8.0):
             logger.warning(f"Target event {event_id} URL did not appear for SELL; proceeding anyway")
 
-        # Open the sell dialog for the position matching the outcome
-        await self._open_sell_dialog(
-            outcome, market_slug=market_slug, market_title=market_title
-        )
-        await asyncio.sleep(1)
+        # Dismiss any network/token modal before trying to open the sell dialog.
+        if await self._is_network_modal_open():
+            logger.info("Network modal open before SELL, handling")
+            handled = await self._select_network_and_token_in_modal()
+            if not handled:
+                handled = await self._dismiss_modal_dialogs()
+            if not handled:
+                raise RuntimeError("Could not handle network/deposit modal before SELL")
+            await asyncio.sleep(0.5)
+
+        # Open the sell dialog for the position matching the outcome, retrying if
+        # a modal or lazy rendering interferes.
+        sell_dialog_open = False
+        for attempt in range(5):
+            if not await self._wait_for_event_url(event_id, timeout=6.0):
+                logger.warning(f"Target event {event_id} did not appear in URL before SELL attempt {attempt + 1}")
+                if attempt < 4:
+                    await asyncio.sleep(1.0)
+                    continue
+                raise RuntimeError(f"Target event {event_id} URL never appeared for SELL")
+
+            try:
+                await self._open_sell_dialog(
+                    outcome, market_slug=market_slug, market_title=market_title
+                )
+            except RuntimeError as e:
+                logger.warning(f"Open sell dialog failed (attempt {attempt + 1}): {e}")
+                if attempt < 4:
+                    await asyncio.sleep(1.5)
+                    continue
+                raise
+
+            await asyncio.sleep(0.8)
+
+            if await self._is_network_modal_open():
+                logger.info(f"Network modal open after SELL dialog attempt {attempt + 1}, handling")
+                handled = await self._select_network_and_token_in_modal()
+                if not handled:
+                    handled = await self._dismiss_modal_dialogs()
+                if not handled:
+                    raise RuntimeError("Could not handle network/deposit modal during SELL")
+                await asyncio.sleep(0.5)
+                continue
+
+            if await self._is_sell_dialog_open(timeout=3.0):
+                logger.info("Sell dialog detected")
+                sell_dialog_open = True
+                break
+
+            logger.warning(f"Sell dialog not detected after open attempt {attempt + 1}, retrying")
+            await asyncio.sleep(1.0)
+
+        if not sell_dialog_open:
+            if await self._is_network_modal_open():
+                raise RuntimeError(
+                    "Network/deposit modal keeps blocking the SELL. "
+                    "The Bridge account may need a network selection or deposit."
+                )
+            logger.warning("Sell dialog still not detected; will attempt to enter shares anyway")
+
+        # Final safety check before entering the amount.
+        if await self._is_network_modal_open():
+            if not await self._select_network_and_token_in_modal():
+                await self._dismiss_modal_dialogs()
+            await asyncio.sleep(0.3)
+            if await self._is_network_modal_open():
+                raise RuntimeError("Network/deposit modal blocked SELL")
+
+        # Capture pre-trade baseline for post-execution verification.
+        baseline = await self._capture_sell_baseline(outcome)
 
         # The sell dialog works in shares, not USDC.
         if size_shares is not None and size_shares > 0:
@@ -1152,8 +1250,17 @@ class PolymtradeExecutor:
             except Exception:
                 logger.info("Full-sell button not found, using default amount")
 
-        # Submit the sell order
-        await self._click_sell_button()
+        # Submit the sell order, retrying the button click if it is transiently stale.
+        for attempt in range(3):
+            try:
+                await self._click_sell_button()
+                break
+            except RuntimeError as e:
+                logger.warning(f"Click sell button failed (attempt {attempt + 1}): {e}")
+                if attempt < 2:
+                    await asyncio.sleep(1.0)
+                    continue
+                raise
 
         # Wait for confirmation
         await self._confirm_trade()
@@ -1163,8 +1270,10 @@ class PolymtradeExecutor:
             "side": "SELL",
             "outcome": outcome,
             "amount_usdc": amount_usdc,
+            "size_shares": size_shares,
             "event_id": event_id,
             "event_slug": event_slug,
+            "baseline": baseline,
         }
 
     def _extract_market_keywords(self, market_slug: Optional[str] = None, market_title: Optional[str] = None) -> list:
@@ -1772,6 +1881,21 @@ class PolymtradeExecutor:
         logger.info(f"Captured BUY baseline: balance={balance}, qty={quantity}")
         return baseline
 
+    async def _capture_sell_baseline(self, outcome: str) -> dict:
+        """Capture pre-SELL state for later verification.
+
+        Returns a dict with balance and position quantity (both may be None).
+        """
+        balance = await self._get_usdc_balance()
+        quantity = await self._get_event_page_position_quantity(outcome)
+        baseline = {
+            "balance": balance,
+            "position_quantity": quantity,
+            "captured_at": int(time.time() * 1000),
+        }
+        logger.info(f"Captured SELL baseline: balance={balance}, qty={quantity}")
+        return baseline
+
     async def _dismiss_modal_dialogs(self) -> bool:
         """Dismiss the network/token selection modal that blocks the buy dialog.
 
@@ -2241,4 +2365,72 @@ class PolymtradeExecutor:
             return False
         except Exception as e:
             logger.warning(f"BUY verification failed with exception: {e}")
+            return False
+
+    async def _verify_sell_executed(
+        self,
+        outcome: str,
+        size_shares: Optional[float],
+        baseline: dict,
+        timeout: float = 15.0,
+    ) -> bool:
+        """Best-effort verification that a SELL order actually affected the account.
+
+        Compares USDC/pUSD balance and event-page position quantity before and after
+        the trade. If the position quantity decreased, or the balance increased by a
+        meaningful amount, the sell is considered verified.
+
+        If verification fails, the trade is still considered executed, but
+        `verified=False` is returned for audit follow-up.
+        """
+        try:
+            pre_balance = baseline.get("balance")
+            pre_quantity = baseline.get("position_quantity")
+
+            # Give the page a moment to reflect the new balance/order state.
+            await asyncio.sleep(3)
+
+            post_balance = await self._get_usdc_balance()
+            post_quantity = await self._get_event_page_position_quantity(outcome)
+
+            logger.info(
+                f"SELL verification: pre_balance={pre_balance}, post_balance={post_balance}, "
+                f"pre_qty={pre_quantity}, post_qty={post_quantity}, size={size_shares}"
+            )
+
+            # Check 1: position quantity decreased.
+            if pre_quantity is not None and post_quantity is not None:
+                delta = pre_quantity - post_quantity
+                if delta > 0.001:
+                    logger.info(f"SELL verified: position quantity decreased by {delta}")
+                    return True
+
+            # Check 2: balance increased by a meaningful portion of the trade value.
+            # SELL releases USDC/pUSD, so a balance bump is a strong signal.
+            if (
+                pre_balance is not None
+                and post_balance is not None
+                and post_balance > pre_balance + 0.01
+            ):
+                logger.info("SELL verified: balance increased")
+                return True
+
+            # Check 3: success indicator still visible on the page.
+            has_success_text = await self.page.evaluate(
+                """
+                () => {
+                    const body = document.body.innerText || '';
+                    const successTexts = ['Order submitted', '订单已提交', 'Success', '成功', '卖出成功', 'Order placed'];
+                    return successTexts.some(t => body.includes(t));
+                }
+                """
+            )
+            if has_success_text:
+                logger.info("SELL verified: success indicator detected")
+                return True
+
+            logger.warning("SELL verification could not confirm account change")
+            return False
+        except Exception as e:
+            logger.warning(f"SELL verification failed with exception: {e}")
             return False
