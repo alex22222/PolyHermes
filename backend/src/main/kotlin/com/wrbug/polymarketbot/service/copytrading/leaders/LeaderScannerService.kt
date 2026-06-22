@@ -68,13 +68,18 @@ class LeaderScannerService(
     private val apiSemaphore = Semaphore(5)
 
     // 每类扫描钱包上限（第二层昂贵分析）
-    private val MAX_WALLETS_PER_CATEGORY = 50
+    private val DEFAULT_MAX_WALLETS_PER_CATEGORY = 50
+    private val PRIORITY_MAX_WALLETS_PER_CATEGORY = 120
 
     // 每类最终保留 Top N
     private val TOP_N_PER_CATEGORY = 10
 
     // 候选池每类最大 PENDING 数量，防止无限膨胀
     private val MAX_PENDING_PER_CATEGORY = 500
+
+    // 政治/金融是当前主要策略方向，本地活跃市场不足时要主动从 Gamma 扩展。
+    private val PRIORITY_CATEGORIES = setOf("politics", "finance")
+    private val MIN_PRIORITY_MARKETS = 30
 
     // 胜率排名最低样本数，避免 1 笔交易 100% 胜率误占榜首
     private val MIN_TRADES_FOR_RANK = 5
@@ -253,15 +258,15 @@ class LeaderScannerService(
                 }
             }
 
-            // 限制分析数量
-            val walletsToAnalyze = pendingCandidates.take(MAX_WALLETS_PER_CATEGORY)
+            // 限制分析数量；政治/金融给更高配额，避免候选还没被充分验证就被 sports 挤压。
+            val walletsToAnalyze = pendingCandidates.take(getMaxWalletsForCategory(category))
             logger.info("类别 {} 分析层将处理 {} 个候选钱包", category, walletsToAnalyze.size)
 
             // 对每个候选做 API 分析
             val analyzed = walletsToAnalyze.mapIndexed { index, candidate ->
                 async {
                     delay(index * API_CALL_DELAY_MS)
-                    analyzeWalletAndUpdatePool(candidate, marketIds)
+                    analyzeWalletAndUpdatePool(candidate, marketIds, dryRun)
                 }
             }.awaitAll().filterNotNull()
 
@@ -288,15 +293,44 @@ class LeaderScannerService(
         }
     }
 
+    private fun getMaxWalletsForCategory(category: String): Int {
+        val defaultLimit = if (category in PRIORITY_CATEGORIES) {
+            PRIORITY_MAX_WALLETS_PER_CATEGORY
+        } else {
+            DEFAULT_MAX_WALLETS_PER_CATEGORY
+        }
+        return try {
+            systemConfigRepository.findByConfigKey("leader_scanner.max_wallets_per_category.$category")
+                ?.configValue
+                ?.toIntOrNull()
+                ?.coerceIn(10, 200)
+                ?: defaultLimit
+        } catch (e: Exception) {
+            defaultLimit
+        }
+    }
+
+    private fun getHotMarketTopCount(category: String): Int {
+        return if (category in PRIORITY_CATEGORIES) 60 else 20
+    }
+
     /**
      * 解析某类别下的活跃市场 ID
      */
     private fun resolveMarketIds(category: String): Set<String> {
         var markets = marketRepository.findByCategoryAndActiveTrueAndClosedFalse(category)
-        val marketIds = if (markets.isNotEmpty()) {
+        val shouldExpandPriorityMarkets = category in PRIORITY_CATEGORIES && markets.size < MIN_PRIORITY_MARKETS
+        val marketIds = if (markets.isNotEmpty() && !shouldExpandPriorityMarkets) {
             markets.map { it.marketId }.toSet()
         } else {
-            logger.warn("类别 {} 的 markets 表为空，尝试从 Gamma API 同步活跃市场", category)
+            if (markets.isEmpty()) {
+                logger.warn("类别 {} 的 markets 表为空，尝试从 Gamma API 同步活跃市场", category)
+            } else {
+                logger.info(
+                    "类别 {} 活跃市场只有 {} 个，低于 {}，尝试从 Gamma API 扩展市场覆盖",
+                    category, markets.size, MIN_PRIORITY_MARKETS
+                )
+            }
             val syncedCount = runBlocking { marketService.fetchAndSaveActiveMarkets() }
             if (syncedCount > 0) {
                 markets = marketRepository.findByCategoryAndActiveTrueAndClosedFalse(category)
@@ -341,7 +375,7 @@ class LeaderScannerService(
             candidatePoolRepository.findByCategoryAndAnalysisStateOrderByDiscoveryScoreDesc(
                 category,
                 "PENDING",
-                PageRequest.of(0, MAX_WALLETS_PER_CATEGORY)
+                PageRequest.of(0, getMaxWalletsForCategory(category))
             ).content
         } catch (e: Exception) {
             logger.warn("读取候选池失败: {}", e.message)
@@ -432,7 +466,7 @@ class LeaderScannerService(
                 category = category,
                 marketIds = marketIds,
                 lookbackDays = 7,
-                topMarkets = 20
+                topMarkets = getHotMarketTopCount(category)
             )
             hotMarketWallets.forEach { (wallet, marketSlug) ->
                 discoveredWallets[wallet] = "HOT_MARKET" to marketSlug
@@ -569,7 +603,7 @@ class LeaderScannerService(
         return (categoryWallets + genericWallets)
             .filterNot { it in invalidWallets }
             .distinct()
-            .take(MAX_WALLETS_PER_CATEGORY)
+            .take(getMaxWalletsForCategory(category))
     }
 
     /**
@@ -618,13 +652,17 @@ class LeaderScannerService(
      */
     private suspend fun analyzeWalletAndUpdatePool(
         candidate: LeaderScannerCandidatePool,
-        marketIds: Set<String>
+        marketIds: Set<String>,
+        dryRun: Boolean = false
     ): LeaderScanResultItem? {
         val wallet = candidate.normalizedWallet
         val category = candidate.category
         val now = System.currentTimeMillis()
 
         val result = analyzeWallet(wallet, category, marketIds)
+        if (dryRun) {
+            return result
+        }
 
         // 更新候选池状态（兼容 fallback 创建的临时对象：先查数据库再更新）
         try {
@@ -699,7 +737,8 @@ class LeaderScannerService(
 
                 val metrics = calculateMetrics(wallet, positions, activities, marketIds)
 
-                if (metrics.totalTrades == 0 && metrics.totalPnl.isNullOrBlank()) {
+                if (metrics.totalTrades <= 0) {
+                    logger.info("跳过 0 交易候选: wallet={}, category={}, pnl={}", wallet, category, metrics.totalPnl)
                     null
                 } else {
                     LeaderScanResultItem(
@@ -845,7 +884,7 @@ class LeaderScannerService(
         var updated = 0
         val now = System.currentTimeMillis()
 
-        for (candidate in topCandidates) {
+        for (candidate in topCandidates.filter { (it.totalTrades ?: 0) > 0 }) {
             val existing = leaderRepository.findByLeaderAddressAndCategory(candidate.leaderAddress, category)
             if (existing == null) {
                 val newLeader = Leader(

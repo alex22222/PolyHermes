@@ -33,7 +33,8 @@ data class LeaderDeleteRequest(
  * Leader 列表请求
  */
 data class LeaderListRequest(
-    val category: String? = null  // politics/sports/crypto/finance
+    val category: String? = null,  // politics/sports/crypto/finance
+    val keyword: String? = null  // 按 leader 名称或地址模糊搜索
 )
 
 /**

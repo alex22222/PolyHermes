@@ -79,6 +79,15 @@ data class CopyTrading(
     @Column(name = "max_price", precision = 20, scale = 8)
     val maxPrice: BigDecimal? = null,  // 最高价格（可选），NULL表示不限制最高价
     
+    @Column(name = "max_price_deviation", precision = 5, scale = 2)
+    val maxPriceDeviation: BigDecimal? = null,  // 最大价格偏离百分比（如 5.00 表示 5%），NULL表示不限制
+    
+    @Column(name = "max_delay_seconds")
+    val maxDelaySeconds: Int? = null,  // 最大信号延迟秒数，NULL表示不限制
+    
+    @Column(name = "min_copy_score", precision = 5, scale = 2)
+    val minCopyScore: BigDecimal? = null,  // 最小 copy_score 阈值（0-100），NULL表示不启用统一评分门控
+    
     // 最大仓位配置
     @Column(name = "max_position_value", precision = 20, scale = 8)
     val maxPositionValue: BigDecimal? = null,  // 最大仓位金额（USDC），NULL表示不启用

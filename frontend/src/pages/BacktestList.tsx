@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Table, Card, Button, Select, Tag, Space, Modal, message, Row, Col, Form, Input, InputNumber, Switch, Statistic, Descriptions, List, Empty, Spin, Tooltip, Popconfirm } from 'antd'
+import { Table, Card, Button, Select, Tag, Space, Modal, message, Row, Col, Form, Input, InputNumber, Switch, Statistic, Descriptions, List, Empty, Spin, Tooltip, Popconfirm, Typography } from 'antd'
 import { useTranslation } from 'react-i18next'
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, StopOutlined, EyeOutlined, RedoOutlined, CopyOutlined, SyncOutlined } from '@ant-design/icons'
 import { formatUSDC } from '../utils'
@@ -11,6 +11,8 @@ import { useMediaQuery } from 'react-responsive'
 import AddCopyTradingModal from './CopyTradingOrders/AddModal'
 import BacktestChart from './BacktestChart'
 import LeaderSelect from '../components/LeaderSelect'
+
+const { Text } = Typography
 
 const BacktestList: React.FC = () => {
   const { t } = useTranslation()
@@ -554,7 +556,21 @@ const BacktestList: React.FC = () => {
       dataIndex: 'totalTrades',
       key: 'totalTrades',
       width: 80,
-      align: 'center' as const
+      align: 'center' as const,
+      render: (totalTrades: number, record: BacktestTaskDto) => {
+        if (record.status === 'PENDING' || record.status === 'RUNNING') {
+          return <Text type="secondary">-</Text>
+        }
+        if (totalTrades === 0) {
+          return (
+            <Space size={4}>
+              <Text>0</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{t('backtest.noSimulatedTrades')}</Text>
+            </Space>
+          )
+        }
+        return totalTrades
+      }
     },
     {
       title: t('backtest.createdAt'),
@@ -1341,7 +1357,16 @@ const BacktestList: React.FC = () => {
                   {detailTask.progress}%
                 </Descriptions.Item>
                 <Descriptions.Item label={t('backtest.totalTrades')}>
-                  {detailTask.totalTrades}
+                  {detailTask.status === 'PENDING' || detailTask.status === 'RUNNING' ? (
+                    <Text type="secondary">-</Text>
+                  ) : detailTask.totalTrades === 0 ? (
+                    <Space size={4}>
+                      <Text>0</Text>
+                      <Text type="secondary">{t('backtest.noSimulatedTrades')}</Text>
+                    </Space>
+                  ) : (
+                    detailTask.totalTrades
+                  )}
                 </Descriptions.Item>
                 <Descriptions.Item label={t('backtest.startTime')}>
                   {new Date(detailTask.startTime).toLocaleString()}

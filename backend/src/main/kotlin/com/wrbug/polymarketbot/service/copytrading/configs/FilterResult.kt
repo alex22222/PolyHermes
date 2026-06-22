@@ -23,7 +23,11 @@ enum class FilterStatus {
     /** 失败：关键字过滤 */
     FAILED_KEYWORD_FILTER,
     /** 失败：市场截止时间超出限制 */
-    FAILED_MARKET_END_DATE
+    FAILED_MARKET_END_DATE,
+    /** 失败：价格偏离过大 */
+    FAILED_PRICE_DEVIATION,
+    /** 失败：信号延迟过大 */
+    FAILED_DELAY
 }
 
 /**
@@ -95,6 +99,19 @@ data class FilterResult(
         /** 市场截止时间超出限制 */
         fun marketEndDateFailed(reason: String) = FilterResult(
             status = FilterStatus.FAILED_MARKET_END_DATE,
+            reason = reason
+        )
+
+        /** 价格偏离过大 */
+        fun priceDeviationFailed(reason: String, orderbook: OrderbookResponse? = null) = FilterResult(
+            status = FilterStatus.FAILED_PRICE_DEVIATION,
+            reason = reason,
+            orderbook = orderbook
+        )
+
+        /** 信号延迟过大 */
+        fun delayFailed(reason: String) = FilterResult(
+            status = FilterStatus.FAILED_DELAY,
             reason = reason
         )
     }

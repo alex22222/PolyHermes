@@ -151,6 +151,24 @@ async def lifespan(app: FastAPI):
         logger.info("Initializing copy-trading rule engine...")
         rule_engine = CopyTradingRuleEngine()
         try:
+            if executor and executor.is_logged_in():
+                wallet = await executor.get_wallet_address()
+                if wallet:
+                    detected_account = rule_engine.resolve_account_id_by_wallet(wallet)
+                    env_account = int(os.getenv("COPY_TRADING_ACCOUNT_ID", "0") or "0")
+                    if detected_account:
+                        if detected_account != env_account:
+                            logger.warning(
+                                f"COPY_TRADING_ACCOUNT_ID mismatch: env={env_account}, "
+                                f"detected={detected_account} for wallet {wallet}. "
+                                f"Using detected account id."
+                            )
+                        rule_engine.set_account_id(detected_account)
+                    elif env_account:
+                        logger.warning(
+                            f"Could not resolve account id for wallet {wallet}; "
+                            f"falling back to COPY_TRADING_ACCOUNT_ID={env_account}."
+                        )
             rule_engine.refresh_if_needed()
         except Exception as e:
             logger.warning(f"Rule engine not available (DB may be unreachable): {e}")
@@ -673,6 +691,7 @@ async def handle_signal(signal: LeaderTradeSignal):
             side=signal.side,
             title=signal.title or "",
             price=Decimal(str(signal.price)),
+            signal_timestamp_ms=signal.timestamp,
         )
 
         if not matching:

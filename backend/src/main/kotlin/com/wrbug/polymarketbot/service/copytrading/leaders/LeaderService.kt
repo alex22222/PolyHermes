@@ -165,11 +165,20 @@ class LeaderService(
                 CategoryValidator.normalizeCategory(it)
                     ?: return Result.failure(IllegalArgumentException("不支持的分类: ${request.category}"))
             }
+            val keyword = request.keyword?.trim()
             
             val leaders = if (normalizedCategory != null) {
-                leaderRepository.findByCategory(normalizedCategory)
+                if (keyword.isNullOrBlank()) {
+                    leaderRepository.findByCategory(normalizedCategory)
+                } else {
+                    leaderRepository.searchByCategoryAndKeyword(normalizedCategory, keyword)
+                }
             } else {
-                leaderRepository.findAllByOrderByCreatedAtAsc()
+                if (keyword.isNullOrBlank()) {
+                    leaderRepository.findAllByOrderByCreatedAtAsc()
+                } else {
+                    leaderRepository.searchByKeyword(keyword)
+                }
             }
             
             val leaderDtos = leaders.map { leader ->

@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap
 import com.wrbug.polymarketbot.service.copytrading.configs.CopyTradingFilterService
 import com.wrbug.polymarketbot.service.copytrading.configs.FilterStatus
 import com.wrbug.polymarketbot.service.copytrading.orders.OrderSigningService
+import com.wrbug.polymarketbot.service.copytrading.scoring.CopyScoreService
 import com.wrbug.polymarketbot.service.common.BlockchainService
 import com.wrbug.polymarketbot.service.common.MarketService
 import com.wrbug.polymarketbot.service.common.PolymarketClobService
@@ -52,6 +53,7 @@ open class CopyOrderTrackingService(
     private val retrofitFactory: RetrofitFactory,
     private val cryptoUtils: CryptoUtils,
     private val marketService: MarketService,  // 市场信息服务
+    private val copyScoreService: CopyScoreService,  // 统一跟单评分服务
     private val telegramNotificationService: TelegramNotificationService? = null  // 可选，避免循环依赖
 ) : ApplicationContextAware {
 
@@ -342,6 +344,8 @@ open class CopyOrderTrackingService(
                         copyTrading,
                         tokenId,
                         tradePrice = tradePrice,
+                        leaderTradePrice = tradePrice,
+                        leaderTradeTimestamp = trade.timestamp.toLongOrNull(),
                         copyOrderAmount = copyOrderAmount,
                         marketId = effectiveMarketId,
                         marketTitle = marketTitle,
@@ -426,6 +430,66 @@ open class CopyOrderTrackingService(
                         }
 
                         continue
+                    }
+
+                    // 统一 copy_score 门控检查
+                    if (copyTrading.minCopyScore != null) {
+                        val copyScoreResult = copyScoreService.computeCopyScore(
+                            copyTrading = copyTrading,
+                            leader = leader,
+                            orderbook = orderbook,
+                            leaderTradePrice = tradePrice,
+                            leaderTradeTimestamp = trade.timestamp.toLongOrNull(),
+                            marketCategory = leader.category
+                        )
+                        if (!copyScoreService.isScoreAcceptable(copyTrading, copyScoreResult)) {
+                            logger.warn(
+                                "copy_score 未通过门控，跳过创建订单: copyTradingId=${copyTrading.id}, score=${copyScoreResult.score}, min=${copyTrading.minCopyScore}, breakdown=${copyScoreResult.breakdown}"
+                            )
+
+                            // 记录被 copy_score 过滤的订单（异步，不阻塞）
+                            notificationScope.launch {
+                                try {
+                                    val market = marketService.getMarket(effectiveMarketId)
+                                    val marketTitle = market?.title ?: effectiveMarketId
+                                    val marketSlug = market?.slug
+                                    val calculatedQuantity = try {
+                                        calculateBuyQuantity(trade, copyTrading)
+                                    } catch (e: Exception) {
+                                        null
+                                    }
+
+                                    val filteredOrder = FilteredOrder(
+                                        copyTradingId = copyTrading.id!!,
+                                        accountId = copyTrading.accountId,
+                                        leaderId = copyTrading.leaderId,
+                                        leaderTradeId = trade.id,
+                                        marketId = effectiveMarketId,
+                                        marketTitle = marketTitle,
+                                        marketSlug = marketSlug,
+                                        side = "BUY",
+                                        outcomeIndex = effectiveOutcomeIndex,
+                                        outcome = trade.outcome,
+                                        price = trade.price.toSafeBigDecimal(),
+                                        size = trade.size.toSafeBigDecimal(),
+                                        calculatedQuantity = calculatedQuantity,
+                                        filterReason = "copy_score ${copyScoreResult.score} 低于阈值 ${copyTrading.minCopyScore}，拆解=${copyScoreResult.breakdown}",
+                                        filterType = "COPY_SCORE"
+                                    )
+
+                                    try {
+                                        filteredOrderRepository.save(filteredOrder)
+                                        logger.info("已记录 copy_score 过滤订单: copyTradingId=${copyTrading.id}, tradeId=${trade.id}")
+                                    } catch (e: Exception) {
+                                        logger.error("保存 copy_score 过滤订单失败: ${e.message}", e)
+                                    }
+                                } catch (e: Exception) {
+                                    logger.error("处理 copy_score 过滤订单失败: ${e.message}", e)
+                                }
+                            }
+
+                            continue
+                        }
                     }
 
                     // 买入数量已在过滤检查前计算，这里直接使用
@@ -1484,6 +1548,8 @@ open class CopyOrderTrackingService(
             FilterStatus.FAILED_MAX_POSITION_VALUE -> "MAX_POSITION_VALUE"
             FilterStatus.FAILED_KEYWORD_FILTER -> "KEYWORD_FILTER"
             FilterStatus.FAILED_MARKET_END_DATE -> "MARKET_END_DATE"
+            FilterStatus.FAILED_PRICE_DEVIATION -> "PRICE_DEVIATION"
+            FilterStatus.FAILED_DELAY -> "DELAY"
         }
     }
 

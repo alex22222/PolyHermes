@@ -33,6 +33,8 @@ class CopyTradingFilterService(
      * @param copyTrading 跟单配置
      * @param tokenId token ID（用于获取订单簿）
      * @param tradePrice Leader 交易价格，用于价格区间检查
+     * @param leaderTradePrice Leader 成交价格，用于实时价格偏离检查；未提供时使用 tradePrice
+     * @param leaderTradeTimestamp Leader 交易发生时间（毫秒时间戳），用于延迟检查
      * @param copyOrderAmount 跟单金额（USDC），用于仓位检查，如果为null则不进行仓位检查
      * @param marketId 市场ID，用于仓位检查（按市场过滤仓位）
      * @param marketTitle 市场标题，用于关键字过滤
@@ -43,6 +45,8 @@ class CopyTradingFilterService(
         copyTrading: CopyTrading,
         tokenId: String,
         tradePrice: BigDecimal? = null,  // Leader 交易价格，用于价格区间检查
+        leaderTradePrice: BigDecimal? = null,  // Leader 成交价格，用于实时价格偏离检查
+        leaderTradeTimestamp: Long? = null,  // Leader 交易发生时间（毫秒时间戳），用于延迟检查
         copyOrderAmount: BigDecimal? = null,  // 跟单金额（USDC），用于仓位检查
         marketId: String? = null,  // 市场ID，用于仓位检查（按市场过滤仓位）
         marketTitle: String? = null,  // 市场标题，用于关键字过滤
@@ -72,11 +76,21 @@ class CopyTradingFilterService(
                 return FilterResult.priceRangeFailed(priceRangeCheck.reason)
             }
         }
-        
+
+        // 2.5. 信号延迟检查（如果配置了最大延迟且提供了 Leader 交易时间戳）
+        if (copyTrading.maxDelaySeconds != null && leaderTradeTimestamp != null) {
+            val delayCheck = checkDelay(copyTrading, leaderTradeTimestamp)
+            if (!delayCheck.isPassed) {
+                return FilterResult.delayFailed(delayCheck.reason)
+            }
+        }
+
         // 3. 检查是否需要获取订单簿或需要执行仓位检查
         // 只有在配置了需要订单簿的过滤条件时才获取订单簿
-        val needOrderbook = copyTrading.maxSpread != null || copyTrading.minOrderDepth != null
-        
+        val effectiveLeaderPrice = leaderTradePrice ?: tradePrice
+        val needOrderbook = copyTrading.maxSpread != null || copyTrading.minOrderDepth != null ||
+                (copyTrading.maxPriceDeviation != null && effectiveLeaderPrice != null)
+
         // 3.5. 如果不需要订单簿，则跳过订单簿相关的检查，但仍然需要检查仓位限制
         if (!needOrderbook) {
             // 仓位检查（如果配置了最大仓位限制且提供了跟单金额和市场ID）
@@ -115,7 +129,15 @@ class CopyTradingFilterService(
                 return FilterResult.orderDepthFailed(depthCheck.reason, orderbook)
             }
         }
-        
+
+        // 6.5. Leader 成交价实时偏离检查（如果配置了最大偏离且提供了 Leader 成交价）
+        if (copyTrading.maxPriceDeviation != null && effectiveLeaderPrice != null) {
+            val deviationCheck = checkPriceDeviation(copyTrading, orderbook, effectiveLeaderPrice)
+            if (!deviationCheck.isPassed) {
+                return FilterResult.priceDeviationFailed(deviationCheck.reason, orderbook)
+            }
+        }
+
         // 7. 仓位检查（如果配置了最大仓位限制且提供了跟单金额和市场ID）
         if (copyOrderAmount != null && marketId != null) {
             val positionCheck = checkPositionLimits(copyTrading, copyOrderAmount, marketId, outcomeIndex)
@@ -217,7 +239,78 @@ class CopyTradingFilterService(
         
         return FilterResult.passed()
     }
-    
+
+    /**
+     * 检查信号延迟
+     * 比较当前处理时间与 Leader 交易发生时间，超过 maxDelaySeconds 则拒绝
+     */
+    private fun checkDelay(
+        copyTrading: CopyTrading,
+        leaderTradeTimestamp: Long
+    ): FilterResult {
+        val maxDelaySeconds = copyTrading.maxDelaySeconds
+            ?: return FilterResult.passed()
+
+        if (leaderTradeTimestamp <= 0) {
+            return FilterResult.passed()
+        }
+
+        val now = System.currentTimeMillis()
+        val delaySeconds = (now - leaderTradeTimestamp) / 1000
+
+        if (delaySeconds > maxDelaySeconds) {
+            return FilterResult.delayFailed(
+                "信号延迟过大: 已延迟 ${delaySeconds}秒，超过最大允许 ${maxDelaySeconds}秒"
+            )
+        }
+
+        return FilterResult.passed()
+    }
+
+    /**
+     * 检查 Leader 成交价实时偏离
+     * 比较当前 orderbook 最佳卖价 (bestAsk) 与 Leader 成交价：
+     * - 如果 bestAsk 超过 Leader 成交价 maxPriceDeviation%，说明追单价格劣势过大，拒绝跟单
+     */
+    private fun checkPriceDeviation(
+        copyTrading: CopyTrading,
+        orderbook: OrderbookResponse,
+        leaderTradePrice: BigDecimal
+    ): FilterResult {
+        val maxDeviation = copyTrading.maxPriceDeviation
+            ?: return FilterResult.passed()
+
+        if (leaderTradePrice <= BigDecimal.ZERO) {
+            return FilterResult.passed()
+        }
+
+        val bestAsk = orderbook.asks
+            .mapNotNull { it.price.toSafeBigDecimal() }
+            .minOrNull()
+
+        if (bestAsk == null) {
+            return FilterResult.priceDeviationFailed("订单簿缺少卖一价格，无法计算价格偏离", orderbook)
+        }
+
+        // 偏离百分比 = (bestAsk - leaderTradePrice) / leaderTradePrice * 100
+        val deviation = bestAsk.subtract(leaderTradePrice)
+            .divide(leaderTradePrice, 8, java.math.RoundingMode.HALF_UP)
+            .multi(BigDecimal("100"))
+
+        if (deviation.gt(maxDeviation)) {
+            val deviationStr = deviation.stripTrailingZeros().toPlainString()
+            val maxStr = maxDeviation.stripTrailingZeros().toPlainString()
+            val leaderStr = leaderTradePrice.stripTrailingZeros().toPlainString()
+            val askStr = bestAsk.stripTrailingZeros().toPlainString()
+            return FilterResult.priceDeviationFailed(
+                "价格偏离过大: bestAsk=$askStr 比 Leader 成交价 $leaderStr 高出 $deviationStr%，超过最大允许 $maxStr%",
+                orderbook
+            )
+        }
+
+        return FilterResult.passed()
+    }
+
     /**
      * 检查买一卖一价差
      * bestBid: 买盘中的最高价格（最大值）

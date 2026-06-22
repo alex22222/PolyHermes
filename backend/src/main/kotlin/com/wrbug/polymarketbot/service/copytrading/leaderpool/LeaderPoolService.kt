@@ -232,6 +232,17 @@ class LeaderPoolService(
                 return Result.failure(IllegalArgumentException("账户不存在"))
             }
             val leader = findLeader(pool.leaderId)
+            if (!isTradeableByResearchScore(leader)) {
+                logger.warn(
+                    "拒绝创建 Leader 池试跟配置，研究评分未达门槛: poolId={}, leaderId={}, tag={}, score={}, flags={}",
+                    pool.id,
+                    leader.id,
+                    leader.researchTag,
+                    leader.researchScore,
+                    leader.researchRiskFlags
+                )
+                return Result.failure(LeaderPoolResearchScoreNotTradeableException())
+            }
 
             validateSuggestedPlan(
                 fixedAmount = pool.suggestedFixedAmount,
@@ -332,6 +343,10 @@ class LeaderPoolService(
 
     private fun findLeader(leaderId: Long): Leader {
         return leaderRepository.findById(leaderId).orElse(null) ?: throw IllegalArgumentException("Leader 不存在")
+    }
+
+    private fun isTradeableByResearchScore(leader: Leader): Boolean {
+        return leader.researchTag in setOf("ELITE", "TRADEABLE")
     }
 
     private fun parseStatus(status: String): LeaderPoolStatus {

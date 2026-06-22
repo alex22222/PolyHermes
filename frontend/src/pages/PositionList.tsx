@@ -45,9 +45,10 @@ const PositionList: React.FC = () => {
 
   useEffect(() => {
     fetchAccounts()
-    // 完全依赖 WebSocket 推送，不主动请求接口
-    // 连接建立后会立即收到全量数据推送
-    setLoading(true)  // 显示加载状态，等待 WebSocket 全量推送
+    // 优先通过 API 加载初始仓位数据，避免 WebSocket 连接/推送异常时页面一直 loading
+    // WebSocket 仍会推送后续实时更新
+    setLoading(true)
+    fetchPositions()
 
     // 监听连接状态（WebSocket 连接在 App.tsx 中全局初始化，全局共享）
     const removeListener = wsManager.onConnectionChange((connected) => {
@@ -275,7 +276,24 @@ const PositionList: React.FC = () => {
     }
   }
 
-  // 已移除 fetchPositions 函数，完全依赖 WebSocket 推送更新数据
+  // 通过 API 获取仓位列表（作为 WebSocket 首推的 fallback）
+  const fetchPositions = async () => {
+    try {
+      const response = await apiService.accounts.positionsList()
+      if (response.data.code === 0 && response.data.data) {
+        const data = response.data.data
+        setCurrentPositions(data.currentPositions || [])
+        setHistoryPositions(data.historyPositions || [])
+      } else {
+        message.error(response.data.msg || '获取仓位数据失败')
+      }
+    } catch (error: any) {
+      console.error('获取仓位数据失败:', error)
+      message.error(error.message || '获取仓位数据失败')
+    } finally {
+      setLoading(false)
+    }
+  }
 
   // 根据筛选器选择对应的仓位列表
   const basePositions = useMemo(() => {

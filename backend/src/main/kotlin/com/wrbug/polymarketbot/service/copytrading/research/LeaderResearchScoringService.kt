@@ -5,8 +5,10 @@ import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
 import com.wrbug.polymarketbot.entity.LeaderResearchScore
 import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.repository.LeaderPaperSessionRepository
+import com.wrbug.polymarketbot.repository.LeaderPaperTradeRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchScoreRepository
+import com.wrbug.polymarketbot.enums.LeaderPaperFilterResult
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.math.BigDecimal
@@ -16,6 +18,7 @@ import java.math.RoundingMode
 class LeaderResearchScoringService(
     private val candidateRepository: LeaderResearchCandidateRepository,
     private val paperSessionRepository: LeaderPaperSessionRepository,
+    private val paperTradeRepository: LeaderPaperTradeRepository,
     private val scoreRepository: LeaderResearchScoreRepository
 ) {
     @Transactional
@@ -133,9 +136,23 @@ class LeaderResearchScoringService(
         val flags = mutableListOf<String>()
         if (session.maxDrawdown < BigDecimal("-15")) flags += "drawdown_gt_15"
         if (session.filteredRatio >= BigDecimal("0.50")) flags += "high_filtered_ratio"
+        if (isTailPriceSpray(session)) flags += "tail_price_spray"
         if (session.unknownRatio() > BigDecimal("0.20")) flags += "high_unknown_quote_exposure"
         if (session.tradeCount < 10) flags += "small_sample"
         return flags.takeIf { it.isNotEmpty() }?.joinToString(",")
+    }
+
+    private fun isTailPriceSpray(session: LeaderPaperSession): Boolean {
+        val sessionId = session.id ?: return false
+        val totalEvents = session.tradeCount + session.filteredCount
+        if (totalEvents < TAIL_SPRAY_MIN_EVENTS) return false
+        val lowPriceFiltered = paperTradeRepository.countBySessionIdAndFilterResultAndFilterReasonContaining(
+            sessionId,
+            LeaderPaperFilterResult.FILTERED,
+            "price_outside_safe_band"
+        )
+        val lowPriceRatio = BigDecimal(lowPriceFiltered).safeDivide(BigDecimal(totalEvents))
+        return lowPriceRatio >= TAIL_SPRAY_FILTERED_RATIO
     }
 
     private fun LeaderPaperSession.unknownRatio(): BigDecimal {
@@ -159,7 +176,9 @@ class LeaderResearchScoringService(
     companion object {
         const val SCORE_VERSION = "research-copyability-v1"
         private val SAMPLE_INSUFFICIENT_CAP = BigDecimal("59")
+        private val TAIL_SPRAY_FILTERED_RATIO = BigDecimal("0.50")
         private const val PAPER_MIN_TRADES = 10
+        private const val TAIL_SPRAY_MIN_EVENTS = 10
         private const val SOURCE_FRESH_MS = 48L * 60 * 60 * 1000
         private const val PAPER_MIN_AGE_MS = 7L * 24 * 60 * 60 * 1000
     }

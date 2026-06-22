@@ -1,6 +1,8 @@
 package com.wrbug.polymarketbot.service.copytrading.leaders
 
 import com.wrbug.polymarketbot.entity.Leader
+import com.wrbug.polymarketbot.entity.BacktestTask
+import com.wrbug.polymarketbot.repository.BacktestTaskRepository
 import com.wrbug.polymarketbot.repository.LeaderRepository
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
@@ -22,7 +24,8 @@ import java.math.RoundingMode
  */
 @Service
 class LeaderResearchScoreAdapterService(
-    private val leaderRepository: LeaderRepository
+    private val leaderRepository: LeaderRepository,
+    private val backtestTaskRepository: BacktestTaskRepository
 ) {
 
     private val logger = LoggerFactory.getLogger(LeaderResearchScoreAdapterService::class.java)
@@ -68,6 +71,8 @@ class LeaderResearchScoreAdapterService(
         val rank = leader.smartMoneyRank
         val lastTradeAt = leader.lastTradeAt
         val volume = leader.totalVolume?.toBigDecimalOrNull() ?: BigDecimal.ZERO
+        val avgTradeSize = leader.avgTradeSize?.toBigDecimalOrNull() ?: BigDecimal.ZERO
+        val bestCompletedBacktest = leader.id?.let { loadBestCompletedBacktest(it) }
 
         // 1. 盈利信号 (0-20)
         val profitSignal = when {
@@ -138,6 +143,8 @@ class LeaderResearchScoreAdapterService(
         if (winRate > 0 && winRate < 40) flags += "low_win_rate"
         if (!isFresh) flags += "stale_data"
         if (pnlRatio > BigDecimal("0.50")) flags += "high_pnl_volatility"
+        appendBacktestRiskFlags(bestCompletedBacktest, flags)
+        if (isTailPriceSpray(trades, avgTradeSize, flags)) flags += "tail_price_spray"
 
         // 风险调整：根据风险标记对分数进行乘数惩罚并限制最高标签
         val riskMultiplier = computeRiskMultiplier(flags)
@@ -167,6 +174,13 @@ class LeaderResearchScoreAdapterService(
         if (flags.contains("high_pnl_volatility")) multiplier = multiplier.multiply(BigDecimal("0.85"))
         if (flags.contains("low_win_rate")) multiplier = multiplier.multiply(BigDecimal("0.90"))
         if (flags.contains("small_sample")) multiplier = multiplier.multiply(BigDecimal("0.95"))
+        if (flags.contains("no_completed_backtest")) multiplier = multiplier.multiply(BigDecimal("0.75"))
+        if (flags.contains("backtest_no_simulated_trades")) multiplier = multiplier.multiply(BigDecimal("0.50"))
+        if (flags.contains("tail_price_spray")) multiplier = multiplier.multiply(BigDecimal("0.20"))
+        if (flags.contains("backtest_loss")) multiplier = multiplier.multiply(BigDecimal("0.35"))
+        if (flags.contains("backtest_dust_profit")) multiplier = multiplier.multiply(BigDecimal("0.55"))
+        if (flags.contains("backtest_high_drawdown")) multiplier = multiplier.multiply(BigDecimal("0.70"))
+        if (flags.contains("backtest_no_sell")) multiplier = multiplier.multiply(BigDecimal("0.80"))
         return multiplier
     }
 
@@ -175,6 +189,13 @@ class LeaderResearchScoreAdapterService(
      */
     private fun computeTagCap(flags: List<String>): TagCap {
         return when {
+            flags.contains("tail_price_spray") -> TagCap.RISKY
+            flags.contains("backtest_loss") -> TagCap.WATCH
+            flags.contains("backtest_no_simulated_trades") -> TagCap.WATCH
+            flags.contains("backtest_dust_profit") -> TagCap.WATCH
+            flags.contains("no_completed_backtest") -> TagCap.CANDIDATE
+            flags.contains("backtest_high_drawdown") -> TagCap.CANDIDATE
+            flags.contains("backtest_no_sell") -> TagCap.CANDIDATE
             flags.contains("negative_pnl") -> TagCap.WATCH
             flags.contains("small_sample") -> TagCap.CANDIDATE
             flags.contains("stale_data") && flags.contains("high_pnl_volatility") -> TagCap.CANDIDATE
@@ -182,6 +203,49 @@ class LeaderResearchScoreAdapterService(
             flags.contains("high_pnl_volatility") -> TagCap.TRADEABLE
             else -> TagCap.ELITE
         }
+    }
+
+    private fun loadBestCompletedBacktest(leaderId: Long): BacktestTask? {
+        return backtestTaskRepository.findByLeaderIdAndStatus(leaderId, "COMPLETED")
+            .maxWithOrNull(
+                compareBy<BacktestTask> { it.profitAmount ?: BigDecimal.ZERO }
+                    .thenBy { it.profitRate ?: BigDecimal.ZERO }
+                    .thenBy { it.createdAt }
+            )
+    }
+
+    private fun appendBacktestRiskFlags(bestBacktest: BacktestTask?, flags: MutableList<String>) {
+        if (bestBacktest == null) {
+            flags += "no_completed_backtest"
+            return
+        }
+
+        val profit = bestBacktest.profitAmount ?: BigDecimal.ZERO
+        val drawdown = bestBacktest.maxDrawdown ?: BigDecimal.ZERO
+
+        when {
+            bestBacktest.totalTrades <= 0 -> flags += "backtest_no_simulated_trades"
+            profit < BigDecimal.ZERO -> flags += "backtest_loss"
+            profit < MIN_COPYABLE_BACKTEST_PROFIT -> flags += "backtest_dust_profit"
+        }
+
+        if (drawdown > MAX_ACCEPTABLE_BACKTEST_DRAWDOWN) {
+            flags += "backtest_high_drawdown"
+        }
+        if (bestBacktest.totalTrades >= MIN_BACKTEST_TRADES_FOR_SELL_CHECK && bestBacktest.sellTrades <= 0) {
+            flags += "backtest_no_sell"
+        }
+    }
+
+    private fun isTailPriceSpray(trades: Int, avgTradeSize: BigDecimal, flags: List<String>): Boolean {
+        return trades >= MIN_TAIL_SPRAY_TRADES &&
+            avgTradeSize > BigDecimal.ZERO &&
+            avgTradeSize <= MAX_TAIL_SPRAY_AVG_TRADE_SIZE &&
+            (
+                flags.contains("backtest_no_simulated_trades") ||
+                    flags.contains("backtest_dust_profit") ||
+                    flags.contains("high_pnl_volatility")
+                )
     }
 
     /**
@@ -193,6 +257,7 @@ class LeaderResearchScoreAdapterService(
             TagCap.TRADEABLE -> BigDecimal("59.99")
             TagCap.CANDIDATE -> BigDecimal("44.99")
             TagCap.WATCH -> BigDecimal("29.99")
+            TagCap.RISKY -> BigDecimal("14.99")
         }
         return score.min(maxScore)
     }
@@ -222,12 +287,17 @@ class LeaderResearchScoreAdapterService(
     )
 
     private enum class TagCap {
-        ELITE, TRADEABLE, CANDIDATE, WATCH
+        ELITE, TRADEABLE, CANDIDATE, WATCH, RISKY
     }
 
     companion object {
         private const val MIN_TRADES_FOR_FULL_SCORE = 10
+        private const val MIN_TAIL_SPRAY_TRADES = 10
+        private const val MIN_BACKTEST_TRADES_FOR_SELL_CHECK = 10
         private val SAMPLE_CAP = BigDecimal("59")
+        private val MIN_COPYABLE_BACKTEST_PROFIT = BigDecimal("0.50")
+        private val MAX_TAIL_SPRAY_AVG_TRADE_SIZE = BigDecimal("1.00")
+        private val MAX_ACCEPTABLE_BACKTEST_DRAWDOWN = BigDecimal("30")
         private const val SOURCE_FRESH_MS = 48L * 60 * 60 * 1000
     }
 }

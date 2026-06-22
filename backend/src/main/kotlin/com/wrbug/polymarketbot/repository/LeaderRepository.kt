@@ -46,5 +46,41 @@ interface LeaderRepository : JpaRepository<Leader, Long> {
      */
     fun findAllByOrderByCreatedAtAsc(): List<Leader>
 
+    /**
+     * 根据关键词模糊搜索 leader 名称或地址
+     */
+    @Query(
+        value = """
+            SELECT *
+            FROM copy_trading_leaders
+            WHERE (:keyword IS NULL OR :keyword = ''
+                OR LOWER(leader_name) LIKE LOWER(CONCAT('%', :keyword, '%'))
+                OR LOWER(leader_address) LIKE LOWER(CONCAT('%', :keyword, '%')))
+            ORDER BY scanned_at DESC, updated_at DESC, id DESC
+        """,
+        nativeQuery = true
+    )
+    fun searchByKeyword(@Param("keyword") keyword: String?): List<Leader>
+
+    /**
+     * 根据分类和关键词模糊搜索 leader 名称或地址
+     */
+    @Query(
+        value = """
+            SELECT *
+            FROM copy_trading_leaders
+            WHERE category = :category
+              AND (:keyword IS NULL OR :keyword = ''
+                  OR LOWER(leader_name) LIKE LOWER(CONCAT('%', :keyword, '%'))
+                  OR LOWER(leader_address) LIKE LOWER(CONCAT('%', :keyword, '%')))
+            ORDER BY scanned_at DESC, updated_at DESC, id DESC
+        """,
+        nativeQuery = true
+    )
+    fun searchByCategoryAndKeyword(
+        @Param("category") category: String?,
+        @Param("keyword") keyword: String?
+    ): List<Leader>
+
     fun findByIdIn(ids: Collection<Long>): List<Leader>
 }

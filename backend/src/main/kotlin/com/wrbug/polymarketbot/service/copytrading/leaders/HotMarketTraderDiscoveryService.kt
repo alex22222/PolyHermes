@@ -211,19 +211,34 @@ class HotMarketTraderDiscoveryService(
         }
 
         val gammaApi = retrofitFactory.createGammaApi()
-        val response = gammaApi.listMarkets(
-            conditionIds = null,
-            includeTag = true,
-            active = true,
-            closed = false,
-            limit = 100
-        )
-        val body = if (response.isSuccessful) response.body().orEmpty() else emptyList()
+        val pageSize = 200
+        val maxPages = 5
+        val markets = mutableListOf<MarketResponse>()
 
-        gammaMarketsCache = body
+        for (page in 0 until maxPages) {
+            val response = gammaApi.listMarkets(
+                conditionIds = null,
+                includeTag = true,
+                active = true,
+                closed = false,
+                limit = pageSize,
+                offset = page * pageSize
+            )
+            if (!response.isSuccessful) {
+                logger.warn("Gamma /markets 请求失败: HTTP {}, page={}", response.code(), page)
+                break
+            }
+            val pageMarkets = response.body().orEmpty()
+            if (pageMarkets.isEmpty()) break
+            markets += pageMarkets
+            if (pageMarkets.size < pageSize) break
+            delay(120)
+        }
+
+        gammaMarketsCache = markets
         gammaMarketsCacheAt = now
-        logger.info("Gamma /markets 刷新: {} 个市场", body.size)
-        return body
+        logger.info("Gamma /markets 刷新: {} 个市场", markets.size)
+        return markets
     }
 
     /**

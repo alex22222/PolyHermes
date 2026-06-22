@@ -98,72 +98,139 @@ object CategoryValidator {
         return null
     }
 
+
+    /**
+     * 体育联赛/赛事 slug 前缀识别
+     */
+    private fun isSportsLeagueSlug(text: String): Boolean {
+        val sportsPrefixes = listOf(
+            "fifwc ", "fifa ", "mlb ", "nba ", "wnba ", "nfl ", "nhl ", "ufc ",
+            "atp ", "wta ", "ipl ", "pga ", "lpl ", "lck ", "cs2 ", "csgo ",
+            "dota2 ", "valorant ", "overwatch ", "premier league", "champions league",
+            "bundesliga", "laliga", "serie a", "ligue 1", "eredivisie", "es2 ",
+            "epl ", "wcq ", "olympic", "olympics", "world cup", "esports"
+        )
+        return sportsPrefixes.any { prefix ->
+            text.startsWith(prefix) ||
+            text.contains(" $prefix") ||
+            text.contains("-$prefix")
+        }
+    }
+
+    /**
+     * 政治/法律相关文本识别
+     */
+    private fun isPoliticsText(text: String): Boolean {
+        val politicsKeywords = listOf(
+            "trump", "biden", "election", "president", "congress", "senate",
+            "supreme court", "tariff", "taiwan", "china", "israel", "iran",
+            "ukraine", "russia", "putin", "weinstein", "prison", "sentenced",
+            "sentence", "court", "trial", "judge", "verdict", "lawsuit",
+            "attorney", "prosecutor", "defendant", "guilty",
+            "convicted", "criminal", "justice",
+            "senators", "representatives", "house", "bill"
+        )
+        return politicsKeywords.any { text.contains(it) }
+    }
+
+    /**
+     * 体育术语关键词识别
+     */
+    private fun isSportsText(text: String): Boolean {
+        val sportsKeywords = listOf(
+            "world cup", "fifa", "nba", "nfl", "mlb", "nhl", "ufc", "tennis",
+            "soccer", "football", "baseball", "basketball", "golf", "championship",
+            "premier league", "esports", "e sports", "counter strike", "cs2", "csgo",
+            "valorant", "dota", "league of legends", " lol ", "overwatch",
+            "starcraft", "bo3", "bo5", "iem ", "major stage", "natus vincere",
+            " navi ", " g2 ", "faze", "vitality", "over/under", " o/u ",
+            "spread", "exact score", "halftime", "draw", "win on", "btts",
+            "team total", "leading at", "clean sheet", "first goal",
+            "red card", "penalty", "overtime", "full time", "match winner",
+            "moneyline", "points", "score", "winner"
+        )
+        return sportsKeywords.any { text.contains(it) }
+    }
+
+    /**
+     * 加密货币关键词识别
+     */
+    private fun isCryptoText(text: String): Boolean {
+        val cryptoKeywords = listOf(
+            "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp", "doge",
+            "dogecoin", "airdrop", "stablecoin", "crypto", "blockchain", "defi",
+            "nft", "altcoin", "memecoin", "layer2", "rollup", "token", "tokens"
+        )
+        return cryptoKeywords.any { text.contains(it) }
+    }
+
+    /**
+     * 金融关键词识别
+     */
+    private fun isFinanceText(text: String): Boolean {
+        val financeKeywords = listOf(
+            "fed", "interest rate", "inflation", "cpi", "recession", "nasdaq",
+            "s&p", "stock", "ipo", "gdp", "treasury", "oil price", "unemployment",
+            "payroll", "nfp", "earnings", "revenue", "quarter", "q1", "q2", "q3",
+            "q4", "gross domestic product", "spx", "s&p 500", "dow jones",
+            "russell 2000", "vix", "bond", "bonds", "yield", "rate cut",
+            "rate hike", "fomc", "jobless claims", "pce", "ppi", "mortgage",
+            "market cap", "valuation", "valued", "sales", "profit", "eps",
+            "guidance", "dividend", "buyback", "bankruptcy", "acquisition",
+            "merger", "sec", "etf", "gold", "silver", "copper", "crude oil",
+            "brent", "wti", "natural gas", "tesla", "tsla", "nvidia", "nvda",
+            "apple", "aapl", "microsoft", "msft", "meta", "amazon", "amzn",
+            "google", "alphabet", "googl", "openai", "anthropic", "spacex",
+            "waymo", "stripe", "databricks", "palantir", "pltr"
+        )
+        return financeKeywords.any { text.contains(it) }
+    }
+
     fun inferMarketCategory(vararg values: String?): String? {
-        values.asSequence()
+        val texts = values.asSequence()
             .mapNotNull { it?.lowercase() }
             .flatMap { sequenceOf(it, it.replace("-", " ").replace("_", " ")) }
-            .forEach { text ->
-                normalizeCategory(text)?.let { return it }
+            .toList()
 
-                if (
-                    text.contains("trump") || text.contains("biden") ||
-                    text.contains("election") || text.contains("president") ||
-                    text.contains("congress") || text.contains("senate") ||
-                    text.contains("supreme court") || text.contains("tariff") ||
-                    text.contains("taiwan") || text.contains("china") ||
-                    text.contains("israel") || text.contains("iran") ||
-                    text.contains("ukraine") || text.contains("russia")
-                ) {
-                    return "politics"
-                }
+        // 1. API 返回的 category / event category 标准化
+        for (text in texts) {
+            normalizeCategory(text)?.let { return it }
+        }
 
-                if (
-                    text.contains("world cup") || text.contains("fifa") ||
-                    text.contains("nba") || text.contains("nfl") ||
-                    text.contains("mlb") || text.contains("nhl") ||
-                    text.contains("ufc") || text.contains("tennis") ||
-                    text.contains("soccer") || text.contains("football") ||
-                    text.contains("baseball") || text.contains("basketball") ||
-                    text.contains("golf") || text.contains("championship") ||
-                    text.contains("premier league") ||
-                    text.contains("esports") || text.contains("e sports") ||
-                    text.contains("电竞") || text.contains("电子竞技") ||
-                    text.contains("counter strike") || text.contains("cs2") ||
-                    text.contains("csgo") || text.contains("valorant") ||
-                    text.contains("dota") || text.contains("league of legends") ||
-                    text.contains(" lol ") || text.contains("overwatch") ||
-                    text.contains("starcraft") || text.contains("bo3") ||
-                    text.contains("bo5") || text.contains("iem ") ||
-                    text.contains("major stage") || text.contains("natus vincere") ||
-                    text.contains(" navi ") || text.contains(" g2 ") ||
-                    text.contains("faze") || text.contains("vitality") ||
-                    text.contains("over/under") || text.contains(" o/u ")
-                ) {
-                    return "sports"
-                }
-
-                if (
-                    text.contains("bitcoin") || text.contains("btc") ||
-                    text.contains("ethereum") || text.contains("eth") ||
-                    text.contains("solana") || text.contains("sol ") ||
-                    text.contains("xrp") || text.contains("doge") ||
-                    text.contains("token") || text.contains("airdrop") ||
-                    text.contains("stablecoin") || text.contains("crypto")
-                ) {
-                    return "crypto"
-                }
-
-                if (
-                    text.contains("fed") || text.contains("interest rate") ||
-                    text.contains("inflation") || text.contains("cpi") ||
-                    text.contains("recession") || text.contains("nasdaq") ||
-                    text.contains("s&p") || text.contains("stock") ||
-                    text.contains("ipo") || text.contains("gdp") ||
-                    text.contains("treasury") || text.contains("oil price")
-                ) {
-                    return "finance"
-                }
+        // 2. 体育联赛/赛事 slug 前缀（高置信度）
+        for (text in texts) {
+            if (isSportsLeagueSlug(text)) {
+                return "sports"
             }
+        }
+
+        // 3. 政治/法律关键词
+        for (text in texts) {
+            if (isPoliticsText(text)) {
+                return "politics"
+            }
+        }
+
+        // 4. 体育术语关键词
+        for (text in texts) {
+            if (isSportsText(text)) {
+                return "sports"
+            }
+        }
+
+        // 5. 加密货币关键词
+        for (text in texts) {
+            if (isCryptoText(text)) {
+                return "crypto"
+            }
+        }
+
+        // 6. 金融关键词
+        for (text in texts) {
+            if (isFinanceText(text)) {
+                return "finance"
+            }
+        }
 
         return null
     }

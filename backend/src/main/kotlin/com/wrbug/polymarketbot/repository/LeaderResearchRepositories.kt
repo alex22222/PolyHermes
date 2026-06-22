@@ -122,6 +122,11 @@ interface LeaderPaperTradeRepository : JpaRepository<LeaderPaperTrade, Long> {
     fun findBySessionIdOrderByEventTimeAsc(sessionId: Long): List<LeaderPaperTrade>
     fun countBySessionId(sessionId: Long): Long
     fun countBySessionIdAndFilterResult(sessionId: Long, filterResult: LeaderPaperFilterResult): Long
+    fun countBySessionIdAndFilterResultAndFilterReasonContaining(
+        sessionId: Long,
+        filterResult: LeaderPaperFilterResult,
+        filterReason: String
+    ): Long
 }
 
 @Repository

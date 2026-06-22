@@ -10,6 +10,7 @@ import com.wrbug.polymarketbot.util.RetrofitFactory
 import com.wrbug.polymarketbot.util.CategoryValidator
 import com.wrbug.polymarketbot.util.getEventSlug
 import com.wrbug.polymarketbot.util.parseStringArray
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
@@ -304,20 +305,32 @@ class MarketService(
     suspend fun fetchAndSaveActiveMarkets(): Int {
         return try {
             val gammaApi = retrofitFactory.createGammaApi()
-            val response = gammaApi.listMarkets(
-                conditionIds = null,
-                includeTag = true,
-                active = true,
-                closed = false,
-                limit = 100
-            )
+            val markets = mutableListOf<MarketResponse>()
+            val pageSize = 200
+            val maxPages = 5
 
-            if (!response.isSuccessful || response.body() == null) {
-                logger.warn("获取活跃市场列表失败: HTTP ${response.code()}")
-                return 0
+            for (page in 0 until maxPages) {
+                val response = gammaApi.listMarkets(
+                    conditionIds = null,
+                    includeTag = true,
+                    active = true,
+                    closed = false,
+                    limit = pageSize,
+                    offset = page * pageSize
+                )
+
+                if (!response.isSuccessful || response.body() == null) {
+                    logger.warn("获取活跃市场列表失败: HTTP ${response.code()}, page=$page")
+                    break
+                }
+
+                val pageMarkets = response.body().orEmpty()
+                if (pageMarkets.isEmpty()) break
+                markets += pageMarkets
+                if (pageMarkets.size < pageSize) break
+                delay(120)
             }
 
-            val markets = response.body()!!
             var savedCount = 0
 
             for (marketResponse in markets) {
@@ -330,7 +343,7 @@ class MarketService(
                 }
             }
 
-            logger.info("从 Gamma API 同步活跃市场完成: 成功保存 $savedCount 个市场")
+            logger.info("从 Gamma API 同步活跃市场完成: 拉取 ${markets.size} 个，成功保存 $savedCount 个市场")
             savedCount
         } catch (e: Exception) {
             logger.error("同步活跃市场失败: ${e.message}", e)
