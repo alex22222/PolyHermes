@@ -290,6 +290,7 @@
   },
   "leader": {
     "title": "Leader 管理",
+    "searchPlaceholder": "搜索 Leader 名称",
     "leaderName": "Leader 名称",
     "leaderAddress": "钱包地址",
     "walletAddress": "钱包地址",

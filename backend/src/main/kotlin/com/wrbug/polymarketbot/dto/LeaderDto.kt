@@ -34,7 +34,8 @@ data class LeaderDeleteRequest(
  */
 data class LeaderListRequest(
     val category: String? = null,  // politics/sports/crypto/finance
-    val keyword: String? = null  // 按 leader 名称或地址模糊搜索
+    val keyword: String? = null,  // 按 leader 名称或地址模糊搜索
+    val name: String? = null  // 按 leader 名称模糊搜索
 )
 
 /**

@@ -386,7 +386,7 @@ export const apiService = {
     /**
      * 查询 Leader 列表
      */
-    list: (data: { category?: string } = {}) =>
+    list: (data: { category?: string; name?: string } = {}) =>
       apiClient.post<ApiResponse<any>>('/copy-trading/leaders/list', data),
 
     /**

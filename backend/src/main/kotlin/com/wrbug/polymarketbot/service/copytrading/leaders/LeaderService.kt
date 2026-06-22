@@ -166,18 +166,23 @@ class LeaderService(
                     ?: return Result.failure(IllegalArgumentException("不支持的分类: ${request.category}"))
             }
             val keyword = request.keyword?.trim()
+            val name = request.name?.trim()
             
             val leaders = if (normalizedCategory != null) {
-                if (keyword.isNullOrBlank()) {
-                    leaderRepository.findByCategory(normalizedCategory)
-                } else {
+                if (!name.isNullOrBlank()) {
+                    leaderRepository.searchByCategoryAndName(normalizedCategory, name)
+                } else if (!keyword.isNullOrBlank()) {
                     leaderRepository.searchByCategoryAndKeyword(normalizedCategory, keyword)
+                } else {
+                    leaderRepository.findByCategory(normalizedCategory)
                 }
             } else {
-                if (keyword.isNullOrBlank()) {
-                    leaderRepository.findAllByOrderByCreatedAtAsc()
-                } else {
+                if (!name.isNullOrBlank()) {
+                    leaderRepository.searchByName(name)
+                } else if (!keyword.isNullOrBlank()) {
                     leaderRepository.searchByKeyword(keyword)
+                } else {
+                    leaderRepository.findAllByOrderByCreatedAtAsc()
                 }
             }
             

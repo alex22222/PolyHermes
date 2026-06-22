@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Alert, Card, Table, Button, Space, Tag, Popconfirm, message, List, Empty, Spin, Divider, Typography, Modal, Descriptions, Statistic, Row, Col, Tooltip, Badge, Segmented } from 'antd'
+import { Alert, Card, Table, Button, Space, Tag, Popconfirm, message, List, Empty, Spin, Divider, Typography, Modal, Descriptions, Statistic, Row, Col, Tooltip, Badge, Segmented, Input } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined, GlobalOutlined, EyeOutlined, ReloadOutlined, WalletOutlined, CopyOutlined, LineChartOutlined, TeamOutlined, SearchOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import { apiService } from '../services/api'
@@ -22,6 +22,7 @@ const LeaderList: React.FC = () => {
   const [scanLoading, setScanLoading] = useState(false)
   const [scoreLoading, setScoreLoading] = useState(false)
   const [categoryFilter, setCategoryFilter] = useState<string>('all')
+  const [nameQuery, setNameQuery] = useState<string>('')
   const [lastScanResult, setLastScanResult] = useState<LeaderScanBatchResponse | null>(null)
 
   // 详情 Modal
@@ -33,6 +34,18 @@ const LeaderList: React.FC = () => {
   useEffect(() => {
     fetchLeaders()
   }, [categoryFilter])
+
+  const buildListRequest = (currentNameQuery?: string) => {
+    const request: { category?: string; name?: string } = {}
+    if (categoryFilter !== 'all') {
+      request.category = categoryFilter
+    }
+    const name = (currentNameQuery !== undefined ? currentNameQuery : nameQuery).trim()
+    if (name) {
+      request.name = name
+    }
+    return request
+  }
 
   const categoryOptions = [
     { label: t('leaderList.categoryAll') || '全部', value: 'all' },
@@ -96,10 +109,10 @@ const LeaderList: React.FC = () => {
     }
   }
 
-  const fetchLeaders = async () => {
+  const fetchLeaders = async (currentNameQuery?: string) => {
     setLoading(true)
     try {
-      const response = await apiService.leaders.list(categoryFilter === 'all' ? {} : { category: categoryFilter })
+      const response = await apiService.leaders.list(buildListRequest(currentNameQuery))
       if (response.data.code === 0 && response.data.data) {
         setLeaders(response.data.data.list || [])
       } else {
@@ -110,6 +123,11 @@ const LeaderList: React.FC = () => {
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleNameSearch = (value: string) => {
+    setNameQuery(value)
+    fetchLeaders(value)
   }
 
   const handleScan = async () => {
@@ -683,6 +701,14 @@ const LeaderList: React.FC = () => {
             value={categoryFilter}
             onChange={(value) => setCategoryFilter(value as string)}
             options={categoryOptions}
+          />
+          <Input.Search
+            placeholder={t('leaderList.searchPlaceholder') || '搜索 Leader 名称'}
+            value={nameQuery}
+            onChange={(e) => setNameQuery(e.target.value)}
+            onSearch={handleNameSearch}
+            allowClear
+            style={{ width: isMobile ? 180 : 260 }}
           />
           <Tooltip title={t('leaderList.scanTooltip') || '扫描 Polymarket 活跃 Leader'}>
             <Button

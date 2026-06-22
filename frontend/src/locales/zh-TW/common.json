@@ -593,6 +593,7 @@
   "leaderList": {
     "title": "Leader 管理",
     "addLeader": "添加 Leader",
+    "searchPlaceholder": "搜索 Leader 名稱",
     "leaderName": "Leader 名稱",
     "walletAddress": "錢包地址",
     "category": "分類",

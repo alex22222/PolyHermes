@@ -593,6 +593,7 @@
   "leaderList": {
     "title": "Leader Management",
     "addLeader": "Add Leader",
+    "searchPlaceholder": "Search leader name",
     "leaderName": "Leader Name",
     "walletAddress": "Wallet Address",
     "category": "Category",

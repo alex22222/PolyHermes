@@ -83,4 +83,38 @@ interface LeaderRepository : JpaRepository<Leader, Long> {
     ): List<Leader>
 
     fun findByIdIn(ids: Collection<Long>): List<Leader>
+
+    /**
+     * 根据名称模糊搜索 leader
+     */
+    @Query(
+        value = """
+            SELECT *
+            FROM copy_trading_leaders
+            WHERE (:name IS NULL OR :name = ''
+                OR LOWER(leader_name) LIKE LOWER(CONCAT('%', :name, '%')))
+            ORDER BY scanned_at DESC, updated_at DESC, id DESC
+        """,
+        nativeQuery = true
+    )
+    fun searchByName(@Param("name") name: String?): List<Leader>
+
+    /**
+     * 根据分类和名称模糊搜索 leader
+     */
+    @Query(
+        value = """
+            SELECT *
+            FROM copy_trading_leaders
+            WHERE category = :category
+              AND (:name IS NULL OR :name = ''
+                  OR LOWER(leader_name) LIKE LOWER(CONCAT('%', :name, '%')))
+            ORDER BY scanned_at DESC, updated_at DESC, id DESC
+        """,
+        nativeQuery = true
+    )
+    fun searchByCategoryAndName(
+        @Param("category") category: String?,
+        @Param("name") name: String?
+    ): List<Leader>
 }
