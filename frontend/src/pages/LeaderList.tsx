@@ -23,6 +23,8 @@ const LeaderList: React.FC = () => {
   const [scoreLoading, setScoreLoading] = useState(false)
   const [categoryFilter, setCategoryFilter] = useState<string>('all')
   const [nameQuery, setNameQuery] = useState<string>('')
+  const [currentPage, setCurrentPage] = useState<number>(1)
+  const [pageSize, setPageSize] = useState<number>(20)
   const [lastScanResult, setLastScanResult] = useState<LeaderScanBatchResponse | null>(null)
 
   // 详情 Modal
@@ -32,6 +34,7 @@ const LeaderList: React.FC = () => {
   const [detailBalanceLoading, setDetailBalanceLoading] = useState(false)
 
   useEffect(() => {
+    setCurrentPage(1)
     fetchLeaders()
   }, [categoryFilter])
 
@@ -127,7 +130,27 @@ const LeaderList: React.FC = () => {
 
   const handleNameSearch = (value: string) => {
     setNameQuery(value)
+    setCurrentPage(1)
     fetchLeaders(value)
+  }
+
+  const paginationConfig = {
+    current: currentPage,
+    pageSize: pageSize,
+    showSizeChanger: true,
+    pageSizeOptions: ['20', '50', '100'],
+    showTotal: (total: number) => `共 ${total} 条`,
+    onChange: (page: number, size?: number) => {
+      setCurrentPage(page)
+      if (size && size !== pageSize) {
+        setPageSize(size)
+        setCurrentPage(1)
+      }
+    },
+    onShowSizeChange: (_current: number, size: number) => {
+      setPageSize(size)
+      setCurrentPage(1)
+    }
   }
 
   const handleScan = async () => {
@@ -993,6 +1016,7 @@ const LeaderList: React.FC = () => {
                     </Card>
                   )
                 }}
+                pagination={paginationConfig}
               />
             )}
           </div>
@@ -1002,7 +1026,7 @@ const LeaderList: React.FC = () => {
             columns={columns}
             rowKey="id"
             loading={loading}
-            pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
+            pagination={paginationConfig}
             size="large"
             style={{ fontSize: '14px' }}
           />
