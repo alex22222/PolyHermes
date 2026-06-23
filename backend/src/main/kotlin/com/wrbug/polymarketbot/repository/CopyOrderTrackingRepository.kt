@@ -3,6 +3,7 @@ package com.wrbug.polymarketbot.repository
 import com.wrbug.polymarketbot.entity.CopyOrderTracking
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
 import java.math.BigDecimal
 
@@ -68,6 +69,17 @@ interface CopyOrderTrackingRepository : JpaRepository<CopyOrderTracking, Long> {
     fun findByCreatedAtBeforeAndStatusNot(beforeTime: Long, status: String): List<CopyOrderTracking>
 
     /**
+     * 统计某个 Leader 已成功创建的跟单买入记录数。
+     */
+    fun countByLeaderId(leaderId: Long): Long
+
+    /**
+     * 统计某个 Leader 仍有未匹配剩余数量的买入记录数。
+     */
+    @Query("SELECT COUNT(t) FROM CopyOrderTracking t WHERE t.leaderId = :leaderId AND t.remainingQuantity > 0")
+    fun countOpenByLeaderId(@Param("leaderId") leaderId: Long): Long
+
+    /**
      * 查询指定跟单配置下的活跃仓位数量
      * 活跃仓位定义为 remainingQuantity > 0 的不同 (marketId, outcomeIndex) 组合
      */
@@ -99,4 +111,3 @@ interface CopyOrderTrackingRepository : JpaRepository<CopyOrderTracking, Long> {
         thresholdTime: Long
     ): List<CopyOrderTracking>
 }
-

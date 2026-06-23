@@ -1,5 +1,6 @@
 package com.wrbug.polymarketbot.service.bridge
 
+import com.wrbug.polymarketbot.dto.BridgeTradeRecordByCopyTradingRequest
 import com.wrbug.polymarketbot.dto.BridgeTradeRecordDetailRequest
 import com.wrbug.polymarketbot.dto.BridgeTradeRecordDto
 import com.wrbug.polymarketbot.dto.BridgeTradeRecordListRequest
@@ -10,6 +11,9 @@ import com.wrbug.polymarketbot.entity.BridgePositionSnapshot
 import com.wrbug.polymarketbot.entity.BridgeTradeRecord
 import com.wrbug.polymarketbot.repository.BridgePositionSnapshotRepository
 import com.wrbug.polymarketbot.repository.BridgeTradeRecordRepository
+import com.wrbug.polymarketbot.repository.BridgeWebhookLogRepository
+import com.wrbug.polymarketbot.repository.CopyTradingRepository
+import com.wrbug.polymarketbot.repository.LeaderRepository
 import org.slf4j.LoggerFactory
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.PageImpl
@@ -25,7 +29,10 @@ import java.math.RoundingMode
 @Service
 class BridgeTradeRecordService(
     private val bridgeTradeRecordRepository: BridgeTradeRecordRepository,
-    private val bridgePositionSnapshotRepository: BridgePositionSnapshotRepository
+    private val bridgePositionSnapshotRepository: BridgePositionSnapshotRepository,
+    private val copyTradingRepository: CopyTradingRepository,
+    private val leaderRepository: LeaderRepository,
+    private val bridgeWebhookLogRepository: BridgeWebhookLogRepository
 ) {
     private val logger = LoggerFactory.getLogger(BridgeTradeRecordService::class.java)
     private val quantityTolerance = BigDecimal("0.01")
@@ -72,6 +79,63 @@ class BridgeTradeRecordService(
             )
         } catch (e: Exception) {
             logger.error("查询桥接交易记录列表失败", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 按跟单关系查询桥接交易记录
+     * 通过 copyTrading -> leader -> webhook 日志中的 conditionId -> bridge_trade_record
+     */
+    fun getBridgeTradeRecordListByCopyTrading(request: BridgeTradeRecordByCopyTradingRequest): Result<BridgeTradeRecordListResponse> {
+        return try {
+            val copyTrading = copyTradingRepository.findById(request.copyTradingId).orElse(null)
+                ?: return Result.failure(IllegalArgumentException("跟单关系不存在: ${request.copyTradingId}"))
+
+            val leader = leaderRepository.findById(copyTrading.leaderId).orElse(null)
+                ?: return Result.failure(IllegalArgumentException("Leader 不存在: ${copyTrading.leaderId}"))
+
+            val leaderAddress = leader.leaderAddress
+            val conditionIds = bridgeWebhookLogRepository
+                .findDistinctConditionIdsByLeaderAddress(leaderAddress)
+                .filter { !it.isNullOrBlank() }
+
+            if (conditionIds.isEmpty()) {
+                return Result.success(
+                    BridgeTradeRecordListResponse(
+                        list = emptyList(),
+                        total = 0,
+                        page = request.page,
+                        size = request.size
+                    )
+                )
+            }
+
+            val pageRequest = PageRequest.of(
+                (request.page - 1).coerceAtLeast(0),
+                request.size.coerceIn(1, 100),
+                Sort.by(Sort.Order.desc("createdAt"))
+            )
+
+            val page = bridgeTradeRecordRepository.findByBridgeIdAndMarketIdIn(
+                "polymtrade-bridge",
+                conditionIds,
+                pageRequest
+            )
+
+            val positionViews = buildPositionViews(page.content)
+            val list = page.content.map { it.toDto(positionViews[it.positionKey()]) }
+
+            Result.success(
+                BridgeTradeRecordListResponse(
+                    list = list,
+                    total = page.totalElements,
+                    page = request.page,
+                    size = request.size
+                )
+            )
+        } catch (e: Exception) {
+            logger.error("按跟单关系查询桥接交易记录失败: copyTradingId=${request.copyTradingId}", e)
             Result.failure(e)
         }
     }

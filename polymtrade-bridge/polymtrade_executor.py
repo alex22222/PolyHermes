@@ -15,6 +15,8 @@ from bridge_metrics import metrics
 
 logger = logging.getLogger(__name__)
 
+_EVALUATE_ARG_MISSING = object()
+
 
 class PolymtradeExecutor:
     def __init__(self):
@@ -64,7 +66,7 @@ class PolymtradeExecutor:
             )
 
             self.page = await self.context.new_page()
-            await self.page.goto(self.base_url, wait_until="load", timeout=60000)
+            await self._goto_with_retry(self.base_url, max_retries=4, timeout_ms=60000)
             # Give dynamic content / websockets a moment to settle
             await asyncio.sleep(3)
 
@@ -156,7 +158,7 @@ class PolymtradeExecutor:
         if not self.page or not self._logged_in:
             return None
         try:
-            await self.page.goto("https://polym.trade/portfolio", wait_until="load", timeout=30000)
+            await self._goto_with_retry(f"{self.base_url}/portfolio", max_retries=5, timeout_ms=30000)
             await asyncio.sleep(1)
             text = await self.page.inner_text("body", timeout=5000)
             ref_match = re.search(r'[?&]ref=(0x[a-fA-F0-9]{40})', text)
@@ -196,7 +198,7 @@ class PolymtradeExecutor:
         if not self.page:
             return {"error": "page not initialized"}
         try:
-            await self.page.goto(url, wait_until="load", timeout=60000)
+            await self._goto_with_retry(url, max_retries=4, timeout_ms=60000)
             await asyncio.sleep(2)
             return await self.debug_info()
         except Exception as e:
@@ -212,6 +214,87 @@ class PolymtradeExecutor:
         except Exception as e:
             return {"error": str(e)}
 
+    @staticmethod
+    def _is_navigation_race_error(error: Exception) -> bool:
+        text = str(error).lower()
+        return (
+            "execution context was destroyed" in text
+            or "most likely because of a navigation" in text
+            or "target page, context or browser has been closed" in text
+            or "page closed during navigation" in text
+        )
+
+    async def _wait_after_navigation_race(self, label: str, attempt: int) -> None:
+        """Give a page that is mid-navigation a short chance to settle."""
+        if not self.page:
+            raise RuntimeError(f"{label}: page not initialized during navigation retry")
+        is_closed = getattr(self.page, "is_closed", None)
+        if callable(is_closed) and is_closed():
+            raise RuntimeError(f"{label}: page closed during navigation retry")
+        try:
+            await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception as e:
+            logger.debug(f"{label}: wait_for_load_state after navigation race failed: {e}")
+        await asyncio.sleep(0.25 + attempt * 0.25)
+
+    async def _evaluate_with_navigation_retry(
+        self,
+        expression: str,
+        arg=_EVALUATE_ARG_MISSING,
+        *,
+        max_retries: int = 3,
+        label: str = "page.evaluate",
+    ):
+        """Evaluate JS and retry transient navigation context loss."""
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                if arg is _EVALUATE_ARG_MISSING:
+                    return await self.page.evaluate(expression)
+                return await self.page.evaluate(expression, arg)
+            except Exception as e:
+                last_error = e
+                if not self._is_navigation_race_error(e):
+                    raise
+                if attempt >= max_retries - 1:
+                    break
+                logger.warning(
+                    f"{label} hit navigation race (attempt {attempt + 1}/{max_retries}); retrying: {e}"
+                )
+                await self._wait_after_navigation_race(label, attempt)
+        raise RuntimeError(
+            f"{label}: navigation race persisted after {max_retries} attempts: {last_error}"
+        ) from last_error
+
+    async def _evaluate_handle_with_navigation_retry(
+        self,
+        expression: str,
+        arg=_EVALUATE_ARG_MISSING,
+        *,
+        max_retries: int = 3,
+        label: str = "page.evaluate_handle",
+    ):
+        """Evaluate JS handle and retry transient navigation context loss."""
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                if arg is _EVALUATE_ARG_MISSING:
+                    return await self.page.evaluate_handle(expression)
+                return await self.page.evaluate_handle(expression, arg)
+            except Exception as e:
+                last_error = e
+                if not self._is_navigation_race_error(e):
+                    raise
+                if attempt >= max_retries - 1:
+                    break
+                logger.warning(
+                    f"{label} hit navigation race (attempt {attempt + 1}/{max_retries}); retrying: {e}"
+                )
+                await self._wait_after_navigation_race(label, attempt)
+        raise RuntimeError(
+            f"{label}: navigation race persisted after {max_retries} attempts: {last_error}"
+        ) from last_error
+
     async def fetch_portfolio_positions(self) -> dict:
         """Scrape current open positions from the Polymtrade portfolio page.
 
@@ -222,10 +305,10 @@ class PolymtradeExecutor:
         if not self.page:
             return {"error": "page not initialized"}
         try:
-            await self.page.goto(
-                f"{self.base_url}/portfolio", wait_until="load", timeout=60000
-            )
-            await asyncio.sleep(3)
+            await self._goto_with_retry(f"{self.base_url}/portfolio", max_retries=6)
+            rendered = await self._wait_for_portfolio_rows(timeout=12.0)
+            if not rendered:
+                logger.warning("Portfolio rows did not render before scrape; continuing with best effort")
 
             js = r"""
             () => {
@@ -320,12 +403,47 @@ class PolymtradeExecutor:
             logger.exception(f"Failed to fetch portfolio positions: {e}")
             return {"error": str(e)}
 
+    async def _wait_for_portfolio_rows(self, timeout: float = 12.0) -> bool:
+        """Wait until portfolio rows or an explicit empty state is rendered."""
+        deadline = time.time() + timeout
+        last_state = None
+        js = """
+        () => {
+            const rowSelector = 'li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer';
+            const rows = Array.from(document.querySelectorAll(rowSelector))
+                .filter(li => li.offsetParent !== null || li.getClientRects().length);
+            const text = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+            const empty = /暂无持仓|没有持仓|No positions|No open positions/i.test(text);
+            const portfolioVisible = text.includes('持仓') || /positions/i.test(text);
+            return {count: rows.length, empty, portfolioVisible, textLength: text.length};
+        }
+        """
+        while time.time() < deadline:
+            try:
+                state = await self._evaluate_with_navigation_retry(
+                    js,
+                    label="portfolio_rows_wait",
+                    max_retries=2,
+                )
+                last_state = state
+                if state.get("count", 0) > 0 or state.get("empty"):
+                    return True
+                if not state.get("portfolioVisible") and state.get("textLength", 0) == 0:
+                    await asyncio.sleep(0.5)
+                    continue
+            except Exception as e:
+                last_state = {"error": str(e)}
+            await asyncio.sleep(0.5)
+        logger.warning(f"Timed out waiting for portfolio rows: {last_state}")
+        return False
+
     async def _enrich_position(self, position: dict) -> dict:
         """Map a portfolio market title to conditionId/slugs.
 
         First tries to use identifiers already present in the scraped card
         (href, data attributes). Then searches Gamma markets/events by title.
-        As a last resort, clicks the portfolio card to reveal the eventSlug.
+        Enrichment is intentionally read-only; it never clicks portfolio cards,
+        because the portfolio page carousel can reveal an unrelated event URL.
         """
         title = position.get("marketTitle")
         if not title:
@@ -347,56 +465,105 @@ class PolymtradeExecutor:
 
         if market_slug and not event_slug:
             try:
-                markets = await self._search_gamma_markets_by_title(market_slug)
+                markets = await self._search_gamma_markets_by_slug(market_slug)
                 if markets:
-                    market = markets[0]
-                    event = (market.get("events") or [None])[0]
-                    if event:
-                        return {
-                            "conditionId": market.get("conditionId"),
-                            "marketSlug": market.get("slug"),
-                            "eventSlug": event.get("slug"),
-                        }
+                    market = self._find_market_by_title(markets, title)
+                    if market:
+                        event = (market.get("events") or [None])[0]
+                        if event:
+                            return {
+                                "conditionId": market.get("conditionId"),
+                                "marketSlug": market.get("slug"),
+                                "eventSlug": event.get("slug"),
+                            }
+                    logger.info(
+                        "Market slug search for %s did not contain a market matching portfolio title '%s'",
+                        market_slug,
+                        title,
+                    )
             except Exception as e:
                 logger.warning(f"Could not resolve market slug {market_slug}: {e}")
 
         if event_slug:
             try:
-                events = await self._search_gamma_events_by_title(event_slug)
+                events = await self._search_gamma_events_by_slug(event_slug)
                 if events:
                     event = events[0]
-                    market = next(
-                        (m for m in event.get("markets", []) if m.get("question") == title),
-                        None,
-                    )
-                    if not market and event.get("markets"):
-                        market = event["markets"][0]
+                    market = self._find_event_market_by_title(event, title)
                     if market:
                         return {
                             "conditionId": market.get("conditionId"),
                             "marketSlug": market.get("slug"),
                             "eventSlug": event.get("slug"),
                         }
+                    logger.info(
+                        "Event slug %s did not contain a market matching portfolio title '%s'; "
+                        "falling back to title search",
+                        event_slug,
+                        title,
+                    )
             except Exception as e:
                 logger.warning(f"Could not resolve event slug {event_slug}: {e}")
 
-        # Strategy 1: search Gamma markets API by title.
-        try:
-            markets = await self._search_gamma_markets_by_title(title)
-            if markets:
-                # Prefer exact title match, fallback to first result.
-                market = next(
-                    (m for m in markets if m.get("question") == title),
-                    markets[0],
-                )
-                event = (market.get("events") or [None])[0]
-                if event:
-                    logger.info(f"Enriched '{title}' via Gamma markets title search")
+        for derived_event_slug in self._derive_portfolio_event_slugs(title):
+            try:
+                events = await self._search_gamma_events_by_slug(derived_event_slug)
+                if not events:
+                    continue
+                event = events[0]
+                market = self._find_event_market_by_title(event, title)
+                if market:
+                    logger.info(
+                        "Enriched '%s' via derived event slug %s",
+                        title,
+                        derived_event_slug,
+                    )
                     return {
                         "conditionId": market.get("conditionId"),
                         "marketSlug": market.get("slug"),
                         "eventSlug": event.get("slug"),
                     }
+            except Exception as e:
+                logger.warning(f"Could not resolve derived event slug {derived_event_slug}: {e}")
+
+        for derived_market_slug in self._derive_portfolio_market_slugs(title):
+            try:
+                markets = await self._search_gamma_markets_by_slug(derived_market_slug)
+                if not markets:
+                    continue
+                market = self._find_market_by_title(markets, title)
+                if market:
+                    event = (market.get("events") or [None])[0]
+                    if event:
+                        logger.info(
+                            "Enriched '%s' via derived market slug %s",
+                            title,
+                            derived_market_slug,
+                        )
+                        return {
+                            "conditionId": market.get("conditionId"),
+                            "marketSlug": market.get("slug"),
+                            "eventSlug": event.get("slug"),
+                        }
+            except Exception as e:
+                logger.warning(f"Could not resolve derived market slug {derived_market_slug}: {e}")
+
+        # Strategy 1: search Gamma markets API by title.
+        try:
+            markets = await self._search_gamma_markets_by_title(title)
+            if markets:
+                market = self._find_market_by_title(markets, title)
+                if not market:
+                    logger.warning(f"Gamma API did not return exact match for title: {title}")
+                else:
+                    event = (market.get("events") or [None])[0]
+                    if event:
+                        logger.info(f"Enriched '{title}' via Gamma markets title search")
+                        return {
+                            "conditionId": market.get("conditionId"),
+                            "marketSlug": market.get("slug"),
+                            "eventSlug": event.get("slug"),
+                        }
         except Exception as e:
             logger.warning(f"Gamma markets title search failed for '{title}': {e}")
 
@@ -408,12 +575,7 @@ class PolymtradeExecutor:
                     (e for e in events if e.get("title") == title),
                     events[0],
                 )
-                market = next(
-                    (m for m in event.get("markets", []) if m.get("question") == title),
-                    None,
-                )
-                if not market and event.get("markets"):
-                    market = event["markets"][0]
+                market = self._find_event_market_by_title(event, title)
                 if market:
                     logger.info(f"Enriched '{title}' via Gamma events title search")
                     return {
@@ -424,63 +586,67 @@ class PolymtradeExecutor:
         except Exception as e:
             logger.warning(f"Gamma events title search failed for '{title}': {e}")
 
-        # Strategy 3 (last resort): click the portfolio card to reveal eventSlug.
-        # This is kept for backwards compatibility but should rarely be needed now.
-        if self.page and "/portfolio" in self.page.url:
-            for attempt in range(2):
-                try:
-                    clicked = await self.page.eval_on_selector_all(
-                        "li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer",
-                        """(lis, title) => {
-                            const li = Array.from(lis).find(l => (l.innerText || "").includes(title));
-                            if (li) { li.click(); return true; }
-                            return false;
-                        }""",
-                        title,
-                    )
-                    if not clicked:
-                        logger.warning(f"Could not find portfolio card to click for: {title}")
-                        return {}
-
-                    await asyncio.sleep(1.5)
-                    url = self.page.url
-                    parsed = urllib.parse.urlparse(url)
-                    qs = urllib.parse.parse_qs(parsed.query)
-                    revealed_slug = qs.get("eventSlug", [None])[0]
-                    if revealed_slug:
-                        events = await self._search_gamma_events_by_title(revealed_slug)
-                        if events:
-                            event = events[0]
-                            market = next(
-                                (m for m in event.get("markets", []) if m.get("question") == title),
-                                None,
-                            )
-                            if not market and event.get("markets"):
-                                market = event["markets"][0]
-                            if market:
-                                return {
-                                    "conditionId": market.get("conditionId"),
-                                    "marketSlug": market.get("slug"),
-                                    "eventSlug": event.get("slug"),
-                                }
-                    if attempt == 0:
-                        await asyncio.sleep(1.0)
-                        continue
-                    logger.warning(f"Portfolio click did not reveal usable eventSlug for: {title}, url={url}")
-                    return {}
-                except Exception as e:
-                    if attempt == 0:
-                        logger.warning(f"Card click enrichment failed for '{title}' (attempt 1): {e}; retrying")
-                        await asyncio.sleep(1.0)
-                        continue
-                    logger.warning(
-                        f"Failed to enrich position {title}: {type(e).__name__}: {e}",
-                        exc_info=True,
-                    )
-                    return {}
-
-        logger.warning(f"Could not enrich position '{title}': no slug found and card click not available")
+        logger.warning(f"Could not enrich position '{title}': exact metadata not found")
         return {}
+
+    @staticmethod
+    def _normalize_market_question(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        import unicodedata
+
+        text = unicodedata.normalize("NFKD", str(value))
+        text = "".join(char for char in text if not unicodedata.combining(char))
+        text = text.lower().replace("&", " and ")
+        text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _find_event_market_by_title(self, event: dict, title: Optional[str]) -> Optional[dict]:
+        """Return an event market only when its question matches the portfolio title.
+
+        Portfolio list hrefs can point at the current carousel event rather than
+        the individual position. Falling back to the first market in that event
+        contaminates every scraped position with the same conditionId/slug and
+        breaks SELL live-position matching.
+        """
+        target = self._normalize_market_question(title)
+        if not target:
+            return None
+        for market in event.get("markets") or []:
+            if self._normalize_market_question(market.get("question")) == target:
+                return market
+        return None
+
+    def _find_market_by_title(self, markets: list, title: Optional[str]) -> Optional[dict]:
+        target = self._normalize_market_question(title)
+        if not target:
+            return None
+        for market in markets or []:
+            if self._normalize_market_question(market.get("question")) == target:
+                return market
+        return None
+
+    @staticmethod
+    def _derive_portfolio_event_slugs(title: Optional[str]) -> list[str]:
+        if not title:
+            return []
+        normalized = PolymtradeExecutor._normalize_market_question(title)
+        group_match = re.search(
+            r"^will .+ win group ([a-z]) in the 2026 fifa world cup$",
+            normalized,
+        )
+        if group_match:
+            return [f"world-cup-group-{group_match.group(1)}-winner"]
+        return []
+
+    @staticmethod
+    def _derive_portfolio_market_slugs(title: Optional[str]) -> list[str]:
+        if not title:
+            return []
+        normalized = PolymtradeExecutor._normalize_market_question(title)
+        if not normalized:
+            return []
+        return [normalized.replace(" ", "-")]
 
     async def debug_inputs(self) -> dict:
         """Return all input/textarea elements on the current page."""
@@ -708,6 +874,22 @@ class PolymtradeExecutor:
                 max_retries=max_retries,
             )
 
+    async def _search_gamma_markets_by_slug(
+        self,
+        slug: str,
+        max_retries: int = 3,
+    ) -> list:
+        """Search Gamma markets API by exact market slug."""
+        proxy_url = self.proxy
+        transport = httpx.AsyncHTTPTransport(proxy=proxy_url) if proxy_url else None
+        async with httpx.AsyncClient(transport=transport, timeout=20.0) as client:
+            return await self._gamma_request_with_retry(
+                client,
+                "https://gamma-api.polymarket.com/markets",
+                {"slug": slug, "limit": "10"},
+                max_retries=max_retries,
+            )
+
     async def _search_gamma_events_by_title(
         self,
         title: str,
@@ -721,6 +903,22 @@ class PolymtradeExecutor:
                 client,
                 "https://gamma-api.polymarket.com/events",
                 {"title": title, "limit": "10"},
+                max_retries=max_retries,
+            )
+
+    async def _search_gamma_events_by_slug(
+        self,
+        slug: str,
+        max_retries: int = 3,
+    ) -> list:
+        """Search Gamma events API by event slug."""
+        proxy_url = self.proxy
+        transport = httpx.AsyncHTTPTransport(proxy=proxy_url) if proxy_url else None
+        async with httpx.AsyncClient(transport=transport, timeout=20.0) as client:
+            return await self._gamma_request_with_retry(
+                client,
+                "https://gamma-api.polymarket.com/events",
+                {"slug": slug, "limit": "10"},
                 max_retries=max_retries,
             )
 
@@ -908,30 +1106,42 @@ class PolymtradeExecutor:
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                has_content = await self.page.evaluate(
+                has_content = await self._evaluate_with_navigation_retry(
                     """(args) => {
                         const keywords = args[0];
-                        const sideLabels = ['是', '否', 'Yes', 'No', 'Buy Yes', 'Buy No', 'Long', 'Short'];
+                        const sideLabels = ['是', '否', 'Yes', 'No', 'Buy Yes', 'Buy No', 'Long', 'Short', '买入', '卖出', 'Buy', 'Sell'];
                         const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
                         const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
                         const bodyText = (document.body?.innerText || '').trim();
                         const hasMarkets = document.querySelectorAll('.market, [class*="market"], [class*="outcome"], li, [role="listitem"]').length > 0;
-                        const hasSideButtons = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"]')).some(el => {
+                        const isTradeAction = (el) => {
                             const t = norm(textOf(el));
-                            if (t.length > 40) return false;
+                            if (t.length > 80) return false;
                             return sideLabels.some(l => {
                                 const lnorm = l.toLowerCase();
                                 return t === lnorm || t.startsWith(lnorm + " ") || t.endsWith(" " + lnorm) || t.includes(" " + lnorm + " ");
                             });
-                        });
+                        };
+                        const hasSideButtons = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"]')).some(isTradeAction);
                         if (keywords.length > 0) {
-                            const lower = bodyText.toLowerCase();
-                            const hasKeyword = keywords.some(kw => lower.includes(kw.toLowerCase()));
+                            const bodyLower = norm(bodyText);
+                            const hasKeyword = keywords.some(kw => bodyLower.includes(kw.toLowerCase()));
+                            const rows = Array.from(document.querySelectorAll('article, section, li, [role="listitem"], [class*="market"], [class*="outcome"], [class*="row"], div'));
+                            const hasTargetTradeRow = rows.some(row => {
+                                const rect = row.getBoundingClientRect();
+                                if (rect.width === 0 || rect.height === 0) return false;
+                                const text = norm(textOf(row));
+                                if (!text || text.length > 1400) return false;
+                                if (!keywords.some(kw => text.includes(kw.toLowerCase()))) return false;
+                                return Array.from(row.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"], .cursor-pointer')).some(isTradeAction);
+                            });
+                            if (hasTargetTradeRow) return true;
                             return hasMarkets && hasKeyword && hasSideButtons;
                         }
                         return (hasMarkets || hasSideButtons) && bodyText.length > 200;
                     }""",
                     [keywords],
+                    label="wait_for_page_ready.evaluate",
                 )
                 if has_content:
                     return True
@@ -983,7 +1193,7 @@ class PolymtradeExecutor:
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                result = await self.page.evaluate(
+                result = await self._evaluate_with_navigation_retry(
                     """(args) => {
                         const [keywords, sideLabels] = args;
                         const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
@@ -993,26 +1203,52 @@ class PolymtradeExecutor:
                         const keywordHits = keywords.filter(kw => bodyText.includes(kw.toLowerCase())).length;
                         const hasKeyword = keywords.length === 0 || keywordHits > 0;
 
-                        const hasSide = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"]')).some(el => {
+                        const tradeLabels = [...sideLabels, '买入', '卖出', 'buy', 'sell', 'Buy', 'Sell'];
+                        const isTradeAction = (el) => {
                             const t = norm(textOf(el));
-                            if (t.length > 40) return false;
-                            return sideLabels.some(l => {
+                            if (t.length > 80) return false;
+                            return tradeLabels.some(l => {
                                 const lnorm = l.toLowerCase();
                                 return t === lnorm || t.startsWith(lnorm + " ") || t.endsWith(" " + lnorm) || t.includes(" " + lnorm + " ");
                             });
-                        });
+                        };
+
+                        const hasSide = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"], .cursor-pointer')).some(isTradeAction);
 
                         const hasOutcome = sideLabels.some(l => bodyText.includes(l.toLowerCase()));
+                        const rows = Array.from(document.querySelectorAll('article, section, li, [role="listitem"], [class*="market"], [class*="outcome"], [class*="row"], div'));
+                        const hasTargetTradeRow = rows.some(row => {
+                            const rect = row.getBoundingClientRect();
+                            if (rect.width === 0 || rect.height === 0) return false;
+                            const text = norm(textOf(row));
+                            if (!text || text.length > 1400) return false;
+                            if (keywords.length && !keywords.some(kw => text.includes(kw.toLowerCase()))) return false;
+                            const actions = Array.from(row.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"], .cursor-pointer'));
+                            return actions.some(isTradeAction);
+                        });
+                        if (hasTargetTradeRow) {
+                            return {
+                                visible: true,
+                                keywordHits,
+                                hasSide,
+                                hasOutcome,
+                                hasTargetTradeRow,
+                                bodyLength: bodyText.length,
+                                url: window.location.href,
+                            };
+                        }
                         return {
                             visible: hasKeyword && hasSide && hasOutcome,
                             keywordHits,
                             hasSide,
                             hasOutcome,
+                            hasTargetTradeRow,
                             bodyLength: bodyText.length,
                             url: window.location.href,
                         };
                     }""",
                     [keywords, side_labels],
+                    label="target_event_visible.evaluate",
                 )
                 if result and result.get("visible"):
                     return True
@@ -1025,8 +1261,15 @@ class PolymtradeExecutor:
         """Return True if a trade amount input is visible."""
         selectors = [
             "input[name='buyAmount']",
+            "input[name*='amount' i]",
+            "input[id*='amount' i]",
+            "input[data-test*='amount' i]",
+            "input[data-testid*='amount' i]",
             "input[inputmode='decimal']",
             "input[type='number']",
+            "input[type='text']",
+            "input[role='spinbutton']",
+            "[role='spinbutton']",
             "input[placeholder*='Amount' i]",
             "input[placeholder*='amount' i]",
             "input[placeholder*='USDC' i]",
@@ -1035,14 +1278,40 @@ class PolymtradeExecutor:
             "input[placeholder*='金额' i]",
             "input[class*='amount' i]",
             "input[class*='trade-input' i]",
+            "input[aria-label*='amount' i]",
+            "input[aria-label*='USDC' i]",
+            "input[aria-label*='数量' i]",
+            "input[aria-label*='金额' i]",
+            "textarea[placeholder*='Amount' i]",
+            "textarea[placeholder*='amount' i]",
+            "textarea[placeholder*='金额' i]",
+            "[role='textbox'][aria-label*='amount' i]",
+            "[role='textbox'][aria-label*='USDC' i]",
+            "[role='textbox'][aria-label*='金额' i]",
+            "[contenteditable='true'][aria-label*='amount' i]",
+            "[contenteditable='true'][aria-label*='USDC' i]",
+            "[contenteditable='true'][aria-label*='金额' i]",
+            "[contenteditable='plaintext-only'][aria-label*='amount' i]",
+            "[contenteditable='plaintext-only'][aria-label*='USDC' i]",
+            "[contenteditable='plaintext-only'][aria-label*='金额' i]",
         ]
         deadline = time.time() + timeout
         while time.time() < deadline:
+            try:
+                input_el = await self._find_trade_input(prefer_sell=False)
+                if input_el and await input_el.is_visible():
+                    return True
+            except Exception:
+                pass
             for selector in selectors:
                 try:
                     el = await self.page.wait_for_selector(selector, timeout=500)
                     if el and await el.is_visible():
-                        return True
+                        in_trade_form = await el.evaluate(
+                            "el => !!el.closest('[role=\"dialog\"], .trade-dialog, [class*=\"trade\"], [class*=\"modal\"], [data-test*=\"trade\" i], [data-testid*=\"trade\" i]')"
+                        )
+                        if in_trade_form:
+                            return True
                 except Exception:
                     continue
             await asyncio.sleep(0.2)
@@ -1073,20 +1342,102 @@ class PolymtradeExecutor:
             await asyncio.sleep(0.2)
         return False
 
-    async def _goto_with_retry(self, url: str, max_retries: int = 3) -> None:
+    @staticmethod
+    def _is_transient_goto_error(error: Exception) -> bool:
+        text = str(error).lower()
+        return (
+            "err_aborted" in text
+            or "net::" in text
+            or "err_connection" in text
+            or "interrupted by another navigation" in text
+            or ("timeout" in text and "goto" in text)
+        )
+
+    def _navigation_target_reached(self, url: str) -> bool:
+        """Return True if the current page URL already represents the target."""
+        try:
+            current_url = self.page.url if self.page else ""
+        except Exception:
+            return False
+        if not current_url:
+            return False
+        try:
+            target = urllib.parse.urlparse(url)
+            current = urllib.parse.urlparse(current_url)
+            if target.netloc and current.netloc and target.netloc != current.netloc:
+                return False
+            target_qs = urllib.parse.parse_qs(target.query)
+            current_qs = urllib.parse.parse_qs(current.query)
+            for key in ("eventId", "eventSlug", "eventSource"):
+                target_value = (target_qs.get(key) or [None])[0]
+                if target_value and target_value != (current_qs.get(key) or [None])[0]:
+                    return False
+            target_path = target.path.rstrip("/")
+            current_path = current.path.rstrip("/")
+            if target_path and target_path != "/" and current_path != target_path:
+                return False
+            return True
+        except Exception:
+            return current_url.startswith(url)
+
+    async def _goto_with_retry(
+        self,
+        url: str,
+        max_retries: int = 4,
+        *,
+        wait_until: str = "domcontentloaded",
+        timeout_ms: int = 45000,
+        fallback_wait_until: str = "commit",
+    ) -> None:
         """Navigate to a URL, retrying on transient network/navigation errors."""
+        last_error = None
         for attempt in range(max_retries):
             try:
-                await self.page.goto(url, wait_until="load", timeout=60000)
+                await self.page.goto(url, wait_until=wait_until, timeout=timeout_ms)
                 return
             except Exception as e:
-                err = str(e)
-                if "ERR_ABORTED" in err or "net::" in err:
-                    logger.warning(f"Navigation aborted (attempt {attempt + 1}/{max_retries}): {err}")
+                last_error = e
+                if self._is_transient_goto_error(e):
+                    if self._navigation_target_reached(url):
+                        logger.warning(
+                            f"Navigation reported transient error but target URL is reached; continuing: {e}"
+                        )
+                        return
+                    logger.warning(f"Navigation transient failure (attempt {attempt + 1}/{max_retries}): {e}")
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(1.0 + attempt)
+                        await asyncio.sleep(min(1.0 + attempt * 1.5, 5.0))
                         continue
+                    break
                 raise
+
+        if fallback_wait_until and fallback_wait_until != wait_until:
+            try:
+                logger.warning(
+                    f"Navigation failed after {max_retries} {wait_until} attempts; "
+                    f"trying {fallback_wait_until} fallback for {url}: {last_error}"
+                )
+                await self.page.goto(
+                    url,
+                    wait_until=fallback_wait_until,
+                    timeout=min(timeout_ms, 20000),
+                )
+                try:
+                    await self.page.wait_for_load_state(wait_until, timeout=10000)
+                except Exception as settle_error:
+                    logger.warning(
+                        f"Navigation reached {fallback_wait_until} but did not settle to "
+                        f"{wait_until}: {settle_error}"
+                    )
+                return
+            except Exception as fallback_error:
+                last_error = fallback_error
+                if self._is_transient_goto_error(fallback_error) and self._navigation_target_reached(url):
+                    logger.warning(
+                        f"Fallback navigation reported transient error but target URL is reached; "
+                        f"continuing: {fallback_error}"
+                    )
+                    return
+        raise RuntimeError(f"Navigation failed after {max_retries} attempts for {url}: {last_error}") from last_error
 
     async def _execute_buy(
         self,
@@ -1235,7 +1586,13 @@ class PolymtradeExecutor:
                 )
             if not outcome_selected:
                 raise RuntimeError("Could not select outcome after retries")
-            logger.warning("Buy dialog still not detected; will attempt to enter amount anyway")
+            try:
+                screenshot_path = "/tmp/trade_buy_dialog_open_error.png"
+                await self.page.screenshot(path=screenshot_path)
+                logger.warning(f"Buy dialog open error screenshot saved: {screenshot_path}")
+            except Exception:
+                pass
+            raise RuntimeError("Could not open buy dialog after outcome click")
 
         # Final safety check before entering the amount.
         if await self._is_network_modal_open():
@@ -1356,7 +1713,13 @@ class PolymtradeExecutor:
                     "Network/deposit modal keeps blocking the SELL. "
                     "The Bridge account may need a network selection or deposit."
                 )
-            logger.warning("Sell dialog still not detected; will attempt to enter shares anyway")
+            try:
+                screenshot_path = "/tmp/trade_sell_dialog_open_error.png"
+                await self.page.screenshot(path=screenshot_path)
+                logger.warning(f"Sell dialog open error screenshot saved: {screenshot_path}")
+            except Exception:
+                pass
+            raise RuntimeError("Could not open sell dialog after sell button click")
 
         # Final safety check before entering the amount.
         if await self._is_network_modal_open():
@@ -1450,6 +1813,7 @@ class PolymtradeExecutor:
             "esp": (["spain"], ["西班牙"]),
             "fra": (["france"], ["法国"]),
             "ger": (["germany"], ["德国"]),
+            "hai": (["haiti"], ["海地"]),
             "hti": (["haiti"], ["海地"]),
             "irn": (["iran"], ["伊朗"]),
             "ita": (["italy"], ["意大利"]),
@@ -1507,11 +1871,15 @@ class PolymtradeExecutor:
             "she", "we", "they", "my", "your", "his", "her", "our", "their",
             "score", "win", "lose", "reach", "final", "market", "event", "more",
             "than", "points", "matchup", "game", "winner", "top", "can", "qat",
-            "draw", "world", "cup", "fifa", "2026", "nation", "national", "group",
+            "draw", "world", "cup", "fifa", "fifwc", "2026", "nation", "national", "group",
             # Generic political terms that appear in many unrelated market titles.
             "presidential", "president", "election", "elections", "candidate",
             "candidates", "vote", "voting", "primary", "primaries", "general",
             "runoff", "ballot", "poll", "campaign", "debate", "nomination",
+            # Esports/event-level words that should not anchor team rows.
+            "team", "esports", "iem", "cologne", "major", "counter", "strike",
+            "cs2", "bo3", "playoffs", "map", "handicap", "game1", "away",
+            "home", "1pt5", "vit", "fal2", "ts7",
         }
 
         raw = " ".join(part for part in [market_title, market_slug] if part)
@@ -1526,6 +1894,13 @@ class PolymtradeExecutor:
         tokens = re.split(r"[^a-z0-9]+", raw)
         keywords = []
         seen = set()
+        title_country_hits = set()
+        if market_title:
+            title_norm_for_codes = unicodedata.normalize("NFKD", market_title).lower()
+            title_norm_for_codes = "".join(c for c in title_norm_for_codes if not unicodedata.combining(c))
+            for en in country_aliases:
+                if en in title_norm_for_codes:
+                    title_country_hits.add(en)
 
         def add(k: str):
             k = k.strip()
@@ -1541,13 +1916,16 @@ class PolymtradeExecutor:
                 continue
             # 3-letter country code -> expand to full country name + Chinese
             if t in code_aliases:
+                if title_country_hits and not any(en in title_country_hits for en in code_aliases[t][0]):
+                    continue
                 for en in code_aliases[t][0]:
                     add(en)
                 for zh in code_aliases[t][1]:
                     add(zh)
                 continue
-            # Drop generic 2-letter tokens (unless it is "usa")
-            if len(t) == 2 and not t.isdigit() and t != "us":
+            # Drop generic 2-letter alphabetic tokens, but keep esports/team
+            # names like "g2" that carry a digit and are meaningful outcomes.
+            if len(t) == 2 and t.isalpha() and t != "us":
                 continue
             add(t)
             if t in country_aliases:
@@ -1849,20 +2227,37 @@ class PolymtradeExecutor:
             side_labels = ["是", "Yes", outcome]
 
         keywords = self._extract_market_keywords(market_slug, market_title)
+        if outcome_norm not in ("yes", "是", "true", "no", "否", "false"):
+            outcome_keywords = self._extract_market_keywords(None, outcome)
+            merged_keywords = []
+            seen_keywords = set()
+            for keyword in [*outcome_keywords, *keywords]:
+                if keyword not in seen_keywords:
+                    seen_keywords.add(keyword)
+                    merged_keywords.append(keyword)
+            keywords = merged_keywords
         last_result = None
 
         for attempt in range(max_attempts):
             # Lazy rows may need a moment; scroll the page to trigger rendering.
             try:
-                await self.page.evaluate("() => { window.scrollTo(0, 0); }")
+                await self._evaluate_with_navigation_retry(
+                    "() => { window.scrollTo(0, 0); }",
+                    label="select_outcome.scroll_top",
+                )
                 await asyncio.sleep(0.2)
-                await self.page.evaluate("() => { window.scrollTo(0, document.body.scrollHeight); }")
+                await self._evaluate_with_navigation_retry(
+                    "() => { window.scrollTo(0, document.body.scrollHeight); }",
+                    label="select_outcome.scroll_bottom",
+                )
                 await asyncio.sleep(0.2)
             except Exception:
                 pass
 
-            result = await self.page.evaluate(
-                self._select_outcome_script(), [outcome, side_labels, keywords]
+            result = await self._evaluate_with_navigation_retry(
+                self._select_outcome_script(),
+                [outcome, side_labels, keywords],
+                label="select_outcome.evaluate",
             )
             last_result = result
 
@@ -2319,6 +2714,59 @@ class PolymtradeExecutor:
 
     async def _fill_input_safely(self, input_el, value: str):
         """Focus, clear and fill a Playwright input element robustly."""
+        tag_name = ""
+        is_custom_editable = False
+        try:
+            await input_el.scroll_into_view_if_needed()
+            await input_el.click(timeout=3000)
+            tag_name = await input_el.evaluate("el => el.tagName")
+            is_text_editable = await input_el.evaluate(
+                "el => el.isContentEditable || el.getAttribute('role') === 'textbox'"
+            )
+            is_custom_editable = await input_el.evaluate(
+                "el => el.isContentEditable || ['textbox', 'spinbutton'].includes(el.getAttribute('role'))"
+            )
+            if tag_name not in ("INPUT", "TEXTAREA") and is_text_editable:
+                await input_el.evaluate(
+                    """el => {
+                        if (el.isContentEditable) {
+                            el.textContent = '';
+                            el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContent'}));
+                        }
+                    }"""
+                )
+                await input_el.press("Control+a")
+                await input_el.press("Backspace")
+                await input_el.type(value, timeout=3000)
+                return True
+        except Exception as e:
+            logger.debug(f"editable type failed: {e}")
+        try:
+            tag_name = await input_el.evaluate("el => el.tagName")
+            if tag_name not in ("INPUT", "TEXTAREA") and is_custom_editable:
+                await input_el.scroll_into_view_if_needed()
+                await input_el.click(timeout=3000)
+                await input_el.press("Control+a")
+                await input_el.press("Backspace")
+                await input_el.type(value, timeout=3000)
+                typed_value = await input_el.evaluate(
+                    "el => (el.value || el.textContent || el.getAttribute('aria-valuenow') || '').trim()"
+                )
+                if value in typed_value:
+                    return True
+                await input_el.evaluate(
+                    """(el, value) => {
+                        el.textContent = value;
+                        el.setAttribute('aria-valuenow', value);
+                        el.setAttribute('data-bridge-filled-value', value);
+                        el.dispatchEvent(new InputEvent('input', {bubbles: true, data: value, inputType: 'insertText'}));
+                        el.dispatchEvent(new Event('change', {bubbles: true}));
+                    }""",
+                    value,
+                )
+                return True
+        except Exception as e:
+            logger.debug(f"custom editable fill failed: {e}")
         try:
             await input_el.scroll_into_view_if_needed()
             await input_el.click(timeout=3000)
@@ -2340,8 +2788,15 @@ class PolymtradeExecutor:
         """Enter the trade amount in the buy dialog with retries and fallbacks."""
         selectors = [
             "input[name='buyAmount']",
+            "input[name*='amount' i]",
+            "input[id*='amount' i]",
+            "input[data-test*='amount' i]",
+            "input[data-testid*='amount' i]",
             "input[inputmode='decimal']",
             "input[type='number']",
+            "input[type='text']",
+            "input[role='spinbutton']",
+            "[role='spinbutton']",
             "input[placeholder*='Amount' i]",
             "input[placeholder*='amount' i]",
             "input[placeholder*='USDC' i]",
@@ -2352,9 +2807,22 @@ class PolymtradeExecutor:
             "input[class*='amount' i]",
             "input[class*='trade-input' i]",
             "input[aria-label*='amount' i]",
+            "input[aria-label*='USDC' i]",
             "input[aria-label*='数量' i]",
             "input[aria-label*='金额' i]",
             "[data-test='trade-amount-input']",
+            "textarea[placeholder*='Amount' i]",
+            "textarea[placeholder*='amount' i]",
+            "textarea[placeholder*='金额' i]",
+            "[role='textbox'][aria-label*='amount' i]",
+            "[role='textbox'][aria-label*='USDC' i]",
+            "[role='textbox'][aria-label*='金额' i]",
+            "[contenteditable='true'][aria-label*='amount' i]",
+            "[contenteditable='true'][aria-label*='USDC' i]",
+            "[contenteditable='true'][aria-label*='金额' i]",
+            "[contenteditable='plaintext-only'][aria-label*='amount' i]",
+            "[contenteditable='plaintext-only'][aria-label*='USDC' i]",
+            "[contenteditable='plaintext-only'][aria-label*='金额' i]",
         ]
         deadline = time.time() + 18.0
         last_error = None
@@ -2391,7 +2859,12 @@ class PolymtradeExecutor:
                 input_el = await self.page.wait_for_selector(
                     "[role='dialog'] input[inputmode='decimal'], "
                     "[role='dialog'] input[type='number'], "
+                    "[role='dialog'] input[type='text'], "
+                    "[role='dialog'] input[role='spinbutton'], "
+                    "[role='dialog'] [role='spinbutton'], "
                     ".trade-dialog input, "
+                    "[class*='trade'] input[type='text'], "
+                    "[class*='trade'] [role='spinbutton'], "
                     "[class*='dialog'] input[inputmode='decimal']",
                     timeout=1500
                 )
@@ -2405,14 +2878,79 @@ class PolymtradeExecutor:
 
             await asyncio.sleep(0.5)
 
-        # Screenshot the dialog to help diagnose why the input could not be found.
+        # Screenshot and DOM candidate snapshot help diagnose why the input
+        # could not be found on the next loop iteration.
         try:
             screenshot_path = "/tmp/trade_amount_input_error.png"
             await self.page.screenshot(path=screenshot_path)
             logger.warning(f"Amount input error screenshot saved: {screenshot_path}")
         except Exception:
             pass
+        await self._capture_trade_input_diagnostics(
+            "/tmp/trade_amount_input_candidates.json",
+            prefer_sell=False,
+        )
         raise RuntimeError(f"Could not enter trade amount: {last_error}")
+
+    async def _capture_trade_input_diagnostics(self, path: str, prefer_sell: bool = False) -> None:
+        """Write a compact DOM snapshot of possible trade inputs for debugging."""
+        try:
+            payload = await self.page.evaluate(
+                """
+                (preferSell) => {
+                    const textOf = (el) => (el ? (el.innerText || el.textContent || '').trim() : '');
+                    const isVisible = (el) => {
+                        const rect = el.getBoundingClientRect();
+                        const style = window.getComputedStyle(el);
+                        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                    };
+                    const selector = [
+                        "input",
+                        "textarea",
+                        "[role='textbox']",
+                        "[role='spinbutton']",
+                        "[contenteditable='true']",
+                        "[contenteditable='plaintext-only']",
+                        "[contenteditable]:not([contenteditable='false'])"
+                    ].join(',');
+                    return Array.from(document.querySelectorAll(selector)).slice(0, 80).map((el) => {
+                        const rect = el.getBoundingClientRect();
+                        let ancestor = el;
+                        const ancestors = [];
+                        for (let i = 0; i < 5 && ancestor; i++, ancestor = ancestor.parentElement) {
+                            ancestors.push({
+                                tag: ancestor.tagName,
+                                role: ancestor.getAttribute('role'),
+                                className: ancestor.getAttribute('class'),
+                                text: textOf(ancestor).slice(0, 160),
+                            });
+                        }
+                        return {
+                            tag: el.tagName,
+                            type: el.getAttribute('type'),
+                            role: el.getAttribute('role'),
+                            name: el.getAttribute('name'),
+                            id: el.getAttribute('id'),
+                            className: el.getAttribute('class'),
+                            placeholder: el.getAttribute('placeholder'),
+                            ariaLabel: el.getAttribute('aria-label'),
+                            dataTest: el.getAttribute('data-test') || el.getAttribute('data-testid'),
+                            value: el.value || el.getAttribute('aria-valuenow') || textOf(el).slice(0, 120),
+                            visible: isVisible(el),
+                            disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+                            rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+                            ancestors,
+                        };
+                    });
+                }
+                """,
+                prefer_sell,
+            )
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            logger.warning(f"Trade input diagnostics saved: {path}")
+        except Exception as e:
+            logger.debug(f"Failed to capture trade input diagnostics: {e}")
 
     async def _find_trade_input(self, prefer_sell: bool = False):
         """Find the most likely active trade amount/shares input."""
@@ -2437,16 +2975,21 @@ class PolymtradeExecutor:
                 return false;
             };
             const inputs = Array.from(document.querySelectorAll(
-                "input[name='buyAmount'], input[name='soldAmount'], input[inputmode='decimal'], input[inputmode='numeric'], input[type='number'], input[placeholder*='Amount' i], input[placeholder*='USDC' i], input[placeholder*='Shares' i], input[placeholder*='数量' i], input[placeholder*='金额' i]"
+                "input[name='buyAmount'], input[name='soldAmount'], input[name*='amount' i], input[name*='quantity' i], input[name*='shares' i], input[id*='amount' i], input[id*='quantity' i], input[id*='shares' i], input[data-test*='amount' i], input[data-testid*='amount' i], input[data-test*='usdc' i], input[data-testid*='usdc' i], input[inputmode='decimal'], input[inputmode='numeric'], input[type='number'], input[type='text'], input[role='spinbutton'], input[placeholder*='Amount' i], input[placeholder*='amount' i], input[placeholder*='USDC' i], input[placeholder*='Shares' i], input[placeholder*='数量' i], input[placeholder*='金额' i], input[aria-label*='Amount' i], input[aria-label*='amount' i], input[aria-label*='USDC' i], input[aria-label*='Shares' i], input[aria-label*='数量' i], input[aria-label*='金额' i], textarea[placeholder*='Amount' i], textarea[placeholder*='amount' i], textarea[placeholder*='金额' i], textarea[aria-label*='金额' i], [role='textbox'], [role='spinbutton'], [contenteditable='true'], [contenteditable='plaintext-only'], [contenteditable]:not([contenteditable='false'])"
             ));
             const scored = [];
             for (const input of inputs) {
                 if (!isVisible(input) || input.disabled || input.readOnly || isNoise(input)) continue;
+                if (input.hasAttribute('contenteditable') && input.getAttribute('contenteditable') === 'false') continue;
                 const attrs = [
                     input.name || '',
+                    input.id || '',
                     input.placeholder || '',
                     input.getAttribute('aria-label') || '',
+                    input.getAttribute('data-test') || '',
+                    input.getAttribute('data-testid') || '',
                     input.getAttribute('class') || '',
+                    input.getAttribute('role') || '',
                 ].join(' ').toLowerCase();
                 if (/search|filter|邮箱|email|address|wallet/.test(attrs)) continue;
                 let score = 0;
@@ -2459,7 +3002,7 @@ class PolymtradeExecutor:
                     if (cls.includes('trade') || cls.includes('order') || cls.includes('amount')) score += 4;
                     if (/买入|buy|卖出|sell|amount|shares|份|数量|金额|usdc|pusd/.test(text)) score += 3;
                     if (preferSell && /卖出|sell|shares|份|sold/.test(text + ' ' + attrs)) score += 5;
-                    if (!preferSell && /买入|buy|amount|usdc|pusd/.test(text + ' ' + attrs)) score += 5;
+                    if (!preferSell && /买入|buy|amount|usdc|pusd|金额|数量/.test(text + ' ' + attrs)) score += 5;
                     if (/搜索市场|search market|你的推荐链接|solana钱包地址/.test(text)) score -= 10;
                 }
                 scored.push({input, score});
@@ -2469,7 +3012,11 @@ class PolymtradeExecutor:
             return scored[0].input;
         }
         """
-        handle = await self.page.evaluate_handle(js, prefer_sell)
+        handle = await self._evaluate_handle_with_navigation_retry(
+            js,
+            prefer_sell,
+            label="find_trade_input.evaluate_handle",
+        )
         if not handle:
             return None
         return handle.as_element()
@@ -2522,15 +3069,28 @@ class PolymtradeExecutor:
             "[role='dialog'] button:has-text('Review')",
             "[role='dialog'] button:has-text('Place')",
         ]
-        for selector in selectors:
-            try:
-                await self.page.click(selector, timeout=3000)
-                logger.info("Clicked buy button")
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            for selector in selectors:
+                try:
+                    await self.page.click(selector, timeout=750)
+                    logger.info("Clicked buy button")
+                    return
+                except Exception:
+                    continue
+            if await self._click_trade_submit_button("BUY"):
                 return
-            except Exception:
-                continue
-        if await self._click_trade_submit_button("BUY"):
-            return
+            await asyncio.sleep(0.35)
+        try:
+            screenshot_path = "/tmp/trade_buy_submit_button_error.png"
+            await self.page.screenshot(path=screenshot_path)
+            logger.warning(f"Buy submit button error screenshot saved: {screenshot_path}")
+        except Exception:
+            pass
+        await self._capture_trade_submit_diagnostics(
+            "/tmp/trade_buy_submit_button_candidates.json",
+            "BUY",
+        )
         raise RuntimeError("Could not click buy button")
 
     async def _open_sell_dialog(
@@ -2740,13 +3300,29 @@ class PolymtradeExecutor:
             return {clicked: false, keywords, sellButtons: allSellBtns.length};
         }
         """
-        result = await self.page.evaluate(js, [outcome, side_labels, keywords])
+        result = await self._evaluate_with_navigation_retry(
+            js,
+            [outcome, side_labels, keywords],
+            label="open_sell_dialog.evaluate",
+        )
         if not result or not result.get("clicked"):
             raise RuntimeError(f"Could not open sell dialog for outcome: {outcome} (keywords={keywords}, sellButtons={result.get('sellButtons') if result else None})")
         logger.info(f"Opened sell dialog for outcome: {outcome} -> {result.get('label')} (score={result.get('score')})")
 
     async def _click_sell_button(self):
         """Click the sell button in the sell dialog."""
+        if not await self._is_sell_dialog_open(timeout=0.75):
+            try:
+                screenshot_path = "/tmp/trade_sell_submit_context_missing.png"
+                await self.page.screenshot(path=screenshot_path)
+                logger.warning(f"Sell submit context missing screenshot saved: {screenshot_path}")
+            except Exception:
+                pass
+            await self._capture_trade_submit_diagnostics(
+                "/tmp/trade_sell_submit_button_candidates.json",
+                "SELL",
+            )
+            raise RuntimeError("Sell dialog disappeared before submit")
         selectors = [
             "button#sellbtn",
             "[role='dialog'] button:has-text('确认卖出')",
@@ -2756,15 +3332,28 @@ class PolymtradeExecutor:
             "[role='dialog'] button:has-text('Review')",
             "[role='dialog'] button:has-text('Place')",
         ]
-        for selector in selectors:
-            try:
-                await self.page.click(selector, timeout=3000)
-                logger.info("Clicked sell button")
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            for selector in selectors:
+                try:
+                    await self.page.click(selector, timeout=750)
+                    logger.info("Clicked sell button")
+                    return
+                except Exception:
+                    continue
+            if await self._click_trade_submit_button("SELL"):
                 return
-            except Exception:
-                continue
-        if await self._click_trade_submit_button("SELL"):
-            return
+            await asyncio.sleep(0.35)
+        try:
+            screenshot_path = "/tmp/trade_sell_submit_button_error.png"
+            await self.page.screenshot(path=screenshot_path)
+            logger.warning(f"Sell submit button error screenshot saved: {screenshot_path}")
+        except Exception:
+            pass
+        await self._capture_trade_submit_diagnostics(
+            "/tmp/trade_sell_submit_button_candidates.json",
+            "SELL",
+        )
         raise RuntimeError("Could not click sell button")
 
     async def _click_trade_submit_button(self, side: str) -> bool:
@@ -2772,7 +3361,21 @@ class PolymtradeExecutor:
         js = """
         (side) => {
             const sideLower = side.toLowerCase();
-            const textOf = (el) => (el ? (el.innerText || el.textContent || '').trim() : '');
+            const textOf = (el) => {
+                if (!el) return '';
+                const visibleText = (el.innerText || el.textContent || '').trim();
+                const attrs = [
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('title') || '',
+                    el.getAttribute('value') || '',
+                    el.getAttribute('data-testid') || '',
+                    el.getAttribute('data-test') || '',
+                    el.getAttribute('id') || '',
+                    el.getAttribute('name') || '',
+                    el.getAttribute('type') || '',
+                ].filter(Boolean).join(' ');
+                return (visibleText + ' ' + attrs).trim();
+            };
             const isVisible = (el) => {
                 const rect = el.getBoundingClientRect();
                 const style = window.getComputedStyle(el);
@@ -2780,37 +3383,61 @@ class PolymtradeExecutor:
             };
             const containers = Array.from(document.querySelectorAll('[role="dialog"], form, [class*="dialog"], [class*="modal"], [class*="trade"], [class*="order"]'))
                 .filter(isVisible);
-            if (!containers.length) containers.push(document.body);
+            if (!containers.length) return {clicked: false, bestScore: -1, reason: 'no_trade_container'};
             const positive = sideLower === 'sell'
-                ? ['确认卖出', '卖出', 'sell', 'place sell', 'submit', 'confirm', '确认', '下单', 'review', 'place order']
-                : ['确认买入', '买入', 'buy', 'place buy', 'submit', 'confirm', '确认', '下单', 'review', 'place order'];
-            const negative = ['取消', 'cancel', '关闭', 'close', 'max', '最大', 'full', '100%', '充值', '提现', 'deposit', 'withdraw'];
+                ? ['确认卖出', '卖出', 'sell', 'place sell', 'submit sell', 'submit', 'confirm sell', 'confirm', '确认', '确认订单', '提交订单', '提交', '下单', 'review', 'review order', 'place order']
+                : ['确认买入', '买入', 'buy', 'place buy', 'submit buy', 'submit', 'confirm buy', 'confirm', '确认', '确认订单', '提交订单', '提交', '下单', 'review', 'review order', 'place order'];
+            const negative = ['取消', 'cancel', '关闭', 'close', 'max', '最大', 'full', '100%', '充值', '提现', 'deposit', 'withdraw', 'wallet', '钱包'];
             let best = null;
             let bestScore = -1;
+            let bestText = '';
             for (const container of containers) {
-                const buttons = Array.from(container.querySelectorAll('button, [role="button"], input[type="submit"], div[class*="button"]'));
+                const buttons = Array.from(container.querySelectorAll(
+                    'button, [role="button"], input[type="submit"], input[type="button"], div[class*="button"], [tabindex="0"], .cursor-pointer, [data-testid*="submit" i], [data-test*="submit" i], [data-testid*="sell" i], [data-test*="sell" i], [data-testid*="buy" i], [data-test*="buy" i], [id*="submit" i], [id*="sell" i], [id*="buy" i]'
+                ));
                 for (const btn of buttons) {
-                    if (!isVisible(btn) || btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
+                    const cls = (btn.getAttribute('class') || '').toLowerCase();
+                    if (
+                        !isVisible(btn) ||
+                        btn.disabled ||
+                        btn.getAttribute('aria-disabled') === 'true' ||
+                        btn.getAttribute('data-disabled') === 'true' ||
+                        cls.includes('disabled') ||
+                        window.getComputedStyle(btn).pointerEvents === 'none'
+                    ) continue;
                     const text = textOf(btn).toLowerCase();
-                    if (!text && btn.tagName !== 'INPUT') continue;
                     if (negative.some(word => text.includes(word))) continue;
                     let score = 0;
                     for (const word of positive) {
                         if (text === word.toLowerCase()) score += 10;
                         else if (text.includes(word.toLowerCase())) score += 5;
                     }
+                    const tag = btn.tagName;
+                    const type = (btn.getAttribute('type') || '').toLowerCase();
+                    const idAttrs = [
+                        btn.getAttribute('id') || '',
+                        btn.getAttribute('name') || '',
+                        btn.getAttribute('data-testid') || '',
+                        btn.getAttribute('data-test') || '',
+                    ].join(' ').toLowerCase();
+                    if (tag === 'INPUT' && type === 'submit') score += 5;
+                    if (tag === 'BUTTON' && type === 'submit') score += 5;
+                    if (idAttrs.includes('submit')) score += 4;
+                    if (sideLower === 'sell' && idAttrs.includes('sell')) score += 5;
+                    if (sideLower === 'buy' && idAttrs.includes('buy')) score += 5;
                     if (container.getAttribute('role') === 'dialog') score += 4;
                     if (/(order|trade|dialog|modal)/i.test(container.getAttribute('class') || '')) score += 2;
                     if (score > bestScore) {
                         best = btn;
                         bestScore = score;
+                        bestText = text;
                     }
                 }
             }
             if (!best || bestScore < 4) return {clicked: false, bestScore};
             best.scrollIntoView({block: 'center', inline: 'center'});
             best.click();
-            return {clicked: true, text: textOf(best), bestScore};
+            return {clicked: true, text: bestText || textOf(best), bestScore};
         }
         """
         try:
@@ -2824,6 +3451,70 @@ class PolymtradeExecutor:
         except Exception as e:
             logger.debug(f"Trade submit fallback failed: {e}")
         return False
+
+    async def _capture_trade_submit_diagnostics(self, path: str, side: str) -> None:
+        """Write candidate submit buttons for the current trade context."""
+        try:
+            payload = await self._evaluate_with_navigation_retry(
+                """
+                (side) => {
+                    const textOf = (el) => {
+                        if (!el) return '';
+                        const visibleText = (el.innerText || el.textContent || '').trim();
+                        const attrs = [
+                            el.getAttribute('aria-label') || '',
+                            el.getAttribute('title') || '',
+                            el.getAttribute('value') || '',
+                            el.getAttribute('data-testid') || '',
+                            el.getAttribute('data-test') || '',
+                            el.getAttribute('id') || '',
+                            el.getAttribute('name') || '',
+                            el.getAttribute('type') || '',
+                        ].filter(Boolean).join(' ');
+                        return (visibleText + ' ' + attrs).trim();
+                    };
+                    const isVisible = (el) => {
+                        const rect = el.getBoundingClientRect();
+                        const style = window.getComputedStyle(el);
+                        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                    };
+                    const buttons = Array.from(document.querySelectorAll(
+                        'button, [role="button"], input[type="submit"], input[type="button"], div[class*="button"], [tabindex="0"], .cursor-pointer, [data-testid], [data-test], [id]'
+                    )).slice(0, 100);
+                    return {
+                        side,
+                        url: window.location.href,
+                        hasDialog: !!document.querySelector('[role="dialog"], [class*="dialog"], [class*="modal"]'),
+                        buttons: buttons.map((btn) => {
+                            const rect = btn.getBoundingClientRect();
+                            const container = btn.closest('[role="dialog"], form, [class*="dialog"], [class*="modal"], [class*="trade"], [class*="order"]');
+                            return {
+                                tag: btn.tagName,
+                                text: textOf(btn).slice(0, 160),
+                                id: btn.getAttribute('id'),
+                                className: btn.getAttribute('class'),
+                                role: btn.getAttribute('role'),
+                                type: btn.getAttribute('type'),
+                                ariaDisabled: btn.getAttribute('aria-disabled'),
+                                disabled: !!btn.disabled,
+                                visible: isVisible(btn),
+                                rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+                                containerRole: container ? container.getAttribute('role') : null,
+                                containerClass: container ? container.getAttribute('class') : null,
+                                containerText: container ? (container.innerText || container.textContent || '').trim().slice(0, 240) : null,
+                            };
+                        }),
+                    };
+                }
+                """,
+                side,
+                label="submit_diagnostics.evaluate",
+            )
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            logger.warning(f"Trade submit diagnostics saved: {path}")
+        except Exception as e:
+            logger.debug(f"Failed to capture trade submit diagnostics: {e}")
 
     async def _confirm_trade(self):
         """Wait for trade confirmation.

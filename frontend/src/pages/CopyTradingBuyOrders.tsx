@@ -3,10 +3,10 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { Card, Table, Button, Tag, Select, Input, message, Divider, Spin } from 'antd'
 import { LeftOutlined } from '@ant-design/icons'
 import { apiService } from '../services/api'
-import { formatUSDC } from '../utils'
+import { formatUSDC, getPolymarketUrl } from '../utils'
 import { useMediaQuery } from 'react-responsive'
 import { useTranslation } from 'react-i18next'
-import type { BuyOrderInfo, OrderTrackingRequest, OrderTrackingListResponse } from '../types'
+import type { BuyOrderInfo, OrderTrackingRequest, OrderTrackingListResponse, BridgeTradeRecord, BridgeTradeRecordListResponse } from '../types'
 
 const { Option } = Select
 
@@ -20,6 +20,14 @@ const CopyTradingBuyOrdersPage: React.FC = () => {
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [limit, setLimit] = useState(20)
+
+  // Bridge 买入执行记录（用于无 API 凭证的 Bridge 账户）
+  const [bridgeRecords, setBridgeRecords] = useState<BridgeTradeRecord[]>([])
+  const [bridgeLoading, setBridgeLoading] = useState(false)
+  const [bridgeTotal, setBridgeTotal] = useState(0)
+  const bridgePage = 1
+  const bridgeLimit = 1000
+
   const [filters, setFilters] = useState<{
     marketId?: string
     side?: string
@@ -31,7 +39,132 @@ const CopyTradingBuyOrdersPage: React.FC = () => {
       fetchOrders()
     }
   }, [copyTradingId, page, limit, filters])
-  
+
+  // 加载 Bridge 买入执行记录
+  useEffect(() => {
+    if (copyTradingId) {
+      fetchBridgeRecords()
+    }
+  }, [copyTradingId, bridgePage, bridgeLimit])
+
+  const fetchBridgeRecords = async () => {
+    if (!copyTradingId) return
+
+    setBridgeLoading(true)
+    try {
+      const response = await apiService.bridgeTradeRecords.byCopyTrading({
+        copyTradingId: parseInt(copyTradingId),
+        page: bridgePage,
+        size: bridgeLimit
+      })
+      if (response.data.code === 0 && response.data.data) {
+        const data = response.data.data as BridgeTradeRecordListResponse
+        const buyRecords = (data.list || []).filter(r => r.side === 'BUY' && r.status !== 'FAILED')
+        setBridgeRecords(buyRecords)
+        setBridgeTotal(buyRecords.length)
+      }
+    } catch (error: any) {
+      console.error('获取 Bridge 买入执行记录失败:', error)
+    } finally {
+      setBridgeLoading(false)
+    }
+  }
+
+  const getBridgeStatusColor = (status: string) => {
+    switch (status) {
+      case 'SUCCESS': return 'success'
+      case 'PENDING': return 'processing'
+      case 'FAILED': return 'error'
+      default: return 'default'
+    }
+  }
+
+  const bridgeColumns = [
+    {
+      title: t('copyTradingOrders.market') || '市场',
+      dataIndex: 'marketTitle',
+      key: 'marketTitle',
+      width: isMobile ? 140 : 220,
+      render: (title: string | undefined, record: BridgeTradeRecord) => {
+        const displayTitle = title || record.marketId.slice(0, 16) + '...'
+        const marketUrl = getPolymarketUrl(undefined, undefined, undefined, record.marketId)
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            {marketUrl ? (
+              <a
+                href={marketUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ fontSize: isMobile ? 12 : 13, fontWeight: 500, color: '#1890ff', textDecoration: 'none' }}
+              >
+                {displayTitle}
+              </a>
+            ) : (
+              <span style={{ fontSize: isMobile ? 12 : 13, fontWeight: 500 }}>{displayTitle}</span>
+            )}
+            <span style={{ fontFamily: 'monospace', fontSize: isMobile ? 10 : 11, color: '#999' }}>
+              {record.marketId.slice(0, isMobile ? 6 : 8)}...{record.marketId.slice(-6)}
+            </span>
+          </div>
+        )
+      }
+    },
+    {
+      title: t('copyTradingOrders.side') || '方向',
+      dataIndex: 'side',
+      key: 'side',
+      width: 80,
+      render: (side: string) => <Tag color={side === 'BUY' ? 'green' : 'red'}>{side}</Tag>
+    },
+    {
+      title: t('copyTradingOrders.outcome') || '结果',
+      dataIndex: 'outcome',
+      key: 'outcome',
+      width: 100,
+      render: (outcome: string | undefined, record: BridgeTradeRecord) =>
+        outcome ? `${outcome} #${record.outcomeIndex ?? '-'}` : '-'
+    },
+    {
+      title: t('copyTradingOrders.quantity') || '数量',
+      dataIndex: 'quantity',
+      key: 'quantity',
+      width: 100,
+      align: 'right' as const,
+      render: (quantity: string) => formatUSDC(quantity)
+    },
+    {
+      title: t('copyTradingOrders.price') || '价格',
+      dataIndex: 'price',
+      key: 'price',
+      width: 100,
+      align: 'right' as const,
+      render: (price: string) => `$${formatUSDC(price)}`
+    },
+    {
+      title: t('copyTradingOrders.amount') || '金额',
+      dataIndex: 'amount',
+      key: 'amount',
+      width: 100,
+      align: 'right' as const,
+      render: (amount: string) => `$${formatUSDC(amount)}`
+    },
+    {
+      title: t('copyTradingOrders.status') || '状态',
+      dataIndex: 'status',
+      key: 'status',
+      width: 100,
+      render: (status: string) => <Tag color={getBridgeStatusColor(status)}>{status}</Tag>
+    },
+    {
+      title: t('copyTradingOrders.time') || '时间',
+      dataIndex: 'createdAt',
+      key: 'createdAt',
+      width: 160,
+      render: (timestamp: number | undefined) =>
+        timestamp ? new Date(timestamp).toLocaleString('zh-CN') : '-'
+    }
+  ]
+
   const fetchOrders = async () => {
     if (!copyTradingId) return
     
@@ -364,6 +497,20 @@ const CopyTradingBuyOrdersPage: React.FC = () => {
               }
             }}
           />
+        )}
+
+        {(bridgeTotal > 0 || bridgeLoading) && (
+          <div style={{ marginTop: 32 }}>
+            <Divider orientation="left">{t('copyTradingOrders.bridgeBuyExecutions') || 'Bridge 买入执行记录'}</Divider>
+            <Table
+              columns={bridgeColumns}
+              dataSource={bridgeRecords}
+              rowKey="id"
+              loading={bridgeLoading}
+              pagination={false}
+              scroll={{ x: isMobile ? 800 : undefined }}
+            />
+          </div>
         )}
       </Card>
     </div>

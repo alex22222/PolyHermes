@@ -155,6 +155,41 @@ const BridgeTradeRecordList: React.FC = () => {
   }
 
   /**
+   * 格式化 JSON 请求/响应体，便于展示
+   */
+  const formatBodyPreview = (body?: string): string => {
+    if (!body) return ''
+    try {
+      const str = JSON.stringify(JSON.parse(body))
+      return str.length > 60 ? str.slice(0, 60) + '...' : str
+    } catch {
+      return body.length > 60 ? body.slice(0, 60) + '...' : body
+    }
+  }
+
+  const formatBodyTooltip = (body?: string): string => {
+    if (!body) return ''
+    try {
+      return JSON.stringify(JSON.parse(body), null, 2)
+    } catch {
+      return body
+    }
+  }
+
+  const renderBodyCell = (body: string | undefined) => {
+    if (!body) return '-'
+    const preview = formatBodyPreview(body)
+    const formatted = formatBodyTooltip(body)
+    return (
+      <Tooltip title={<pre style={{ maxHeight: '300px', overflow: 'auto' }}>{formatted}</pre>} placement="topLeft">
+        <Typography.Text style={{ fontFamily: 'monospace', fontSize: '12px', color: '#888', cursor: 'help' }} ellipsis>
+          {preview}
+        </Typography.Text>
+      </Tooltip>
+    )
+  }
+
+  /**
    * 当 marketTitle 为空时，尝试从 rawPayload 解析 title
    */
   const resolveMarketTitle = (record: BridgeTradeRecord): string => {
@@ -379,16 +414,13 @@ const BridgeTradeRecordList: React.FC = () => {
       title: t('bridgeWebhookLog.request') || '请求体',
       dataIndex: 'requestBody',
       key: 'requestBody',
-      render: (body: string | undefined) => {
-        if (!body) return '-'
-        return (
-          <Tooltip title={<pre style={{ maxHeight: '300px', overflow: 'auto' }}>{body}</pre>} placement="topLeft">
-            <Typography.Text style={{ fontFamily: 'monospace', fontSize: '12px', color: '#888', cursor: 'help' }} ellipsis>
-              {body.slice(0, 60)}...
-            </Typography.Text>
-          </Tooltip>
-        )
-      }
+      render: renderBodyCell
+    },
+    {
+      title: t('bridgeWebhookLog.response') || '响应体',
+      dataIndex: 'responseBody',
+      key: 'responseBody',
+      render: renderBodyCell
     },
     {
       title: t('bridgeWebhookLog.createdAt') || '发送时间',
@@ -466,7 +498,7 @@ const BridgeTradeRecordList: React.FC = () => {
         columns={webhookLogColumns}
         rowKey="id"
         loading={webhookLogsLoading}
-        scroll={isMobile ? { x: 1200 } : undefined}
+        scroll={isMobile ? { x: 1400 } : undefined}
         pagination={{
           current: webhookLogsPagination.current,
           pageSize: webhookLogsPagination.pageSize,

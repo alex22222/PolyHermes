@@ -53,10 +53,25 @@ class CopyTradingRuleEngine:
         self.user = os.getenv("COPY_TRADING_DB_USER", "root")
         self.password = os.getenv("COPY_TRADING_DB_PASSWORD", "")
         self.database = os.getenv("COPY_TRADING_DB_NAME", "polyhermes")
-        self.account_id = os.getenv("COPY_TRADING_ACCOUNT_ID")
+        self.account_id = self.normalize_account_id(os.getenv("COPY_TRADING_ACCOUNT_ID"))
         self.refresh_interval = refresh_interval
         self._configs: List[CopyTradingConfig] = []
         self._last_refresh = 0.0
+
+    @staticmethod
+    def normalize_account_id(value) -> Optional[int]:
+        """Return a positive account id, or None when unset/invalid."""
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            account_id = int(text)
+        except (TypeError, ValueError):
+            logger.warning(f"Ignoring invalid COPY_TRADING_ACCOUNT_ID={value!r}")
+            return None
+        return account_id if account_id > 0 else None
 
     def _connect(self):
         return pymysql.connect(
@@ -80,10 +95,24 @@ class CopyTradingRuleEngine:
 
     def set_account_id(self, account_id: Optional[int]):
         """Override the account id used to filter configs and force a reload."""
-        if account_id != self.account_id:
-            logger.info(f"Copy-trading account_id overridden: {self.account_id} -> {account_id}")
-            self.account_id = account_id
+        normalized = self.normalize_account_id(account_id)
+        if normalized != self.account_id:
+            logger.info(f"Copy-trading account_id overridden: {self.account_id} -> {normalized}")
+            self.account_id = normalized
             self._last_refresh = 0.0
+
+    @property
+    def active_account_id(self) -> Optional[int]:
+        if self.account_id is not None:
+            return self.account_id
+        account_ids = {cfg.account_id for cfg in self._configs if cfg.account_id is not None}
+        if len(account_ids) == 1:
+            return next(iter(account_ids))
+        return None
+
+    @property
+    def config_count(self) -> int:
+        return len(self._configs)
 
     def resolve_account_id_by_wallet(self, wallet_address: str) -> Optional[int]:
         """Look up the wallet_accounts id for the given address (case-insensitive)."""
@@ -105,9 +134,9 @@ class CopyTradingRuleEngine:
     def _load_configs(self):
         account_filter = ""
         params = []
-        if self.account_id:
+        if self.account_id is not None:
             account_filter = "AND ct.account_id = %s"
-            params.append(int(self.account_id))
+            params.append(self.account_id)
 
         sql = f"""
         SELECT

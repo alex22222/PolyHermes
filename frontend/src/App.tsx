@@ -21,6 +21,7 @@ import LeaderEdit from './pages/LeaderEdit'
 import ConfigPage from './pages/ConfigPage'
 import PositionList from './pages/PositionList'
 import Statistics from './pages/Statistics'
+import OptimizationDaily from './pages/OptimizationDaily'
 import TemplateList from './pages/TemplateList'
 import TemplateAdd from './pages/TemplateAdd'
 import TemplateEdit from './pages/TemplateEdit'
@@ -290,6 +291,7 @@ function App() {
           <Route path="/config" element={<ProtectedRoute><ConfigPage /></ProtectedRoute>} />
           <Route path="/positions" element={<ProtectedRoute><PositionList /></ProtectedRoute>} />
           <Route path="/statistics" element={<ProtectedRoute><Statistics /></ProtectedRoute>} />
+          <Route path="/optimization-daily" element={<ProtectedRoute><OptimizationDaily /></ProtectedRoute>} />
           <Route path="/users" element={<ProtectedRoute><UserList /></ProtectedRoute>} />
           <Route path="/announcements" element={<ProtectedRoute><Announcements /></ProtectedRoute>} />
           <Route path="/system-settings" element={<ProtectedRoute><SystemSettings /></ProtectedRoute>} />

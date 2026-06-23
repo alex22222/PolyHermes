@@ -84,6 +84,46 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
         self.engine._configs = [self._base_config()]
         self.engine._last_refresh = time.time()  # prevent DB refresh during tests
 
+    def test_normalize_account_id(self):
+        self.assertIsNone(CopyTradingRuleEngine.normalize_account_id(None))
+        self.assertIsNone(CopyTradingRuleEngine.normalize_account_id(""))
+        self.assertIsNone(CopyTradingRuleEngine.normalize_account_id("0"))
+        self.assertIsNone(CopyTradingRuleEngine.normalize_account_id("-1"))
+        self.assertIsNone(CopyTradingRuleEngine.normalize_account_id("abc"))
+        self.assertEqual(CopyTradingRuleEngine.normalize_account_id("2"), 2)
+        self.assertEqual(CopyTradingRuleEngine.normalize_account_id(3), 3)
+
+    def test_set_account_id_normalizes_and_forces_reload(self):
+        self.engine.account_id = None
+        self.engine._last_refresh = time.time()
+        self.engine.set_account_id("2")
+        self.assertEqual(self.engine.active_account_id, 2)
+        self.assertEqual(self.engine._last_refresh, 0.0)
+
+        self.engine._last_refresh = 123.0
+        self.engine.set_account_id(2)
+        self.assertEqual(self.engine._last_refresh, 123.0)
+
+        self.engine.set_account_id("0")
+        self.assertEqual(self.engine.active_account_id, 1)
+        self.assertEqual(self.engine._last_refresh, 0.0)
+
+    def test_active_account_id_infers_single_config_account(self):
+        self.engine.account_id = None
+        self.engine._configs = [
+            self._base_config(account_id=2),
+            self._base_config(id=2, account_id=2),
+        ]
+        self.assertEqual(self.engine.active_account_id, 2)
+
+    def test_active_account_id_does_not_infer_mixed_accounts(self):
+        self.engine.account_id = None
+        self.engine._configs = [
+            self._base_config(account_id=2),
+            self._base_config(id=2, account_id=3),
+        ]
+        self.assertIsNone(self.engine.active_account_id)
+
     def test_category_match_passes(self):
         reason = self.engine._check_filters(
             self.engine._configs[0],

@@ -48,5 +48,14 @@ interface FilteredOrderRepository : JpaRepository<FilteredOrder, Long> {
      * 统计某个跟单配置的某个过滤类型的被过滤订单数量
      */
     fun countByCopyTradingIdAndFilterType(copyTradingId: Long, filterType: String): Long
-}
 
+    /**
+     * 统计某个 Leader 的过滤订单数量。
+     */
+    fun countByLeaderId(leaderId: Long): Long
+
+    /**
+     * 按买入/卖出方向统计某个 Leader 的过滤订单数量。
+     */
+    fun countByLeaderIdAndSide(leaderId: Long, side: String): Long
+}

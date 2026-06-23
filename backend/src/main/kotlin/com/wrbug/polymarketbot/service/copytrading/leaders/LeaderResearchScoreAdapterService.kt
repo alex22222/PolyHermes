@@ -25,7 +25,8 @@ import java.math.RoundingMode
 @Service
 class LeaderResearchScoreAdapterService(
     private val leaderRepository: LeaderRepository,
-    private val backtestTaskRepository: BacktestTaskRepository
+    private val backtestTaskRepository: BacktestTaskRepository,
+    private val leaderExecutionStatsService: LeaderExecutionStatsService
 ) {
 
     private val logger = LoggerFactory.getLogger(LeaderResearchScoreAdapterService::class.java)
@@ -34,7 +35,6 @@ class LeaderResearchScoreAdapterService(
      * 为所有 Leader 重新计算研究评分。
      * @return 被更新的 Leader 数量
      */
-    @Transactional
     fun scoreAllLeaders(): Int {
         val leaders = leaderRepository.findAll()
         var updated = 0
@@ -47,6 +47,10 @@ class LeaderResearchScoreAdapterService(
                         researchScore = result.score,
                         researchTag = result.tag,
                         researchRiskFlags = result.riskFlags,
+                        convictionScore = result.convictionScore,
+                        zombieRiskScore = result.zombieRiskScore,
+                        categoryScore = result.categoryScore,
+                        executionScore = result.executionScore,
                         researchScoredAt = now,
                         updatedAt = now
                     )
@@ -73,6 +77,25 @@ class LeaderResearchScoreAdapterService(
         val volume = leader.totalVolume?.toBigDecimalOrNull() ?: BigDecimal.ZERO
         val avgTradeSize = leader.avgTradeSize?.toBigDecimalOrNull() ?: BigDecimal.ZERO
         val bestCompletedBacktest = leader.id?.let { loadBestCompletedBacktest(it) }
+        val convictionScore = computeConvictionScore(avgTradeSize)
+        val categoryScore = computeCategoryScore(leader.category, rank)
+        val backtestExecutionScore = computeBacktestExecutionScore(bestCompletedBacktest)
+        val executionScoreResult = leader.id?.let {
+            leaderExecutionStatsService.scoreLeaderExecution(it, leader.leaderAddress, backtestExecutionScore)
+        } ?: LeaderExecutionScoreResult(
+            score = backtestExecutionScore,
+            riskFlags = emptyList(),
+            stats = LeaderExecutionStats(
+                buyCreatedCount = 0,
+                filteredBuyCount = 0,
+                filteredSellCount = 0,
+                matchedSellCount = 0,
+                openBuyCount = 0,
+                lossSellCount = 0
+            ),
+            source = "BACKTEST_FALLBACK"
+        )
+        val executionScore = executionScoreResult.score
 
         // 1. 盈利信号 (0-20)
         val profitSignal = when {
@@ -114,13 +137,14 @@ class LeaderResearchScoreAdapterService(
         } else {
             BigDecimal.ZERO
         }
+        val finalZombieRiskScore = computeZombieRiskScore(bestCompletedBacktest, pnlRatio, pnl, volume)
         val volatilityRisk = when {
             pnlRatio > BigDecimal("0.50") -> BigDecimal("2")
             pnlRatio > BigDecimal("0.25") -> BigDecimal("5")
             else -> BigDecimal("10")
         }
 
-        val rawTotal = listOf(
+        val baseQualityScore = listOf(
             profitSignal,
             repeatability,
             winRateScore,
@@ -129,7 +153,20 @@ class LeaderResearchScoreAdapterService(
             sampleScore,
             dataFreshness,
             volatilityRisk
-        ).fold(BigDecimal.ZERO, BigDecimal::add)
+        ).fold(BigDecimal.ZERO, BigDecimal::add).clamp(BigDecimal.ZERO, BigDecimal("100"))
+
+        val copyableBacktestScore = computeCopyableBacktestScore(bestCompletedBacktest)
+        val zombieSafetyScore = BigDecimal("100").subtract(finalZombieRiskScore).clamp(BigDecimal.ZERO, BigDecimal("100"))
+        val rawTotal = weightedScore(
+            copyableBacktestScore to BigDecimal("0.20"),
+            baseQualityScore to BigDecimal("0.15"),
+            categoryScore to BigDecimal("0.15"),
+            volatilityRisk.multiply(BigDecimal("10")).clamp(BigDecimal.ZERO, BigDecimal("100")) to BigDecimal("0.10"),
+            zombieSafetyScore to BigDecimal("0.10"),
+            activityFit.multiply(BigDecimal("10")).clamp(BigDecimal.ZERO, BigDecimal("100")) to BigDecimal("0.10"),
+            convictionScore to BigDecimal("0.10"),
+            executionScore to BigDecimal("0.10")
+        )
             .setScale(4, RoundingMode.HALF_UP)
 
         // 小样本封顶（借鉴研究模块思路）
@@ -144,6 +181,8 @@ class LeaderResearchScoreAdapterService(
         if (!isFresh) flags += "stale_data"
         if (pnlRatio > BigDecimal("0.50")) flags += "high_pnl_volatility"
         appendBacktestRiskFlags(bestCompletedBacktest, flags)
+        flags += executionScoreResult.riskFlags
+        appendComponentRiskFlags(convictionScore, finalZombieRiskScore, categoryScore, executionScore, flags)
         if (isTailPriceSpray(trades, avgTradeSize, flags)) flags += "tail_price_spray"
 
         // 风险调整：根据风险标记对分数进行乘数惩罚并限制最高标签
@@ -160,7 +199,11 @@ class LeaderResearchScoreAdapterService(
         return LeaderResearchScoreResult(
             score = finalScore,
             tag = tag,
-            riskFlags = riskFlags
+            riskFlags = riskFlags,
+            convictionScore = convictionScore,
+            zombieRiskScore = finalZombieRiskScore,
+            categoryScore = categoryScore,
+            executionScore = executionScore
         )
     }
 
@@ -248,6 +291,104 @@ class LeaderResearchScoreAdapterService(
                 )
     }
 
+    private fun computeConvictionScore(avgTradeSize: BigDecimal): BigDecimal {
+        return when {
+            avgTradeSize >= BigDecimal("25") -> BigDecimal("100")
+            avgTradeSize >= BigDecimal("10") -> BigDecimal("85")
+            avgTradeSize >= BigDecimal("5") -> BigDecimal("70")
+            avgTradeSize >= BigDecimal("2") -> BigDecimal("55")
+            avgTradeSize >= BigDecimal("1") -> BigDecimal("35")
+            avgTradeSize > BigDecimal.ZERO -> BigDecimal("10")
+            else -> BigDecimal.ZERO
+        }
+    }
+
+    private fun computeCategoryScore(category: String?, rank: Int?): BigDecimal {
+        val base = when (category) {
+            "politics", "finance" -> BigDecimal("80")
+            "sports", "crypto" -> BigDecimal("55")
+            null -> BigDecimal("35")
+            else -> BigDecimal("40")
+        }
+        val rankBoost = when {
+            rank != null && rank <= 3 -> BigDecimal("20")
+            rank != null && rank <= 6 -> BigDecimal("12")
+            rank != null && rank <= 10 -> BigDecimal("6")
+            else -> BigDecimal.ZERO
+        }
+        return base.add(rankBoost).clamp(BigDecimal.ZERO, BigDecimal("100"))
+    }
+
+    private fun computeBacktestExecutionScore(bestBacktest: BacktestTask?): BigDecimal {
+        if (bestBacktest == null) return BigDecimal("25")
+        if (bestBacktest.totalTrades <= 0) return BigDecimal.ZERO
+        var score = BigDecimal("55")
+        if ((bestBacktest.profitAmount ?: BigDecimal.ZERO) > BigDecimal.ZERO) score = score.add(BigDecimal("20"))
+        if (bestBacktest.sellTrades > 0) score = score.add(BigDecimal("15"))
+        if ((bestBacktest.maxDrawdown ?: BigDecimal.ZERO) <= BigDecimal("15")) score = score.add(BigDecimal("10"))
+        if ((bestBacktest.profitAmount ?: BigDecimal.ZERO) < BigDecimal.ZERO) score = score.subtract(BigDecimal("25"))
+        return score.clamp(BigDecimal.ZERO, BigDecimal("100"))
+    }
+
+    private fun computeCopyableBacktestScore(bestBacktest: BacktestTask?): BigDecimal {
+        if (bestBacktest == null) return BigDecimal("25")
+        if (bestBacktest.totalTrades <= 0) return BigDecimal.ZERO
+        var score = BigDecimal("45")
+        val profit = bestBacktest.profitAmount ?: BigDecimal.ZERO
+        val drawdown = bestBacktest.maxDrawdown ?: BigDecimal.ZERO
+        if (profit > BigDecimal.ZERO) score = score.add(BigDecimal("25"))
+        if (profit >= MIN_COPYABLE_BACKTEST_PROFIT) score = score.add(BigDecimal("10"))
+        if (bestBacktest.sellTrades > 0) score = score.add(BigDecimal("10"))
+        if (drawdown <= BigDecimal("15")) score = score.add(BigDecimal("10"))
+        if (profit < BigDecimal.ZERO) score = score.subtract(BigDecimal("30"))
+        return score.clamp(BigDecimal.ZERO, BigDecimal("100"))
+    }
+
+    private fun computeZombieRiskScore(
+        bestBacktest: BacktestTask?,
+        pnlRatio: BigDecimal?,
+        pnl: BigDecimal,
+        volume: BigDecimal
+    ): BigDecimal {
+        var risk = BigDecimal.ZERO
+        val ratio = pnlRatio ?: if (volume > BigDecimal.ZERO) {
+            pnl.abs().divide(volume, 4, RoundingMode.HALF_UP)
+        } else {
+            BigDecimal.ZERO
+        }
+        if (ratio > BigDecimal("0.50")) risk = risk.add(BigDecimal("25"))
+        if (pnl < BigDecimal.ZERO) risk = risk.add(BigDecimal("20"))
+        if (bestBacktest == null) return risk.add(BigDecimal("20")).clamp(BigDecimal.ZERO, BigDecimal("100"))
+        val drawdown = bestBacktest.maxDrawdown ?: BigDecimal.ZERO
+        val profit = bestBacktest.profitAmount ?: BigDecimal.ZERO
+        if (bestBacktest.totalTrades <= 0) risk = risk.add(BigDecimal("30"))
+        if (profit < BigDecimal.ZERO) risk = risk.add(BigDecimal("25"))
+        if (drawdown > BigDecimal("30")) risk = risk.add(BigDecimal("25"))
+        if (bestBacktest.totalTrades >= MIN_BACKTEST_TRADES_FOR_SELL_CHECK && bestBacktest.sellTrades <= 0) {
+            risk = risk.add(BigDecimal("15"))
+        }
+        return risk.clamp(BigDecimal.ZERO, BigDecimal("100"))
+    }
+
+    private fun appendComponentRiskFlags(
+        convictionScore: BigDecimal,
+        zombieRiskScore: BigDecimal,
+        categoryScore: BigDecimal,
+        executionScore: BigDecimal,
+        flags: MutableList<String>
+    ) {
+        if (convictionScore < BigDecimal("20")) flags += "low_conviction_size"
+        if (zombieRiskScore >= BigDecimal("70")) flags += "zombie_position_risk_high"
+        if (categoryScore < BigDecimal("60")) flags += "category_low_priority"
+        if (executionScore < BigDecimal("40")) flags += "execution_not_copyable"
+    }
+
+    private fun weightedScore(vararg parts: Pair<BigDecimal, BigDecimal>): BigDecimal {
+        return parts.fold(BigDecimal.ZERO) { sum, (score, weight) ->
+            sum.add(score.multiply(weight))
+        }.clamp(BigDecimal.ZERO, BigDecimal("100"))
+    }
+
     /**
      * 将分数限制在指定标签上限以下。
      */
@@ -283,7 +424,11 @@ class LeaderResearchScoreAdapterService(
     data class LeaderResearchScoreResult(
         val score: BigDecimal,
         val tag: String,
-        val riskFlags: String?
+        val riskFlags: String?,
+        val convictionScore: BigDecimal,
+        val zombieRiskScore: BigDecimal,
+        val categoryScore: BigDecimal,
+        val executionScore: BigDecimal
     )
 
     private enum class TagCap {

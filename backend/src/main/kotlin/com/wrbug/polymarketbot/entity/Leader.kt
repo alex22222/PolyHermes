@@ -68,6 +68,18 @@ data class Leader(
     @Column(name = "research_risk_flags", length = 255)
     val researchRiskFlags: String? = null,  // 风险标记,逗号分隔
 
+    @Column(name = "conviction_score", precision = 8, scale = 4)
+    val convictionScore: BigDecimal? = null,  // 信念评分：历史单笔规模与可跟单适配度
+
+    @Column(name = "zombie_risk_score", precision = 8, scale = 4)
+    val zombieRiskScore: BigDecimal? = null,  // 僵尸单/未平仓亏损风险，越高越危险
+
+    @Column(name = "category_score", precision = 8, scale = 4)
+    val categoryScore: BigDecimal? = null,  // 分领域适配评分
+
+    @Column(name = "execution_score", precision = 8, scale = 4)
+    val executionScore: BigDecimal? = null,  // 回测/执行链路适配评分
+
     @Column(name = "research_scored_at")
     val researchScoredAt: Long? = null,  // 研究评分时间(毫秒时间戳)
     

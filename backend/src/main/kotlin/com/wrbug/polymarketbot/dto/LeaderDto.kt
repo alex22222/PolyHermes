@@ -71,6 +71,10 @@ data class LeaderDto(
     val researchScore: Double? = null,  // 研究模块 copyability 评分 (0-100)
     val researchTag: String? = null,  // 研究标签: ELITE/TRADEABLE/CANDIDATE/WATCH/RISKY
     val researchRiskFlags: String? = null,  // 风险标记,逗号分隔
+    val convictionScore: Double? = null,  // 信念评分 (0-100)
+    val zombieRiskScore: Double? = null,  // 僵尸单风险评分 (0-100，越高越危险)
+    val categoryScore: Double? = null,  // 分领域评分 (0-100)
+    val executionScore: Double? = null,  // 执行链路评分 (0-100)
     val researchScoredAt: Long? = null,  // 研究评分时间(毫秒时间戳)
     val createdAt: Long,
     val updatedAt: Long

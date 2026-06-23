@@ -1,6 +1,9 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import type {
   ApiResponse,
+  BridgeAuditRequest,
+  BridgeAuditResponse,
+  BridgeRuntimeStatus,
   BridgeTradeRecord,
   BridgeWebhookLogListRequest,
   BridgeWebhookLogListResponse,
@@ -1019,7 +1022,25 @@ export const apiService = {
      * 查询桥接交易统计
      */
     statistics: (data: BridgeTradeStatisticsRequest = {}) =>
-      apiClient.post<ApiResponse<BridgeTradeStatistics>>('/bridge/trades/statistics', data)
+      apiClient.post<ApiResponse<BridgeTradeStatistics>>('/bridge/trades/statistics', data),
+
+    /**
+     * 查询 Bridge 执行链路审计快照
+     */
+    audit: (data: BridgeAuditRequest = {}) =>
+      apiClient.post<ApiResponse<BridgeAuditResponse>>('/bridge/trades/audit', data),
+
+    /**
+     * 查询 Bridge runtime 状态
+     */
+    status: () =>
+      apiClient.post<ApiResponse<BridgeRuntimeStatus>>('/bridge/trades/status', {}),
+
+    /**
+     * 按跟单关系查询桥接交易记录
+     */
+    byCopyTrading: (data: { copyTradingId: number; page: number; size: number }) =>
+      apiClient.post<ApiResponse<BridgeTradeRecordListResponse>>('/bridge/trades/by-copy-trading', data)
   },
 
   /**

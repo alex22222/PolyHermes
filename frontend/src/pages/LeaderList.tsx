@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Alert, Card, Table, Button, Space, Tag, Popconfirm, message, List, Empty, Spin, Divider, Typography, Modal, Descriptions, Statistic, Row, Col, Tooltip, Badge, Segmented, Input } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, GlobalOutlined, EyeOutlined, ReloadOutlined, WalletOutlined, CopyOutlined, LineChartOutlined, TeamOutlined, SearchOutlined } from '@ant-design/icons'
+import { PlusOutlined, EditOutlined, DeleteOutlined, GlobalOutlined, EyeOutlined, ReloadOutlined, WalletOutlined, CopyOutlined, LineChartOutlined, TeamOutlined, SearchOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import { apiService } from '../services/api'
 import type { Leader, LeaderBalanceResponse, LeaderScanBatchResponse } from '../types'
@@ -9,6 +9,7 @@ import { useMediaQuery } from 'react-responsive'
 import { formatUSDC } from '../utils'
 
 const { Text } = Typography
+type CopyabilityScoreKey = 'conviction' | 'execution' | 'category' | 'zombie'
 
 const LeaderList: React.FC = () => {
   const { t, i18n } = useTranslation()
@@ -111,6 +112,74 @@ const LeaderList: React.FC = () => {
         return t('leaderList.researchTagUnscored') || '未评分'
     }
   }
+
+  const getScoreColor = (score?: number, inverse = false) => {
+    if (score == null) return 'default'
+    if (inverse) {
+      return score >= 70 ? 'red' : score >= 40 ? 'orange' : 'green'
+    }
+    return score >= 70 ? 'green' : score >= 40 ? 'blue' : score >= 20 ? 'orange' : 'red'
+  }
+
+  const copyabilityScoreInfo: Record<CopyabilityScoreKey, { label: string; description: string; inverse?: boolean }> = {
+    conviction: {
+      label: t('leaderList.convictionScore') || '信念',
+      description: t('leaderList.convictionScoreDesc') || '看 Leader 单笔平均金额，越高代表下注更有分量，越低越可能是长尾低价铺单。'
+    },
+    execution: {
+      label: t('leaderList.executionScore') || '执行',
+      description: t('leaderList.executionScoreDesc') || '看真实跟单链路的 BUY/SELL 成功率、过滤记录、Bridge 失败记录和未卖出积压，越高越适合复制。'
+    },
+    category: {
+      label: t('leaderList.categoryScore') || '领域',
+      description: t('leaderList.categoryScoreDesc') || '按策略目标给政治、金融更高权重，体育、加密货币较低权重，并结合聪明钱排名加分。'
+    },
+    zombie: {
+      label: t('leaderList.zombieRiskScore') || '僵尸',
+      description: t('leaderList.zombieRiskScoreDesc') || '衡量僵尸仓位和不可复制风险，越高越危险；高分通常来自亏损、回测无交易、高回撤或没有卖出。',
+      inverse: true
+    }
+  }
+
+  const copyabilityScoreItems: CopyabilityScoreKey[] = ['conviction', 'execution', 'category', 'zombie']
+
+  const renderScoreExplanation = (key: CopyabilityScoreKey) => {
+    const info = copyabilityScoreInfo[key]
+    return (
+      <Space direction="vertical" size={2}>
+        <Text strong>{info.label}</Text>
+        <Text style={{ fontSize: 12 }}>{info.description}</Text>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {info.inverse ? (t('leaderList.scoreLowerBetter') || '越低越好') : (t('leaderList.scoreHigherBetter') || '越高越好')}
+        </Text>
+      </Space>
+    )
+  }
+
+  const renderScoreTag = (label: string, score?: number, inverse = false, scoreKey?: CopyabilityScoreKey) => {
+    const tag = (
+      <Tag color={getScoreColor(score, inverse)} style={{ marginRight: 0, cursor: scoreKey ? 'help' : 'default' }}>
+        {label} {score != null ? score.toFixed(0) : '-'}
+      </Tag>
+    )
+    return scoreKey ? <Tooltip title={renderScoreExplanation(scoreKey)}>{tag}</Tooltip> : tag
+  }
+
+  const hasCopyabilityScores = (leader: Leader) => (
+    leader.convictionScore != null ||
+    leader.executionScore != null ||
+    leader.categoryScore != null ||
+    leader.zombieRiskScore != null
+  )
+
+  const renderCopyabilityScores = (leader: Leader) => (
+    <Space size={[4, 4]} wrap>
+      {renderScoreTag(copyabilityScoreInfo.conviction.label, leader.convictionScore, false, 'conviction')}
+      {renderScoreTag(copyabilityScoreInfo.execution.label, leader.executionScore, false, 'execution')}
+      {renderScoreTag(copyabilityScoreInfo.category.label, leader.categoryScore, false, 'category')}
+      {renderScoreTag(copyabilityScoreInfo.zombie.label, leader.zombieRiskScore, true, 'zombie')}
+    </Space>
+  )
 
   const fetchLeaders = async (currentNameQuery?: string) => {
     setLoading(true)
@@ -490,6 +559,14 @@ const LeaderList: React.FC = () => {
       }
     },
     {
+      title: t('leaderList.copyabilityComponents') || '复制评分',
+      key: 'copyabilityComponents',
+      width: 190,
+      render: (_: any, record: Leader) => (
+        renderCopyabilityScores(record)
+      )
+    },
+    {
       title: t('leaderList.winRate'),
       dataIndex: 'winRate',
       key: 'winRate',
@@ -787,6 +864,34 @@ const LeaderList: React.FC = () => {
         />
       )}
 
+      <Alert
+        type="info"
+        showIcon
+        icon={<InfoCircleOutlined />}
+        style={{ marginBottom: '16px' }}
+        message={t('leaderList.copyabilityGuideTitle') || '复制评分说明'}
+        description={
+          <Row gutter={[12, 8]}>
+            {copyabilityScoreItems.map((key) => {
+              const info = copyabilityScoreInfo[key]
+              return (
+                <Col key={key} xs={24} sm={12} lg={6}>
+                  <Space direction="vertical" size={2}>
+                    <Space size={4}>
+                      <Tag color={getScoreColor(info.inverse ? 20 : 80, info.inverse)} style={{ marginRight: 0 }}>{info.label}</Tag>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {info.inverse ? (t('leaderList.scoreLowerBetter') || '越低越好') : (t('leaderList.scoreHigherBetter') || '越高越好')}
+                      </Text>
+                    </Space>
+                    <Text style={{ fontSize: 12 }}>{info.description}</Text>
+                  </Space>
+                </Col>
+              )
+            })}
+          </Row>
+        }
+      />
+
       <Card style={{ borderRadius: '12px', boxShadow: '0 2px 8px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8' }} bodyStyle={{ padding: isMobile ? '12px' : '24px' }}>
         {isMobile ? (
           <div>
@@ -916,6 +1021,19 @@ const LeaderList: React.FC = () => {
                               <div style={{ fontSize: '13px', fontWeight: '600', color: leader.activityScore >= 70 ? '#52c41a' : '#faad14' }}>{leader.activityScore.toFixed(0)}</div>
                             </div>
                           )}
+                        </div>
+                      )}
+
+                      {hasCopyabilityScores(leader) && (
+                        <div style={{
+                          padding: '8px 12px',
+                          backgroundColor: '#f0f7ff',
+                          borderBottom: '1px solid #d6e4ff'
+                        }}>
+                          <div style={{ fontSize: '10px', color: '#8c8c8c', marginBottom: 4 }}>
+                            {t('leaderList.copyabilityComponents') || '复制评分'}
+                          </div>
+                          {renderCopyabilityScores(leader)}
                         </div>
                       )}
 
@@ -1161,6 +1279,18 @@ const LeaderList: React.FC = () => {
                     {detailLeader.researchRiskFlags ? (
                       <Text type="warning">{detailLeader.researchRiskFlags}</Text>
                     ) : <Text type="secondary">-</Text>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.convictionScore') || '信念评分'}>
+                    {renderScoreTag(copyabilityScoreInfo.conviction.label, detailLeader.convictionScore, false, 'conviction')}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.executionScore') || '执行评分'}>
+                    {renderScoreTag(copyabilityScoreInfo.execution.label, detailLeader.executionScore, false, 'execution')}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.categoryScore') || '领域评分'}>
+                    {renderScoreTag(copyabilityScoreInfo.category.label, detailLeader.categoryScore, false, 'category')}
+                  </Descriptions.Item>
+                  <Descriptions.Item label={t('leaderDetail.zombieRiskScore') || '僵尸风险'}>
+                    {renderScoreTag(copyabilityScoreInfo.zombie.label, detailLeader.zombieRiskScore, true, 'zombie')}
                   </Descriptions.Item>
                   <Descriptions.Item label={t('leaderDetail.lastScan')}>
                     {detailLeader.scannedAt ? formatTimestamp(detailLeader.scannedAt) : <Text type="secondary">-</Text>}

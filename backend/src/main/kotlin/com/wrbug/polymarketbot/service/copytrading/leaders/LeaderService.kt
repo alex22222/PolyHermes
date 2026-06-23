@@ -282,6 +282,10 @@ class LeaderService(
             researchScore = leader.researchScore?.toDouble(),
             researchTag = leader.researchTag,
             researchRiskFlags = leader.researchRiskFlags,
+            convictionScore = leader.convictionScore?.toDouble(),
+            zombieRiskScore = leader.zombieRiskScore?.toDouble(),
+            categoryScore = leader.categoryScore?.toDouble(),
+            executionScore = leader.executionScore?.toDouble(),
             researchScoredAt = leader.researchScoredAt,
             createdAt = leader.createdAt,
             updatedAt = leader.updatedAt

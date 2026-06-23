@@ -126,7 +126,6 @@ class LeaderScannerService(
      * @param dryRun true 只返回预览，不写入数据库
      * @return 扫描结果
      */
-    @Transactional
     fun scan(targetCategory: String? = null, dryRun: Boolean = false): LeaderScanBatchResponse {
         val startTime = System.currentTimeMillis()
         if (scanRunning) {

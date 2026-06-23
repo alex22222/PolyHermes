@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -27,6 +28,303 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 load_dotenv(SCRIPT_DIR / ".env")
 load_dotenv()
 DEFAULT_RECONCILIATION_FILE = SCRIPT_DIR / "audit_reconciliations.json"
+
+
+FAILURE_BUCKET_PRIORITY = {
+    "select_outcome": 100,
+    "buy_dialog_open": 95,
+    "amount_input": 90,
+    "sell_dialog_open": 88,
+    "click_submit": 85,
+    "sell_post_submit_no_effect": 82,
+    "target_market_missing": 80,
+    "target_event_url_missing": 75,
+    "executor_js_error": 70,
+    "navigation_race": 60,
+    "navigation_network": 50,
+    "resolve_event": 45,
+    "network_or_token_modal": 40,
+    "live_position_insufficient": 20,
+    "insufficient_balance": 15,
+    "read_only_account": 12,
+    "insufficient_position": 10,
+    "test_or_incomplete_record": 2,
+    "other": 1,
+}
+
+
+FAILURE_BUCKET_ACTIONABILITY = {
+    "select_outcome": "code_selector",
+    "buy_dialog_open": "code_selector",
+    "amount_input": "code_selector",
+    "sell_dialog_open": "code_selector",
+    "click_submit": "code_selector",
+    "sell_post_submit_no_effect": "sell_verification",
+    "target_market_missing": "code_navigation",
+    "target_event_url_missing": "code_navigation",
+    "executor_js_error": "code_selector",
+    "navigation_race": "code_navigation",
+    "navigation_network": "infra_retry",
+    "resolve_event": "data_resolution",
+    "network_or_token_modal": "account_setup_or_modal",
+    "live_position_insufficient": "state_or_risk",
+    "insufficient_balance": "state_or_risk",
+    "read_only_account": "account_setup_or_config",
+    "insufficient_position": "state_or_risk",
+    "test_or_incomplete_record": "historical_test_data",
+    "other": "needs_triage",
+}
+
+
+FAILURE_BUCKET_NEXT_ACTION = {
+    "select_outcome": "Add/extend selector fixture for the market shape, then improve outcome row matching.",
+    "buy_dialog_open": "Inspect outcome click result and strengthen buy form detection/opening.",
+    "amount_input": "Inspect screenshot/DOM and extend trade input detection.",
+    "sell_dialog_open": "Inspect sell position card matching and strengthen sell dialog opening.",
+    "click_submit": "Inspect dialog screenshot/DOM and extend submit button detection.",
+    "sell_post_submit_no_effect": "Inspect SELL submit/verification flow; add retry or reconcile live portfolio delay.",
+    "target_market_missing": "Improve target event visibility/navigation fallback and add market fixture.",
+    "target_event_url_missing": "Remove URL-only gating or add content-based fallback for this event shape.",
+    "executor_js_error": "Inspect executor JavaScript exception and add regression coverage for the affected selector path.",
+    "navigation_race": "Wrap page evaluation around navigation retry and page-ready checks.",
+    "navigation_network": "Treat as transient network failure; add retry/backoff if recurring.",
+    "resolve_event": "Improve Gamma/CLOB slug and conditionId event resolution.",
+    "network_or_token_modal": "Improve modal handling or account default network/token setup.",
+    "live_position_insufficient": "Verify ledger/live portfolio drift; do not retry UI sell without real position.",
+    "insufficient_balance": "Fund account or lower copy amount; not a browser reliability bug.",
+    "read_only_account": "Enable a writable Bridge account or disable live trading for this account; not a browser reliability bug.",
+    "insufficient_position": "Expected risk skip unless ledger drift is suspected.",
+    "test_or_incomplete_record": "Historical/manual test or incomplete metadata; exclude from code-fix queue.",
+    "other": "Inspect the raw error and add a new classifier when repeated.",
+}
+
+
+FIXTURE_COVERAGE_RULES = [
+    {
+        "bucket": "select_outcome",
+        "match": ["abelardo de la espriella", "colombian presidential election"],
+        "coverage_level": "exact",
+        "coverage_id": "political_candidate_selector_fixture",
+        "note": "Covered by POLITICAL_CANDIDATE_HTML selector fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["netherlands", "group f", "fifa world cup"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_group_selector_fixture",
+        "note": "Covered by WORLD_CUP_GROUP_HTML categorical row fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["uruguay", "group h", "fifa world cup"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_group_multi_country_fixture",
+        "note": "Covered by WORLD_CUP_GROUP_MULTI_COUNTRY_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["ecuador", "group e", "fifa world cup"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_group_multi_country_fixture",
+        "note": "Covered by WORLD_CUP_GROUP_MULTI_COUNTRY_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["germany", "group e", "fifa world cup"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_group_multi_country_fixture",
+        "note": "Covered by WORLD_CUP_GROUP_MULTI_COUNTRY_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["belgium", "group g", "fifa world cup"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_group_multi_country_fixture",
+        "note": "Covered by WORLD_CUP_GROUP_MULTI_COUNTRY_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["spain", "group h", "fifa world cup"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_group_multi_country_fixture",
+        "note": "Covered by WORLD_CUP_GROUP_MULTI_COUNTRY_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["haiti", "will haiti win"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_remaining_country_fixture",
+        "note": "Covered by WORLD_CUP_REMAINING_COUNTRY_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["curacao", "group e", "fifa world cup"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_remaining_country_fixture",
+        "note": "Covered by WORLD_CUP_REMAINING_COUNTRY_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["cape verde", "fifa world cup final"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_remaining_country_fixture",
+        "note": "Covered by WORLD_CUP_REMAINING_COUNTRY_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["scotland", "group c", "fifa world cup"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_remaining_country_fixture",
+        "note": "Covered by WORLD_CUP_REMAINING_COUNTRY_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["usa", "fifa world cup final"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_remaining_country_fixture",
+        "note": "Covered by WORLD_CUP_REMAINING_COUNTRY_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["usa", "group d", "fifa world cup"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_select_outcome_cleanup_fixture",
+        "note": "Covered by USA Group D selector fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["mexico", "fifa world cup final"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_select_outcome_cleanup_fixture",
+        "note": "Covered by Mexico final selector fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["argentina", "fifa world cup final"],
+        "coverage_level": "exact",
+        "coverage_id": "world_cup_select_outcome_cleanup_fixture",
+        "note": "Covered by Argentina final selector fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["toronto tempo", "connecticut sun"],
+        "coverage_level": "exact",
+        "coverage_id": "wnba_binary_selector_fixture",
+        "note": "Covered by WNBA binary outcome fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["team spirit", "iem cologne major"],
+        "coverage_level": "exact",
+        "coverage_id": "esports_team_selector_fixture",
+        "note": "Covered by ESPORTS_TEAM_HTML selector fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["vitality", "team falcons", "iem cologne major playoffs"],
+        "coverage_level": "exact",
+        "coverage_id": "esports_match_team_selector_fixture",
+        "note": "Covered by ESPORTS_MATCH_MARKET_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["vitality", "team falcons", "map 1 winner"],
+        "coverage_level": "exact",
+        "coverage_id": "esports_match_team_selector_fixture",
+        "note": "Covered by ESPORTS_MATCH_MARKET_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["spirit", "g2", "iem cologne major playoffs"],
+        "coverage_level": "exact",
+        "coverage_id": "esports_match_team_selector_fixture",
+        "note": "Covered by ESPORTS_MATCH_MARKET_HTML fixture.",
+    },
+    {
+        "bucket": "select_outcome",
+        "match": ["map handicap", "team falcons"],
+        "coverage_level": "exact",
+        "coverage_id": "esports_match_team_selector_fixture",
+        "note": "Covered by ESPORTS_MATCH_MARKET_HTML fixture.",
+    },
+    {
+        "bucket": "amount_input",
+        "record_ids": [598, 569, 567, 565, 564, 558, 508, 501, 494, 481, 458, 358, 355, 246],
+        "coverage_level": "exact",
+        "coverage_id": "buy_dialog_open_guard_fixture",
+        "note": "Historical screenshots show portfolio/event page without an open BUY dialog; covered by BUY dialog-open guard.",
+    },
+    {
+        "bucket": "amount_input",
+        "match": ["could not enter trade amount"],
+        "coverage_level": "partial",
+        "coverage_id": "custom_amount_input_fixture",
+        "note": "Partially covered by contenteditable, Chinese aria-label, and custom role=spinbutton amount input fixtures.",
+    },
+    {
+        "bucket": "buy_dialog_open",
+        "match": ["could not open buy dialog"],
+        "coverage_level": "partial",
+        "coverage_id": "buy_dialog_open_guard_fixture",
+        "note": "Partially covered by portfolio false-positive guard fixture.",
+    },
+    {
+        "bucket": "sell_dialog_open",
+        "match": ["ludvig aberg", "could not open sell dialog", "sellbuttons=0"],
+        "coverage_level": "exact",
+        "coverage_id": "live_sell_position_precheck",
+        "note": "Covered by live portfolio SELL precheck before UI sell.",
+    },
+    {
+        "bucket": "click_submit",
+        "record_ids": [597],
+        "coverage_level": "exact",
+        "coverage_id": "robust_sell_submit_button_fixtures",
+        "note": "Historical SELL submit sample from before submit hardening; covered by delayed, attribute-only, and icon-only sell submit fixtures.",
+    },
+    {
+        "bucket": "click_submit",
+        "match": ["could not click sell button"],
+        "coverage_level": "partial",
+        "coverage_id": "robust_sell_submit_button_fixtures",
+        "note": "Partially covered by delayed, attribute-only, and icon-only sell submit fixtures.",
+    },
+    {
+        "bucket": "navigation_race",
+        "record_ids": [581, 547, 472, 350],
+        "coverage_level": "exact",
+        "coverage_id": "evaluate_navigation_retry_fixture",
+        "note": "Historical Page.evaluate context-loss samples covered by evaluate navigation retry fixtures.",
+    },
+    {
+        "bucket": "navigation_race",
+        "record_ids": [450],
+        "coverage_level": "exact",
+        "coverage_id": "goto_interrupted_navigation_retry_fixture",
+        "note": "Historical page.goto interrupted-by-portfolio sample covered by goto navigation retry fixtures.",
+    },
+    {
+        "bucket": "navigation_network",
+        "record_ids": [559, 542, 473, 439, 372, 365, 235],
+        "coverage_level": "exact",
+        "coverage_id": "goto_network_retry_fixture",
+        "note": "Historical ERR_ABORTED page.goto samples covered by goto network retry fixtures.",
+    },
+    {
+        "bucket": "target_event_url_missing",
+        "match": ["abelardo de la espriella", "target event"],
+        "coverage_level": "exact",
+        "coverage_id": "content_based_event_visibility_fixture",
+        "note": "Covered by content-based event visibility/navigation fallback tests.",
+    },
+    {
+        "bucket": "target_market_missing",
+        "match": ["abelardo de la espriella", "target market content"],
+        "coverage_level": "exact",
+        "coverage_id": "content_based_event_visibility_fixture",
+        "note": "Covered by content-based target market visibility tests.",
+    },
+]
 
 
 @dataclass(frozen=True)
@@ -88,6 +386,202 @@ def record_summary(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def classify_failure(error_message: Any) -> str:
+    text = normalize_text(error_message)
+    if not text:
+        return "other"
+    if "could not select outcome" in text:
+        return "select_outcome"
+    if "could not open buy dialog" in text:
+        return "buy_dialog_open"
+    if "enter trade amount" in text or "amount input" in text:
+        return "amount_input"
+    if "could not open sell dialog" in text or "sell dialog disappeared before submit" in text:
+        return "sell_dialog_open"
+    if "sell post-submit verification failed" in text or "sell verification could not confirm" in text:
+        return "sell_post_submit_no_effect"
+    if "could not click sell button" in text or "could not click buy button" in text:
+        return "click_submit"
+    if "target market content never appeared" in text:
+        return "target_market_missing"
+    if "target event" in text and "url never appeared" in text:
+        return "target_event_url_missing"
+    if (
+        "execution context was destroyed" in text
+        or "target page, context or browser has been closed" in text
+        or "navigation race persisted" in text
+        or "page closed during navigation retry" in text
+        or "interrupted by another navigation" in text
+    ):
+        return "navigation_race"
+    if "referenceerror" in text or "is not defined" in text and "page.evaluate" in text:
+        return "executor_js_error"
+    if "net::" in text or "err_connection" in text or ("timeout" in text and "goto" in text):
+        return "navigation_network"
+    if "could not resolve polymtrade event" in text or "resolve event" in text:
+        return "resolve_event"
+    if ("network" in text and "modal" in text) or "deposit modal" in text or ("token" in text and "modal" in text):
+        return "network_or_token_modal"
+    if "live portfolio insufficient" in text or "no live position available" in text:
+        return "live_position_insufficient"
+    if "insufficient balance" in text or "余额不足" in text:
+        return "insufficient_balance"
+    if "read-only account" in text or "read only account" in text or "does not support buy orders" in text:
+        return "read_only_account"
+    if "insufficient position" in text:
+        return "insufficient_position"
+    return "other"
+
+
+def classify_failure_row(row: dict[str, Any]) -> str:
+    """Classify a failed bridge row, using metadata when the raw error is ambiguous."""
+    bucket = classify_failure(row.get("error_message") or row.get("errorMessage"))
+    if bucket in {
+        "select_outcome",
+        "amount_input",
+        "buy_dialog_open",
+        "click_submit",
+        "executor_js_error",
+        "navigation_race",
+        "navigation_network",
+        "target_market_missing",
+        "target_event_url_missing",
+    }:
+        title = normalize_text(row.get("market_title") or row.get("marketTitle"))
+        external_id = normalize_text(row.get("external_trade_id") or row.get("externalTradeId"))
+        amount = decimal_value(row.get("amount"))
+        price = decimal_value(row.get("price"))
+        quantity = decimal_value(row.get("quantity"))
+        if not title:
+            return "test_or_incomplete_record"
+        if bucket in {"amount_input", "buy_dialog_open", "click_submit"} and (amount <= 0 or quantity <= 0):
+            return "test_or_incomplete_record"
+        if bucket in {"navigation_race", "navigation_network"} and external_id.startswith("manual-") and (
+            amount <= 0 or price <= 0
+        ):
+            return "test_or_incomplete_record"
+        if "test" in title and (amount <= 0 or quantity <= 0 or external_id.startswith("manual-")):
+            return "test_or_incomplete_record"
+    return bucket
+
+
+def failure_coverage_hint(row: dict[str, Any]) -> dict[str, Any]:
+    bucket = row.get("failure_bucket") or classify_failure_row(row)
+    haystack = " ".join(
+        str(row.get(key) or "")
+        for key in ("market_title", "marketTitle", "error_message", "errorMessage", "outcome")
+    ).lower()
+    haystack = unicodedata.normalize("NFKD", haystack)
+    haystack = "".join(c for c in haystack if not unicodedata.combining(c))
+    for rule in FIXTURE_COVERAGE_RULES:
+        if rule["bucket"] != bucket:
+            continue
+        record_ids = rule.get("record_ids")
+        if record_ids is not None and row.get("id") not in record_ids:
+            continue
+        match = rule.get("match")
+        if record_ids is not None or all(part in haystack for part in match):
+            coverage_level = rule.get("coverage_level", "exact")
+            return {
+                "covered": coverage_level == "exact",
+                "coverage_level": coverage_level,
+                "coverage_id": rule["coverage_id"],
+                "note": rule["note"],
+            }
+    return {
+        "covered": False,
+        "coverage_level": "none",
+        "coverage_id": None,
+        "note": "No explicit regression fixture coverage matched this historical failure.",
+    }
+
+
+def failure_bucket_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        bucket = classify_failure_row(row)
+        coverage = failure_coverage_hint({**row, "failure_bucket": bucket})
+        item = buckets.setdefault(
+            bucket,
+            {
+                "bucket": bucket,
+                "count": 0,
+                "covered_count": 0,
+                "uncovered_count": 0,
+                "priority": FAILURE_BUCKET_PRIORITY.get(bucket, 1),
+                "actionability": FAILURE_BUCKET_ACTIONABILITY.get(bucket, "needs_triage"),
+                "next_action": FAILURE_BUCKET_NEXT_ACTION.get(bucket, FAILURE_BUCKET_NEXT_ACTION["other"]),
+                "sample_record_ids": [],
+                "sample_markets": [],
+                "uncovered_sample_record_ids": [],
+                "uncovered_sample_markets": [],
+                "coverage_ids": [],
+                "latest_created_at": None,
+            },
+        )
+        item["count"] += 1
+        coverage_id = coverage.get("coverage_id")
+        if coverage_id and coverage_id not in item["coverage_ids"]:
+            item["coverage_ids"].append(coverage_id)
+        if coverage.get("covered"):
+            item["covered_count"] += 1
+        else:
+            item["uncovered_count"] += 1
+            if len(item["uncovered_sample_record_ids"]) < 5:
+                item["uncovered_sample_record_ids"].append(row.get("id"))
+            market_title = row.get("market_title") or row.get("marketTitle")
+            if (
+                market_title
+                and len(item["uncovered_sample_markets"]) < 5
+                and market_title not in item["uncovered_sample_markets"]
+            ):
+                item["uncovered_sample_markets"].append(market_title)
+        if len(item["sample_record_ids"]) < 5:
+            item["sample_record_ids"].append(row.get("id"))
+        market_title = row.get("market_title") or row.get("marketTitle")
+        if market_title and len(item["sample_markets"]) < 5 and market_title not in item["sample_markets"]:
+            item["sample_markets"].append(market_title)
+        created_at = row.get("created_at") or row.get("createdAt")
+        if created_at is not None and (
+            item["latest_created_at"] is None or int(created_at) > int(item["latest_created_at"])
+        ):
+            item["latest_created_at"] = int(created_at)
+
+    return sorted(
+        buckets.values(),
+        key=lambda item: (-item["count"], -item["priority"], -(item["latest_created_at"] or 0), item["bucket"]),
+    )
+
+
+def actionable_failure_buckets(summary: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in sorted(
+            summary,
+            key=lambda row: (
+                -row["priority"],
+                -row.get("uncovered_count", row["count"]),
+                -row["count"],
+                -(row["latest_created_at"] or 0),
+                row["bucket"],
+            ),
+        )
+        if row_is_actionable(item)
+    ][:limit]
+
+
+def row_is_actionable(item: dict[str, Any]) -> bool:
+    if item.get("count", 0) > 0 and item.get("uncovered_count", item.get("count", 0)) <= 0:
+        return False
+    return item.get("actionability") in {
+        "code_selector",
+        "code_navigation",
+        "infra_retry",
+        "data_resolution",
+        "needs_triage",
+    }
+
+
 def latest_record_time_ms(rows: list[dict[str, Any]]) -> int | None:
     timestamps = [
         int(value)
@@ -96,6 +590,69 @@ def latest_record_time_ms(rows: list[dict[str, Any]]) -> int | None:
         if value is not None
     ]
     return max(timestamps) if timestamps else None
+
+
+def filter_records_since(records: list[dict[str, Any]], since_ms: int | None) -> list[dict[str, Any]]:
+    """Filter recent audit rows by created/updated time without affecting ledger checks."""
+    if since_ms is None or since_ms <= 0:
+        return records
+    filtered = []
+    for row in records:
+        timestamps = [
+            int(value)
+            for value in (
+                row.get("created_at"),
+                row.get("createdAt"),
+                row.get("updated_at"),
+                row.get("updatedAt"),
+            )
+            if value is not None
+        ]
+        if timestamps and max(timestamps) >= since_ms:
+            filtered.append(row)
+    return filtered
+
+
+def build_monitor_status(metrics: dict[str, Any], next_action_candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a compact status object for post-fix audit loops and dashboards."""
+    actionable_failure_count = int(metrics.get("actionable_failure_bucket_count") or len(next_action_candidates))
+    records_checked = int(metrics.get("records_checked") or 0)
+    recent_failure_count = int(metrics.get("recent_failure_count") or 0)
+    pending_timeout_count = int(metrics.get("pending_timeout_count") or 0)
+    active_mismatch_count = int(metrics.get("active_success_position_mismatch_count") or 0)
+    actionable_issue_count = strict_actionable_issue_count(
+        {
+            **metrics,
+            "actionable_failure_bucket_count": actionable_failure_count,
+            "pending_timeout_count": pending_timeout_count,
+            "active_success_position_mismatch_count": active_mismatch_count,
+        }
+    )
+
+    if actionable_issue_count > 0:
+        status = "actionable"
+        message = "Actionable Bridge failures need investigation."
+    elif records_checked <= 0:
+        status = "no_recent_records"
+        message = "No PENDING/FAILED records in the selected audit window."
+    else:
+        status = "clear"
+        message = "No actionable Bridge failures in the selected audit window."
+
+    return {
+        "status": status,
+        "message": message,
+        "actionable_failure_bucket_count": actionable_failure_count,
+        "actionable_issue_count": actionable_issue_count,
+        "pending_timeout_count": pending_timeout_count,
+        "recent_failure_count": recent_failure_count,
+        "active_success_position_mismatch_count": active_mismatch_count,
+        "latest_raw_record_time_ms": metrics.get("latest_raw_record_time_ms"),
+        "latest_record_time_ms": metrics.get("latest_record_time_ms"),
+        "latest_failure_time_ms": metrics.get("latest_failure_time_ms"),
+        "since_ms": metrics.get("since_ms"),
+        "next_action_buckets": [item.get("bucket") for item in next_action_candidates],
+    }
 
 
 def reconciliation_key(
@@ -147,6 +704,102 @@ def save_reconciliations(annotations: dict[str, Any], path: Path | None = None) 
     temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     temp_path.replace(file_path)
     return file_path
+
+
+def build_success_mismatch_metric_counts(
+    total: int,
+    fresh: int,
+    stale: int,
+    reconciled: int,
+) -> dict[str, int]:
+    """Return success-position mismatch metrics with fresh-only active semantics.
+
+    Stale mismatches are useful reconciliation evidence, but they usually mean
+    a historical/manual close is possible. They should not keep the post-fix
+    loop in an actionable state unless a fresh SUCCESS row is missing from the
+    live portfolio.
+    """
+    return {
+        "success_position_mismatch_count": total,
+        "active_success_position_mismatch_count": fresh,
+        "fresh_success_position_mismatch_count": fresh,
+        "stale_success_position_mismatch_count": stale,
+        "reconciled_success_position_mismatch_count": reconciled,
+        "unresolved_success_position_mismatch_count": fresh + stale,
+    }
+
+
+def strict_actionable_issue_count(metrics: dict[str, Any]) -> int:
+    """Count only issues that should make strict audit fail."""
+    return (
+        int(metrics.get("pending_timeout_count") or 0)
+        + int(metrics.get("actionable_failure_bucket_count") or 0)
+        + int(metrics.get("active_success_position_mismatch_count") or 0)
+    )
+
+
+def build_reconciliation_suggestions(
+    success_position_mismatches: list[dict[str, Any]],
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Suggest safe operator annotations for stale, unreconciled mismatches.
+
+    The suggestions are intentionally read-only. They give the UI or operator
+    enough data to POST an annotation later, but audit never writes
+    reconciliation files by itself.
+    """
+    suggestions: list[dict[str, Any]] = []
+    for item in success_position_mismatches:
+        if len(suggestions) >= limit:
+            break
+        if item.get("is_reconciled") or not item.get("is_stale"):
+            continue
+        if item.get("bucket") != "stale_success_position_mismatch":
+            continue
+
+        actual_qty = decimal_value(item.get("actual_quantity"))
+        expected_qty = decimal_value(item.get("expected_quantity"))
+        confidence = "high" if actual_qty <= Decimal("0") else "medium"
+        status = "accepted_stale"
+        note = (
+            "Live portfolio no longer shows the expected position; likely "
+            "historical/manual/external close. Verify before accepting."
+        )
+        if actual_qty > Decimal("0") and expected_qty > Decimal("0"):
+            note = (
+                "Live portfolio has less than the expected ledger quantity; "
+                "likely partial external/manual close. Verify before accepting."
+            )
+
+        suggestions.append(
+            {
+                "key": item.get("reconciliation_key"),
+                "status": status,
+                "confidence": confidence,
+                "reason": "stale_success_position_missing_from_live_portfolio",
+                "market_id": item.get("market_id"),
+                "market_title": item.get("market_title"),
+                "outcome": item.get("outcome"),
+                "outcome_index": item.get("outcome_index"),
+                "expected_quantity": item.get("expected_quantity"),
+                "actual_quantity": item.get("actual_quantity"),
+                "latest_record_id": item.get("latest_record_id"),
+                "latest_record_updated_at": item.get("latest_record_updated_at"),
+                "age_ms": item.get("age_ms"),
+                "contributing_record_ids": item.get("contributing_record_ids") or [],
+                "annotation_payload": {
+                    "status": status,
+                    "note": note,
+                    "actor": "audit_suggestion",
+                    "market_id": item.get("market_id"),
+                    "market_title": item.get("market_title"),
+                    "outcome": item.get("outcome"),
+                    "outcome_index": item.get("outcome_index"),
+                },
+            }
+        )
+    return suggestions
 
 
 def db_config() -> DbConfig:
@@ -288,7 +941,9 @@ def build_expected_positions(
 def audit(args: argparse.Namespace) -> dict[str, Any]:
     config = db_config()
     now_ms = int(time.time() * 1000)
-    records = fetch_records(config, args.limit)
+    raw_records = fetch_records(config, args.limit)
+    since_ms = getattr(args, "since_ms", None)
+    records = filter_records_since(raw_records, since_ms)
     success_rows = fetch_success_ledger(config, args.ledger_limit)
     portfolio_payload = fetch_portfolio(args.portfolio_url, args.portfolio_timeout)
     positions = portfolio_payload.get("positions") or []
@@ -307,7 +962,16 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
             item["age_ms"] = age_ms
             pending_timeouts.append(item)
         elif status == "FAILED":
-            recent_failures.append(record_summary(row))
+            item = record_summary(row)
+            bucket = classify_failure_row(item)
+            item["failure_bucket"] = bucket
+            item["failure_actionability"] = FAILURE_BUCKET_ACTIONABILITY.get(bucket, "needs_triage")
+            item["failure_next_action"] = FAILURE_BUCKET_NEXT_ACTION.get(bucket, FAILURE_BUCKET_NEXT_ACTION["other"])
+            item["coverage_hint"] = failure_coverage_hint(item)
+            recent_failures.append(item)
+
+    failure_buckets = failure_bucket_summary(recent_failures)
+    next_action_candidates = actionable_failure_buckets(failure_buckets)
 
     expected, contributing_records = build_expected_positions(success_rows)
     expected_index: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
@@ -405,25 +1069,45 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
 
+    reconciliation_suggestions = build_reconciliation_suggestions(
+        success_position_mismatches,
+        limit=args.reconciliation_suggestion_limit,
+    )
+
+    metrics = {
+        "records_checked": len(records),
+        "raw_records_checked": len(raw_records),
+        "since_ms": since_ms,
+        "latest_raw_record_time_ms": latest_record_time_ms(raw_records),
+        "latest_record_time_ms": latest_record_time_ms(records),
+        "latest_failure_time_ms": latest_record_time_ms(recent_failures),
+        "success_ledger_rows_checked": len(success_rows),
+        "portfolio_position_count": len(positions),
+        "pending_timeout_count": len(pending_timeouts),
+        **build_success_mismatch_metric_counts(
+            total=len(success_position_mismatches),
+            fresh=fresh_success_position_mismatches,
+            stale=stale_success_position_mismatches,
+            reconciled=reconciled_success_position_mismatches,
+        ),
+        "unexpected_portfolio_position_count": len(unexpected_portfolio_positions),
+        "recent_failure_count": len(recent_failures),
+        "failure_bucket_count": len(failure_buckets),
+        "actionable_failure_bucket_count": len(next_action_candidates),
+        "reconciliation_suggestion_count": len(reconciliation_suggestions),
+    }
+
     return {
         "bridge_id": config.bridge_id,
         "portfolio_url": args.portfolio_url,
         "synced_at": portfolio_payload.get("synced_at"),
-        "metrics": {
-            "records_checked": len(records),
-            "success_ledger_rows_checked": len(success_rows),
-            "portfolio_position_count": len(positions),
-            "pending_timeout_count": len(pending_timeouts),
-            "success_position_mismatch_count": len(success_position_mismatches),
-            "active_success_position_mismatch_count": fresh_success_position_mismatches + stale_success_position_mismatches,
-            "fresh_success_position_mismatch_count": fresh_success_position_mismatches,
-            "stale_success_position_mismatch_count": stale_success_position_mismatches,
-            "reconciled_success_position_mismatch_count": reconciled_success_position_mismatches,
-            "unexpected_portfolio_position_count": len(unexpected_portfolio_positions),
-            "recent_failure_count": len(recent_failures),
-        },
+        "metrics": metrics,
+        "monitor_status": build_monitor_status(metrics, next_action_candidates),
+        "failure_buckets": failure_buckets,
+        "next_action_candidates": next_action_candidates,
         "pending_timeouts": pending_timeouts,
         "success_position_mismatches": success_position_mismatches,
+        "reconciliation_suggestions": reconciliation_suggestions,
         "unexpected_portfolio_positions": unexpected_portfolio_positions,
         "recent_failures": recent_failures[: args.failure_limit],
         "portfolio_positions": portfolio_position_summaries,
@@ -433,11 +1117,18 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit Bridge records against live portfolio.")
     parser.add_argument("--limit", type=int, default=100, help="recent records to inspect")
+    parser.add_argument(
+        "--since-ms",
+        type=int,
+        default=None,
+        help="only include recent PENDING/FAILED rows created or updated at/after this timestamp",
+    )
     parser.add_argument("--ledger-limit", type=int, default=1000, help="SUCCESS rows used to compute expected open positions")
     parser.add_argument("--failure-limit", type=int, default=20, help="FAILED records to include in output")
     parser.add_argument("--pending-timeout-ms", type=int, default=120000, help="PENDING age threshold")
     parser.add_argument("--stale-mismatch-ms", type=int, default=1800000, help="SUCCESS mismatch age threshold for historical/stale classification")
     parser.add_argument("--reconciliation-file", default=str(reconciliation_file_path()), help="JSON file with operator reconciliation annotations")
+    parser.add_argument("--reconciliation-suggestion-limit", type=int, default=20, help="stale mismatch reconciliation suggestions to include")
     parser.add_argument("--portfolio-url", default=os.getenv("BRIDGE_PORTFOLIO_URL", "http://127.0.0.1:8080/portfolio"))
     parser.add_argument("--portfolio-timeout", type=float, default=90.0)
     parser.add_argument("--min-quantity-ratio", type=Decimal, default=Decimal("0.5"))
@@ -455,11 +1146,7 @@ def main() -> int:
         return 2
 
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    actionable = (
-        result["metrics"]["pending_timeout_count"]
-        + result["metrics"]["active_success_position_mismatch_count"]
-        + result["metrics"]["unexpected_portfolio_position_count"]
-    )
+    actionable = strict_actionable_issue_count(result["metrics"])
     return 1 if args.strict and actionable else 0
 
 

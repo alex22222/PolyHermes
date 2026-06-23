@@ -135,6 +135,50 @@ _trade_lock = asyncio.Lock()
 _portfolio_lock = asyncio.Lock()
 
 
+def bridge_runtime_status() -> dict[str, Any]:
+    return {
+        "ready": executor.is_ready() if executor else False,
+        "logged_in": executor.is_logged_in() if executor else False,
+        "last_error": executor.last_error if executor else "executor not initialized",
+        "copy_trading_account_id": rule_engine.active_account_id if rule_engine else None,
+        "copy_trading_config_count": rule_engine.config_count if rule_engine else 0,
+    }
+
+
+def runtime_block_reasons(runtime_status: dict[str, Any]) -> list[str]:
+    reasons = []
+    if not runtime_status.get("ready"):
+        reasons.append("executor_not_ready")
+    if not runtime_status.get("logged_in"):
+        reasons.append("not_logged_in")
+    if runtime_status.get("copy_trading_account_id") in (None, "", 0):
+        reasons.append("copy_trading_account_missing")
+    if int(runtime_status.get("copy_trading_config_count") or 0) <= 0:
+        reasons.append("copy_trading_config_empty")
+    if runtime_status.get("last_error"):
+        reasons.append("last_error_present")
+    return reasons
+
+
+def apply_runtime_status_to_audit_result(
+    audit_result: dict[str, Any],
+    runtime_status: dict[str, Any],
+) -> dict[str, Any]:
+    audit_result["runtime_status"] = runtime_status
+    reasons = runtime_block_reasons(runtime_status)
+    if not reasons:
+        return audit_result
+
+    previous_status = audit_result.get("monitor_status") or {}
+    audit_result["monitor_status"] = {
+        **previous_status,
+        "status": "runtime_blocked",
+        "message": f"Bridge runtime is not ready for copy trading: {', '.join(reasons)}.",
+        "runtime_block_reasons": reasons,
+    }
+    return audit_result
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global executor, rule_engine, recorder, position_ledger
@@ -156,13 +200,20 @@ async def lifespan(app: FastAPI):
                 wallet = await executor.get_wallet_address()
                 if wallet:
                     detected_account = rule_engine.resolve_account_id_by_wallet(wallet)
-                    env_account = int(os.getenv("COPY_TRADING_ACCOUNT_ID", "0") or "0")
+                    env_account = CopyTradingRuleEngine.normalize_account_id(
+                        os.getenv("COPY_TRADING_ACCOUNT_ID")
+                    )
                     if detected_account:
-                        if detected_account != env_account:
+                        if env_account is not None and detected_account != env_account:
                             logger.warning(
                                 f"COPY_TRADING_ACCOUNT_ID mismatch: env={env_account}, "
                                 f"detected={detected_account} for wallet {wallet}. "
                                 f"Using detected account id."
+                            )
+                        elif env_account is None:
+                            logger.info(
+                                f"Using detected copy-trading account id {detected_account} "
+                                f"for wallet {wallet}."
                             )
                         rule_engine.set_account_id(detected_account)
                     elif env_account:
@@ -206,13 +257,7 @@ async def health():
 
 @app.get("/status")
 async def status():
-    if not executor:
-        return {"error": "executor not initialized"}
-    return {
-        "ready": executor.is_ready(),
-        "logged_in": executor.is_logged_in(),
-        "last_error": executor.last_error,
-    }
+    return bridge_runtime_status()
 
 
 @app.get("/metrics")
@@ -375,6 +420,11 @@ async def portfolio_positions():
 @app.get("/audit")
 async def reliability_audit(
     limit: int = Query(100, ge=1, le=500),
+    since_ms: Optional[int] = Query(
+        None,
+        ge=0,
+        description="Only include recent PENDING/FAILED rows created or updated at/after this timestamp.",
+    ),
     ledger_limit: int = Query(1000, ge=1, le=5000),
     failure_limit: int = Query(20, ge=0, le=100),
     pending_timeout_ms: int = Query(120000, ge=1000),
@@ -385,18 +435,21 @@ async def reliability_audit(
 ):
     """Return read-only Bridge reliability audit metrics.
 
-    This exposes the same reconciliation checks as bridge_reliability_audit.py:
-    PENDING timeouts, SUCCESS ledger vs live portfolio mismatches, and
-    unexpected live portfolio positions. SUCCESS mismatches older than
-    stale_mismatch_ms are marked as historical/stale. It never places trades.
+    This exposes the same checks as bridge_reliability_audit.py: PENDING
+    timeouts, SUCCESS ledger vs live portfolio mismatches, unexpected live
+    portfolio positions, FAILED error buckets, and next action candidates.
+    SUCCESS mismatches older than stale_mismatch_ms are marked as
+    historical/stale. It never places trades.
     """
     args = argparse.Namespace(
         limit=limit,
+        since_ms=since_ms,
         ledger_limit=ledger_limit,
         failure_limit=failure_limit,
         pending_timeout_ms=pending_timeout_ms,
         stale_mismatch_ms=stale_mismatch_ms,
         reconciliation_file=str(reconciliation_file_path()),
+        reconciliation_suggestion_limit=20,
         portfolio_url=os.getenv("BRIDGE_PORTFOLIO_URL", "http://127.0.0.1:8080/portfolio"),
         portfolio_timeout=portfolio_timeout,
         min_quantity_ratio=Decimal(str(min_quantity_ratio)),
@@ -404,7 +457,8 @@ async def reliability_audit(
         strict=False,
     )
     try:
-        return await asyncio.to_thread(run_bridge_reliability_audit, args)
+        result = await asyncio.to_thread(run_bridge_reliability_audit, args)
+        return apply_runtime_status_to_audit_result(result, bridge_runtime_status())
     except Exception as e:
         logger.error(f"Bridge reliability audit failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Bridge reliability audit failed: {e}")
@@ -806,10 +860,33 @@ async def handle_signal(signal: LeaderTradeSignal):
                     outcome=signal.outcome,
                 )
                 if live_quantity <= 0:
-                    raise RuntimeError(
-                        f"No live position available for SELL "
-                        f"(available={live_quantity}, required={quantity})"
+                    logger.info(
+                        f"Config {cfg.id}: SELL skipped for {signal.transaction_hash} "
+                        f"because live portfolio has no matching position"
                     )
+                    if recorder:
+                        try:
+                            skip_id = recorder.record_pending(
+                                external_trade_id=signal.transaction_hash,
+                                market_id=signal.condition_id or signal.market_slug or "",
+                                market_title=signal.title,
+                                side=side_upper,
+                                outcome=signal.outcome,
+                                outcome_index=signal.outcome_index,
+                                quantity=quantity,
+                                price=price_dec,
+                                amount=amount,
+                                raw_payload=signal.model_dump(by_alias=True),
+                            )
+                            recorder.update_status(
+                                skip_id,
+                                "FAILED",
+                                "Live portfolio insufficient position, skipped "
+                                f"(available={live_quantity}, required={quantity})",
+                            )
+                        except Exception as rec_err:
+                            logger.warning(f"Failed to record live skipped SELL: {rec_err}")
+                    continue
                 if live_quantity < quantity:
                     logger.warning(
                         f"Config {cfg.id}: Adjusting SELL quantity from {quantity} to {live_quantity} "

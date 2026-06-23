@@ -37,9 +37,13 @@ export default defineConfig(({ mode }) => {
           target: WS_URL,
           ws: true,
           changeOrigin: true
+        },
+        '/bridge-runtime': {
+          target: 'http://localhost:8080',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/bridge-runtime/, '')
         }
       }
     }
   }
 })
-

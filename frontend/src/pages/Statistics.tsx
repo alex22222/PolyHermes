@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react'
-import { Card, Row, Col, Statistic, message, DatePicker, Space, Button, Typography, Select, Segmented, Empty } from 'antd'
+import { Card, Row, Col, Statistic, message, DatePicker, Space, Button, Typography, Select, Segmented, Empty, Tag } from 'antd'
 import { ArrowUpOutlined, ArrowDownOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import type { Dayjs } from 'dayjs'
 import { apiService } from '../services/api'
-import type { BridgeTradeStatistics, CopyTrading, CopyTradingStatistics, Leader, Statistics as StatisticsType } from '../types'
+import type { BridgeAuditResponse, BridgeTradeStatistics, CopyTrading, CopyTradingStatistics, Leader, Statistics as StatisticsType } from '../types'
 import { formatUSDC, formatNumber } from '../utils'
 import { useMediaQuery } from 'react-responsive'
 
 const { RangePicker } = DatePicker
-const { Title } = Typography
+const { Title, Text } = Typography
 type StatisticsScope = 'global' | 'leader' | 'category'
 
 const toNumber = (value: string | number | null | undefined): number => {
@@ -74,10 +74,42 @@ const mapBridgeStatistics = (bridgeStats: BridgeTradeStatistics): StatisticsType
   }
 }
 
+const getAuditStatusView = (status?: string) => {
+  switch (status) {
+    case 'clear':
+      return { color: 'green', label: '正常' }
+    case 'actionable':
+      return { color: 'red', label: '需处理' }
+    case 'runtime_blocked':
+      return { color: 'red', label: '执行受阻' }
+    case 'no_recent_records':
+      return { color: 'orange', label: '暂无新记录' }
+    default:
+      return { color: 'default', label: status || '未知' }
+  }
+}
+
+const runtimeBlockReasonLabels: Record<string, string> = {
+  executor_not_ready: '执行器未就绪',
+  not_logged_in: 'Bridge 未登录',
+  copy_trading_account_missing: '跟单账号缺失',
+  copy_trading_config_empty: '有效配置为 0',
+  last_error_present: '存在最近错误'
+}
+
+const formatRuntimeBlockReason = (reason: string): string =>
+  runtimeBlockReasonLabels[reason] || reason
+
+const formatTimestamp = (value?: number | null): string => {
+  if (!value) return '-'
+  return new Date(value).toLocaleString()
+}
+
 const Statistics: React.FC = () => {
   const { t } = useTranslation()
   const isMobile = useMediaQuery({ maxWidth: 768 })
   const [stats, setStats] = useState<StatisticsType | null>(null)
+  const [bridgeAudit, setBridgeAudit] = useState<BridgeAuditResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [leadersLoading, setLeadersLoading] = useState(false)
   const [leaders, setLeaders] = useState<Leader[]>([])
@@ -174,8 +206,26 @@ const Statistics: React.FC = () => {
     return mapBridgeStatistics(response.data.data)
   }
 
+  const fetchBridgeAudit = async () => {
+    try {
+      const response = await apiService.bridgeTradeRecords.audit({
+        limit: 500,
+        failureLimit: 100,
+        portfolioTimeout: 90
+      })
+      if (response.data.code === 0 && response.data.data) {
+        setBridgeAudit(response.data.data)
+      } else {
+        setBridgeAudit(null)
+      }
+    } catch (error) {
+      setBridgeAudit(null)
+    }
+  }
+
   const fetchStatistics = async () => {
     setLoading(true)
+    const bridgeAuditPromise = fetchBridgeAudit()
     try {
       const startTime = dateRange[0] ? dateRange[0].valueOf() : undefined
       const endTime = dateRange[1] ? dateRange[1].valueOf() : undefined
@@ -217,6 +267,7 @@ const Statistics: React.FC = () => {
       setStats(null)
       message.error(error.message || t('statistics.fetchFailed') || '获取统计信息失败')
     } finally {
+      await bridgeAuditPromise
       setLoading(false)
     }
   }
@@ -237,6 +288,12 @@ const Statistics: React.FC = () => {
     setScope(value)
     setStats(null)
   }
+
+  const auditMonitor = bridgeAudit?.monitorStatus
+  const auditMetrics = bridgeAudit?.metrics
+  const auditStatusView = getAuditStatusView(auditMonitor?.status)
+  const nextActionBuckets = auditMonitor?.nextActionBuckets || bridgeAudit?.nextActionCandidates || []
+  const runtimeBlockReasons = auditMonitor?.runtimeBlockReasons || []
 
   return (
     <div>
@@ -305,6 +362,65 @@ const Statistics: React.FC = () => {
           )}
         </Space>
       </div>
+
+      <Card
+        title="Bridge 执行链路监控"
+        extra={<Tag color={auditStatusView.color}>{auditStatusView.label}</Tag>}
+        style={{ marginBottom: 16 }}
+      >
+        <Row gutter={[16, 16]}>
+          <Col xs={24} sm={12} md={6}>
+            <Statistic
+              title="可处理失败桶"
+              value={auditMonitor?.actionableFailureBucketCount || 0}
+              valueStyle={{ color: (auditMonitor?.actionableFailureBucketCount || 0) > 0 ? '#cf1322' : undefined }}
+              loading={loading && !bridgeAudit}
+            />
+          </Col>
+          <Col xs={24} sm={12} md={6}>
+            <Statistic
+              title="最近失败数"
+              value={auditMonitor?.recentFailureCount || auditMetrics?.recentFailureCount || 0}
+              loading={loading && !bridgeAudit}
+            />
+          </Col>
+          <Col xs={24} sm={12} md={6}>
+            <Statistic
+              title="Pending 超时"
+              value={auditMonitor?.pendingTimeoutCount || auditMetrics?.pendingTimeoutCount || 0}
+              valueStyle={{ color: (auditMonitor?.pendingTimeoutCount || 0) > 0 ? '#cf1322' : undefined }}
+              loading={loading && !bridgeAudit}
+            />
+          </Col>
+          <Col xs={24} sm={12} md={6}>
+            <Statistic
+              title="当前持仓快照"
+              value={auditMetrics?.portfolioPositionCount || 0}
+              loading={loading && !bridgeAudit}
+            />
+          </Col>
+        </Row>
+        <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <Text type="secondary">{auditMonitor?.message || 'Bridge audit 暂无返回'}</Text>
+          <Text type="secondary">最近记录: {formatTimestamp(auditMonitor?.latestRecordTimeMs || auditMetrics?.latestRecordTimeMs)}</Text>
+          {runtimeBlockReasons.length > 0 && (
+            <Space size={[8, 8]} wrap>
+              {runtimeBlockReasons.map((reason) => (
+                <Tag key={reason} color="red">{formatRuntimeBlockReason(reason)}</Tag>
+              ))}
+            </Space>
+          )}
+          {nextActionBuckets.length > 0 && (
+            <Space size={[8, 8]} wrap>
+              {nextActionBuckets.slice(0, 4).map((bucket) => (
+                <Tag key={`${bucket.bucket}-${bucket.priority}`} color="red">
+                  {bucket.bucket}: {bucket.uncoveredCount ?? bucket.count ?? 0}
+                </Tag>
+              ))}
+            </Space>
+          )}
+        </div>
+      </Card>
 
       {!loading && !stats && (
         <Card>

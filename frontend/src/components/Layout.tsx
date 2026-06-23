@@ -205,6 +205,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       label: t('menu.statistics')
     },
     {
+      key: '/optimization-daily',
+      icon: <DashboardOutlined />,
+      label: t('menu.optimizationDaily') || '优化点日报'
+    },
+    {
       key: '/bridge-trade-records',
       icon: <SwapOutlined />,
       label: t('menu.bridgeTradeRecords') || '桥接交易记录'

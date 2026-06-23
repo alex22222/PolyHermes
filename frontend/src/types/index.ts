@@ -164,6 +164,10 @@ export interface Leader {
   researchScore?: number  // 研究模块 copyability 评分 (0-100)
   researchTag?: string  // 研究标签: ELITE/TRADEABLE/CANDIDATE/WATCH/RISKY
   researchRiskFlags?: string  // 风险标记,逗号分隔
+  convictionScore?: number  // 信念评分 (0-100)
+  zombieRiskScore?: number  // 僵尸单风险评分 (0-100，越高越危险)
+  categoryScore?: number  // 分领域评分 (0-100)
+  executionScore?: number  // 执行链路评分 (0-100)
   researchScoredAt?: number  // 研究评分时间(毫秒时间戳)
   createdAt: number
   updatedAt: number
@@ -1861,6 +1865,120 @@ export interface BridgeTradeStatistics {
   latestBuyAt?: number
   latestSellAt?: number
   latestSnapshotSyncedAt?: number
+}
+
+/**
+ * Bridge 执行链路审计请求
+ */
+export interface BridgeAuditRequest {
+  sinceMs?: number
+  limit?: number
+  failureLimit?: number
+  portfolioTimeout?: number
+}
+
+/**
+ * Bridge 执行链路审计响应
+ */
+export interface BridgeAuditResponse {
+  bridgeId?: string
+  syncedAt?: number
+  metrics?: BridgeAuditMetrics
+  monitorStatus?: BridgeAuditMonitorStatus
+  runtimeStatus?: BridgeRuntimeStatus
+  reconciliationSuggestions?: BridgeAuditReconciliationSuggestion[]
+  nextActionCandidates?: BridgeAuditBucket[]
+}
+
+export interface BridgeAuditMetrics {
+  recordsChecked?: number
+  rawRecordsChecked?: number
+  sinceMs?: number
+  latestRawRecordTimeMs?: number
+  latestRecordTimeMs?: number
+  latestFailureTimeMs?: number
+  portfolioPositionCount?: number
+  pendingTimeoutCount?: number
+  recentFailureCount?: number
+  successPositionMismatchCount?: number
+  activeSuccessPositionMismatchCount?: number
+  freshSuccessPositionMismatchCount?: number
+  staleSuccessPositionMismatchCount?: number
+  reconciledSuccessPositionMismatchCount?: number
+  unresolvedSuccessPositionMismatchCount?: number
+  reconciliationSuggestionCount?: number
+  failureBucketCount?: number
+  actionableFailureBucketCount?: number
+}
+
+export interface BridgeAuditMonitorStatus {
+  status?: 'clear' | 'actionable' | 'no_recent_records' | 'runtime_blocked' | string
+  message?: string
+  actionableFailureBucketCount?: number
+  actionableIssueCount?: number
+  pendingTimeoutCount?: number
+  recentFailureCount?: number
+  activeSuccessPositionMismatchCount?: number
+  latestRawRecordTimeMs?: number
+  latestRecordTimeMs?: number
+  latestFailureTimeMs?: number
+  sinceMs?: number
+  runtimeBlockReasons?: string[]
+  nextActionBuckets?: BridgeAuditBucket[]
+}
+
+export interface BridgeAuditBucket {
+  bucket?: string
+  count?: number
+  coveredCount?: number
+  uncoveredCount?: number
+  priority?: number
+  actionability?: string
+  nextAction?: string
+  sampleRecordIds?: number[]
+  uncoveredSampleRecordIds?: number[]
+  sampleMarkets?: string[]
+  coverageIds?: string[]
+  latestCreatedAt?: number
+}
+
+export interface BridgeAuditReconciliationSuggestion {
+  key?: string
+  status?: string
+  confidence?: string
+  reason?: string
+  marketId?: string
+  marketTitle?: string
+  outcome?: string
+  outcomeIndex?: number
+  expectedQuantity?: string
+  actualQuantity?: string
+  latestRecordId?: number
+  latestRecordUpdatedAt?: number
+  ageMs?: number
+  contributingRecordIds?: number[]
+  annotationPayload?: BridgeAuditReconciliationPayload
+}
+
+export interface BridgeAuditReconciliationPayload {
+  status?: string
+  note?: string
+  actor?: string
+  marketId?: string
+  marketTitle?: string
+  outcome?: string
+  outcomeIndex?: number
+}
+
+/**
+ * Bridge runtime 状态响应
+ */
+export interface BridgeRuntimeStatus {
+  ready?: boolean
+  loggedIn?: boolean
+  lastError?: string | null
+  copyTradingAccountId?: number | null
+  copyTradingConfigCount?: number
 }
 
 /**

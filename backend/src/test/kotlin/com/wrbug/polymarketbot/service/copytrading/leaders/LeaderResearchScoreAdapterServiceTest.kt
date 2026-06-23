@@ -13,7 +13,12 @@ import java.math.BigDecimal
 class LeaderResearchScoreAdapterServiceTest {
     private val leaderRepository: LeaderRepository = mock()
     private val backtestTaskRepository: BacktestTaskRepository = mock()
-    private val service = LeaderResearchScoreAdapterService(leaderRepository, backtestTaskRepository)
+    private val leaderExecutionStatsService: LeaderExecutionStatsService = mock()
+    private val service = LeaderResearchScoreAdapterService(
+        leaderRepository,
+        backtestTaskRepository,
+        leaderExecutionStatsService
+    )
 
     @Test
     fun `low average trade size with uncopyable backtest is blocked as tail spray`() {
@@ -44,6 +49,27 @@ class LeaderResearchScoreAdapterServiceTest {
             profitRate = BigDecimal.ZERO
         )
         Mockito.`when`(backtestTaskRepository.findByLeaderIdAndStatus(66L, "COMPLETED")).thenReturn(listOf(backtest))
+        Mockito.`when`(
+            leaderExecutionStatsService.scoreLeaderExecution(
+                66L,
+                "0xc21ea96be762bb55041529af6e386e7c53b80215",
+                BigDecimal.ZERO
+            )
+        ).thenReturn(
+            LeaderExecutionScoreResult(
+                score = BigDecimal.ZERO,
+                riskFlags = emptyList(),
+                stats = LeaderExecutionStats(
+                    buyCreatedCount = 0,
+                    filteredBuyCount = 0,
+                    filteredSellCount = 0,
+                    matchedSellCount = 0,
+                    openBuyCount = 0,
+                    lossSellCount = 0
+                ),
+                source = "REAL_EXECUTION"
+            )
+        )
 
         val result = service.computeScore(leader)
 
