@@ -253,6 +253,78 @@ BALANCE_HTML = """
 </html>
 """
 
+INLINE_BUY_FORM_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <section class="trade-panel">
+      <h2>Will Canada win the 2026 FIFA World Cup?</h2>
+      <div>Canada</div>
+      <label>金额</label>
+      <input inputmode="decimal" placeholder="金额" />
+      <button>确认买入</button>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
+SELL_POSITION_WITH_PM_WALLET_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <section class="wallet-card">
+      <div>余额 0 PM</div>
+      <button id="pm-sell">卖出 $PM</button>
+      <button>买入 $PM</button>
+      <div>Solana钱包地址 217m...5y9x</div>
+    </section>
+    <section class="event-page">
+      <h1>Argentina vs. Austria</h1>
+      <div class="position-card">
+        <div>持仓</div>
+        <div>Argentina • Yes</div>
+        <button id="position-sell">卖出</button>
+        <div>剩余</div>
+        <div>3.33</div>
+        <div>PnL +0%</div>
+      </div>
+    </section>
+  </main>
+  <script>
+    window.clickedIds = [];
+    document.addEventListener("click", (event) => {
+      window.clickedIds.push(event.target.id || (event.target.innerText || "").trim());
+    });
+  </script>
+</body>
+</html>
+"""
+
+
+SELL_CONFIRM_DIALOG_HTML = """
+<!doctype html>
+<html>
+<body>
+  <div role="dialog" class="trade-modal">
+    <h2>卖出 Argentina Yes</h2>
+    <input name="soldAmount" inputmode="decimal" />
+    <button id="max">100%</button>
+    <button id="confirm-sell">确认卖出</button>
+  </div>
+  <script>
+    window.clickedIds = [];
+    document.addEventListener("click", (event) => {
+      window.clickedIds.push(event.target.id || (event.target.innerText || "").trim());
+    });
+  </script>
+</body>
+</html>
+"""
+
 
 async def _run_network_modal_fixture() -> None:
     async with async_playwright() as playwright:
@@ -302,10 +374,50 @@ async def _run_balance_fixture() -> None:
             await browser.close()
 
 
+async def _run_trade_form_fixture() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            executor = PolymtradeExecutor()
+            executor.page = page
+
+            await page.set_content(INLINE_BUY_FORM_HTML)
+            await executor._enter_amount(2.0)
+            value = await page.eval_on_selector("input", "el => el.value")
+            assert value == "2.0", value
+
+            await page.set_content(SELL_POSITION_WITH_PM_WALLET_HTML)
+            is_open = await executor._is_sell_dialog_open(timeout=0.5)
+            assert is_open is False, "Portfolio sell buttons must not count as an open sell dialog"
+
+            await executor._open_sell_dialog(
+                "Yes",
+                market_slug="fifwc-arg-aut-2026-06-22-arg",
+                market_title="Will Argentina win on 2026-06-22?",
+            )
+            clicked_ids = await page.evaluate("window.clickedIds")
+            assert clicked_ids == ["position-sell"], clicked_ids
+
+            await page.set_content(SELL_CONFIRM_DIALOG_HTML)
+            is_open = await executor._is_sell_dialog_open(timeout=0.5)
+            assert is_open is True, "Dialog with soldAmount input should be treated as sell dialog"
+            entered = await executor._enter_sell_shares(2.4691)
+            assert entered is True, "Expected sell shares input to be filled"
+            value = await page.eval_on_selector("input[name='soldAmount']", "el => el.value")
+            assert value == "2.4691", value
+            await executor._click_sell_button()
+            clicked_ids = await page.evaluate("window.clickedIds")
+            assert "confirm-sell" in clicked_ids, clicked_ids
+        finally:
+            await browser.close()
+
+
 def main() -> int:
     asyncio.run(_run_selector_fixture())
     asyncio.run(_run_network_modal_fixture())
     asyncio.run(_run_balance_fixture())
+    asyncio.run(_run_trade_form_fixture())
     print("selector fixture passed")
     return 0
 

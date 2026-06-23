@@ -33,6 +33,8 @@
 - [x] 迭代 3：增强 BUY 后成交精确校验（已完成）
 - [x] 迭代 4：SELL 路径加固，减少假阴性（已完成）
 - [x] 迭代 5：BUY outcome/amount 鲁棒性、SELL 持仓降级、Bridge 指标（已完成）
+- [x] 迭代 6：修复 BUY 因 portfolio 轮播导致 eventId 未出现在 URL 而误判失败的问题（已完成）
+- [x] 迭代 7：将真实 Bridge 执行成败纳入 Leader execution_score（已完成）
 
 ## Done
 
@@ -43,6 +45,7 @@
 - [x] 识别主要根因：网络/代币模态框仅被关闭未选择、BUY 无成交后校验、部分异常日志缺失原因
 - [x] 创建 OpenSpec 变更目录与初始提案/设计/任务/需求文档
 - [x] 实现迭代 1 代码修复并验证
+- [x] Leader 研究评分已接入真实执行记录：优先使用 `copy_order_tracking` / `filtered_order` / `sell_match_record`，并补充 `bridge_trade_record.raw_payload.leaderAddress` 归因。
 
 ## Iteration 1 Log
 
@@ -198,6 +201,33 @@
 - outcome 选择仍有赖于页面 DOM 结构；若 Polymtrade 大改版，脚本可能再次失效。
 - 指标是内存级，Bridge 重启会清零；如需持久化可接入后端数据库或 Prometheus。
 - 第 3 点建议的"低余额告警/自动充值"尚未实现。
+
+## Iteration 6 Log
+
+**目标**：修复 trade id 583（BUY 哥伦比亚大选 Yes）因 portfolio 轮播未停留在目标 event 而被误判为 `Target event 34584 URL never appeared` 的失败。
+
+**根因**：
+- Bridge 账户在该事件上无持仓，Polymtrade `/portfolio` 页会自动轮播到已有持仓的事件，导致 URL 中的 `eventId` 被替换为其他事件。
+- `_execute_buy()` 和 `_wait_for_page_ready()` 之前把 `eventId 出现在 URL` 作为硬门槛，只要轮播离开目标事件就会触发 `RuntimeError`。
+- `_extract_market_keywords()` 未过滤 `presidential` / `election` 等通用政治词汇，跨事件关键词匹配可能误命中。
+
+**改动文件**：
+- `polymtrade-bridge/polymtrade_executor.py`
+  - `_wait_for_page_ready()`：移除对 `eventId` 出现在 URL 的硬依赖，改为验证页面是否渲染了目标市场关键词与 Yes/No 侧边按钮。
+  - 新增 `_is_target_event_visible()`：基于市场关键词、side label 与 outcome 文本判断目标市场是否真正渲染在当前页面。
+  - `_execute_buy()`：用 `_is_target_event_visible()` 替代 `_wait_for_event_url()`；若目标内容不可见，则在主 URL 与 `eventSlug` 兜底 URL 之间重新导航，最多重试 6 次。
+  - `_extract_market_keywords()`：在 stop words 中补充 `presidential`、`president`、`election`、`candidate`、`vote` 等通用政治词汇，降低跨事件误匹配。
+- `polymtrade-bridge/test_event_visibility.py`（新增）
+  - 覆盖目标事件可见/不可见、缺少按钮、`_wait_for_page_ready()` 不依赖 URL 中 eventId 等场景。
+
+**验证结果**：
+- `python -m py_compile polymtrade_executor.py main.py bridge_metrics.py` 通过。
+- `python -m pytest -q --asyncio-mode=auto`：37 tests 全部通过（含新增 5 个）。
+- `launchctl` 重启 `com.polyhermes.polymtrade-bridge` 后 `/health`、`/portfolio`、`/metrics` 均正常响应。
+
+**已知限制 / 下一步可继续优化**：
+- SELL 路径仍部分依赖 `eventId` URL 匹配；若未来在无持仓事件上尝试 SELL，仍可能遇到类似问题（但当前 ledger/live 检查会提前拦截无持仓 SELL）。
+- 内容可见性检查仍基于 DOM 文本，若 Polymtrade 调整 class/文本，需要同步更新 selector。
 
 ---
 
@@ -363,3 +393,31 @@
 ## Blocked / Escalated
 
 - 无
+
+## Iteration 8 Log
+
+**目标**：修复 2026-06-23 两笔 Polymtrade Web Bridge 失败样本，提升 BUY 金额输入与 SELL 执行链路成功率。
+
+**失败样本**：
+- BUY `Will Canada win the 2026 FIFA World Cup?`：bridge record 598，失败原因为金额输入框等待超时。
+- SELL `Will Argentina win on 2026-06-22?`：bridge record 597，失败原因为误点顶部钱包 `卖出 $PM`，随后无法进入真实持仓卖出弹窗与提交按钮。
+
+**改动文件**：
+- `polymtrade-bridge/polymtrade_executor.py`
+- `polymtrade-bridge/test_selector_fixture.py`
+
+**规则变更**：
+- BUY outcome 点击改为点击最近可交易按钮祖先，减少点到孤立 `是/Yes` 文本后不出交易框的概率。
+- BUY/SELL 金额输入增加 trade/form/dialog 上下文扫描，支持 inline trade panel 输入框。
+- SELL 开仓按钮排除钱包 `$PM` 操作，只允许命中带 `持仓/剩余/position/market` 上下文的目标市场卡片。
+- SELL dialog 判断不再把页面任意 `卖出` 按钮当作弹窗打开，必须有真实 sell form/input/dialog 证据。
+- SELL 提交按钮支持 `确认卖出/确认/下单/Review/Place order` 等弹窗内按钮。
+- 持仓数量读取增加 `剩余 X`，并优先按目标市场关键词匹配，避免读取到其他持仓数量。
+
+**验证结果**：
+- `python3 polymtrade-bridge/test_selector_fixture.py` 通过。
+- `python3 polymtrade-bridge/test_buy_verification.py` 通过。
+- `python3 polymtrade-bridge/test_sell_verification.py` 通过。
+- `python3 polymtrade-bridge/test_event_visibility.py` 通过。
+- `python3 -m py_compile polymtrade-bridge/polymtrade_executor.py polymtrade-bridge/main.py polymtrade-bridge/bridge_metrics.py` 通过。
+- 已重启 `com.polyhermes.polymtrade-bridge`，`/health` 返回 `{"status":"ok","executor_ready":true}`。

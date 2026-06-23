@@ -851,6 +851,8 @@ class PolymtradeExecutor:
                     outcome=outcome,
                     amount_usdc=amount_usdc,
                     baseline=baseline,
+                    market_slug=market_slug,
+                    market_title=market_title,
                 )
                 result["verified"] = verified
             else:
@@ -864,6 +866,8 @@ class PolymtradeExecutor:
                     outcome=outcome,
                     size_shares=size_shares,
                     baseline=baseline,
+                    market_slug=market_slug,
+                    market_title=market_title,
                 )
                 result["verified"] = verified
 
@@ -890,9 +894,10 @@ class PolymtradeExecutor:
     ):
         """Wait until the event page has rendered market rows.
 
-        Polymtrade's portfolio page auto-rotates through the user's position
-        events. We wait until the URL matches the target eventId and the
-        market keywords are visible in the DOM before proceeding.
+        The portfolio page may auto-rotate through position events, so we no
+        longer gate on the exact ``eventId`` appearing in the URL. Instead we
+        wait until the market keywords and Yes/No side buttons are visible in
+        the DOM. ``event_id`` is kept as a diagnostic argument only.
         """
         keywords = []
         if market_title:
@@ -903,24 +908,26 @@ class PolymtradeExecutor:
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                # Wait for the carousel to land on the target event.
-                if event_id and event_id not in self.page.url:
-                    await asyncio.sleep(0.3)
-                    continue
-
                 has_content = await self.page.evaluate(
                     """(args) => {
                         const keywords = args[0];
+                        const sideLabels = ['是', '否', 'Yes', 'No', 'Buy Yes', 'Buy No', 'Long', 'Short'];
+                        const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
+                        const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
                         const bodyText = (document.body?.innerText || '').trim();
                         const hasMarkets = document.querySelectorAll('.market, [class*="market"], [class*="outcome"], li, [role="listitem"]').length > 0;
-                        const hasSideButtons = Array.from(document.querySelectorAll('*')).some(el => {
-                            const text = (el.innerText || '').trim();
-                            return text === '是' || text === '否' || text === 'Yes' || text === 'No' || text.startsWith('是 ') || text.startsWith('否 ');
+                        const hasSideButtons = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"]')).some(el => {
+                            const t = norm(textOf(el));
+                            if (t.length > 40) return false;
+                            return sideLabels.some(l => {
+                                const lnorm = l.toLowerCase();
+                                return t === lnorm || t.startsWith(lnorm + " ") || t.endsWith(" " + lnorm) || t.includes(" " + lnorm + " ");
+                            });
                         });
                         if (keywords.length > 0) {
                             const lower = bodyText.toLowerCase();
                             const hasKeyword = keywords.some(kw => lower.includes(kw.toLowerCase()));
-                            return hasMarkets && hasKeyword;
+                            return hasMarkets && hasKeyword && hasSideButtons;
                         }
                         return (hasMarkets || hasSideButtons) && bodyText.length > 200;
                     }""",
@@ -945,6 +952,73 @@ class PolymtradeExecutor:
             except Exception:
                 pass
             await asyncio.sleep(0.2)
+        return False
+
+    async def _is_target_event_visible(
+        self,
+        outcome: str,
+        market_slug: Optional[str] = None,
+        market_title: Optional[str] = None,
+        timeout: float = 8.0,
+    ) -> bool:
+        """Return True when the target market/outcome is rendered on the page.
+
+        This is used for BUY attempts instead of hard-gating on ``eventId``
+        appearing in the URL. The portfolio carousel can rotate away from an
+        event where the Bridge account has no open position, leaving the page
+        content correct but the URL pointing at a different event.
+        """
+        keywords = self._extract_market_keywords(market_slug, market_title)
+        # Keep the most specific short keywords; avoid overly long phrases.
+        keywords = [k for k in keywords if len(k) <= 25][:5]
+
+        outcome_norm = outcome.strip().lower()
+        if outcome_norm in ("yes", "是", "true"):
+            side_labels = ["是", "Yes", "Buy Yes", "Long"]
+        elif outcome_norm in ("no", "否", "false"):
+            side_labels = ["否", "No", "Buy No", "Short"]
+        else:
+            side_labels = ["是", "Yes", outcome]
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                result = await self.page.evaluate(
+                    """(args) => {
+                        const [keywords, sideLabels] = args;
+                        const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
+                        const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
+                        const bodyText = norm(textOf(document.body));
+
+                        const keywordHits = keywords.filter(kw => bodyText.includes(kw.toLowerCase())).length;
+                        const hasKeyword = keywords.length === 0 || keywordHits > 0;
+
+                        const hasSide = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"]')).some(el => {
+                            const t = norm(textOf(el));
+                            if (t.length > 40) return false;
+                            return sideLabels.some(l => {
+                                const lnorm = l.toLowerCase();
+                                return t === lnorm || t.startsWith(lnorm + " ") || t.endsWith(" " + lnorm) || t.includes(" " + lnorm + " ");
+                            });
+                        });
+
+                        const hasOutcome = sideLabels.some(l => bodyText.includes(l.toLowerCase()));
+                        return {
+                            visible: hasKeyword && hasSide && hasOutcome,
+                            keywordHits,
+                            hasSide,
+                            hasOutcome,
+                            bodyLength: bodyText.length,
+                            url: window.location.href,
+                        };
+                    }""",
+                    [keywords, side_labels],
+                )
+                if result and result.get("visible"):
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
         return False
 
     async def _is_buy_dialog_open(self, timeout: float = 3.0) -> bool:
@@ -975,17 +1049,17 @@ class PolymtradeExecutor:
         return False
 
     async def _is_sell_dialog_open(self, timeout: float = 3.0) -> bool:
-        """Return True if the sell dialog is open."""
+        """Return True if a real sell form/dialog is open."""
         selectors = [
             "input[name='soldAmount']",
-            "input[inputmode='decimal']",
-            "input[type='number']",
-            "input[placeholder*='Shares' i]",
-            "input[placeholder*='shares' i]",
+            "[role='dialog'] input[inputmode='decimal']",
+            "[role='dialog'] input[type='number']",
+            "[role='dialog'] input[placeholder*='Shares' i]",
+            "[role='dialog'] input[placeholder*='shares' i]",
             "button#fullsell",
             "button#sellbtn",
-            "button:has-text('卖出')",
             "[role='dialog'] button:has-text('卖出')",
+            "[role='dialog'] button:has-text('确认')",
         ]
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -1023,10 +1097,52 @@ class PolymtradeExecutor:
         market_slug: Optional[str] = None,
         market_title: Optional[str] = None,
     ):
-        """Execute a BUY order on the Polymtrade event page."""
+        """Execute a BUY order on the Polymtrade event page.
+
+        We open a fresh page for each BUY. The persistent portfolio page can be
+        in the middle of its position-event carousel; reusing it causes the
+        carousel to rotate away from events where the Bridge account has no
+        open position. A new page starts from a clean state and keeps the
+        target event stable.
+        """
+        if not self.context:
+            raise RuntimeError("Browser context not initialized")
+
+        trade_page = await self.context.new_page()
+        original_page = self.page
+        self.page = trade_page
+        try:
+            return await self._execute_buy_on_page(
+                event_id, event_slug, outcome, amount_usdc,
+                market_slug=market_slug, market_title=market_title
+            )
+        finally:
+            try:
+                await trade_page.close()
+            except Exception:
+                pass
+            self.page = original_page
+
+    async def _execute_buy_on_page(
+        self,
+        event_id: str,
+        event_slug: str,
+        outcome: str,
+        amount_usdc: float,
+        market_slug: Optional[str] = None,
+        market_title: Optional[str] = None,
+    ):
+        """Internal BUY implementation that operates on ``self.page``."""
         market_url = (
             f"{self.base_url}/portfolio?eventId={event_id}"
             f"&eventSlug={event_slug}&eventSource=polymarket"
+        )
+        # Fallback URL without eventId. Polymtrade redirects this to the canonical
+        # event URL and it can be more reliable when the portfolio carousel would
+        # otherwise rotate away from an event where we have no open position.
+        fallback_url = (
+            f"{self.base_url}/portfolio?eventSlug={event_slug}"
+            f"&eventSource=polymarket"
         )
         logger.info(f"Navigating to {market_url}")
         await self._goto_with_retry(market_url)
@@ -1051,14 +1167,27 @@ class PolymtradeExecutor:
         buy_dialog_open = False
         outcome_selected = False
         for attempt in range(6):
-            # The portfolio page auto-rotates between position events. Wait for
-            # the carousel to land on the target event before each click attempt.
-            if not await self._wait_for_event_url(event_id, timeout=8.0):
-                logger.warning(f"Target event {event_id} did not appear in URL before attempt {attempt + 1}")
+            # The portfolio page auto-rotates through the user's position events.
+            # Instead of waiting for the exact eventId to appear in the URL, we
+            # verify the target market/outcome content is actually rendered. If
+            # the carousel rotated away, we re-navigate to bring it back.
+            if not await self._is_target_event_visible(
+                outcome, market_slug=market_slug, market_title=market_title, timeout=8.0
+            ):
+                current_url = self.page.url if self.page else ""
+                logger.warning(
+                    f"Target market content not visible (attempt {attempt + 1}); "
+                    f"current URL: {current_url}"
+                )
                 if attempt < 5:
+                    target_url = fallback_url if attempt % 2 else market_url
+                    logger.info(f"Re-navigating to {target_url}")
+                    await self._goto_with_retry(target_url)
                     await asyncio.sleep(1.0)
                     continue
-                raise RuntimeError(f"Target event {event_id} URL never appeared")
+                raise RuntimeError(
+                    f"Target market content never appeared for {market_title or market_slug}"
+                )
 
             try:
                 await self._select_polymtrade_outcome(
@@ -1117,7 +1246,9 @@ class PolymtradeExecutor:
                 raise RuntimeError("Network/deposit modal blocked trade")
 
         # Capture pre-trade baseline for post-execution verification.
-        baseline = await self._capture_buy_baseline(outcome)
+        baseline = await self._capture_buy_baseline(
+            outcome, market_slug=market_slug, market_title=market_title
+        )
 
         # Enter amount in the buy dialog
         await self._enter_amount(amount_usdc)
@@ -1236,7 +1367,20 @@ class PolymtradeExecutor:
                 raise RuntimeError("Network/deposit modal blocked SELL")
 
         # Capture pre-trade baseline for post-execution verification.
-        baseline = await self._capture_sell_baseline(outcome)
+        baseline = await self._capture_sell_baseline(
+            outcome, market_slug=market_slug, market_title=market_title
+        )
+        live_position_qty = baseline.get("position_quantity")
+        if (
+            live_position_qty is not None
+            and size_shares is not None
+            and size_shares > live_position_qty
+            and live_position_qty > 0
+        ):
+            logger.warning(
+                f"Clamping SELL shares from {size_shares} to live position {live_position_qty}"
+            )
+            size_shares = live_position_qty
 
         # The sell dialog works in shares, not USDC.
         if size_shares is not None and size_shares > 0:
@@ -1364,6 +1508,10 @@ class PolymtradeExecutor:
             "score", "win", "lose", "reach", "final", "market", "event", "more",
             "than", "points", "matchup", "game", "winner", "top", "can", "qat",
             "draw", "world", "cup", "fifa", "2026", "nation", "national", "group",
+            # Generic political terms that appear in many unrelated market titles.
+            "presidential", "president", "election", "elections", "candidate",
+            "candidates", "vote", "voting", "primary", "primaries", "general",
+            "runoff", "ballot", "poll", "campaign", "debate", "nomination",
         }
 
         raw = " ".join(part for part in [market_title, market_slug] if part)
@@ -1484,6 +1632,21 @@ class PolymtradeExecutor:
                     || el.getAttribute("tabindex") === "0";
             }
 
+            function clickableAncestor(el) {
+                let cur = el;
+                for (let depth = 0; depth < 5 && cur; depth++, cur = cur.parentElement) {
+                    if (isClickable(cur)) return cur;
+                }
+                return el;
+            }
+
+            function clickTarget(el) {
+                const target = clickableAncestor(el);
+                target.scrollIntoView({block: "center", inline: "center"});
+                target.click();
+                return target;
+            }
+
             function isInsideComments(el) {
                 while (el) {
                     const cls = (el.getAttribute("class") || "").toLowerCase();
@@ -1496,6 +1659,12 @@ class PolymtradeExecutor:
             function isInNoise(el) {
                 // Ignore anchors inside navigation, sidebar, header, footer, or
                 // modal overlays to avoid clicking top-bar language/search items.
+                // We match whole class tokens so that Tailwind utilities like
+                // "bg-sidebar" or "sidebar-wrapper" do not mask the main content.
+                function hasClassToken(cls, token) {
+                    const re = new RegExp("(^|\\s)" + token + "($|\\s)");
+                    return re.test(cls);
+                }
                 while (el) {
                     const tag = el.tagName;
                     const cls = (el.getAttribute("class") || "").toLowerCase();
@@ -1504,12 +1673,12 @@ class PolymtradeExecutor:
                         tag === "NAV" ||
                         tag === "ASIDE" ||
                         tag === "FOOTER" ||
-                        cls.includes("sidebar") ||
-                        cls.includes("header") ||
-                        cls.includes("breadcrumb") ||
-                        cls.includes("dialog") ||
-                        cls.includes("modal") ||
-                        cls.includes("overlay")
+                        hasClassToken(cls, "sidebar") ||
+                        hasClassToken(cls, "header") ||
+                        hasClassToken(cls, "breadcrumb") ||
+                        hasClassToken(cls, "dialog") ||
+                        hasClassToken(cls, "modal") ||
+                        hasClassToken(cls, "overlay")
                     ) {
                         return true;
                     }
@@ -1523,7 +1692,7 @@ class PolymtradeExecutor:
                 const candidates = Array.from(container.querySelectorAll("*"));
                 for (const c of candidates) {
                     if (isClickable(c) && matchesSideLabel(textOf(c))) {
-                        buttons.push(c);
+                        buttons.push(clickableAncestor(c));
                     }
                 }
                 return buttons;
@@ -1566,13 +1735,13 @@ class PolymtradeExecutor:
                                 return t === l || t.startsWith(l + " ") || t.endsWith(" " + l) || t.includes(" " + l + " ");
                             });
                             if (target) {
-                                target.click();
-                                return {clicked: true, label: textOf(target), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), strategy: "anchor"};
+                                const clicked = clickTarget(target);
+                                return {clicked: true, label: textOf(clicked), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), strategy: "anchor"};
                             }
                         }
                         // Fallback: click the first side button we found.
-                        btns[0].click();
-                        return {clicked: true, label: textOf(btns[0]), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), strategy: "anchor-fallback"};
+                        const clicked = clickTarget(btns[0]);
+                        return {clicked: true, label: textOf(clicked), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), strategy: "anchor-fallback"};
                     }
                     el = el.parentElement;
                 }
@@ -1614,8 +1783,8 @@ class PolymtradeExecutor:
                         return t === l || t.startsWith(l + " ") || t.endsWith(" " + l) || t.includes(" " + l + " ");
                     });
                     if (target) {
-                        target.click();
-                        return {clicked: true, label: textOf(target), rowScore: score, rowText: textOf(row).slice(0, 80), strategy: "row-score"};
+                        const clicked = clickTarget(target);
+                        return {clicked: true, label: textOf(clicked), rowScore: score, rowText: textOf(row).slice(0, 80), strategy: "row-score"};
                     }
                 }
             }
@@ -1642,8 +1811,8 @@ class PolymtradeExecutor:
                             return t === l || t.startsWith(l + " ") || t.endsWith(" " + l) || t.includes(" " + l + " ");
                         });
                         if (target) {
-                            target.click();
-                            return {clicked: true, label: textOf(target), fallback: true};
+                            const clicked = clickTarget(target);
+                            return {clicked: true, label: textOf(clicked), fallback: true};
                         }
                     }
                     el = el.parentElement;
@@ -1725,12 +1894,38 @@ class PolymtradeExecutor:
                 f"outcome={outcome}, keywords={keywords}, rowScore={result.get('bestScore') if result else None}"
             )
             if attempt < max_attempts - 1:
+                # On the first failure, try revealing low-liquidity markets before
+                # waiting and retrying.
+                if attempt == 0:
+                    await self._show_low_liquidity_markets()
                 await asyncio.sleep(1.5)
 
         raise RuntimeError(
             f"Could not select outcome: {outcome} ({side_labels}), keywords={keywords}, "
             f"rowScore={last_result.get('bestScore') if last_result else None}"
         )
+
+    async def _show_low_liquidity_markets(self) -> bool:
+        """Click the 'show low-liquidity markets' toggle if it is currently hiding them.
+
+        On categorical event pages Polymtrade hides low-liquidity markets by default.
+        If the target market row is not visible, flipping this switch reveals it.
+        """
+        try:
+            toggle = await self.page.query_selector('button[role="switch"][aria-checked="true"]')
+            if not toggle:
+                return False
+            label = await toggle.get_attribute("aria-label") or ""
+            label_lower = label.lower()
+            # Match Chinese or English liquidity labels.
+            if "低流动性" in label or "liquidity" in label_lower:
+                logger.info(f"Clicking low-liquidity toggle to reveal hidden markets: {label}")
+                await toggle.click()
+                await asyncio.sleep(1.5)
+                return True
+        except Exception as e:
+            logger.debug(f"Failed to toggle low-liquidity markets: {e}")
+        return False
 
     async def _is_network_modal_open(self) -> bool:
         """Return True if the network/token selection modal is visible."""
@@ -1881,31 +2076,80 @@ class PolymtradeExecutor:
             logger.warning(f"Failed to read balance from page: {e}")
         return None
 
-    async def _get_event_page_position_quantity(self, outcome: str) -> Optional[float]:
+    async def _get_event_page_position_quantity(
+        self,
+        outcome: str,
+        market_slug: Optional[str] = None,
+        market_title: Optional[str] = None,
+    ) -> Optional[float]:
         """Try to read the current position quantity for an outcome from the event page.
 
         Polymtrade sometimes shows 'You own X shares' or '持仓 X 份' near the
         selected outcome row. Returns the quantity as a float, or None.
         """
         outcome_norm = outcome.strip().lower()
+        keywords = self._extract_market_keywords(market_slug, market_title)
+        keywords = [k.lower() for k in keywords if len(k) <= 25][:5]
         js = """
-        (outcomeNorm) => {
+        (args) => {
+            const [outcomeNorm, keywords] = args;
             const bodyText = (document.body?.innerText || '');
+            const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+            const parse = (text) => {
+                const patterns = [
+                    /(?:You own|持仓|持有|Position|pos)\\s*[:：]?\\s*([0-9,]+\\.?[0-9]*)\\s*(?:shares?|份|shares?)/i,
+                    /([0-9,]+\\.?[0-9]*)\\s*(?:shares?|份)\\s*(?:owned|held|持仓)/i,
+                    /(?:own|hold|持仓)\\s+([0-9,]+\\.?[0-9]*)\\s*(?:shares?|份)/i,
+                    /(?:剩余|Remaining|Available)\\s*[:：]?\\s*([0-9,]+\\.?[0-9]*)/i,
+                ];
+                for (const re of patterns) {
+                    const m = text.match(re);
+                    if (m) return {text: m[0], value: parseFloat(m[1].replace(/,/g, ''))};
+                }
+                return null;
+            };
+            const score = (text) => {
+                const lower = norm(text);
+                let s = 0;
+                for (const kw of keywords) {
+                    if (lower.includes(kw)) s += 1;
+                }
+                return s;
+            };
+
+            const rows = Array.from(document.querySelectorAll('li, [role="listitem"], section, article, div'))
+                .map(row => {
+                    const text = (row.innerText || '').trim();
+                    return {row, text, lower: norm(text), score: score(text), len: text.length};
+                })
+                .filter(item => item.text && item.len < 1200)
+                .sort((a, b) => b.score - a.score || a.len - b.len);
+
+            for (const item of rows) {
+                if (keywords.length && item.score <= 0) continue;
+                if (outcomeNorm && !item.lower.includes(outcomeNorm)) continue;
+                const parsed = parse(item.text);
+                if (parsed) return parsed;
+            }
+
             // Patterns ordered from most specific to least specific.
             const patterns = [
                 /(?:You own|持仓|持有|Position|pos)\\s*[:：]?\\s*([0-9,]+\\.?[0-9]*)\\s*(?:shares?|份|shares?)/i,
                 /([0-9,]+\\.?[0-9]*)\\s*(?:shares?|份)\\s*(?:owned|held|持仓)/i,
                 /(?:own|hold|持仓)\\s+([0-9,]+\\.?[0-9]*)\\s*(?:shares?|份)/i,
+                /(?:剩余|Remaining|Available)\\s*[:：]?\\s*([0-9,]+\\.?[0-9]*)/i,
             ];
-            for (const re of patterns) {
-                const m = bodyText.match(re);
-                if (m) return {text: m[0], value: parseFloat(m[1].replace(/,/g, ''))};
+            if (!keywords.length) {
+                for (const re of patterns) {
+                    const m = bodyText.match(re);
+                    if (m) return {text: m[0], value: parseFloat(m[1].replace(/,/g, ''))};
+                }
             }
             // Outcome-specific: look near the outcome row for quantity text.
-            const rows = Array.from(document.querySelectorAll('li, div, section'));
             for (const row of rows) {
-                const text = (row.innerText || '').trim();
-                const lower = text.toLowerCase();
+                const text = row.text;
+                const lower = row.lower;
+                if (keywords.length && row.score <= 0) continue;
                 if (!lower.includes(outcomeNorm)) continue;
                 const m = text.match(/([0-9,]+\\.?[0-9]*)\\s*(?:shares?|份)/i);
                 if (m) return {text: m[0], value: parseFloat(m[1].replace(/,/g, ''))};
@@ -1914,7 +2158,7 @@ class PolymtradeExecutor:
         }
         """
         try:
-            result = await self.page.evaluate(js, outcome_norm)
+            result = await self.page.evaluate(js, [outcome_norm, keywords])
             if result and result.get("value") is not None:
                 logger.info(f"Detected position quantity: {result.get('value')} from '{result.get('text')}'")
                 return float(result.get("value"))
@@ -1922,13 +2166,20 @@ class PolymtradeExecutor:
             logger.warning(f"Failed to read position quantity from page: {e}")
         return None
 
-    async def _capture_buy_baseline(self, outcome: str) -> dict:
+    async def _capture_buy_baseline(
+        self,
+        outcome: str,
+        market_slug: Optional[str] = None,
+        market_title: Optional[str] = None,
+    ) -> dict:
         """Capture pre-trade state for later verification.
 
         Returns a dict with balance and position quantity (both may be None).
         """
         balance = await self._get_usdc_balance()
-        quantity = await self._get_event_page_position_quantity(outcome)
+        quantity = await self._get_event_page_position_quantity(
+            outcome, market_slug=market_slug, market_title=market_title
+        )
         baseline = {
             "balance": balance,
             "position_quantity": quantity,
@@ -1937,13 +2188,20 @@ class PolymtradeExecutor:
         logger.info(f"Captured BUY baseline: balance={balance}, qty={quantity}")
         return baseline
 
-    async def _capture_sell_baseline(self, outcome: str) -> dict:
+    async def _capture_sell_baseline(
+        self,
+        outcome: str,
+        market_slug: Optional[str] = None,
+        market_title: Optional[str] = None,
+    ) -> dict:
         """Capture pre-SELL state for later verification.
 
         Returns a dict with balance and position quantity (both may be None).
         """
         balance = await self._get_usdc_balance()
-        quantity = await self._get_event_page_position_quantity(outcome)
+        quantity = await self._get_event_page_position_quantity(
+            outcome, market_slug=market_slug, market_title=market_title
+        )
         baseline = {
             "balance": balance,
             "position_quantity": quantity,
@@ -2101,6 +2359,14 @@ class PolymtradeExecutor:
         deadline = time.time() + 18.0
         last_error = None
         while time.time() < deadline:
+            try:
+                input_el = await self._find_trade_input(prefer_sell=False)
+                if input_el and await self._fill_input_safely(input_el, str(amount_usdc)):
+                    logger.info(f"Entered amount via trade-input scan: {amount_usdc}")
+                    return
+            except Exception as e:
+                last_error = e
+
             # Prefer a visible input that is inside a dialog or trade area.
             for selector in selectors:
                 try:
@@ -2148,6 +2414,66 @@ class PolymtradeExecutor:
             pass
         raise RuntimeError(f"Could not enter trade amount: {last_error}")
 
+    async def _find_trade_input(self, prefer_sell: bool = False):
+        """Find the most likely active trade amount/shares input."""
+        js = """
+        (preferSell) => {
+            const textOf = (el) => (el ? (el.innerText || el.textContent || '').trim() : '');
+            const isVisible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            };
+            const isNoise = (el) => {
+                let cur = el;
+                for (let i = 0; i < 8 && cur; i++, cur = cur.parentElement) {
+                    const tag = cur.tagName;
+                    const cls = (cur.getAttribute('class') || '').toLowerCase();
+                    const role = cur.getAttribute('role');
+                    if (tag === 'ASIDE' || tag === 'NAV' || tag === 'HEADER' || tag === 'FOOTER') return true;
+                    if (role === 'search') return true;
+                    if (/(sidebar|navigation|header|footer|search)/.test(cls)) return true;
+                }
+                return false;
+            };
+            const inputs = Array.from(document.querySelectorAll(
+                "input[name='buyAmount'], input[name='soldAmount'], input[inputmode='decimal'], input[inputmode='numeric'], input[type='number'], input[placeholder*='Amount' i], input[placeholder*='USDC' i], input[placeholder*='Shares' i], input[placeholder*='数量' i], input[placeholder*='金额' i]"
+            ));
+            const scored = [];
+            for (const input of inputs) {
+                if (!isVisible(input) || input.disabled || input.readOnly || isNoise(input)) continue;
+                const attrs = [
+                    input.name || '',
+                    input.placeholder || '',
+                    input.getAttribute('aria-label') || '',
+                    input.getAttribute('class') || '',
+                ].join(' ').toLowerCase();
+                if (/search|filter|邮箱|email|address|wallet/.test(attrs)) continue;
+                let score = 0;
+                let cur = input;
+                for (let depth = 0; depth < 8 && cur; depth++, cur = cur.parentElement) {
+                    const text = textOf(cur).toLowerCase();
+                    const cls = (cur.getAttribute('class') || '').toLowerCase();
+                    const role = cur.getAttribute('role') || '';
+                    if (role === 'dialog' || cls.includes('dialog') || cls.includes('modal')) score += 10;
+                    if (cls.includes('trade') || cls.includes('order') || cls.includes('amount')) score += 4;
+                    if (/买入|buy|卖出|sell|amount|shares|份|数量|金额|usdc|pusd/.test(text)) score += 3;
+                    if (preferSell && /卖出|sell|shares|份|sold/.test(text + ' ' + attrs)) score += 5;
+                    if (!preferSell && /买入|buy|amount|usdc|pusd/.test(text + ' ' + attrs)) score += 5;
+                    if (/搜索市场|search market|你的推荐链接|solana钱包地址/.test(text)) score -= 10;
+                }
+                scored.push({input, score});
+            }
+            scored.sort((a, b) => b.score - a.score);
+            if (!scored.length || scored[0].score < 3) return null;
+            return scored[0].input;
+        }
+        """
+        handle = await self.page.evaluate_handle(js, prefer_sell)
+        if not handle:
+            return None
+        return handle.as_element()
+
     async def _enter_sell_shares(self, size_shares: float) -> bool:
         """Enter the sell shares amount in the sell dialog."""
         selectors = [
@@ -2164,6 +2490,13 @@ class PolymtradeExecutor:
         ]
         deadline = time.time() + 10.0
         while time.time() < deadline:
+            try:
+                input_el = await self._find_trade_input(prefer_sell=True)
+                if input_el and await self._fill_input_safely(input_el, str(size_shares)):
+                    logger.info(f"Entered sell shares via trade-input scan: {size_shares}")
+                    return True
+            except Exception:
+                pass
             for selector in selectors:
                 try:
                     input_el = await self.page.wait_for_selector(selector, timeout=2000)
@@ -2181,8 +2514,13 @@ class PolymtradeExecutor:
         selectors = [
             "button[data-test='trade-buy-button']",
             "button#buybtn",
+            "[role='dialog'] button:has-text('确认买入')",
             "button:has-text('买入')",
             "[role='dialog'] button:has-text('买入')",
+            "[role='dialog'] button:has-text('确认')",
+            "[role='dialog'] button:has-text('下单')",
+            "[role='dialog'] button:has-text('Review')",
+            "[role='dialog'] button:has-text('Place')",
         ]
         for selector in selectors:
             try:
@@ -2191,6 +2529,8 @@ class PolymtradeExecutor:
                 return
             except Exception:
                 continue
+        if await self._click_trade_submit_button("BUY"):
+            return
         raise RuntimeError("Could not click buy button")
 
     async def _open_sell_dialog(
@@ -2227,6 +2567,68 @@ class PolymtradeExecutor:
                 return t === '卖出' || t.includes('卖出') || t === 'sell' || t.includes('sell');
             }
 
+            function isWalletPmSellButton(b) {
+                const ownText = textOf(b).toLowerCase();
+                if (ownText.includes('$pm') || ownText.match(/\\bpm\\b/)) return true;
+                let el = b;
+                for (let i = 0; i < 5 && el; i++, el = el.parentElement) {
+                    const text = textOf(el).toLowerCase();
+                    if (
+                        text.includes('持仓') ||
+                        text.includes('剩余') ||
+                        text.includes('position') ||
+                        text.includes('remaining')
+                    ) {
+                        return false;
+                    }
+                    if (text.length > 350) {
+                        el = el.parentElement;
+                        continue;
+                    }
+                    if (
+                        text.includes('solana钱包地址') ||
+                        text.includes('solana wallet') ||
+                        text.includes('买入 $pm') ||
+                        text.includes('sell $pm') ||
+                        text.includes('0 pm')
+                    ) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            function hasPositionContext(card) {
+                const text = textOf(card).toLowerCase();
+                return text.includes('持仓') ||
+                    text.includes('剩余') ||
+                    text.includes('remaining') ||
+                    text.includes('position') ||
+                    text.includes('pnl') ||
+                    text.includes('market') ||
+                    text.includes('市场');
+            }
+
+            function clickableAncestor(el) {
+                let cur = el;
+                for (let depth = 0; depth < 5 && cur; depth++, cur = cur.parentElement) {
+                    const tag = cur.tagName;
+                    const role = cur.getAttribute('role');
+                    const cls = (cur.getAttribute('class') || '').toLowerCase();
+                    if (tag === 'BUTTON' || role === 'button' || cls.includes('button') || cur.onclick || cur.getAttribute('tabindex') === '0') {
+                        return cur;
+                    }
+                }
+                return el;
+            }
+
+            function clickTarget(el) {
+                const target = clickableAncestor(el);
+                target.scrollIntoView({block: 'center', inline: 'center'});
+                target.click();
+                return target;
+            }
+
             function scoreCard(card) {
                 const text = textOf(card).toLowerCase();
                 let s = 0;
@@ -2244,9 +2646,13 @@ class PolymtradeExecutor:
                 for (let i = 0; i < 14 && el; i++, el = el.parentElement) {
                     const text = textOf(el);
                     if (!text) continue;
+                    if (text.length > 1200) continue;
+                    if (isWalletPmSellButton(btn) || text.includes('买入 $pm') || text.includes('sell $pm')) continue;
                     const score = scoreCard(el);
+                    if (keywords.length && score <= 0) continue;
+                    if (!hasPositionContext(el)) continue;
                     const textLen = text.length;
-                    if (score > bestScore || (score === bestScore && textLen > bestTextLen)) {
+                    if (score > bestScore || (score === bestScore && (bestTextLen === 0 || textLen < bestTextLen))) {
                         best = el;
                         bestScore = score;
                         bestTextLen = textLen;
@@ -2261,20 +2667,23 @@ class PolymtradeExecutor:
             // current unrelated position. Require a keyword hit when keywords are
             // available.
             const allSellBtns = Array.from(document.querySelectorAll('button, [role="button"], .cursor-pointer, [class*="button"]'))
-                .filter(b => isVisible(b) && isSellButton(b));
+                .filter(b => isVisible(b) && isSellButton(b) && !isWalletPmSellButton(b));
 
             let bestBtn = null;
-            let bestScore = 0;
+            let bestScore = -1;
             let bestKeywordScore = 0;
             for (const btn of allSellBtns) {
                 const candidate = bestAncestorFor(btn);
                 const card = candidate.card;
                 const s = candidate.keywordScore;
+                if (keywords.length && s <= 0) continue;
                 // Tie-break: prefer a card whose text also contains the side label/outcome
                 const cardText = textOf(card).toLowerCase();
                 const sideMatch = sideLabels.some(l => cardText.includes(l.toLowerCase()));
                 const outcomeMatch = cardText.includes(outcome.toLowerCase());
-                const finalScore = s + (sideMatch ? 5 : 0) + (outcomeMatch ? 5 : 0);
+                const positionMatch = hasPositionContext(card);
+                if (!positionMatch) continue;
+                const finalScore = s * 10 + (sideMatch ? 5 : 0) + (outcomeMatch ? 5 : 0);
                 if (finalScore > bestScore) {
                     bestScore = finalScore;
                     bestKeywordScore = s;
@@ -2283,8 +2692,8 @@ class PolymtradeExecutor:
             }
 
             if (bestBtn && (!keywords.length || bestKeywordScore > 0)) {
-                bestBtn.click();
-                return {clicked: true, label: textOf(bestBtn), score: bestScore, keywordScore: bestKeywordScore};
+                const clicked = clickTarget(bestBtn);
+                return {clicked: true, label: textOf(clicked), score: bestScore, keywordScore: bestKeywordScore};
             }
 
             // Strategy 2: walk up from any element containing the outcome/side label
@@ -2300,10 +2709,22 @@ class PolymtradeExecutor:
                 while ((node = iter.iterateNext())) {
                     let el = node;
                     for (let i = 0; i < 10 && el; i++) {
-                        const sell = el.querySelector ? Array.from(el.querySelectorAll('button, [role="button"], .cursor-pointer')).find(isSellButton) : null;
+                        const text = textOf(el).toLowerCase();
+                        if (keywords.length && !keywords.some(kw => text.includes(kw))) {
+                            el = el.parentElement;
+                            continue;
+                        }
+                        if (!hasPositionContext(el)) {
+                            el = el.parentElement;
+                            continue;
+                        }
+                        const sell = el.querySelector
+                            ? Array.from(el.querySelectorAll('button, [role="button"], .cursor-pointer'))
+                                .find(b => isSellButton(b) && !isWalletPmSellButton(b))
+                            : null;
                         if (sell) {
-                            sell.click();
-                            return {clicked: true, label: textOf(sell), fallback: true};
+                            const clicked = clickTarget(sell);
+                            return {clicked: true, label: textOf(clicked), fallback: true};
                         }
                         el = el.parentElement;
                     }
@@ -2311,9 +2732,9 @@ class PolymtradeExecutor:
             }
 
             // Strategy 3: global #sell button
-            const sell = document.querySelector('#sell');
-            if (sell && isVisible(sell)) {
-                sell.click();
+            const sell = keywords.length ? null : document.querySelector('#sell');
+            if (sell && isVisible(sell) && !isWalletPmSellButton(sell)) {
+                const clicked = clickTarget(sell);
                 return {clicked: true, label: textOf(sell), fallback: true};
             }
             return {clicked: false, keywords, sellButtons: allSellBtns.length};
@@ -2328,8 +2749,12 @@ class PolymtradeExecutor:
         """Click the sell button in the sell dialog."""
         selectors = [
             "button#sellbtn",
-            "button:has-text('卖出')",
+            "[role='dialog'] button:has-text('确认卖出')",
             "[role='dialog'] button:has-text('卖出')",
+            "[role='dialog'] button:has-text('确认')",
+            "[role='dialog'] button:has-text('下单')",
+            "[role='dialog'] button:has-text('Review')",
+            "[role='dialog'] button:has-text('Place')",
         ]
         for selector in selectors:
             try:
@@ -2338,7 +2763,67 @@ class PolymtradeExecutor:
                 return
             except Exception:
                 continue
+        if await self._click_trade_submit_button("SELL"):
+            return
         raise RuntimeError("Could not click sell button")
+
+    async def _click_trade_submit_button(self, side: str) -> bool:
+        """Click the active submit button inside the current trade dialog/form."""
+        js = """
+        (side) => {
+            const sideLower = side.toLowerCase();
+            const textOf = (el) => (el ? (el.innerText || el.textContent || '').trim() : '');
+            const isVisible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            };
+            const containers = Array.from(document.querySelectorAll('[role="dialog"], form, [class*="dialog"], [class*="modal"], [class*="trade"], [class*="order"]'))
+                .filter(isVisible);
+            if (!containers.length) containers.push(document.body);
+            const positive = sideLower === 'sell'
+                ? ['确认卖出', '卖出', 'sell', 'place sell', 'submit', 'confirm', '确认', '下单', 'review', 'place order']
+                : ['确认买入', '买入', 'buy', 'place buy', 'submit', 'confirm', '确认', '下单', 'review', 'place order'];
+            const negative = ['取消', 'cancel', '关闭', 'close', 'max', '最大', 'full', '100%', '充值', '提现', 'deposit', 'withdraw'];
+            let best = null;
+            let bestScore = -1;
+            for (const container of containers) {
+                const buttons = Array.from(container.querySelectorAll('button, [role="button"], input[type="submit"], div[class*="button"]'));
+                for (const btn of buttons) {
+                    if (!isVisible(btn) || btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
+                    const text = textOf(btn).toLowerCase();
+                    if (!text && btn.tagName !== 'INPUT') continue;
+                    if (negative.some(word => text.includes(word))) continue;
+                    let score = 0;
+                    for (const word of positive) {
+                        if (text === word.toLowerCase()) score += 10;
+                        else if (text.includes(word.toLowerCase())) score += 5;
+                    }
+                    if (container.getAttribute('role') === 'dialog') score += 4;
+                    if (/(order|trade|dialog|modal)/i.test(container.getAttribute('class') || '')) score += 2;
+                    if (score > bestScore) {
+                        best = btn;
+                        bestScore = score;
+                    }
+                }
+            }
+            if (!best || bestScore < 4) return {clicked: false, bestScore};
+            best.scrollIntoView({block: 'center', inline: 'center'});
+            best.click();
+            return {clicked: true, text: textOf(best), bestScore};
+        }
+        """
+        try:
+            result = await self.page.evaluate(js, side)
+            if result and result.get("clicked"):
+                logger.info(
+                    f"Clicked {side} submit button via fallback: "
+                    f"{result.get('text')} (score={result.get('bestScore')})"
+                )
+                return True
+        except Exception as e:
+            logger.debug(f"Trade submit fallback failed: {e}")
+        return False
 
     async def _confirm_trade(self):
         """Wait for trade confirmation.
@@ -2385,6 +2870,8 @@ class PolymtradeExecutor:
         outcome: str,
         amount_usdc: float,
         baseline: dict,
+        market_slug: Optional[str] = None,
+        market_title: Optional[str] = None,
         timeout: float = 15.0,
     ) -> bool:
         """Best-effort verification that a BUY order actually affected the account.
@@ -2404,7 +2891,9 @@ class PolymtradeExecutor:
             await asyncio.sleep(3)
 
             post_balance = await self._get_usdc_balance()
-            post_quantity = await self._get_event_page_position_quantity(outcome)
+            post_quantity = await self._get_event_page_position_quantity(
+                outcome, market_slug=market_slug, market_title=market_title
+            )
 
             logger.info(
                 f"BUY verification: pre_balance={pre_balance}, post_balance={post_balance}, "
@@ -2456,6 +2945,8 @@ class PolymtradeExecutor:
         outcome: str,
         size_shares: Optional[float],
         baseline: dict,
+        market_slug: Optional[str] = None,
+        market_title: Optional[str] = None,
         timeout: float = 15.0,
     ) -> bool:
         """Best-effort verification that a SELL order actually affected the account.
@@ -2475,7 +2966,9 @@ class PolymtradeExecutor:
             await asyncio.sleep(3)
 
             post_balance = await self._get_usdc_balance()
-            post_quantity = await self._get_event_page_position_quantity(outcome)
+            post_quantity = await self._get_event_page_position_quantity(
+                outcome, market_slug=market_slug, market_title=market_title
+            )
 
             logger.info(
                 f"SELL verification: pre_balance={pre_balance}, post_balance={post_balance}, "
