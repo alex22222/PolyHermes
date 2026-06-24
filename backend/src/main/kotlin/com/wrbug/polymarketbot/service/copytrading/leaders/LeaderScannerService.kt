@@ -28,6 +28,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.context.annotation.Lazy
 import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Propagation
@@ -63,6 +65,11 @@ class LeaderScannerService(
 ) {
 
     private val logger = LoggerFactory.getLogger(LeaderScannerService::class.java)
+
+    // 通过 Spring 代理自调用，确保 @Transactional(REQUIRES_NEW) 生效
+    @Autowired
+    @Lazy
+    private lateinit var self: LeaderScannerService
 
     // 并发控制：同时最多 5 个 Data API 请求，避免限流
     private val apiSemaphore = Semaphore(5)
@@ -145,9 +152,9 @@ class LeaderScannerService(
             for (category in categories) {
                 try {
                     // 1) 先执行廉价发现，把候选沉淀到 candidate_pool
-                    val discoveredCount = discoverOnly(category)
+                    val discoveredCount = self.discoverOnly(category)
                     // 2) 再执行昂贵分析，从 pool 中读取并分析
-                    val preview = analyzeOnly(category, dryRun)
+                    val preview = self.analyzeOnly(category, dryRun)
                     allPreviews += preview
                     if (!dryRun) {
                         val (created, updated) = persistTopLeaders(category, preview.candidates)
@@ -950,7 +957,7 @@ class LeaderScannerService(
     fun preview(category: String? = null): List<LeaderScanPreviewResponse> {
         val categories = normalizeCategories(category)
         return categories.map { cat ->
-            analyzeOnly(cat, dryRun = true)
+            self.analyzeOnly(cat, dryRun = true)
         }
     }
 

@@ -376,6 +376,8 @@
       "resolveEvent": "Event Resolution Failed",
       "insufficientPosition": "Insufficient Position",
       "clickButton": "Button Click Failed",
+      "navigationRace": "Navigation/Restart Race",
+      "duplicateShortCycleBuy": "Duplicate Short-Cycle BUY Skipped",
       "insufficientBalance": "Insufficient Balance",
       "other": "Other"
     },
@@ -2094,5 +2096,12 @@
     "accountGuide": "CLOB V2 requires pUSD for trading. Click the USDC.e → pUSD button in the account actions to complete the migration.",
     "accountGuideButton": "USDC.e → pUSD",
     "dismissGuide": "Got it"
+  },
+  "positionList": {
+    "sellMethod": "Execution Method",
+    "sellMethodDirect": "Direct Backend Sell (CLOB)",
+    "sellMethodBridge": "Bridge Browser Execution",
+    "sellBridgeReadOnlyTip": "This is a Bridge read-only account; sell will be executed via Bridge browser at market price",
+    "sellBridgeTip": "Bridge execution currently only supports market orders, completed by Bridge in the browser session"
   }
 }

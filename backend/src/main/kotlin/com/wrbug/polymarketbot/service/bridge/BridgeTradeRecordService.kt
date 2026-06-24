@@ -250,6 +250,7 @@ class BridgeTradeRecordService(
     }
 
     private fun BridgeTradeRecord.toDto(positionView: PositionView? = null): BridgeTradeRecordDto {
+        val exposePositionMismatch = this.status == "SUCCESS" && positionView?.positionMismatch == true
         return BridgeTradeRecordDto(
             id = this.id!!,
             bridgeId = this.bridgeId,
@@ -269,8 +270,8 @@ class BridgeTradeRecordService(
             ledgerNetQuantity = positionView?.ledgerNetQuantity?.toPlainString(),
             snapshotQuantity = positionView?.snapshotQuantity?.toPlainString(),
             snapshotSyncedAt = positionView?.snapshotSyncedAt,
-            positionMismatch = positionView?.positionMismatch ?: false,
-            positionMismatchReason = positionView?.positionMismatchReason,
+            positionMismatch = exposePositionMismatch,
+            positionMismatchReason = if (exposePositionMismatch) positionView?.positionMismatchReason else null,
             executedAt = this.executedAt,
             createdAt = this.createdAt,
             updatedAt = this.updatedAt

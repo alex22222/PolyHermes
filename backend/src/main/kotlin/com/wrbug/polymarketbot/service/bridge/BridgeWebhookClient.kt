@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import com.wrbug.polymarketbot.entity.BridgeWebhookLog
 import com.wrbug.polymarketbot.repository.BridgeWebhookLogRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
@@ -28,6 +29,10 @@ class BridgeWebhookClient(
 
     private val logger = LoggerFactory.getLogger(BridgeWebhookClient::class.java)
     private val gson = Gson()
+
+    companion object {
+        private val RETRY_DELAYS_MS = listOf(0L, 2_000L, 5_000L, 10_000L)
+    }
 
     private val httpClient: HttpClient by lazy {
         HttpClient.newBuilder()
@@ -67,7 +72,14 @@ class BridgeWebhookClient(
                             status = "PENDING"
                         )
                     )
+                }
 
+                var lastErrorMessage: String? = null
+                for ((attemptIndex, delayMs) in RETRY_DELAYS_MS.withIndex()) {
+                    if (delayMs > 0) {
+                        delay(delayMs)
+                    }
+                    val attempt = attemptIndex + 1
                     val request = HttpRequest.newBuilder()
                         .uri(URI.create(webhookUrl))
                         .header("Content-Type", "application/json")
@@ -75,24 +87,54 @@ class BridgeWebhookClient(
                         .timeout(Duration.ofSeconds(10))
                         .build()
 
-                    val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-                    val now = System.currentTimeMillis()
-                    log!!.statusCode = response.statusCode()
-                    log!!.responseBody = response.body()
-                    log!!.status = if (response.statusCode() in 200..299) "SUCCESS" else "FAILED"
-                    log!!.errorMessage = if (response.statusCode() in 200..299) null else "HTTP ${response.statusCode()}"
-                    log!!.updatedAt = now
-                    bridgeWebhookLogRepository.save(log!!)
+                    try {
+                        val response = withContext(Dispatchers.IO) {
+                            httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+                        }
+                        val now = System.currentTimeMillis()
+                        withContext(Dispatchers.IO) {
+                            log!!.statusCode = response.statusCode()
+                            log!!.responseBody = response.body()
+                            log!!.status = if (response.statusCode() in 200..299) "SUCCESS" else "FAILED"
+                            log!!.errorMessage = if (response.statusCode() in 200..299) null else {
+                                "HTTP ${response.statusCode()} (attempt $attempt/${RETRY_DELAYS_MS.size})"
+                            }
+                            log!!.updatedAt = now
+                            bridgeWebhookLogRepository.save(log!!)
+                        }
 
-                    if (response.statusCode() == 200) {
-                        logger.debug("Bridge webhook sent: txHash=${signal.transactionHash}")
-                    } else {
+                        if (response.statusCode() in 200..299) {
+                            logger.debug("Bridge webhook sent: txHash=${signal.transactionHash}, attempt=$attempt")
+                            return@launch
+                        }
+
+                        lastErrorMessage = "HTTP ${response.statusCode()}"
                         logger.warn(
-                            "Bridge webhook returned non-200: status=${response.statusCode()}, " +
-                            "body=${response.body()}, txHash=${signal.transactionHash}"
+                            "Bridge webhook returned non-2xx: status=${response.statusCode()}, " +
+                                "attempt=$attempt/${RETRY_DELAYS_MS.size}, body=${response.body()}, " +
+                                "txHash=${signal.transactionHash}"
+                        )
+                    } catch (sendEx: Exception) {
+                        lastErrorMessage = sendEx.message ?: sendEx.javaClass.simpleName
+                        val now = System.currentTimeMillis()
+                        withContext(Dispatchers.IO) {
+                            log!!.status = "FAILED"
+                            log!!.errorMessage =
+                                "$lastErrorMessage (attempt $attempt/${RETRY_DELAYS_MS.size})"
+                            log!!.updatedAt = now
+                            bridgeWebhookLogRepository.save(log!!)
+                        }
+                        logger.warn(
+                            "Bridge webhook attempt failed: txHash=${signal.transactionHash}, " +
+                                "attempt=$attempt/${RETRY_DELAYS_MS.size}, error=$lastErrorMessage"
                         )
                     }
                 }
+
+                logger.error(
+                    "Failed to send bridge webhook after ${RETRY_DELAYS_MS.size} attempts " +
+                        "for txHash=${signal.transactionHash}: $lastErrorMessage"
+                )
             } catch (e: Exception) {
                 val now = System.currentTimeMillis()
                 log?.let {

@@ -34,9 +34,12 @@ def test_classify_failure_messages():
         "Page.evaluate: ReferenceError: bestScore is not defined": "executor_js_error",
         "Page.goto: net::ERR_CONNECTION_RESET at https://polym.trade/portfolio": "navigation_network",
         "Could not resolve Polymtrade event for slug=abc": "resolve_event",
-        "Network/deposit modal keeps blocking the trade": "network_or_token_modal",
+        "Network/token modal keeps blocking the trade": "network_or_token_modal",
+        "Network/deposit modal keeps blocking the trade. The Bridge account probably has insufficient USDC balance or needs a deposit.": "insufficient_balance",
         "Live portfolio insufficient position, skipped": "live_position_insufficient",
         "Insufficient balance for BUY: available 0.5 USDC": "insufficient_balance",
+        "Short-cycle market stale or closing soon, skipped (seconds_to_close=12.0, buffer=45s)": "market_stale",
+        "Duplicate short-cycle market BUY skipped: same leader already has a PENDING/SUCCESS BUY for this BTC 5M market": "duplicate_short_cycle_buy",
         "Bridge read-only account does not support BUY orders": "read_only_account",
         "Insufficient position, skipped": "insufficient_position",
     }
@@ -651,6 +654,102 @@ def test_failure_coverage_hints_and_uncovered_counts():
     assert actionable_failure_buckets(all_covered_summary) == [], all_covered_summary
 
 
+def test_btc_updown_select_outcome_coverage():
+    row = {
+        "id": 844,
+        "market_title": "Bitcoin Up or Down - June 24, 7:15AM-7:20AM ET",
+        "outcome": "Up",
+        "error_message": "Could not select outcome: Up",
+        "created_at": 1000,
+    }
+
+    hint = failure_coverage_hint(row)
+    assert hint["covered"] is True, hint
+    assert hint["coverage_id"] == "btc_updown_binary_portfolio_fixture", hint
+
+    summary = failure_bucket_summary([row])
+    assert summary[0]["covered_count"] == 1, summary
+    assert summary[0]["uncovered_count"] == 0, summary
+    assert actionable_failure_buckets(summary) == [], summary
+
+
+def test_btc_updown_buy_dialog_and_navigation_race_coverage():
+    rows = [
+        {
+            "id": 857,
+            "market_title": "Bitcoin Up or Down - June 24, 7:50AM-7:55AM ET",
+            "outcome": "Down",
+            "quantity": "0.89552239",
+            "price": "0.67",
+            "amount": "0.6",
+            "error_message": "Page.query_selector: Execution context was destroyed, most likely because of a navigation",
+            "created_at": 1000,
+        },
+        {
+            "id": 858,
+            "market_title": "Bitcoin Up or Down - June 24, 7:50AM-7:55AM ET",
+            "outcome": "Down",
+            "quantity": "0.66666667",
+            "price": "0.90",
+            "amount": "0.6",
+            "error_message": "Could not open buy dialog after outcome click",
+            "created_at": 2000,
+        },
+    ]
+
+    expected = {
+        857: "post_submit_navigation_race_fixture",
+        858: "btc_updown_binary_buy_dialog_fixture",
+    }
+    for row in rows:
+        hint = failure_coverage_hint(row)
+        assert hint["covered"] is True, (row, hint)
+        assert hint["coverage_id"] == expected[row["id"]], (row, hint)
+
+    summary = failure_bucket_summary(rows)
+    assert {item["bucket"] for item in summary} == {"navigation_race", "buy_dialog_open"}, summary
+    assert all(item["uncovered_count"] == 0 for item in summary), summary
+    assert actionable_failure_buckets(summary) == [], summary
+
+
+def test_btc_updown_restart_and_stale_market_coverage():
+    rows = [
+        {
+            "id": 861,
+            "market_title": "Bitcoin Up or Down - June 24, 7:55AM-8:00AM ET",
+            "outcome": "Down",
+            "quantity": "0.86956467",
+            "price": "0.69000043",
+            "amount": "0.6",
+            "error_message": "BrowserContext.new_page: Target page, context or browser has been closed",
+            "created_at": 1000,
+        },
+        {
+            "id": 865,
+            "market_title": "Bitcoin Up or Down - June 24, 8:35AM-8:40AM ET",
+            "outcome": "Up",
+            "quantity": "0.64516129",
+            "price": "0.93",
+            "amount": "0.6",
+            "error_message": "Target market content never appeared for Bitcoin Up or Down - June 24, 8:35AM-8:40AM ET",
+            "created_at": 2000,
+        },
+    ]
+
+    expected = {
+        861: "shutdown_trade_lock_guard",
+        865: "short_cycle_market_stale_guard",
+    }
+    for row in rows:
+        hint = failure_coverage_hint(row)
+        assert hint["covered"] is True, (row, hint)
+        assert hint["coverage_id"] == expected[row["id"]], (row, hint)
+
+    summary = failure_bucket_summary(rows)
+    assert all(item["uncovered_count"] == 0 for item in summary), summary
+    assert actionable_failure_buckets(summary) == [], summary
+
+
 def test_world_cup_group_multi_country_coverage():
     rows = [
         {
@@ -916,6 +1015,61 @@ def test_argentina_sell_submit_historical_record_is_exact_covered():
     assert actionable_failure_buckets(summary) == [], summary
 
 
+def test_manual_zero_amount_sell_verification_records_are_not_actionable():
+    rows = [
+        {
+            "id": 572,
+            "external_trade_id": "manual-b394ddb9-d45b-4941-a9ad-abaeba854789",
+            "market_title": "Will Mexico reach the 2026 FIFA World Cup final?",
+            "outcome": "NO",
+            "quantity": "2.12",
+            "price": "0",
+            "amount": "0",
+            "error_message": "SELL post-submit verification failed: live portfolio quantity did not decrease (before=2.12, after=2.12)",
+            "created_at": 1000,
+        },
+        {
+            "id": 575,
+            "external_trade_id": "manual-43c01a3e-db89-48a7-8ecd-684148be6a9e",
+            "market_title": "Will Belgium reach the 2026 FIFA World Cup final?",
+            "outcome": "NO",
+            "quantity": "2.11",
+            "price": "0",
+            "amount": "0",
+            "error_message": "Live portfolio insufficient position, skipped (available=0, required=2.11)",
+            "created_at": 2000,
+        },
+    ]
+
+    assert [classify_failure_row(row) for row in rows] == [
+        "test_or_incomplete_record",
+        "test_or_incomplete_record",
+    ]
+    summary = failure_bucket_summary(rows)
+    assert summary[0]["bucket"] == "test_or_incomplete_record", summary
+    assert summary[0]["count"] == 2, summary
+    assert actionable_failure_buckets(summary) == [], summary
+
+
+def test_real_sell_post_submit_no_effect_remains_actionable_bucket():
+    row = {
+        "id": 700,
+        "external_trade_id": "0xreal",
+        "market_title": "Will Mexico reach the 2026 FIFA World Cup final?",
+        "outcome": "NO",
+        "quantity": "2.12",
+        "price": "0.94",
+        "amount": "1.99",
+        "error_message": "SELL post-submit verification failed: live portfolio quantity did not decrease (before=2.12, after=2.12)",
+        "created_at": 1000,
+    }
+
+    assert classify_failure_row(row) == "sell_post_submit_no_effect"
+    summary = failure_bucket_summary([row])
+    assert summary[0]["bucket"] == "sell_post_submit_no_effect", summary
+    assert summary[0]["uncovered_count"] == 1, summary
+
+
 def main() -> int:
     test_classify_failure_messages()
     test_filter_records_since_uses_created_or_updated_time()
@@ -932,6 +1086,9 @@ def main() -> int:
     test_amount_input_portfolio_screenshot_records_are_exact_covered()
     test_other_samples_are_split_into_specific_buckets()
     test_failure_coverage_hints_and_uncovered_counts()
+    test_btc_updown_select_outcome_coverage()
+    test_btc_updown_buy_dialog_and_navigation_race_coverage()
+    test_btc_updown_restart_and_stale_market_coverage()
     test_world_cup_group_multi_country_coverage()
     test_world_cup_remaining_country_coverage()
     test_esports_match_team_coverage()
@@ -940,6 +1097,8 @@ def main() -> int:
     test_ludvig_sell_dialog_open_covered_by_live_precheck()
     test_click_submit_partial_coverage_remains_actionable()
     test_argentina_sell_submit_historical_record_is_exact_covered()
+    test_manual_zero_amount_sell_verification_records_are_not_actionable()
+    test_real_sell_post_submit_no_effect_remains_actionable_bucket()
     print("bridge reliability audit tests passed")
     return 0
 

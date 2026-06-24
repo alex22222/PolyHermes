@@ -88,9 +88,23 @@ class PolymtradeExecutor:
 
     async def stop(self):
         if self.context:
-            await self.context.close()
+            try:
+                await self.context.close()
+            except Exception as e:
+                message = str(e).lower()
+                if "target page" in message or "context or browser has been closed" in message:
+                    logger.info(f"Browser context already closed during shutdown: {e}")
+                else:
+                    raise
+            finally:
+                self.context = None
+                self.page = None
         if self.playwright:
-            await self.playwright.stop()
+            try:
+                await self.playwright.stop()
+            finally:
+                self.playwright = None
+        self._ready = False
 
     def is_ready(self) -> bool:
         return self._ready and self.page is not None
@@ -1182,20 +1196,15 @@ class PolymtradeExecutor:
         # Keep the most specific short keywords; avoid overly long phrases.
         keywords = [k for k in keywords if len(k) <= 25][:5]
 
-        outcome_norm = outcome.strip().lower()
-        if outcome_norm in ("yes", "是", "true"):
-            side_labels = ["是", "Yes", "Buy Yes", "Long"]
-        elif outcome_norm in ("no", "否", "false"):
-            side_labels = ["否", "No", "Buy No", "Short"]
-        else:
-            side_labels = ["是", "Yes", outcome]
+        binary_updown = self._is_binary_updown_market(market_slug, market_title)
+        side_labels = self._side_labels_for_outcome(outcome, market_slug, market_title)
 
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
                 result = await self._evaluate_with_navigation_retry(
                     """(args) => {
-                        const [keywords, sideLabels] = args;
+                        const [keywords, sideLabels, binaryOutcomeMode] = args;
                         const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
                         const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
                         const bodyText = norm(textOf(document.body));
@@ -1203,7 +1212,9 @@ class PolymtradeExecutor:
                         const keywordHits = keywords.filter(kw => bodyText.includes(kw.toLowerCase())).length;
                         const hasKeyword = keywords.length === 0 || keywordHits > 0;
 
-                        const tradeLabels = [...sideLabels, '买入', '卖出', 'buy', 'sell', 'Buy', 'Sell'];
+                        const tradeLabels = binaryOutcomeMode
+                            ? [...sideLabels]
+                            : [...sideLabels, '买入', '卖出', 'buy', 'sell', 'Buy', 'Sell'];
                         const isTradeAction = (el) => {
                             const t = norm(textOf(el));
                             if (t.length > 80) return false;
@@ -1237,6 +1248,17 @@ class PolymtradeExecutor:
                                 url: window.location.href,
                             };
                         }
+                        if (binaryOutcomeMode) {
+                            return {
+                                visible: false,
+                                keywordHits,
+                                hasSide,
+                                hasOutcome,
+                                hasTargetTradeRow,
+                                bodyLength: bodyText.length,
+                                url: window.location.href,
+                            };
+                        }
                         return {
                             visible: hasKeyword && hasSide && hasOutcome,
                             keywordHits,
@@ -1247,7 +1269,7 @@ class PolymtradeExecutor:
                             url: window.location.href,
                         };
                     }""",
-                    [keywords, side_labels],
+                    [keywords, side_labels, binary_updown],
                     label="target_event_visible.evaluate",
                 )
                 if result and result.get("visible"):
@@ -1255,6 +1277,95 @@ class PolymtradeExecutor:
             except Exception:
                 pass
             await asyncio.sleep(0.3)
+        return False
+
+    def _side_labels_for_outcome(
+        self,
+        outcome: str,
+        market_slug: Optional[str] = None,
+        market_title: Optional[str] = None,
+    ) -> list[str]:
+        outcome_norm = outcome.strip().lower()
+        if self._is_binary_updown_market(market_slug, market_title) and outcome_norm in ("up", "down"):
+            if outcome_norm == "up":
+                return ["Up", "UP", "涨", "上涨"]
+            return ["Down", "DOWN", "跌", "下跌"]
+        if outcome_norm in ("yes", "是", "true"):
+            return ["是", "Yes", "Buy Yes", "Long"]
+        if outcome_norm in ("no", "否", "false"):
+            return ["否", "No", "Buy No", "Short"]
+        return ["是", "Yes", outcome]
+
+    async def _open_target_market_from_portfolio_row(
+        self,
+        market_slug: Optional[str] = None,
+        market_title: Optional[str] = None,
+    ) -> bool:
+        """Open a target market from the portfolio holdings list if we landed there.
+
+        After a BUY succeeds, Polymtrade can leave the next trade on the portfolio
+        dashboard. The holding row contains the market title and outcome text, but
+        not the tradable Up/Down buttons. Clicking the row brings the event panel
+        back before selection retries.
+        """
+        keywords = self._extract_market_keywords(market_slug, market_title)
+        keywords = [k for k in keywords if len(k) <= 25][:6]
+        try:
+            result = await self._evaluate_with_navigation_retry(
+                """(args) => {
+                    const [marketTitle, keywords] = args;
+                    const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
+                    const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
+                    const titleNorm = norm(marketTitle || "");
+                    const kws = (keywords || []).map(k => String(k).toLowerCase());
+                    const isClickable = (el) => {
+                        if (!el) return false;
+                        const tag = el.tagName;
+                        const role = el.getAttribute("role");
+                        const cls = (el.getAttribute("class") || "").toLowerCase();
+                        return tag === "BUTTON"
+                            || tag === "A"
+                            || role === "button"
+                            || cls.includes("cursor-pointer")
+                            || cls.includes("button")
+                            || el.onclick
+                            || el.getAttribute("tabindex") === "0";
+                    };
+                    const clickableAncestor = (el) => {
+                        let cur = el;
+                        for (let depth = 0; depth < 7 && cur; depth++, cur = cur.parentElement) {
+                            if (isClickable(cur)) return cur;
+                        }
+                        return el;
+                    };
+                    const rows = Array.from(document.querySelectorAll('li, [role="listitem"], article, section, div'))
+                        .map(row => ({row, text: textOf(row), lower: norm(textOf(row))}))
+                        .filter(item => item.text && item.text.length < 700);
+                    const portfolioHints = ["持仓", "历史", "份", "portfolio", "holdings"];
+                    const candidates = rows.filter(item => {
+                        const text = item.lower;
+                        const titleHit = titleNorm && text.includes(titleNorm);
+                        const kwHits = kws.filter(kw => text.includes(kw)).length;
+                        const portfolioLike = portfolioHints.some(h => text.includes(h));
+                        return (titleHit || kwHits >= Math.min(3, Math.max(1, kws.length))) && portfolioLike;
+                    }).sort((a, b) => a.text.length - b.text.length);
+                    for (const item of candidates) {
+                        const target = clickableAncestor(item.row);
+                        if (!target) continue;
+                        target.scrollIntoView({block: "center", inline: "center"});
+                        target.click();
+                        return {clicked: true, label: textOf(target).slice(0, 120)};
+                    }
+                    return {clicked: false};
+                }""",
+                [market_title or "", keywords],
+                label="open_portfolio_market.evaluate",
+            )
+            if result and result.get("clicked"):
+                logger.info(f"Clicked portfolio market row: {result.get('label')}")
+                return True
+        except Exception as e:
+            logger.warning(f"Failed to click portfolio market row: {e}")
         return False
 
     async def _is_buy_dialog_open(self, timeout: float = 3.0) -> bool:
@@ -1531,6 +1642,11 @@ class PolymtradeExecutor:
                     f"current URL: {current_url}"
                 )
                 if attempt < 5:
+                    if await self._open_target_market_from_portfolio_row(
+                        market_slug=market_slug, market_title=market_title
+                    ):
+                        await asyncio.sleep(1.5)
+                        continue
                     target_url = fallback_url if attempt % 2 else market_url
                     logger.info(f"Re-navigating to {target_url}")
                     await self._goto_with_retry(target_url)
@@ -1560,6 +1676,11 @@ class PolymtradeExecutor:
 
             if await self._is_network_modal_open():
                 logger.info(f"Network modal open after outcome click (attempt {attempt + 1}), handling")
+                if await self._is_deposit_or_insufficient_modal_open():
+                    raise RuntimeError(
+                        "Insufficient balance for BUY: deposit modal is blocking the trade. "
+                        "The Bridge account needs USDC balance or a deposit."
+                    )
                 # First try to actually select a network/token.
                 handled = await self._select_network_and_token_in_modal()
                 if not handled:
@@ -1580,6 +1701,11 @@ class PolymtradeExecutor:
 
         if not buy_dialog_open:
             if await self._is_network_modal_open():
+                if await self._is_deposit_or_insufficient_modal_open():
+                    raise RuntimeError(
+                        "Insufficient balance for BUY: deposit modal is blocking the trade. "
+                        "The Bridge account needs USDC balance or a deposit."
+                    )
                 raise RuntimeError(
                     "Network/deposit modal keeps blocking the trade. "
                     "The Bridge account probably has insufficient USDC balance or needs a deposit."
@@ -1596,6 +1722,11 @@ class PolymtradeExecutor:
 
         # Final safety check before entering the amount.
         if await self._is_network_modal_open():
+            if await self._is_deposit_or_insufficient_modal_open():
+                raise RuntimeError(
+                    "Insufficient balance for BUY: deposit modal is blocking the trade. "
+                    "The Bridge account needs USDC balance or a deposit."
+                )
             if not await self._select_network_and_token_in_modal():
                 await self._dismiss_modal_dialogs()
             await asyncio.sleep(0.3)
@@ -1657,6 +1788,11 @@ class PolymtradeExecutor:
 
         # Dismiss any network/token modal before trying to open the sell dialog.
         if await self._is_network_modal_open():
+            if await self._is_deposit_or_insufficient_modal_open():
+                raise RuntimeError(
+                    "Insufficient balance/deposit modal blocked SELL. "
+                    "The Bridge account needs USDC balance or a deposit."
+                )
             logger.info("Network modal open before SELL, handling")
             handled = await self._select_network_and_token_in_modal()
             if not handled:
@@ -1691,6 +1827,11 @@ class PolymtradeExecutor:
 
             if await self._is_network_modal_open():
                 logger.info(f"Network modal open after SELL dialog attempt {attempt + 1}, handling")
+                if await self._is_deposit_or_insufficient_modal_open():
+                    raise RuntimeError(
+                        "Insufficient balance/deposit modal blocked SELL. "
+                        "The Bridge account needs USDC balance or a deposit."
+                    )
                 handled = await self._select_network_and_token_in_modal()
                 if not handled:
                     handled = await self._dismiss_modal_dialogs()
@@ -1709,6 +1850,11 @@ class PolymtradeExecutor:
 
         if not sell_dialog_open:
             if await self._is_network_modal_open():
+                if await self._is_deposit_or_insufficient_modal_open():
+                    raise RuntimeError(
+                        "Insufficient balance/deposit modal blocked SELL. "
+                        "The Bridge account needs USDC balance or a deposit."
+                    )
                 raise RuntimeError(
                     "Network/deposit modal keeps blocking the SELL. "
                     "The Bridge account may need a network selection or deposit."
@@ -1723,6 +1869,11 @@ class PolymtradeExecutor:
 
         # Final safety check before entering the amount.
         if await self._is_network_modal_open():
+            if await self._is_deposit_or_insufficient_modal_open():
+                raise RuntimeError(
+                    "Insufficient balance/deposit modal blocked SELL. "
+                    "The Bridge account needs USDC balance or a deposit."
+                )
             if not await self._select_network_and_token_in_modal():
                 await self._dismiss_modal_dialogs()
             await asyncio.sleep(0.3)
@@ -1976,7 +2127,7 @@ class PolymtradeExecutor:
         """
         return """
         (args) => {
-            const [outcome, sideLabels, keywords] = args;
+            const [outcome, sideLabels, keywords, binaryOutcomeMode] = args;
             const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
             const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
 
@@ -2167,6 +2318,33 @@ class PolymtradeExecutor:
                 }
             }
 
+            // Binary Up/Down pages have one market on the event page and the
+            // actionable labels are the outcomes themselves. Market keywords
+            // may only appear in the page title, so row scoring can be 0 even
+            // while the correct short "Up"/"Down" button is visible.
+            if (binaryOutcomeMode) {
+                const allButtons = Array.from(document.querySelectorAll("button, [role='button'], a, div, span"))
+                    .filter(el => isClickable(el) && !isInNoise(el));
+                for (const sideLabel of sideLabels) {
+                    const l = sideLabel.toLowerCase();
+                    const target = allButtons.find(b => {
+                        const t = norm(textOf(b));
+                        if (t.length > 40) return false;
+                        return t === l || t.startsWith(l + " ") || t.endsWith(" " + l) || t.includes(" " + l + " ");
+                    });
+                    if (target) {
+                        const clicked = clickTarget(target);
+                        return {
+                            clicked: true,
+                            label: textOf(clicked),
+                            rowScore: bestScore,
+                            rowText: textOf(clicked).slice(0, 80),
+                            strategy: "binary-global"
+                        };
+                    }
+                }
+            }
+
             // Fallback: search globally only when we have no market-specific
             // keywords. On multi-market event pages, a global Yes/No fallback
             // can click the wrong row.
@@ -2200,6 +2378,20 @@ class PolymtradeExecutor:
         }
         """
 
+    @staticmethod
+    def _is_binary_updown_market(
+        market_slug: Optional[str] = None,
+        market_title: Optional[str] = None,
+    ) -> bool:
+        raw = " ".join(part for part in [market_slug, market_title] if part).lower()
+        return (
+            "updown" in raw
+            or "up-or-down" in raw
+            or "up or down" in raw
+            or ("bitcoin" in raw and "up" in raw and "down" in raw)
+            or ("btc" in raw and "up" in raw and "down" in raw)
+        )
+
     async def _select_polymtrade_outcome(
         self,
         outcome: str,
@@ -2218,7 +2410,13 @@ class PolymtradeExecutor:
         improve reliability.
         """
         outcome_norm = outcome.strip().lower()
-        if outcome_norm in ("yes", "是", "true"):
+        binary_updown = self._is_binary_updown_market(market_slug, market_title)
+        if binary_updown and outcome_norm in ("up", "down"):
+            if outcome_norm == "up":
+                side_labels = ["Up", "UP", "涨", "上涨"]
+            else:
+                side_labels = ["Down", "DOWN", "跌", "下跌"]
+        elif outcome_norm in ("yes", "是", "true"):
             side_labels = ["是", "Yes", "Buy Yes", "Long"]
         elif outcome_norm in ("no", "否", "false"):
             side_labels = ["否", "No", "Buy No", "Short"]
@@ -2256,7 +2454,7 @@ class PolymtradeExecutor:
 
             result = await self._evaluate_with_navigation_retry(
                 self._select_outcome_script(),
-                [outcome, side_labels, keywords],
+                [outcome, side_labels, keywords, binary_updown],
                 label="select_outcome.evaluate",
             )
             last_result = result
@@ -2340,6 +2538,27 @@ class PolymtradeExecutor:
             )
         except Exception as e:
             logger.warning(f"Failed to check modal state: {e}")
+            return False
+
+    async def _is_deposit_or_insufficient_modal_open(self) -> bool:
+        """Return True if the visible network/token modal is actually a funding block."""
+        try:
+            return await self.page.evaluate(
+                """() => {
+                    const modalTexts = ['选择网络和代币', '选择网络', '选择币种', 'Select Network', 'Select Token'];
+                    const fundingPattern = /deposit|充值|insufficient|余额不足|not enough/i;
+                    const all = Array.from(document.querySelectorAll('*[role="dialog"], div, section, aside, [class*="modal"], [class*="chakra-modal"]'));
+                    return all.some(d => {
+                        const text = (d.innerText || '').trim();
+                        if (!text || !modalTexts.some(mt => text.includes(mt))) return false;
+                        if (!fundingPattern.test(text)) return false;
+                        const rect = d.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0 && d.style.display !== 'none';
+                    });
+                }"""
+            )
+        except Exception as e:
+            logger.warning(f"Failed to check deposit modal state: {e}")
             return False
 
     async def _select_network_and_token_in_modal(
@@ -2512,12 +2731,13 @@ class PolymtradeExecutor:
                 return s;
             };
 
+            const hasMarketContext = keywords.length > 0;
             const rows = Array.from(document.querySelectorAll('li, [role="listitem"], section, article, div'))
                 .map(row => {
                     const text = (row.innerText || '').trim();
                     return {row, text, lower: norm(text), score: score(text), len: text.length};
                 })
-                .filter(item => item.text && item.len < 1200)
+                .filter(item => item.text && item.len < (hasMarketContext ? 520 : 1200))
                 .sort((a, b) => b.score - a.score || a.len - b.len);
 
             for (const item of rows) {
@@ -3537,7 +3757,17 @@ class PolymtradeExecutor:
 
         # Wait up to 15 seconds for the dialog to close or a success marker.
         for _ in range(30):
-            dialog = await self.page.query_selector("[role='dialog']")
+            try:
+                dialog = await self.page.query_selector("[role='dialog']")
+            except Exception as e:
+                message = str(e).lower()
+                if self._is_navigation_race_error(e) or "target page" in message or "context or browser has been closed" in message:
+                    logger.warning(
+                        "Trade confirmation page changed after submit; treating as submitted "
+                        f"and deferring to post-trade verification: {e}"
+                    )
+                    return
+                raise
             if not dialog:
                 logger.info("Trade dialog closed; trade likely confirmed")
                 return

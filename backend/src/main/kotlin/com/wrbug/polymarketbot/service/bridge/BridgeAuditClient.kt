@@ -2,6 +2,9 @@ package com.wrbug.polymarketbot.service.bridge
 
 import com.google.gson.Gson
 import com.wrbug.polymarketbot.dto.BridgeAuditRequest
+import com.wrbug.polymarketbot.dto.BridgeAuditReconciliationListResponse
+import com.wrbug.polymarketbot.dto.BridgeAuditReconciliationRequest
+import com.wrbug.polymarketbot.dto.BridgeAuditReconciliationSaveResponse
 import com.wrbug.polymarketbot.dto.BridgeAuditResponse
 import com.wrbug.polymarketbot.dto.BridgeRuntimeStatusResponse
 import org.slf4j.LoggerFactory
@@ -22,7 +25,8 @@ import java.time.Duration
 @Component
 class BridgeAuditClient(
     @Value("\${bridge.audit.url:http://localhost:8080/audit}") private val auditUrl: String,
-    @Value("\${bridge.status.url:http://localhost:8080/status}") private val statusUrl: String
+    @Value("\${bridge.status.url:http://localhost:8080/status}") private val statusUrl: String,
+    @Value("\${bridge.audit.reconciliations.url:http://localhost:8080/audit/reconciliations}") private val reconciliationsUrl: String
 ) {
 
     private val logger = LoggerFactory.getLogger(BridgeAuditClient::class.java)
@@ -86,6 +90,62 @@ class BridgeAuditClient(
             }
         } catch (e: Exception) {
             logger.error("调用 Bridge /status 失败: ${e.message}", e)
+            null
+        }
+    }
+
+    fun fetchReconciliations(): BridgeAuditReconciliationListResponse? {
+        return try {
+            val httpRequest = HttpRequest.newBuilder()
+                .uri(URI.create(reconciliationsUrl))
+                .GET()
+                .timeout(Duration.ofSeconds(10))
+                .build()
+
+            val response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString())
+            if (response.statusCode() in 200..299) {
+                val body = response.body()
+                try {
+                    gson.fromJson(body, BridgeAuditReconciliationListResponse::class.java)
+                } catch (e: Exception) {
+                    logger.warn("解析 Bridge /audit/reconciliations 响应失败: ${e.message}, body=$body")
+                    null
+                }
+            } else {
+                logger.warn("Bridge /audit/reconciliations 返回非 2xx: status=${response.statusCode()}, body=${response.body()}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("调用 Bridge /audit/reconciliations 失败: ${e.message}", e)
+            null
+        }
+    }
+
+    fun upsertReconciliation(request: BridgeAuditReconciliationRequest): BridgeAuditReconciliationSaveResponse? {
+        return try {
+            val body = gson.toJson(request)
+            val httpRequest = HttpRequest.newBuilder()
+                .uri(URI.create(reconciliationsUrl))
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .header("Content-Type", "application/json")
+                .timeout(Duration.ofSeconds(10))
+                .build()
+
+            val response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString())
+            if (response.statusCode() in 200..299) {
+                val responseBody = response.body()
+                try {
+                    gson.fromJson(responseBody, BridgeAuditReconciliationSaveResponse::class.java)
+                } catch (e: Exception) {
+                    logger.warn("解析 Bridge reconciliation 保存响应失败: ${e.message}, body=$responseBody")
+                    null
+                }
+            } else {
+                logger.warn("Bridge reconciliation 保存返回非 2xx: status=${response.statusCode()}, body=${response.body()}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("调用 Bridge reconciliation 保存失败: ${e.message}", e)
             null
         }
     }

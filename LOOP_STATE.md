@@ -4,6 +4,52 @@
 
 通过挖掘 Bridge 日志和数据库中的 BUY/SELL 失败记录，持续修复 `polymtrade-bridge` 的执行可靠性问题，降低误判失败和假成功比例。
 
+> 2026-06-24 note: 用户提出“第二目标”：第一阶段积累并评分 1000+ 新的高质量 Leader 候选。由于 Codex goal 工具中旧 Bridge 目标仍为 paused，不能并行新建持久 goal；第二目标先落到项目文档 `docs/zh/leader-discovery-goal-2-phase-1.md`，后续可在完成/切换旧 goal 后正式创建。
+
+> 2026-06-24 11:35 note: 用户确认“先把第一个目标往后放，启动第二个积累 leader 目标”。执行层面暂停 Bridge 可靠性目标的新迭代，优先推进 Leader 候选积累目标；Codex goal 工具仍被旧 paused goal 占用，因此第二目标通过项目 spec、代码/API、数据库候选池与本 loop state 追踪。
+
+> 2026-06-24 update: 第一目标已设置为 `COMPLETED_PENDING_RESTART`，保留所有历史记录和后续重启入口；第二目标升级为当前主目标 `ACTIVE`。系统新增 `/api/loop-goals/status` 与 `/api/loop-goals/update`，并在 `/optimization-daily` 的“目标控制”对话框中支持启动/暂停目标。Leader Research 定时任务会在第二目标非 `ACTIVE` 时跳过。
+
+## Active Goal Override
+
+当前执行优先级：
+
+1. 第二目标：第一阶段积累并评分 1000+ 新的高质量 Leader 候选。状态：`ACTIVE`。
+2. 第一目标：Bridge BUY/SELL 可靠性持续改进。状态：`COMPLETED_PENDING_RESTART`，不删除，后续可从目标控制对话框重启；sell 成功率仍作为 Leader 可复制性评分的重要维度保留。
+
+第二目标启动进展：
+
+- 已建立规格文档：`docs/zh/leader-discovery-goal-2-phase-1.md`。
+- 已补后端正式导入接口：`POST /api/copy-trading/leader-research/scanner-pool/import`。
+- 已新增 scanner pool -> research candidate 导入服务，支持 dry-run、分类限额、最小 discovery score、只导入 PENDING/全量切换、锁定候选保护、事件记录。
+- 已将 `leader_research_candidate` 从 3 个扩展到 1145 个，其中 `DISCOVERED=1142`、`PAPER=3`。
+- 当前 inferred category 分布：politics 429、finance 415、sports 152、crypto 148、unknown 1。政治+金融约 73.7%，已接近 80% 主策略目标，下一轮优先补 politics/finance 高质量来源。
+- 已完成下一轮预筛：新增 `activity-prescreen-v1` 活动基础评分，1142 个新增候选全部评分；筛出 45 个 80+ 且未命中核心排除风险的候选。
+- 已按策略配比推进首批 PAPER：politics 9、finance 9、sports 2、crypto 2；当前 `PAPER=25`，active paper session=25。
+- 已新增并上线 paper 专用接口：`POST /api/copy-trading/leader-research/paper/process` 和 `POST /api/copy-trading/leader-research/paper/score`。
+- 已修复 paper processing 批次公平性：待处理事件按 PAPER/TRIAL_READY 钱包公平采样，避免单个高频钱包吞掉整个 batch。
+- 已处理两轮公平 paper batch：新增/累计 paper trades 696 条，其中 processed 513、filtered 183、failed 0。
+- 当前合格候选 4 个：politics 2、finance 1、sports 1。candidate 80 虽然分数/PnL 高，但 `drawdown_gt_15`，暂不列入合格。
+- 下一轮：对 4 个合格候选跑更深 paper/backtest，并将不合格 PAPER 自动转 COOLDOWN；同时继续补 politics/finance 来源，尤其提高 finance 合格数量。
+- 2026-06-24 第二目标下一步 loop 已执行：
+  - 新增 `/api/copy-trading/leader-research/activity-score/promote-paper`，打通 activity 预筛分到 PAPER 的正式晋级链路。
+  - scanner pool 真实导入新增 65 个、更新 10 个；主要来自 politics，finance 新增很少。
+  - activity-prescreen 评分新增 65 个：politics 62、finance 3；主要风险为 `small_sample`、`scanner_pool_unverified`、`tail_price_spray`、`low_safe_price_ratio`。
+  - 80+ 安全可晋级候选集中在 sports/crypto；politics/finance 没有安全可晋级的 60+ 候选，finance 主要被 `buy_only_no_exit` 拦截。
+  - 按 20% 机会策略配额推进 PAPER 10 个：sports 5、crypto 5。
+  - 当前 PAPER=30，分布 politics 9、finance 7、sports 7、crypto 7。
+  - paper process 大批次 `batchSize=1500` 发生请求超时并留下长事务锁，导致 paper score 首次锁等待失败；已通过重启后端释放事务并完成 score。
+  - 当前合格候选仍为 4 个；新增 10 个 PAPER 暂无可模拟通过交易，评分被 sample cap 压到 59。
+  - 新增优化点：paper/process 需要改成小事务分批提交或异步 job，避免单个大 batch 锁住 `leader_research_candidate`。
+  - 2026-06-24 follow-up: 已修复 paper/process 长事务问题：
+    - `processPaperCandidates()` 改为按 chunk 调度，默认每轮最多 100 个事件。
+    - 实际事件处理改为 `processPaperEventInNewTransaction()`，单个 activity event 使用独立 `REQUIRES_NEW` 事务 claim/process/mark。
+    - 这样慢行情估值最多影响单个 event 事务，不再让整批 paper process 锁住候选表。
+    - 新增单测覆盖 `batchSize=2/chunkSize=1` 会分两次取事件处理。
+    - 后端验证：`LeaderPaperTradingServiceTest` 通过，`compileKotlin` 通过，`bootJar` 通过。
+    - 本地正式 API 验证：`paper/process batchSize=30` 返回 processed 21、filtered 9、failed 0；随后 `paper/score` 返回 scoredCount 30。
+    - 验证后 `information_schema.INNODB_TRX` 为空，未留下长事务锁。
+
 验证标准：
 - 针对每个识别出的失败模式，有对应的代码修复。
 - 新增/更新单元测试或静态 fixture 测试覆盖修复逻辑并通过。
@@ -2451,3 +2497,561 @@
 **下一步候选**：
 - 若需要把 stale mismatch 真正收敛到 0，可在优化点日报增加人工确认入口，POST `/audit/reconciliations` 写入选中的 suggestion。
 - 继续观察 post-fix audit；若出现新的 PENDING/FAILED 或 fresh mismatch，优先修 BUY/SELL 执行链路。
+
+## Iteration 60 Log
+
+**目标**：修复 `Bitcoin Up or Down - June 24, 7:50AM-7:55AM ET` BUY Down 失败，降低 BTC 5 分钟短周期市场的 selector、导航竞态和假成功风险。
+
+**现场记录**：
+- record 857：`BUY Down`，amount `$0.6`，失败文本 `Page.query_selector: Execution context was destroyed...`。
+- 日志显示 857 已经选中 Down、输入金额、点击 BUY submit；随后 `/portfolio` 轮询复用同一个 executor page 导航到 portfolio，导致 submit 后确认阶段页面上下文被销毁。
+- record 858：同一市场 `Could not open buy dialog after outcome click`，属于 BTC Up/Down 二元按钮/买入弹窗路径的历史覆盖缺口。
+- record 859：`SELL Down` 被 `Insufficient position, skipped` 跳过，属于账本/风控状态，不是 selector bug。
+- 后续观察发现 864 曾把组合页里西班牙持仓 `14.8 份` 误读为 BTC Up 持仓并标记 SUCCESS，属于 BUY post-submit verification 假成功风险。
+- 865 说明 5 分钟 BTC 市场可能在等待 `_trade_lock` 期间过期，过期后仍进入 UI 会形成 `Target market content never appeared`。
+
+**改动文件**：
+- `polymtrade-bridge/main.py`
+- `polymtrade-bridge/polymtrade_executor.py`
+- `polymtrade-bridge/bridge_reliability_audit.py`
+- `polymtrade-bridge/test_buy_verification.py`
+- `polymtrade-bridge/test_bridge_reliability_audit.py`
+- `polymtrade-bridge/test_short_cycle_market_guard.py`
+
+**实现内容**：
+- `/portfolio` endpoint 现在同时拿 `_trade_lock` 和 `_portfolio_lock`，避免交易提交后确认阶段被 portfolio scrape 导航抢走页面。
+- `_confirm_trade()` 遇到 submit 后页面导航/context closed，按“已提交，交给 post-trade verification 判断”处理，不再直接标 FAILED。
+- `executor.stop()` 幂等化，浏览器上下文已关闭时不再把 shutdown 记成异常；lifespan shutdown 会先拿 `_trade_lock`，避免关闭浏览器时踩到交易执行。
+- BTC Up/Down 的 audit 覆盖扩展到：
+  - `post_submit_navigation_race_fixture`
+  - `btc_updown_binary_buy_dialog_fixture`
+  - `shutdown_trade_lock_guard`
+  - `short_cycle_market_stale_guard`
+- BUY position verification 改为在有 `market_slug/market_title` 时只接受紧凑目标市场持仓行，避免把 portfolio 里其他市场的 `shares/份` 当作当前 BTC 市场持仓。
+- 新增 BTC 5M stale guard：`btc-updown-5m-<start_ts>` 在 `start+300s-45s` 后进入 `_trade_lock` 时直接标记 `Short-cycle market stale or closing soon, skipped`，不再打开 UI。
+
+**验证结果**：
+- `polymtrade-bridge/.venv/bin/python -m pytest polymtrade-bridge/test_bridge_reliability_audit.py -q` 通过：28 passed。
+- `polymtrade-bridge/.venv/bin/python polymtrade-bridge/test_short_cycle_market_guard.py` 通过。
+- `polymtrade-bridge/.venv/bin/python polymtrade-bridge/test_buy_verification.py` 通过。
+- `polymtrade-bridge/.venv/bin/python polymtrade-bridge/test_event_visibility.py` 通过。
+- `py_compile` 覆盖 `main.py`、`polymtrade_executor.py`、audit 与新增测试，通过。
+- Bridge 已重启，`/status` 返回 `ready=true`、`logged_in=true`、`last_error=null`、`copy_trading_account_id=2`。
+- Live audit 窗口 `since_ms=1782301700000`：
+  - `pending_timeout_count=0`
+  - `actionable_failure_bucket_count=0`
+  - `next_action_candidates=[]`
+  - 857/858/861/863/865 均已有精确或状态类覆盖；859 保持 `insufficient_position` state/risk。
+
+**下一步候选**：
+- 继续处理 live audit 的 `active_success_position_mismatch_count=2`，确认是否由 864 这类历史假成功造成，并在优化点日报提供 reconciliation 或修正入口。
+- 若继续跟 BTC 5M leader，建议观察 stale guard 是否开始产生 skip 记录；若过多，说明该 leader 信号/Bridge UI 链路对 5 分钟市场太慢，应降低或禁用该类跟单。
+
+## Iteration 61 Log
+
+**目标**：复查 `Bitcoin Up or Down - June 24, 7:55AM-8:00AM ET` record 861，修复交易列表显示为“其他 + 持仓漂移”的误导问题，并确认代码侧已经阻止同类重启窗口失败。
+
+**现场记录**：
+- record 861：
+  - `external_trade_id=0xb22bfa8b2db3578ee83abf1d81e34413fa85ce0dc7fbe268e0e157d27cbfd6f7`
+  - `BUY Down`
+  - `amount=$0.6`
+  - 原始错误：`BrowserContext.new_page: Target page, context or browser has been closed`
+- Bridge audit 已将 861 归类为 `navigation_race`，并由 `shutdown_trade_lock_guard` 覆盖。
+- 页面显示“其他”的原因：前端 `BridgeTradeRecordList` 未识别 `Target page/context/browser closed` 类错误。
+- 页面显示“持仓漂移”的原因：后端 position view 用 `PositionKey` 聚合，同市场/outcome 的 FAILED 行复用了 SUCCESS 行的 mismatch view；虽然 mismatch 计算本身限定 SUCCESS，但 DTO 输出没有按当前 record 状态再防一层。
+
+**改动文件**：
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/service/bridge/BridgeTradeRecordService.kt`
+- `frontend/src/pages/BridgeTradeRecordList.tsx`
+- `frontend/src/locales/zh-CN/common.json`
+- `frontend/src/locales/zh-TW/common.json`
+- `frontend/src/locales/en/common.json`
+- `LOOP_STATE.md`
+
+**实现内容**：
+- `BridgeTradeRecordService.toDto()` 新增输出 guard：
+  - 只有当前 record 自身 `status == SUCCESS` 时才暴露 `positionMismatch=true` 和 `positionMismatchReason`。
+  - FAILED 行仍可展示 ledger/snapshot 数值，但不会再贴“持仓漂移”标签。
+- 前端错误分类新增 navigation race：
+  - `execution context was destroyed`
+  - `target page, context or browser has been closed`
+  - `interrupted by another navigation`
+  - 中文显示为“导航/重启竞态”。
+- 补齐 zh-CN、zh-TW、en i18n 文案。
+
+**验证结果**：
+- 后端 `compileKotlin` 通过。
+- 前端 `npm run build` 通过。
+- Bridge audit 测试通过：28 passed。
+- `test_short_cycle_market_guard.py` 通过。
+- 后端已重启，8000 正在监听。
+- 直接调用 `/api/bridge/trades/detail` 验证 record 861：
+  - `positionMismatch=false`
+  - `positionMismatchReason=null`
+  - `errorMessage=BrowserContext.new_page: Target page, context or browser has been closed`
+- 前端 dev server 3000 正在运行；Bridge 8080 `/status` 正常，`last_error=null`。
+
+**下一步候选**：
+- 若页面还显示历史缓存，可刷新浏览器页面；接口数据已确认不会再给 861 返回持仓漂移。
+- 后续继续观察 BTC 5M 跟单：若 `Short-cycle market stale or closing soon` skip 增多，说明该 leader 对 5 分钟市场信号太晚或 Bridge UI 链路太慢。
+
+## Iteration 62 Log
+
+**目标**：针对 records 866-870 连续跟单问题，添加 BTC 5 分钟短周期市场硬规则：同一个 leader + 同一个 market 只允许首笔 BUY 进入 UI，后续 BUY 直接跳过；SELL 不拦截。
+
+**现场记录**：
+- 866-870 都来自同一个 leader：`0xe7ce284302936fd06ffc7ad05f13c648c513d53a`。
+- 5 条记录都属于同一个 market：
+  - `Bitcoin Up or Down - June 24, 9:55AM-10:00AM ET`
+  - `marketSlug=btc-updown-5m-1782309300`
+  - `conditionId=0x8a77ddaabadfbccd4a3cddf52d9b900b4bcf11f7632106ef7f62af701f064425`
+- 每条 `transactionHash` 不同，因此不是 webhook 重复；原逻辑只按 `external_trade_id` 幂等，全部被当作独立 leader trade。
+- 当时配置允许：
+  - `fixed/max/min` 都约 `$1`
+  - `max_daily_orders=100`
+  - `support_sell=1`
+  - 无关键词/价格/单市场冷却限制
+- 所以系统按 leader 的 `BUY Down -> BUY Up -> BUY Down -> SELL Down -> BUY Down` 高频 scalping/对冲行为全部跟单。
+
+**改动文件**：
+- `polymtrade-bridge/main.py`
+- `polymtrade-bridge/bridge_recorder.py`
+- `polymtrade-bridge/bridge_reliability_audit.py`
+- `polymtrade-bridge/test_short_cycle_market_guard.py`
+- `polymtrade-bridge/test_bridge_reliability_audit.py`
+- `frontend/src/pages/BridgeTradeRecordList.tsx`
+- `frontend/src/locales/zh-CN/common.json`
+- `frontend/src/locales/zh-TW/common.json`
+- `frontend/src/locales/en/common.json`
+- `LOOP_STATE.md`
+
+**实现内容**：
+- `BridgeTradeRecorder.has_prior_short_cycle_buy()`：
+  - 检查同 bridge、同 leader、同 market_id 或同 marketSlug 是否已有 `PENDING/SUCCESS` BUY。
+- `handle_signal()`：
+  - BUY 数量计算后、创建真实执行 PENDING 前执行 duplicate guard。
+  - 若 `marketSlug` 匹配 `btc-updown-5m-<ts>` 且已有 prior BUY，则写入一条 FAILED skip：
+    - `Duplicate short-cycle market BUY skipped: same leader already has a PENDING/SUCCESS BUY for this BTC 5M market`
+  - 不进入 UI，不占用 `_trade_lock`。
+  - SELL 不受该规则影响，仍可优先执行退出。
+- audit 新增 `duplicate_short_cycle_buy` bucket，归为 `state_or_risk`，不进入 code-actionable 修复队列。
+- 前端交易列表新增错误类型展示：`短周期重复买入已跳过`。
+
+**验证结果**：
+- `polymtrade-bridge/.venv/bin/python test_short_cycle_market_guard.py` 通过。
+- `polymtrade-bridge/.venv/bin/python -m pytest test_bridge_reliability_audit.py -q` 通过：28 passed。
+- `py_compile` 覆盖 main/recorder/audit/tests，通过。
+- 前端 `npm run build` 通过。
+- Bridge 已重启，`/status` 返回：
+  - `ready=true`
+  - `logged_in=true`
+  - `last_error=null`
+  - `copy_trading_account_id=2`
+- 用真实 866 market/leader 调 `has_prior_short_cycle_buy()` 返回 `True`，确认 DB 查询能命中既有首笔 BUY。
+
+**下一步候选**：
+- 观察后续 BTC 5M 记录，预期第二笔及之后同 leader 同 market BUY 会显示为 `短周期重复买入已跳过`。
+- 若需要更保守，可进一步把所有 `btc-updown-5m-*` BUY 默认禁用，仅保留 SELL；目前先按用户要求执行“同 leader 同 market BUY 最多 1 次”。
+
+## Iteration 53 Log
+
+**目标**：把 reconciliation suggestions 从只读展示推进到人工确认闭环，允许 operator 显式确认单条 stale mismatch 并写入 Bridge reconciliation 注释，从而减少历史账本噪音对 SELL 监控的长期干扰。
+
+**监控窗口检查**：
+- Bridge `/status` 健康：
+  - `ready=true`
+  - `logged_in=true`
+  - `last_error=null`
+  - `copy_trading_account_id=2`
+  - `copy_trading_config_count=2`
+- Bridge live `/audit?since_ms=0&limit=100&failure_limit=20`：
+  - `monitor_status.status=clear`
+  - `monitor_status.actionable_issue_count=0`
+  - `metrics.success_position_mismatch_count=13`
+  - `metrics.active_success_position_mismatch_count=0`
+  - `metrics.stale_success_position_mismatch_count=13`
+  - `metrics.reconciliation_suggestion_count=13`
+- Bridge 原生已有：
+  - `GET /audit/reconciliations`
+  - `POST /audit/reconciliations`
+- PolyHermes 后端此前只代理 `/audit` 和 `/status`，没有正式 reconciliation 代理；优化点日报只能看 suggestions，不能人工确认。
+
+**改动文件**：
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/dto/BridgeTradeRecordDto.kt`
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/service/bridge/BridgeAuditClient.kt`
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/controller/bridge/BridgeTradeRecordController.kt`
+- `frontend/src/types/index.ts`
+- `frontend/src/services/api.ts`
+- `frontend/src/pages/OptimizationDaily.tsx`
+- `openspec/changes/improve-polymtrade-bridge-buy-sell-reliability/tasks.md`
+- `openspec/changes/improve-polymtrade-bridge-buy-sell-reliability/specs/bridge-trade-reliability/spec.md`
+- `LOOP_STATE.md`
+
+**实现内容**：
+- 后端新增正式 reconciliation DTO：
+  - `BridgeAuditReconciliationRequest`
+  - `BridgeAuditReconciliationAnnotation`
+  - `BridgeAuditReconciliationListResponse`
+  - `BridgeAuditReconciliationSaveResponse`
+- `BridgeAuditClient` 新增：
+  - `fetchReconciliations()`
+  - `upsertReconciliation()`
+  - 配置项 `bridge.audit.reconciliations.url`，默认 `http://localhost:8080/audit/reconciliations`
+- `BridgeTradeRecordController` 新增：
+  - `POST /api/bridge/trades/audit/reconciliations`
+  - `POST /api/bridge/trades/audit/reconciliations/upsert`
+- 后端 upsert 做输入校验：
+  - status 只允许 `externally_closed`、`manual_closed`、`accepted_stale`、`wrong_market_known`
+  - `marketId` 不能为空
+  - `outcome` 不能为空
+- 前端类型新增 reconciliation request/list/save/annotation 类型。
+- `apiService.bridgeTradeRecords` 新增：
+  - `auditReconciliations()`
+  - `upsertAuditReconciliation()`
+- 优化点日报 suggestions 表格新增 `操作` 列：
+  - 每行显示 `确认` 按钮。
+  - 点击后弹出 `确认历史错配建议` 二次确认。
+  - 确认后通过后端正式代理写入单条 reconciliation。
+  - 成功后提示 `已确认历史错配` 并刷新 audit。
+  - 不做自动批量写入。
+- OpenSpec 追加 REQ-66 / SC-68，tasks 追加 10.58。
+
+**验证结果**：
+- `frontend npm run build` 通过。
+- `backend JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew compileKotlin` 通过。
+- Bridge live `/status` 健康。
+- Bridge live `/audit?since_ms=0&limit=100&failure_limit=20` 仍返回：
+  - `monitor_status.status=clear`
+  - `monitor_status.actionable_issue_count=0`
+  - `metrics.reconciliation_suggestion_count=13`
+- 未对真实 Bridge 执行 POST `/audit/reconciliations` 冒烟写入，因为这会修改当前 `audit_reconciliations.json`，可能把真实 stale mismatch 标记掉；本轮用前端构建、后端编译和 Bridge live audit 验证链路结构与数据源。
+
+**下一步候选**：
+- 若用户确认，可以通过优化点日报逐条确认 stale mismatch，观察 `reconciled_success_position_mismatch_count` 上升、`reconciliation_suggestion_count` 下降。
+- 继续观察 post-fix audit；若出现新的 PENDING/FAILED 或 fresh mismatch，优先修 BUY/SELL 执行链路。
+
+## Iteration 54 Log
+
+**目标**：继续收口 SELL 相关历史失败噪音，避免手工零金额 SELL 测试记录被误判为需要继续改代码的 `sell_post_submit_no_effect` / `live_position_insufficient`，同时保留真实 SELL post-submit 无效果失败的可见性。
+
+**监控窗口检查**：
+- 离线 full audit 修复前发现：
+  - `sell_post_submit_no_effect` 1 条 uncovered，record id 572，`external_trade_id=manual-*`，amount/price 为 0。
+  - `live_position_insufficient` 1 条 uncovered，record id 575，`external_trade_id=manual-*`，amount/price 为 0。
+  - `insufficient_position` 1 条 uncovered，record id 599，真实外部 id，属于 `state_or_risk` 风险/状态 skip。
+- 这些手工零金额记录不代表当前 SELL 代码路径失败，继续留在 code bucket 会干扰下一轮优先级。
+
+**改动文件**：
+- `polymtrade-bridge/bridge_reliability_audit.py`
+- `polymtrade-bridge/test_bridge_reliability_audit.py`
+- `openspec/changes/improve-polymtrade-bridge-buy-sell-reliability/tasks.md`
+- `openspec/changes/improve-polymtrade-bridge-buy-sell-reliability/specs/bridge-trade-reliability/spec.md`
+- `LOOP_STATE.md`
+
+**实现内容**：
+- audit row-level 降级规则新增覆盖：
+  - `sell_post_submit_no_effect`
+  - `live_position_insufficient`
+- 当 bucket 属于上述 SELL bucket，且 `external_trade_id` 以 `manual-` 开头，并且 amount 或 price 为 0 时，分类为 `test_or_incomplete_record`。
+- 新增回归测试：
+  - id 572/575 这类手工零金额 SELL 记录不再进入 actionable 队列。
+  - 真实外部 id 且非零 amount/price 的 `SELL post-submit verification failed` 仍保留为 `sell_post_submit_no_effect`。
+- OpenSpec 追加 REQ-67 / SC-69，tasks 追加 10.59。
+
+**验证结果**：
+- `polymtrade-bridge/.venv/bin/python -m pytest test_bridge_reliability_audit.py -q` 通过：25 passed。
+- `polymtrade-bridge/.venv/bin/python test_bridge_reliability_audit.py` 通过。
+- `polymtrade-bridge/.venv/bin/python -m py_compile bridge_reliability_audit.py test_bridge_reliability_audit.py main.py` 通过。
+- 离线 full audit 验证：
+  - `sell_post_submit_no_effect` 不再出现。
+  - `live_position_insufficient` 不再出现。
+  - `test_or_incomplete_record` 包含 id 572/575。
+  - id 599 仍为 `insufficient_position` / `state_or_risk`。
+- 重启 Bridge 后 `/status` 正常：
+  - `ready=true`
+  - `logged_in=true`
+  - `copy_trading_account_id=2`
+  - `copy_trading_config_count=2`
+- Live Bridge `/audit?since_ms=0&limit=150&failure_limit=100` 验证：
+  - `monitor_status.status=clear`
+  - `metrics.actionable_failure_bucket_count=0`
+  - `next_action_candidates=[]`
+  - `test_or_incomplete_record` 包含 sample ids 592/575/574/573/572。
+  - `insufficient_position` 仍包含 id 599，actionability 为 `state_or_risk`。
+- `polymtrade-bridge/.venv/bin/python test_sell_verification.py` 在非沙盒环境通过。沙盒内首次运行时 Chromium headless 被系统关闭，非代码断言失败。
+
+**下一步候选**：
+- 当前 live audit 已无 actionable failure bucket；后续应继续观察新增 PENDING/FAILED 或 fresh mismatch。
+- 若新增失败再次出现，优先处理非历史、非手工、非 state/risk 的 BUY/SELL 执行链路 bucket。
+
+## Iteration 55 Log
+
+**目标**：继续清理 Bridge audit 中会误导 BUY/SELL 修复优先级的历史失败桶，重点处理 53 条 `Network/deposit modal keeps blocking the trade` 样本，让它们准确反映为资金/充值状态问题，而不是网络/代币选择 modal UI 问题。
+
+**监控窗口检查**：
+- Bridge `/status` 健康：
+  - `ready=true`
+  - `logged_in=true`
+  - `copy_trading_account_id=2`
+  - `copy_trading_config_count=2`
+- 修复前 full audit：
+  - `network_or_token_modal` 53 条 uncovered，样本 id 563/561/556/555/553。
+  - 错误文本实际为 `Network/deposit modal keeps blocking the trade. The Bridge account probably has insufficient USDC balance or needs a deposit.`
+  - `actionable_failure_bucket_count=0`，但 bucket 名称仍会误导下一轮以为是 modal UI 代码问题。
+
+**改动文件**：
+- `polymtrade-bridge/bridge_reliability_audit.py`
+- `polymtrade-bridge/test_bridge_reliability_audit.py`
+- `openspec/changes/improve-polymtrade-bridge-buy-sell-reliability/tasks.md`
+- `openspec/changes/improve-polymtrade-bridge-buy-sell-reliability/specs/bridge-trade-reliability/spec.md`
+- `LOOP_STATE.md`
+
+**实现内容**：
+- `classify_failure()` 调整优先级：
+  - 先识别 `insufficient balance`、`insufficient USDC balance`、`needs a deposit`、`余额不足`。
+  - 再识别一般 `network/token modal`。
+- 新增分类回归：
+  - `Network/token modal keeps blocking the trade` 仍为 `network_or_token_modal`。
+  - `Network/deposit modal... insufficient USDC balance or needs a deposit` 改为 `insufficient_balance`。
+- OpenSpec 追加 REQ-68 / SC-70，tasks 追加 10.60。
+
+**验证结果**：
+- `polymtrade-bridge/.venv/bin/python -m pytest test_bridge_reliability_audit.py -q` 通过：25 passed。
+- `polymtrade-bridge/.venv/bin/python -m py_compile bridge_reliability_audit.py test_bridge_reliability_audit.py main.py` 通过。
+- 离线 full audit 验证：
+  - `insufficient_balance` 53 条，actionability 为 `state_or_risk`。
+  - `network_or_token_modal` 不再出现。
+  - `next_action_candidates=[]`。
+- 重启 Bridge 后 live `/status` 正常。
+- Live Bridge `/audit?since_ms=0&limit=200&failure_limit=100` 验证：
+  - `monitor_status.status=clear`
+  - `monitor_status.actionable_issue_count=0`
+  - `metrics.actionable_failure_bucket_count=0`
+  - `insufficient_balance` 53 条，样本 id 563/561/556/555/553。
+  - `network_or_token_modal` 不再出现。
+
+**下一步候选**：
+- 当前 live audit 仍无 code-actionable bucket；继续观察新增 PENDING/FAILED。
+- 若后续出现真实 `network_or_token_modal`，应基于截图/DOM 修 modal 选择；若继续出现 `insufficient_balance`，应优先调整跟单金额、余额预检或账户资金告警，而不是改 selector。
+
+## Iteration 56 Log
+
+**目标**：在 audit 分类已将资金不足 modal 归入 `insufficient_balance` 后，进一步改执行链路本身：BUY/SELL 一旦看到明确充值/余额不足 modal，立刻中止并报资金状态错误，不再重复选择 Polygon/USDC、关闭或强制隐藏 modal。
+
+**监控窗口检查**：
+- Bridge live `/audit?since_ms=0&limit=220&failure_limit=100`：
+  - `monitor_status.status=clear`
+  - `monitor_status.actionable_issue_count=0`
+  - `metrics.actionable_failure_bucket_count=0`
+  - `insufficient_balance=53`
+  - `insufficient_position=1`
+  - `next_action_candidates=[]`
+- 最大剩余失败类是资金/充值状态问题，不是 selector 或 navigation 代码问题。
+- `polymtrade_executor.py` 已有 BUY 前 `_get_usdc_balance()` 预检，但历史样本说明余额有时无法从页面直接读到，之后才进入 deposit modal 路径。
+
+**改动文件**：
+- `polymtrade-bridge/polymtrade_executor.py`
+- `polymtrade-bridge/test_selector_fixture.py`
+- `openspec/changes/improve-polymtrade-bridge-buy-sell-reliability/tasks.md`
+- `openspec/changes/improve-polymtrade-bridge-buy-sell-reliability/specs/bridge-trade-reliability/spec.md`
+- `LOOP_STATE.md`
+
+**实现内容**：
+- 新增 `_is_deposit_or_insufficient_modal_open()`：
+  - 只读检测可见 network/token modal。
+  - 若 modal 文案包含 `deposit`、`充值`、`insufficient`、`余额不足`、`not enough`，返回 true。
+- BUY 路径在以下位置遇到 deposit modal 立即抛 `Insufficient balance for BUY...`：
+  - outcome 点击后 network modal 处理前。
+  - buy dialog 未打开的 network modal 分支。
+  - 输入金额前 final safety check。
+- SELL 路径在以下位置遇到 deposit modal 立即抛资金/充值错误：
+  - 打开 sell dialog 前。
+  - sell dialog attempt 后 network modal 分支。
+  - sell dialog 未打开的 network modal 分支。
+  - 输入份额前 final safety check。
+- 普通 network/token modal 仍按既有逻辑选择 Polygon/USDC。
+- selector fixture 新增断言：
+  - 普通 network modal：`_is_deposit_or_insufficient_modal_open()` 为 false，仍点击 Polygon/USDC/Confirm。
+  - deposit modal：检测为 true，`_select_network_and_token_in_modal()` 返回 false，且不点击 Polygon。
+- OpenSpec 追加 REQ-69 / SC-71，tasks 追加 10.61。
+
+**验证结果**：
+- `polymtrade-bridge/.venv/bin/python -m py_compile polymtrade_executor.py test_selector_fixture.py bridge_reliability_audit.py test_bridge_reliability_audit.py main.py` 通过。
+- `polymtrade-bridge/.venv/bin/python -m pytest test_bridge_reliability_audit.py -q` 通过：25 passed。
+- `polymtrade-bridge/.venv/bin/python test_selector_fixture.py` 非沙盒环境通过：`selector fixture passed`。
+- `polymtrade-bridge/.venv/bin/python test_buy_verification.py` 非沙盒环境通过。
+- `polymtrade-bridge/.venv/bin/python test_sell_verification.py` 非沙盒环境通过。
+- 重启 Bridge 后 live `/status` 正常：
+  - `ready=true`
+  - `logged_in=true`
+  - `copy_trading_account_id=2`
+  - `copy_trading_config_count=2`
+- Live Bridge `/audit?since_ms=0&limit=220&failure_limit=100` 验证：
+  - `monitor_status.status=clear`
+  - `monitor_status.actionable_issue_count=0`
+  - `metrics.actionable_failure_bucket_count=0`
+  - `pending_timeout_count=0`
+  - `active_success_position_mismatch_count=0`
+  - `insufficient_balance` 仍为 53 条 state/risk 样本。
+
+**下一步候选**：
+- 若后续新增 `insufficient_balance`，优先做账户余额展示、跟单金额下调或交易前资金告警。
+- 若新增 code-actionable bucket，再回到 selector/navigation/verification 修复队列。
+
+## Iteration 57 Log
+
+**目标**：把第二目标“积累 1000+ 高质量 leader 候选”的下一步正式落到系统中：新增基于真实 `leader_activity_event` 的 politics/finance 扩源入口，绕开 scanner pool 在主策略类别下候选质量不足的瓶颈，并执行一轮导入、评分、PAPER 晋级。
+
+**新增目标动作**：
+- 第二目标新增可重复 loop 动作：`POST /api/copy-trading/leader-research/activity-source/import`。
+- 动作含义：从真实活动事件中按 politics/finance 关键词聚合钱包，要求同一钱包具备足够事件数、市场多样性、buy/sell 双向行为、安全价格比例，并排除过高长尾价格比例。
+- 该动作优先服务政治/金融 80% 主策略目标，补足 scanner pool 难以筛出高质量 politics/finance leader 的问题。
+
+**改动文件**：
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/repository/LeaderResearchRepositories.kt`
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/dto/LeaderResearchDto.kt`
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/service/copytrading/research/LeaderResearchActivitySourceImportService.kt`
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/service/copytrading/research/LeaderResearchActivityScoringService.kt`
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/controller/copytrading/research/LeaderResearchController.kt`
+- `backend/src/test/kotlin/com/wrbug/polymarketbot/service/copytrading/research/LeaderResearchActivitySourceImportServiceTest.kt`
+- `backend/src/test/kotlin/com/wrbug/polymarketbot/service/copytrading/research/LeaderResearchActivityScoringServiceTest.kt`
+- `backend/src/test/kotlin/com/wrbug/polymarketbot/controller/copytrading/research/LeaderResearchControllerTest.kt`
+- `docs/zh/leader-discovery-goal-2-phase-1.md`
+- `LOOP_STATE.md`
+
+**实现内容**：
+- 新增 repository native aggregation：按 category market pattern 从 `leader_activity_event` 聚合 wallet activity。
+- 新增 `LeaderResearchActivitySourceImportService`：
+  - 支持 `dryRun`、类别列表、每类上限、lookback days。
+  - 支持 `minEvents`、`minDistinctMarkets`、`minBuyEvents`、`minSellEvents`、`minSafePriceRatio`、`maxTailPriceRatio`。
+  - 写入/更新 `leader_research_candidate`，并记录 `leader_research_event`。
+  - 保护 locked/manual candidate。
+- 新增 controller endpoint：`POST /api/copy-trading/leader-research/activity-source/import`。
+- 评分风控新增 `sell_only_no_entry`，防止只有卖出样本、没有可跟买入入口的钱包高分晋级。
+- finance 关键词移除泛词 `market`，降低误收非金融市场风险。
+
+**执行结果**：
+- 第一轮真实 activity-source 导入：
+  - selectedTotal=160
+  - createdTotal=152
+  - updatedTotal=8
+  - politics selected=10、created=3、updated=7
+  - finance selected=150、created=149、updated=1
+- 加严 `minBuyEvents=3` 与移除 finance 泛词后 dry-run：
+  - selectedTotal=159
+  - politics selected=9，全部已存在
+  - finance selected=150，其中 12 个仍可新增
+- Activity prescreen 强制重评：
+  - scannedCount=1327
+  - scoredCount=1327
+  - risk flags：small_sample=1083、low_market_diversity=939、scanner_pool_unverified=1054、buy_only_no_exit=58、sell_only_no_entry=17。
+- 真实晋级 PAPER：
+  - selectedTotal=23
+  - promotedTotal=23
+  - politics promoted=3
+  - finance promoted=20
+- PAPER 处理：
+  - 客户端调用 `paper/process batchSize=500` 在 300 秒超时，但后端继续完成该批处理。
+  - 最终 `leader_activity_event` 状态：PROCESSED=1065、FILTERED=615、NEW=220301。
+  - `leader_paper_trade` 总数=1680。
+- PAPER 评分：
+  - `paper/score` scoredCount=53。
+  - PAPER 类别分布：politics=15、finance=26、sports=6、crypto=6。
+  - politics+finance PAPER 占比 41/53 = 77.4%，接近 80% 主策略目标。
+
+**当前值得继续观察的候选**：
+- politics：candidate 617，wallet `0x9703676286b93c2eca71ca96e8757104519a69c2`，score=90.8891，paper trades=33，copyablePnL=21.0191。
+- finance：candidate 1742，wallet `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`，score=83.1104，paper trades=10，copyablePnL=4.0469。
+- sports：candidate 850 仍为全局最高，score=92.6737，但第二目标资金配置上不应挤占 politics/finance 主配额。
+
+**验证结果**：
+- `JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew --no-daemon --no-parallel test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivitySourceImportServiceTest' --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityScoringServiceTest' --tests 'com.wrbug.polymarketbot.controller.copytrading.research.LeaderResearchControllerTest' bootJar` 通过。
+- 后端已重启，当前监听 PID 43951，端口 8000。
+- `information_schema.INNODB_TRX` 最终事务数回到 0。
+
+**新发现瓶颈 / 下一步候选**：
+- `paper/process batchSize=500` 对含大量已结算/需链上估值的事件会超过 300 秒。下一轮应把 paper process 的 valuation/settlement 查询做缓存或异步化，并给 API 返回 chunk progress，默认 batchSize 下调到 50-100。
+- politics 源仍偏少：严格条件下只有 9-10 个 politics activity-source 钱包。下一轮应从政治热门市场 counterparty、Polyburg/Analytics/Dune 或已有优秀 politics leader 的同市场交易对手继续扩源。
+- finance 新增较多但需要交叉验证：下一轮应输出每个 finance 候选的命中 market slug 样本，确认不是 crypto/sports 污染或纯做市流。
+
+## Iteration 58 Log
+
+**目标**：修复 Bridge 对当前跟单 leader `0xe7ce284302936fd06ffc7ad05f13c648c513d53a` 的 BTC Up/Down 高频信号选择失败问题，并确认 Bridge 恢复可运行状态。
+
+**问题定位**：
+- `copy_order_tracking` 没有普通订单记录，是因为当前跟单账户为 Bridge read-only/magic 钱包路径，缺少 CLOB API key/private key，真实跟单执行走 Web Bridge 的 `bridge_trade_record`。
+- 该 leader 已有 Bridge 执行记录：BUY/SELL 均有成功样本；最近失败集中在 BTC Up/Down 的 `Could not select outcome: Up/Down ... rowScore=0`。
+- 原选择器把 BTC Up/Down 当成普通二元市场，默认优先匹配 Yes/No/是/否；同时 market keywords 存在时跳过全局 fallback，导致页面上实际短按钮 `Up` / `Down` 没被点击。
+
+**改动文件**：
+- `polymtrade-bridge/polymtrade_executor.py`
+- `polymtrade-bridge/test_selector_fixture.py`
+- `LOOP_STATE.md`
+
+**实现内容**：
+- 新增 `_is_binary_updown_market()`，识别 `updown`、`up-or-down`、`up or down`、BTC/Bitcoin + Up/Down 形态。
+- 对 BTC Up/Down 市场将 outcome side labels 显式改成 `Up`/`Down`，包含中文涨跌别名。
+- 在前端选择器脚本中为 binary Up/Down 市场增加安全的全局短按钮 fallback，只点击文本精确匹配 `Up` 或 `Down` 的可点击按钮，避免被 market title 干扰。
+- 增加 BTC Up/Down fixture，覆盖 `Down 57c` 与 `Up 45c` 两个按钮选择场景。
+
+**验证结果**：
+- `polymtrade-bridge/.venv/bin/python polymtrade-bridge/test_selector_fixture.py` 通过。
+- `polymtrade-bridge/.venv/bin/python -m pytest polymtrade-bridge/test_bridge_reliability_audit.py -q` 通过，25 个测试通过。
+- `polymtrade-bridge/.venv/bin/python -m py_compile polymtrade-bridge/polymtrade_executor.py polymtrade-bridge/test_selector_fixture.py polymtrade-bridge/main.py` 通过。
+- Bridge 已重启，PID `58768` 监听 `*:8080`。
+- `GET /status` 返回 `ready=true`、`logged_in=true`、`last_error=null`、`copy_trading_config_count=3`。
+- `GET /audit` 当前 `runtime_status.last_error=null`；历史 `select_outcome` bucket 仍保留 4 条旧失败记录，属于修复前证据，不代表当前 runtime 仍阻塞。
+
+**下一步候选**：
+- 等待该 leader 新的 BTC Up/Down 或非体育信号到来后，观察新增 `bridge_trade_record` 是否继续出现 `select_outcome`。
+- 如果 audit 仍把已覆盖的历史 `select_outcome` 标为 actionable，应补充 coverage hint，把对应 fixture id 关联到 BTC Up/Down 历史 bucket，避免日报误报。
+- `insufficient_position` 仍是风险/状态类跳过，下一轮应继续检查 sell ledger 与真实 portfolio 的漂移处理，而不是把它当成 selector bug。
+
+## Iteration 59 Log
+
+**目标**：排查用户反馈“没有跟单执行成功”的真实原因，并继续修复 Bridge 对当前跟单 leader `Research 0xe7ce...d53a` 的高频 BTC Up/Down 跟单链路。
+
+**问题定位**：
+- Bridge webhook 并非没有收到信号：19:18 之后后端继续收到 `leader_trade`，`bridge_webhook_log` id 7106/7107/7109/7110/7111/7112/7113/7114 都是 `SUCCESS`。
+- 真实执行结果：
+  - id 843：BUY Up，SUCCESS。
+  - id 844：BUY Up，FAILED，原因是第一次 BUY 后页面停在 portfolio 持仓列表，第二笔同市场信号把 `Bitcoin Up or Down ... Up• 1.35 份` 的持仓行误判为目标可交易页面，随后找不到 Up 按钮。
+  - id 845、847、848、849：后续 BUY 已 SUCCESS。
+  - id 846：FAILED，`Target page, context or browser has been closed`，发生在本轮重启 Bridge 期间，属于部署窗口打断。
+  - id 850：FAILED，`Insufficient balance for BUY: available 0.3000 USDC, required ~1.0500 USDC`，当前余额不足以继续 1 美元固定跟单。
+- 当前不是“完全没有跟单成功”，而是高频同市场连续信号下曾有 portfolio 页面误判；修复后已出现多笔成功，最新阻塞变为余额不足。
+
+**改动文件**：
+- `polymtrade-bridge/polymtrade_executor.py`
+- `polymtrade-bridge/test_event_visibility.py`
+- `polymtrade-bridge/bridge_reliability_audit.py`
+- `polymtrade-bridge/test_bridge_reliability_audit.py`
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/service/bridge/BridgeWebhookClient.kt`
+- `LOOP_STATE.md`
+
+**实现内容**：
+- `_is_target_event_visible()` 对 BTC Up/Down 使用严格 Up/Down side label，不再把 portfolio 页面上的通用 `买入/卖出` 或持仓行当成可交易按钮。
+- 新增 `_side_labels_for_outcome()`，统一 Up/Down 与 Yes/No side label 选择。
+- 新增 `_open_target_market_from_portfolio_row()`：如果落在 portfolio 持仓列表且能看到目标市场行，先点击该行进入事件页，再重新寻找真实 Up/Down 交易按钮。
+- BUY 重试流程在目标内容不可交易时先尝试点击 portfolio 持仓行，再回退重新导航。
+- 新增 event visibility fixture：
+  - BTC Up/Down 真实交易按钮可见时返回 true。
+  - 只有 portfolio 持仓行时返回 false，并可点击持仓行。
+- audit coverage 新增 `btc_updown_binary_portfolio_fixture`，避免 id 844 这类已覆盖历史失败继续占用 selector 待修队列。
+- 后端 `BridgeWebhookClient` 新增短重试：0s、2s、5s、10s，避免 Bridge 重启/瞬断时一次发送失败就永久丢信号。
+
+**验证结果**：
+- `polymtrade-bridge/.venv/bin/python polymtrade-bridge/test_event_visibility.py` 通过。
+- `polymtrade-bridge/.venv/bin/python polymtrade-bridge/test_selector_fixture.py` 通过。
+- `polymtrade-bridge/.venv/bin/python -m pytest polymtrade-bridge/test_bridge_reliability_audit.py -q` 通过，26 passed。
+- `polymtrade-bridge/.venv/bin/python polymtrade-bridge/test_bridge_reliability_audit.py` 通过。
+- `polymtrade-bridge/.venv/bin/python -m py_compile polymtrade-bridge/polymtrade_executor.py polymtrade-bridge/bridge_reliability_audit.py polymtrade-bridge/test_event_visibility.py polymtrade-bridge/test_bridge_reliability_audit.py polymtrade-bridge/main.py` 通过。
+- 后端 `compileKotlin` 通过，`bootJar` 通过。
+- Bridge 已重启并监听 8080，PID 26309，`ready=true`、`logged_in=true`、`copy_trading_config_count=3`。
+- 后端已通过 tmux 重启并监听 8000，PID 43841；启动日志确认监听 3 个 leader，包括 `Research 0xe7ce...d53a`。
+
+**当前状态 / 下一步候选**：
+- 当前 Bridge `last_error` 是余额不足：可用约 0.3000 USDC，固定跟单金额 1.0000，需要约 1.0500 含缓冲。
+- 若继续使用该 leader 跟单，需要先补充 Bridge 账户余额，或把 `copy_trading id=7` 的 fixed/min/max 金额下调到 Polymtrade 可接受的最小值；否则后续 BUY 会继续被余额预检拦截。
+- 下次部署 Bridge 时应避免在高频 leader 活跃窗口直接 stop/start；已加 webhook 重试，但正在执行中的浏览器交易仍可能被重启打断。

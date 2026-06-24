@@ -7,10 +7,16 @@ import com.wrbug.polymarketbot.enums.LeaderResearchTriggerType
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalConfirmRequiredException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityScoringService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivitySourceImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateLockedException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchJobService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMapper
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScannerPoolImportService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScoringService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPaperPromotionService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperTradingService
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito
@@ -19,11 +25,23 @@ import org.springframework.context.support.StaticMessageSource
 class LeaderResearchControllerTest {
     private val jobService: LeaderResearchJobService = mock()
     private val researchService: LeaderResearchService = mock()
+    private val scannerPoolImportService: LeaderResearchScannerPoolImportService = mock()
+    private val activityScoringService: LeaderResearchActivityScoringService = mock()
+    private val activitySourceImportService: LeaderResearchActivitySourceImportService = mock()
+    private val paperTradingService: LeaderPaperTradingService = mock()
+    private val paperPromotionService: LeaderResearchPaperPromotionService = mock()
+    private val scoringService: LeaderResearchScoringService = mock()
     private val approvalService: LeaderResearchApprovalService = mock()
     private val mapper: LeaderResearchMapper = mock()
     private val controller = LeaderResearchController(
         jobService = jobService,
         researchService = researchService,
+        scannerPoolImportService = scannerPoolImportService,
+        activityScoringService = activityScoringService,
+        activitySourceImportService = activitySourceImportService,
+        paperTradingService = paperTradingService,
+        paperPromotionService = paperPromotionService,
+        scoringService = scoringService,
         approvalService = approvalService,
         mapper = mapper,
         messageSource = StaticMessageSource()

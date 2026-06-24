@@ -1,6 +1,9 @@
 package com.wrbug.polymarketbot.controller.bridge
 
 import com.wrbug.polymarketbot.dto.ApiResponse
+import com.wrbug.polymarketbot.dto.BridgeAuditReconciliationListResponse
+import com.wrbug.polymarketbot.dto.BridgeAuditReconciliationRequest
+import com.wrbug.polymarketbot.dto.BridgeAuditReconciliationSaveResponse
 import com.wrbug.polymarketbot.dto.BridgeAuditRequest
 import com.wrbug.polymarketbot.dto.BridgeAuditResponse
 import com.wrbug.polymarketbot.dto.BridgeRuntimeStatusResponse
@@ -193,6 +196,53 @@ class BridgeTradeRecordController(
             ResponseEntity.ok(ApiResponse.success(audit))
         } catch (e: Exception) {
             logger.error("查询 Bridge 执行链路审计异常", e)
+            ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
+        }
+    }
+
+    /**
+     * 查询 Bridge audit reconciliation 注释
+     * POST /api/bridge/trades/audit/reconciliations
+     */
+    @PostMapping("/audit/reconciliations")
+    fun getBridgeAuditReconciliations(): ResponseEntity<ApiResponse<BridgeAuditReconciliationListResponse>> {
+        return try {
+            val reconciliations = bridgeAuditClient.fetchReconciliations()
+                ?: return ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, "Bridge reconciliation 暂不可用", messageSource))
+
+            ResponseEntity.ok(ApiResponse.success(reconciliations))
+        } catch (e: Exception) {
+            logger.error("查询 Bridge audit reconciliation 异常", e)
+            ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
+        }
+    }
+
+    /**
+     * 人工确认 Bridge audit reconciliation 建议
+     * POST /api/bridge/trades/audit/reconciliations/upsert
+     */
+    @PostMapping("/audit/reconciliations/upsert")
+    fun upsertBridgeAuditReconciliation(
+        @RequestBody request: BridgeAuditReconciliationRequest
+    ): ResponseEntity<ApiResponse<BridgeAuditReconciliationSaveResponse>> {
+        return try {
+            val allowedStatuses = setOf("externally_closed", "manual_closed", "accepted_stale", "wrong_market_known")
+            if (request.status.trim().lowercase() !in allowedStatuses) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, "status 必须是 ${allowedStatuses.sorted()}", messageSource))
+            }
+            if (request.marketId.isBlank()) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, "marketId 不能为空", messageSource))
+            }
+            if (request.outcome.isBlank()) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, "outcome 不能为空", messageSource))
+            }
+
+            val saved = bridgeAuditClient.upsertReconciliation(request)
+                ?: return ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, "Bridge reconciliation 保存失败", messageSource))
+
+            ResponseEntity.ok(ApiResponse.success(saved))
+        } catch (e: Exception) {
+            logger.error("保存 Bridge audit reconciliation 异常", e)
             ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
         }
     }

@@ -35,6 +35,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+BTC_UPDOWN_STALE_BUFFER_SECONDS = int(os.getenv("BTC_UPDOWN_STALE_BUFFER_SECONDS", "45"))
+BTC_UPDOWN_5M_SECONDS = 300
+
 # Singleton PID lock to prevent multiple bridge instances from competing for the
 # same browser profile and opening multiple Chrome windows.
 PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".polymtrade-bridge.pid")
@@ -239,7 +242,8 @@ async def lifespan(app: FastAPI):
     finally:
         logger.info("Shutting down Polymtrade executor...")
         if executor:
-            await executor.stop()
+            async with _trade_lock:
+                await executor.stop()
         logger.info("Polymtrade executor stopped")
         release_singleton_lock()
 
@@ -408,9 +412,12 @@ async def portfolio_positions():
         raise HTTPException(status_code=401, detail="Not logged in")
 
     metrics.portfolio_requests += 1
-    # Serialize page access to avoid concurrent Playwright navigation/evaluation.
-    async with _portfolio_lock:
-        result = await executor.fetch_portfolio_positions()
+    # Serialize with trades as well as other portfolio scrapes. The executor has
+    # one active page pointer; navigating it during post-submit confirmation can
+    # destroy the trade page context and create false FAILED records.
+    async with _trade_lock:
+        async with _portfolio_lock:
+            result = await executor.fetch_portfolio_positions()
     if "error" in result:
         metrics.portfolio_errors += 1
         raise HTTPException(status_code=500, detail=result["error"])
@@ -808,6 +815,34 @@ async def handle_signal(signal: LeaderTradeSignal):
                     logger.info(f"Config {cfg.id}: BUY quantity filtered")
                     continue
                 quantity = amount / price_dec
+                duplicate_reason = _short_cycle_duplicate_buy_reason(
+                    market_slug=signal.market_slug,
+                    market_id=signal.condition_id or signal.market_slug or "",
+                    leader_address=signal.leader_address,
+                )
+                if duplicate_reason:
+                    logger.info(
+                        f"Config {cfg.id}: BUY skipped for {signal.transaction_hash}: "
+                        f"{duplicate_reason}"
+                    )
+                    if recorder:
+                        try:
+                            skip_id = recorder.record_pending(
+                                external_trade_id=signal.transaction_hash,
+                                market_id=signal.condition_id or signal.market_slug or "",
+                                market_title=signal.title,
+                                side=side_upper,
+                                outcome=signal.outcome,
+                                outcome_index=signal.outcome_index,
+                                quantity=quantity,
+                                price=price_dec,
+                                amount=amount,
+                                raw_payload=signal.model_dump(by_alias=True),
+                            )
+                            recorder.update_status(skip_id, "FAILED", duplicate_reason)
+                        except Exception as rec_err:
+                            logger.warning(f"Failed to record duplicate BUY skip: {rec_err}")
+                    continue
             else:
                 quantity = rule_engine.compute_sell_shares(
                     cfg, price_dec, Decimal(str(signal.size))
@@ -920,6 +955,15 @@ async def handle_signal(signal: LeaderTradeSignal):
 
             try:
                 async with _trade_lock:
+                    stale_reason = _short_cycle_market_stale_reason(signal.market_slug, side_upper)
+                    if stale_reason:
+                        logger.info(
+                            f"Config {cfg.id}: skipping {signal.transaction_hash} before UI execution: "
+                            f"{stale_reason}"
+                        )
+                        if record_id and recorder:
+                            recorder.update_status(record_id, "FAILED", stale_reason)
+                        continue
                     if side_upper == "BUY":
                         await executor.execute_trade(
                             market_slug=signal.market_slug,
@@ -981,6 +1025,53 @@ async def handle_signal(signal: LeaderTradeSignal):
                     recorder.update_status(record_id, "FAILED", str(exec_err))
     except Exception as e:
         logger.exception(f"Failed to handle signal: {e}")
+
+
+def _short_cycle_market_stale_reason(
+    market_slug: Optional[str],
+    side: str,
+    now_seconds: Optional[float] = None,
+) -> Optional[str]:
+    """Return a skip reason when a short-cycle market is too close to close."""
+    if side.upper() != "BUY" or not market_slug:
+        return None
+    match = re.search(r"btc-updown-5m-(\d{10})", market_slug)
+    if not match:
+        return None
+
+    started_at = int(match.group(1))
+    market_close_at = started_at + BTC_UPDOWN_5M_SECONDS
+    now = now_seconds if now_seconds is not None else time.time()
+    cutoff = market_close_at - BTC_UPDOWN_STALE_BUFFER_SECONDS
+    if now >= cutoff:
+        seconds_to_close = market_close_at - now
+        return (
+            "Short-cycle market stale or closing soon, skipped "
+            f"(seconds_to_close={seconds_to_close:.1f}, buffer={BTC_UPDOWN_STALE_BUFFER_SECONDS}s)"
+        )
+    return None
+
+
+def _short_cycle_duplicate_buy_reason(
+    market_slug: Optional[str],
+    market_id: str,
+    leader_address: Optional[str],
+) -> Optional[str]:
+    """Return a skip reason for repeated BUYs on the same BTC 5M market."""
+    if not market_slug or not re.search(r"btc-updown-5m-\d{10}", market_slug):
+        return None
+    if not recorder:
+        return None
+    if recorder.has_prior_short_cycle_buy(
+        market_id=market_id,
+        market_slug=market_slug,
+        leader_address=leader_address,
+    ):
+        return (
+            "Duplicate short-cycle market BUY skipped: "
+            "same leader already has a PENDING/SUCCESS BUY for this BTC 5M market"
+        )
+    return None
 
 
 if __name__ == "__main__":

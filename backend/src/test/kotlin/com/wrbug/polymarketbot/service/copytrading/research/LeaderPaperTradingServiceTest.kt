@@ -22,9 +22,8 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito
-import org.springframework.data.domain.PageImpl
-import org.springframework.data.domain.PageRequest
 import java.math.BigDecimal
+import java.util.Optional
 
 class LeaderPaperTradingServiceTest {
     private val candidateRepository: LeaderResearchCandidateRepository = mock()
@@ -200,6 +199,43 @@ class LeaderPaperTradingServiceTest {
     }
 
     @Test
+    fun `process paper candidates splits large batch into smaller chunks`() {
+        val candidate = paperCandidate()
+        val session = LeaderPaperSession(id = 10L, candidateId = candidate.id!!)
+        val events = listOf(
+            paperEvent(id = 100L, stableKey = "chunk-1", side = "BUY", price = "0.50", size = "10"),
+            paperEvent(id = 101L, stableKey = "chunk-2", side = "BUY", price = "0.50", size = "10")
+        )
+        val savedTrades = mutableListOf<LeaderPaperTrade>()
+        val savedPositions = mutableListOf<LeaderPaperPosition>()
+        val savedSessions = mutableListOf<LeaderPaperSession>()
+        stubPaperPipeline(
+            candidate = candidate,
+            session = session,
+            events = events,
+            savedTrades = savedTrades,
+            savedPositions = savedPositions,
+            savedSessions = savedSessions,
+            fairBatches = listOf(listOf(events[0]), listOf(events[1]))
+        )
+        runBlocking {
+            Mockito.`when`(marketPriceService.getCurrentMarketPrice("market-1", 0)).thenReturn(BigDecimal("0.60"))
+        }
+
+        val result = service.processPaperCandidatesInChunks(runId = 9L, batchSize = 2, chunkSize = 1)
+
+        assertEquals(2, result.processed)
+        assertEquals(0, result.filtered)
+        assertEquals(0, result.failed)
+        Mockito.verify(activityEventRepository, Mockito.times(2)).findPaperProcessableForWalletsFair(
+            listOf(LeaderPaperProcessingStatus.NEW.name, LeaderPaperProcessingStatus.RETRYABLE.name),
+            setOf(candidate.normalizedWallet),
+            1,
+            1
+        )
+    }
+
+    @Test
     fun `processing failure becomes failed after max attempts and does not block batch`() {
         val candidate = paperCandidate()
         val session = LeaderPaperSession(id = 10L, candidateId = candidate.id!!)
@@ -247,7 +283,8 @@ class LeaderPaperTradingServiceTest {
         savedTrades: MutableList<LeaderPaperTrade>,
         savedPositions: MutableList<LeaderPaperPosition>,
         savedSessions: MutableList<LeaderPaperSession>,
-        claimResult: Int = 1
+        claimResult: Int = 1,
+        fairBatches: List<List<LeaderActivityEvent>>? = null
     ) {
         Mockito.`when`(candidateRepository.findByResearchStateIn(listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)))
             .thenReturn(listOf(candidate))
@@ -260,12 +297,28 @@ class LeaderPaperTradingServiceTest {
             savedSessions += saved
             saved
         }
-        Mockito.`when`(
-            activityEventRepository.findByPaperProcessingStatusInAndUsableForPaperTrueOrderByEventTimeAsc(
-                listOf(LeaderPaperProcessingStatus.NEW, LeaderPaperProcessingStatus.RETRYABLE),
-                PageRequest.of(0, 10)
-            )
-        ).thenReturn(PageImpl(events))
+        if (fairBatches == null) {
+            Mockito.`when`(
+                activityEventRepository.findPaperProcessableForWalletsFair(
+                    listOf(LeaderPaperProcessingStatus.NEW.name, LeaderPaperProcessingStatus.RETRYABLE.name),
+                    setOf(candidate.normalizedWallet),
+                    10,
+                    10
+                )
+            ).thenReturn(events)
+        } else {
+            var batchIndex = 0
+            Mockito.`when`(
+                activityEventRepository.findPaperProcessableForWalletsFair(
+                    listOf(LeaderPaperProcessingStatus.NEW.name, LeaderPaperProcessingStatus.RETRYABLE.name),
+                    setOf(candidate.normalizedWallet),
+                    1,
+                    1
+                )
+            ).thenAnswer {
+                fairBatches.getOrElse(batchIndex++) { emptyList() }
+            }
+        }
         Mockito.`when`(
             activityEventRepository.claimForPaperProcessing(
                 Mockito.anyLong(),
@@ -275,6 +328,17 @@ class LeaderPaperTradingServiceTest {
             )
         ).thenReturn(claimResult)
         Mockito.`when`(activityEventRepository.save(anyActivityEvent())).thenAnswer { it.arguments[0] }
+        Mockito.`when`(activityEventRepository.findById(Mockito.anyLong())).thenAnswer {
+            val id = it.arguments[0] as Long
+            Optional.ofNullable(events.firstOrNull { event -> event.id == id }?.let { event ->
+                event.copy(
+                    paperProcessingStatus = LeaderPaperProcessingStatus.PROCESSING,
+                    processingAttempts = event.processingAttempts + 1,
+                    paperProcessingStartedAt = System.currentTimeMillis(),
+                    updatedAt = System.currentTimeMillis()
+                )
+            })
+        }
         Mockito.`when`(paperPositionRepository.findBySessionIdAndMarketIdAndOutcomeIndex(session.id!!, "market-1", 0))
             .thenAnswer { savedPositions.lastOrNull { it.marketId == "market-1" && it.outcomeIndex == 0 } }
         Mockito.`when`(paperPositionRepository.findBySessionIdOrderByUpdatedAtDesc(session.id!!))

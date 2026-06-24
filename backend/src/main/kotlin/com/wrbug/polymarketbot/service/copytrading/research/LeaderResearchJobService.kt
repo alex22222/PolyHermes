@@ -9,6 +9,7 @@ import com.wrbug.polymarketbot.enums.LeaderResearchTriggerType
 import com.wrbug.polymarketbot.repository.LeaderActivityEventRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchRunRepository
+import com.wrbug.polymarketbot.service.loop.LoopGoalControlService
 import jakarta.annotation.PreDestroy
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -28,6 +29,7 @@ class LeaderResearchJobService(
     private val scoringService: LeaderResearchScoringService,
     private val stateMachine: LeaderResearchStateMachine,
     private val eventService: LeaderResearchEventService,
+    private val loopGoalControlService: LoopGoalControlService,
     @Value("\${leader.research.enabled:false}") private val scheduledEnabled: Boolean
 ) {
     private val logger = LoggerFactory.getLogger(LeaderResearchJobService::class.java)
@@ -39,6 +41,10 @@ class LeaderResearchJobService(
     @Scheduled(fixedDelayString = "\${leader.research.fixed-delay-ms:900000}")
     fun scheduledRun() {
         if (!scheduledEnabled) return
+        if (!loopGoalControlService.isLeaderDiscoveryActive()) {
+            logger.info("Leader research scheduled run skipped because loop goal 2 is not active")
+            return
+        }
         runOnce(dryRun = false, triggerType = LeaderResearchTriggerType.SCHEDULED)
     }
 

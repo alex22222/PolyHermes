@@ -490,6 +490,27 @@ export interface LeaderResearchRun {
   errorMessage?: string
 }
 
+export type LoopGoalStatus = 'ACTIVE' | 'PAUSED' | 'COMPLETED_PENDING_RESTART'
+export type LoopGoalAction = 'START' | 'PAUSE' | 'COMPLETE_PENDING'
+
+export interface LoopGoal {
+  goalKey: string
+  title: string
+  status: LoopGoalStatus
+  priority: number
+  summary: string
+  canStart: boolean
+  canPause: boolean
+  retained: boolean
+  updatedAt?: number
+}
+
+export interface LoopGoalControlStatus {
+  activeGoalKey?: string
+  goals: LoopGoal[]
+  updatedAt: number
+}
+
 export interface LeaderResearchSummary {
   discoveredCount: number
   candidateCount: number
@@ -1968,6 +1989,41 @@ export interface BridgeAuditReconciliationPayload {
   marketTitle?: string
   outcome?: string
   outcomeIndex?: number
+}
+
+export interface BridgeAuditReconciliationRequest {
+  status: string
+  note?: string
+  actor: string
+  marketId: string
+  marketTitle?: string
+  outcome: string
+  outcomeIndex?: number
+}
+
+export interface BridgeAuditReconciliationAnnotation {
+  status?: string
+  note?: string
+  actor?: string
+  marketId?: string
+  marketTitle?: string
+  outcome?: string
+  outcomeIndex?: number
+  reconciledAt?: number
+  updatedAt?: number
+}
+
+export interface BridgeAuditReconciliationListResponse {
+  file?: string
+  count?: number
+  annotations?: Record<string, BridgeAuditReconciliationAnnotation>
+}
+
+export interface BridgeAuditReconciliationSaveResponse {
+  status?: string
+  key?: string
+  file?: string
+  annotation?: BridgeAuditReconciliationAnnotation
 }
 
 /**

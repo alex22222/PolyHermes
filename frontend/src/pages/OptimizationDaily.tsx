@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Col, Row, Space, Statistic, Table, Tag, Typography } from 'antd'
-import { CheckCircleOutlined, ClockCircleOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Col, Modal, Row, Space, Statistic, Table, Tag, Typography, message } from 'antd'
+import { CheckCircleOutlined, ClockCircleOutlined, PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined, SettingOutlined, WarningOutlined } from '@ant-design/icons'
 import { apiService } from '../services/api'
-import type { BridgeAuditBucket, BridgeAuditReconciliationSuggestion, BridgeAuditResponse, BridgeRuntimeStatus } from '../types'
+import type { BridgeAuditBucket, BridgeAuditReconciliationSuggestion, BridgeAuditResponse, BridgeRuntimeStatus, LoopGoal, LoopGoalAction, LoopGoalControlStatus, LoopGoalStatus } from '../types'
 
 const { Title, Text } = Typography
 
@@ -86,6 +86,19 @@ const formatTimestamp = (value?: number | null): string => {
   return new Date(value).toLocaleString()
 }
 
+const formatGoalStatus = (status?: LoopGoalStatus): { color: string; label: string } => {
+  switch (status) {
+    case 'ACTIVE':
+      return { color: 'green', label: '运行中' }
+    case 'PAUSED':
+      return { color: 'orange', label: '已暂停' }
+    case 'COMPLETED_PENDING_RESTART':
+      return { color: 'blue', label: '已完成，保留待重启' }
+    default:
+      return { color: 'default', label: status || '-' }
+  }
+}
+
 const formatBucketLabel = (bucket: BridgeAuditBucket): string => {
   const count = bucket.uncoveredCount ?? bucket.count ?? 0
   return `${bucket.bucket || 'unknown'}: ${count}`
@@ -151,7 +164,11 @@ const OptimizationDaily: React.FC = () => {
   const [audit, setAudit] = useState<BridgeAuditResponse | null>(null)
   const [dailyAudit, setDailyAudit] = useState<BridgeAuditResponse | null>(null)
   const [runtimeStatus, setRuntimeStatus] = useState<BridgeRuntimeStatus | null>(null)
+  const [goalControl, setGoalControl] = useState<LoopGoalControlStatus | null>(null)
   const [loading, setLoading] = useState(false)
+  const [confirmingKey, setConfirmingKey] = useState<string | null>(null)
+  const [goalModalOpen, setGoalModalOpen] = useState(false)
+  const [updatingGoalKey, setUpdatingGoalKey] = useState<string | null>(null)
 
   const fetchData = async () => {
     setLoading(true)
@@ -178,6 +195,11 @@ const OptimizationDaily: React.FC = () => {
       }
 
       setRuntimeStatus(nextRuntimeStatus || await fetchRuntimeStatus())
+
+      const goalResponse = await apiService.loopGoals.status()
+      if (goalResponse.data.code === 0 && goalResponse.data.data) {
+        setGoalControl(goalResponse.data.data)
+      }
     } finally {
       setLoading(false)
     }
@@ -186,6 +208,67 @@ const OptimizationDaily: React.FC = () => {
   useEffect(() => {
     fetchData()
   }, [])
+
+  const handleConfirmSuggestion = (record: BridgeAuditReconciliationSuggestion) => {
+    const payload = record.annotationPayload
+    const marketId = payload?.marketId || record.marketId
+    const outcome = payload?.outcome || record.outcome
+    if (!marketId || !outcome) {
+      message.error('建议缺少 marketId 或 outcome，无法确认')
+      return
+    }
+
+    Modal.confirm({
+      title: '确认历史错配建议',
+      content: (
+        <Space direction="vertical" size={4}>
+          <Text>该操作会把这条 stale mismatch 标记为已接受的历史错配。</Text>
+          <Text type="secondary">{record.marketTitle || marketId}</Text>
+          <Text type="secondary">账本/实仓: {record.expectedQuantity || '0'} / {record.actualQuantity || '0'}</Text>
+        </Space>
+      ),
+      okText: '确认',
+      cancelText: '取消',
+      onOk: async () => {
+        const key = record.key || `${marketId}-${outcome}-${record.latestRecordId}`
+        setConfirmingKey(key)
+        try {
+          const response = await apiService.bridgeTradeRecords.upsertAuditReconciliation({
+            status: payload?.status || record.status || 'accepted_stale',
+            note: payload?.note || 'Accepted from optimization daily reconciliation suggestion.',
+            actor: 'operator',
+            marketId,
+            marketTitle: payload?.marketTitle || record.marketTitle,
+            outcome,
+            outcomeIndex: payload?.outcomeIndex ?? record.outcomeIndex
+          })
+          if (response.data.code === 0) {
+            message.success('已确认历史错配')
+            await fetchData()
+          } else {
+            message.error(response.data.msg || '确认失败')
+          }
+        } finally {
+          setConfirmingKey(null)
+        }
+      }
+    })
+  }
+
+  const handleGoalAction = async (goal: LoopGoal, action: LoopGoalAction) => {
+    setUpdatingGoalKey(`${goal.goalKey}:${action}`)
+    try {
+      const response = await apiService.loopGoals.update({ goalKey: goal.goalKey, action })
+      if (response.data.code === 0 && response.data.data) {
+        setGoalControl(response.data.data)
+        message.success(action === 'START' ? '目标已启动' : action === 'PAUSE' ? '目标已暂停' : '目标已完成并保留')
+      } else {
+        message.error(response.data.msg || '目标状态更新失败')
+      }
+    } finally {
+      setUpdatingGoalKey(null)
+    }
+  }
 
   const monitor = audit?.monitorStatus
   const dailyMonitor = dailyAudit?.monitorStatus
@@ -200,6 +283,8 @@ const OptimizationDaily: React.FC = () => {
       ? dailyAudit.reconciliationSuggestions
       : audit?.reconciliationSuggestions || []
   )
+  const sortedGoals = [...(goalControl?.goals || [])].sort((a, b) => a.priority - b.priority)
+  const activeGoal = sortedGoals.find((goal) => goal.status === 'ACTIVE')
 
   const columns = useMemo(() => [
     {
@@ -266,17 +351,60 @@ const OptimizationDaily: React.FC = () => {
       render: (_: unknown, record: BridgeAuditReconciliationSuggestion) => (
         <Tag color="blue">{formatSuggestionStatus(record.annotationPayload?.status || record.status)}</Tag>
       )
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 100,
+      render: (_: unknown, record: BridgeAuditReconciliationSuggestion) => {
+        const key = record.key || `${record.marketId}-${record.outcome}-${record.latestRecordId}`
+        return (
+          <Button
+            size="small"
+            onClick={() => handleConfirmSuggestion(record)}
+            loading={confirmingKey === key}
+          >
+            确认
+          </Button>
+        )
+      }
     }
-  ], [])
+  ], [confirmingKey])
 
   return (
     <div>
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <Title level={2} style={{ margin: 0 }}>优化点日报</Title>
-        <Button type="primary" icon={<ReloadOutlined />} onClick={fetchData} loading={loading}>
-          刷新
-        </Button>
+        <Space>
+          <Button icon={<SettingOutlined />} onClick={() => setGoalModalOpen(true)}>
+            目标控制
+          </Button>
+          <Button type="primary" icon={<ReloadOutlined />} onClick={fetchData} loading={loading}>
+            刷新
+          </Button>
+        </Space>
       </div>
+
+      <Card
+        title="Loop 当前目标"
+        extra={activeGoal ? <Tag color="green">主目标</Tag> : <Tag color="orange">未启动</Tag>}
+        style={{ marginBottom: 16 }}
+      >
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={14}>
+            <Space direction="vertical" size={2}>
+              <Text strong>{activeGoal?.title || '暂无运行中目标'}</Text>
+              <Text type="secondary">{activeGoal?.summary || '可在目标控制中启动第二目标或恢复第一目标。'}</Text>
+            </Space>
+          </Col>
+          <Col xs={12} md={5}>
+            <Statistic title="第二目标" value={formatGoalStatus(sortedGoals.find((goal) => goal.goalKey === 'leader-discovery-goal-2')?.status).label} loading={loading && !goalControl} />
+          </Col>
+          <Col xs={12} md={5}>
+            <Statistic title="第一目标" value={formatGoalStatus(sortedGoals.find((goal) => goal.goalKey === 'bridge-reliability-goal-1')?.status).label} loading={loading && !goalControl} />
+          </Col>
+        </Row>
+      </Card>
 
       <Alert
         type={monitor?.status === 'actionable' ? 'error' : 'success'}
@@ -413,6 +541,60 @@ const OptimizationDaily: React.FC = () => {
           size="middle"
         />
       </Card>
+
+      <Modal
+        title="Loop 目标控制"
+        open={goalModalOpen}
+        onCancel={() => setGoalModalOpen(false)}
+        footer={null}
+        width={760}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="目标状态只控制研究/优化 loop 的优先级与自动执行，不会自动创建或启用真钱跟单。"
+          />
+          {sortedGoals.map((goal) => {
+            const statusView = formatGoalStatus(goal.status)
+            return (
+              <Card
+                key={goal.goalKey}
+                size="small"
+                title={goal.title}
+                extra={<Tag color={statusView.color}>{statusView.label}</Tag>}
+              >
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  <Text type="secondary">{goal.summary}</Text>
+                  <Space size={[8, 8]} wrap>
+                    <Tag color={goal.retained ? 'blue' : 'default'}>{goal.retained ? '保留' : '可删除'}</Tag>
+                    <Text type="secondary">最近更新: {formatTimestamp(goal.updatedAt)}</Text>
+                  </Space>
+                  <Space>
+                    <Button
+                      type={goal.status === 'ACTIVE' ? 'default' : 'primary'}
+                      icon={<PlayCircleOutlined />}
+                      disabled={!goal.canStart}
+                      loading={updatingGoalKey === `${goal.goalKey}:START`}
+                      onClick={() => handleGoalAction(goal, 'START')}
+                    >
+                      启动
+                    </Button>
+                    <Button
+                      icon={<PauseCircleOutlined />}
+                      disabled={!goal.canPause}
+                      loading={updatingGoalKey === `${goal.goalKey}:PAUSE`}
+                      onClick={() => handleGoalAction(goal, 'PAUSE')}
+                    >
+                      暂停
+                    </Button>
+                  </Space>
+                </Space>
+              </Card>
+            )
+          })}
+        </Space>
+      </Modal>
     </div>
   )
 }

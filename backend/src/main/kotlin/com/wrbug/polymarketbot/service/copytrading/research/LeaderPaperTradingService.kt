@@ -21,9 +21,11 @@ import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import com.wrbug.polymarketbot.service.common.MarketPriceService
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
-import org.springframework.data.domain.PageRequest
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.context.annotation.Lazy
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.annotation.Propagation
 import java.math.BigDecimal
 import java.math.RoundingMode
 
@@ -44,6 +46,10 @@ class LeaderPaperTradingService(
     private val eventService: LeaderResearchEventService
 ) {
     private val logger = LoggerFactory.getLogger(LeaderPaperTradingService::class.java)
+
+    @Autowired
+    @Lazy
+    private lateinit var transactionalSelf: LeaderPaperTradingService
 
     @Transactional
     fun ensureSession(candidate: LeaderResearchCandidate, runId: Long? = null): LeaderPaperSession {
@@ -76,8 +82,36 @@ class LeaderPaperTradingService(
         return session
     }
 
-    @Transactional
     fun processPaperCandidates(runId: Long? = null, batchSize: Int = 200): LeaderPaperProcessingResult {
+        return processPaperCandidatesInChunks(runId = runId, batchSize = batchSize)
+    }
+
+    fun processPaperCandidatesInChunks(
+        runId: Long? = null,
+        batchSize: Int = 200,
+        chunkSize: Int = DEFAULT_PROCESSING_CHUNK_SIZE
+    ): LeaderPaperProcessingResult {
+        val targetTotal = batchSize.coerceAtLeast(1)
+        val effectiveChunkSize = chunkSize.coerceIn(1, targetTotal)
+        var remaining = targetTotal
+        var total = LeaderPaperProcessingResult(processed = 0, filtered = 0, failed = 0)
+        val processor = if (::transactionalSelf.isInitialized) transactionalSelf else this
+
+        while (remaining > 0) {
+            val chunk = processor.processPaperCandidatesChunk(
+                runId = runId,
+                batchSize = minOf(effectiveChunkSize, remaining)
+            )
+            total = total + chunk
+            val chunkTotal = chunk.processed + chunk.filtered + chunk.failed
+            if (chunkTotal == 0) break
+            remaining -= chunkTotal
+        }
+
+        return total
+    }
+
+    fun processPaperCandidatesChunk(runId: Long? = null, batchSize: Int = 200): LeaderPaperProcessingResult {
         val paperCandidates = candidateRepository.findByResearchStateIn(
             listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
         )
@@ -86,72 +120,100 @@ class LeaderPaperTradingService(
         }
 
         val candidatesByWallet = paperCandidates.associateBy { it.normalizedWallet }
-        paperCandidates.forEach { ensureSession(it, runId) }
+        val processor = if (::transactionalSelf.isInitialized) transactionalSelf else this
 
-        val page = activityEventRepository.findByPaperProcessingStatusInAndUsableForPaperTrueOrderByEventTimeAsc(
-            listOf(LeaderPaperProcessingStatus.NEW, LeaderPaperProcessingStatus.RETRYABLE),
-            PageRequest.of(0, batchSize)
+        val eligibleStatuses = listOf(LeaderPaperProcessingStatus.NEW, LeaderPaperProcessingStatus.RETRYABLE)
+        val events = activityEventRepository.findPaperProcessableForWalletsFair(
+            statuses = eligibleStatuses.map { it.name },
+            wallets = candidatesByWallet.keys,
+            perWalletLimit = perWalletLimit(batchSize, candidatesByWallet.size),
+            limit = batchSize
         )
 
         var processed = 0
         var filtered = 0
         var failed = 0
-        val now = System.currentTimeMillis()
 
-        page.content.forEach { event ->
+        events.forEach { event ->
             val wallet = event.normalizedWallet ?: return@forEach
             val candidate = candidatesByWallet[wallet] ?: return@forEach
             val eventId = event.id ?: return@forEach
-            val claimed = activityEventRepository.claimForPaperProcessing(
-                id = eventId,
-                allowed = listOf(LeaderPaperProcessingStatus.NEW, LeaderPaperProcessingStatus.RETRYABLE),
-                nextStatus = LeaderPaperProcessingStatus.PROCESSING,
-                startedAt = now
-            )
-            if (claimed != 1) return@forEach
-
-            val claimedEvent = event.copy(
-                paperProcessingStatus = LeaderPaperProcessingStatus.PROCESSING,
-                processingAttempts = event.processingAttempts + 1,
-                paperProcessingStartedAt = now,
-                updatedAt = now
-            )
-            try {
-                val session = ensureSession(candidate, runId)
-                val outcome = processEvent(candidate, session, claimedEvent)
-                when (outcome) {
-                    LeaderPaperFilterResult.PASSED -> processed += 1
-                    LeaderPaperFilterResult.FILTERED -> filtered += 1
-                }
-            } catch (e: Exception) {
-                failed += 1
-                val nextAttempts = claimedEvent.processingAttempts
-                val nextStatus = if (nextAttempts >= MAX_PROCESSING_ATTEMPTS) {
-                    LeaderPaperProcessingStatus.FAILED
-                } else {
-                    LeaderPaperProcessingStatus.RETRYABLE
-                }
-                logger.warn("Paper event processing failed: eventId={}, error={}", eventId, e.message, e)
-                activityEventRepository.save(
-                    claimedEvent.copy(
-                        paperProcessingStatus = nextStatus,
-                        paperProcessedAt = System.currentTimeMillis(),
-                        lastProcessingError = e.message,
-                        updatedAt = System.currentTimeMillis()
-                    )
-                )
-                eventService.record(
-                    type = LeaderResearchEventType.PAPER_PROCESSING_FAILED,
-                    candidateId = candidate.id,
-                    runId = runId,
-                    reason = "Paper event processing failed with status=$nextStatus: ${e.message}",
-                    payloadSummary = claimedEvent.payloadSummary,
-                    dedupeKey = "paper-processing-failed:$eventId:$nextAttempts"
-                )
+            when (processor.processPaperEventInNewTransaction(candidate, eventId, runId, eligibleStatuses)) {
+                PaperEventProcessResult.PASSED -> processed += 1
+                PaperEventProcessResult.FILTERED -> filtered += 1
+                PaperEventProcessResult.FAILED -> failed += 1
+                PaperEventProcessResult.SKIPPED -> Unit
             }
         }
 
         return LeaderPaperProcessingResult(processed = processed, filtered = filtered, failed = failed)
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    fun processPaperEventInNewTransaction(
+        candidate: LeaderResearchCandidate,
+        eventId: Long,
+        runId: Long?,
+        eligibleStatuses: List<LeaderPaperProcessingStatus>
+    ): PaperEventProcessResult {
+        val now = System.currentTimeMillis()
+        val claimed = activityEventRepository.claimForPaperProcessing(
+            id = eventId,
+            allowed = eligibleStatuses,
+            nextStatus = LeaderPaperProcessingStatus.PROCESSING,
+            startedAt = now
+        )
+        if (claimed != 1) return PaperEventProcessResult.SKIPPED
+
+        val claimedEvent = activityEventRepository.findById(eventId).orElseThrow {
+            IllegalArgumentException("Paper event not found: $eventId")
+        }
+
+        return try {
+            val session = ensureSession(candidate, runId)
+            when (processEvent(candidate, session, claimedEvent)) {
+                LeaderPaperFilterResult.PASSED -> PaperEventProcessResult.PASSED
+                LeaderPaperFilterResult.FILTERED -> PaperEventProcessResult.FILTERED
+            }
+        } catch (e: Exception) {
+            val nextAttempts = claimedEvent.processingAttempts
+            val nextStatus = if (nextAttempts >= MAX_PROCESSING_ATTEMPTS) {
+                LeaderPaperProcessingStatus.FAILED
+            } else {
+                LeaderPaperProcessingStatus.RETRYABLE
+            }
+            logger.warn("Paper event processing failed: eventId={}, error={}", eventId, e.message, e)
+            activityEventRepository.save(
+                claimedEvent.copy(
+                    paperProcessingStatus = nextStatus,
+                    paperProcessedAt = System.currentTimeMillis(),
+                    lastProcessingError = e.message,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            eventService.record(
+                type = LeaderResearchEventType.PAPER_PROCESSING_FAILED,
+                candidateId = candidate.id,
+                runId = runId,
+                reason = "Paper event processing failed with status=$nextStatus: ${e.message}",
+                payloadSummary = claimedEvent.payloadSummary,
+                dedupeKey = "paper-processing-failed:$eventId:$nextAttempts"
+            )
+            PaperEventProcessResult.FAILED
+        }
+    }
+
+    private operator fun LeaderPaperProcessingResult.plus(other: LeaderPaperProcessingResult): LeaderPaperProcessingResult {
+        return LeaderPaperProcessingResult(
+            processed = processed + other.processed,
+            filtered = filtered + other.filtered,
+            failed = failed + other.failed
+        )
+    }
+
+    private fun perWalletLimit(batchSize: Int, walletCount: Int): Int {
+        if (walletCount <= 0) return batchSize.coerceAtLeast(1)
+        return (batchSize / walletCount).coerceIn(1, FAIR_MAX_EVENTS_PER_WALLET)
     }
 
     fun isEligibleForTrialReady(session: LeaderPaperSession, now: Long = System.currentTimeMillis()): Boolean {
@@ -519,6 +581,13 @@ class LeaderPaperTradingService(
         val timestamp: Long
     )
 
+    enum class PaperEventProcessResult {
+        PASSED,
+        FILTERED,
+        FAILED,
+        SKIPPED
+    }
+
     companion object {
         private val PAPER_FIXED_AMOUNT = BigDecimal("1.00000000")
         private val MIN_PRICE = BigDecimal("0.10000000")
@@ -526,5 +595,7 @@ class LeaderPaperTradingService(
         private const val PAPER_MIN_TRADES = 10
         private const val PAPER_MIN_AGE_MS = 7L * 24 * 60 * 60 * 1000
         private const val MAX_PROCESSING_ATTEMPTS = 3
+        private const val FAIR_MAX_EVENTS_PER_WALLET = 25
+        const val DEFAULT_PROCESSING_CHUNK_SIZE = 100
     }
 }

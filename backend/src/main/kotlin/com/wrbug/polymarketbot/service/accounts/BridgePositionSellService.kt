@@ -34,13 +34,17 @@ class BridgePositionSellService(
             }
             val account = accountRepository.findById(request.accountId).orElse(null)
                 ?: return Result.failure(IllegalArgumentException("账户不存在"))
-            if (!account.isReadOnly) {
-                return Result.failure(IllegalStateException("该账户不是 Bridge 只读账户，请使用普通卖出接口"))
+            // Bridge 卖出适用于两类账户：
+            // 1. Bridge 只读账户（没有私钥，必须由 Bridge 浏览器执行）
+            // 2. Magic 钱包账户（即使非只读，也可选择由 Bridge 浏览器执行，避免暴露私钥）
+            val canUseBridge = account.isReadOnly || account.walletType.equals("magic", ignoreCase = true)
+            if (!canUseBridge) {
+                return Result.failure(IllegalStateException("该账户不是 Bridge 只读账户或 Magic 钱包，请使用普通卖出接口"))
             }
 
             // 2. 市价单校验（Bridge 当前只支持市价执行）
             if (!request.orderType.equals("MARKET", ignoreCase = true)) {
-                return Result.failure(IllegalArgumentException("Bridge 只读账户当前只支持市价卖出"))
+                return Result.failure(IllegalArgumentException("Bridge 执行当前只支持市价卖出"))
             }
 
             // 3. 计算目标卖出数量

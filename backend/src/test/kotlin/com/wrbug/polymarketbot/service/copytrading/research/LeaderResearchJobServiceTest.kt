@@ -10,6 +10,7 @@ import com.wrbug.polymarketbot.enums.LeaderResearchTriggerType
 import com.wrbug.polymarketbot.repository.LeaderActivityEventRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchRunRepository
+import com.wrbug.polymarketbot.service.loop.LoopGoalControlService
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -28,6 +29,7 @@ class LeaderResearchJobServiceTest {
     private val scoringService: LeaderResearchScoringService = mock()
     private val stateMachine: LeaderResearchStateMachine = mock()
     private val eventService: LeaderResearchEventService = mock()
+    private val loopGoalControlService: LoopGoalControlService = mock()
 
     @Test
     fun `successful run writes run record counts cursor and processing phases`() {
@@ -180,6 +182,7 @@ class LeaderResearchJobServiceTest {
         scoringService = scoringService,
         stateMachine = stateMachine,
         eventService = eventService,
+        loopGoalControlService = loopGoalControlService,
         scheduledEnabled = false
     )
 

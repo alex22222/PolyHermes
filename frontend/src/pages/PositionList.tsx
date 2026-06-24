@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo } from 'react'
 import { Card, Table, Tag, message, Space, Input, Radio, Select, Button, Row, Col, Empty, Modal, Form, Descriptions } from 'antd'
 import { SearchOutlined, AppstoreOutlined, UnorderedListOutlined, UpOutlined, DownOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import { apiService } from '../services/api'
 import type { AccountPosition, Account, PositionPushMessage, PositionSellRequest, MarketPriceResponse, RedeemablePositionsSummary, PositionRedeemRequest, BridgePositionSellRequest } from '../types'
 import { getPositionKey } from '../types'
@@ -14,6 +15,7 @@ type PositionFilter = 'current' | 'historical'
 type ViewMode = 'card' | 'list'
 
 const PositionList: React.FC = () => {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const isMobile = useMediaQuery({ maxWidth: 768 })
   const [currentPositions, setCurrentPositions] = useState<AccountPosition[]>([])
@@ -30,6 +32,7 @@ const PositionList: React.FC = () => {
   const [selectedPosition, setSelectedPosition] = useState<AccountPosition | null>(null)
   const [marketPrice, setMarketPrice] = useState<MarketPriceResponse | null>(null)
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('LIMIT')
+  const [sellMethod, setSellMethod] = useState<'direct' | 'bridge'>('direct')
   const [sellQuantity, setSellQuantity] = useState<string>('')
   const [limitPrice, setLimitPrice] = useState<string>('')
   const [selectedPercent, setSelectedPercent] = useState<string | null>(null)  // 记录选择的百分比（字符串格式）
@@ -74,6 +77,13 @@ const PositionList: React.FC = () => {
   useEffect(() => {
     setCurrentPage(1)
   }, [positionFilter, selectedAccountId, searchKeyword])
+
+  // Bridge 执行方式只支持市价单，切换时强制改为市价
+  useEffect(() => {
+    if (sellMethod === 'bridge') {
+      setOrderType('MARKET')
+    }
+  }, [sellMethod])
 
   // 静默获取可赎回仓位统计（不显示loading状态）
   const fetchRedeemableSummarySilently = async () => {
@@ -444,8 +454,19 @@ const PositionList: React.FC = () => {
     })
   }
 
+  // 判断账户是否支持后端直接卖出（需要完整 CLOB API 凭证）
+  const canSellDirect = (account?: Account): boolean => {
+    return !!account && account.apiKeyConfigured && account.apiSecretConfigured && account.apiPassphraseConfigured
+  }
+
+  // 判断账户是否支持 Bridge 执行（只读账户 或 Magic 钱包）
+  const canSellBridge = (account?: Account): boolean => {
+    return !!account && (account.readOnly === true || account.walletType === 'magic')
+  }
+
   // 处理卖出按钮点击
   const handleSellClick = async (position: AccountPosition) => {
+    const account = accounts.find(a => a.id === position.accountId)
     setSelectedPosition(position)
     setSellModalVisible(true)
     setOrderType('LIMIT')
@@ -453,6 +474,15 @@ const PositionList: React.FC = () => {
     setLimitPrice('')
     setSelectedPercent(null)  // 重置百分比选择
     form.resetFields()
+
+    // 默认执行方式：只读账户强制 Bridge；Magic 钱包优先直接卖出，没有 API 凭证时回退 Bridge
+    if (account?.readOnly) {
+      setSellMethod('bridge')
+    } else if (account?.walletType === 'magic') {
+      setSellMethod(canSellDirect(account) ? 'direct' : 'bridge')
+    } else {
+      setSellMethod('direct')
+    }
 
     // 加载市场价格
     try {
@@ -531,11 +561,12 @@ const PositionList: React.FC = () => {
 
       const account = accounts.find(a => a.id === selectedPosition.accountId)
       const isBridgeReadOnly = account?.readOnly === true
+      const useBridge = isBridgeReadOnly || sellMethod === 'bridge'
 
-      // Bridge 只读账户通过 Bridge 执行卖出，当前只支持市价单
-      if (isBridgeReadOnly) {
+      // Bridge 执行（只读账户 或 用户选择 Bridge 方式的 Magic 钱包），当前只支持市价单
+      if (useBridge) {
         if (orderType !== 'MARKET') {
-          message.warning('Bridge 只读账户当前只支持市价卖出')
+          message.warning('Bridge 执行当前只支持市价卖出')
           setSubmitting(false)
           return
         }
@@ -1466,6 +1497,44 @@ const PositionList: React.FC = () => {
               )}
             </div>
 
+            {/* 执行方式选择：Magic 钱包显示，只读账户强制 Bridge */}
+            {(() => {
+              const account = accounts.find(a => a.id === selectedPosition.accountId)
+              if (!account) return null
+              if (account.readOnly) {
+                return (
+                  <div style={{ marginBottom: '16px', padding: '12px', background: '#fff7e6', borderRadius: '8px' }}>
+                    <span style={{ color: '#fa8c16', fontWeight: 500 }}>
+                      {t('positionList.sellBridgeReadOnlyTip') || '该账户为 Bridge 只读账户，将通过 Bridge 浏览器执行市价卖出'}
+                    </span>
+                  </div>
+                )
+              }
+              if (account.walletType === 'magic') {
+                return (
+                  <Form.Item label={t('positionList.sellMethod') || '执行方式'} required>
+                    <Radio.Group
+                      value={sellMethod}
+                      onChange={(e) => setSellMethod(e.target.value)}
+                    >
+                      <Radio value="direct" disabled={!canSellDirect(account)}>
+                        {t('positionList.sellMethodDirect') || '后端直接卖出 (CLOB)'}
+                      </Radio>
+                      <Radio value="bridge" disabled={!canSellBridge(account)}>
+                        {t('positionList.sellMethodBridge') || 'Bridge 浏览器执行'}
+                      </Radio>
+                    </Radio.Group>
+                    {sellMethod === 'bridge' && (
+                      <div style={{ marginTop: '4px', fontSize: '12px', color: '#999' }}>
+                        {t('positionList.sellBridgeTip') || 'Bridge 执行当前只支持市价单，由 Bridge 在浏览器会话中完成卖出'}
+                      </div>
+                    )}
+                  </Form.Item>
+                )
+              }
+              return null
+            })()}
+
             <Form.Item label="订单类型" required>
               <Radio.Group
                 value={orderType}
@@ -1479,9 +1548,10 @@ const PositionList: React.FC = () => {
                     calculatePnl(sellQuantity, price)
                   }
                 }}
+                disabled={sellMethod === 'bridge'}
               >
-                <Radio value="MARKET">市价出售</Radio>
-                <Radio value="LIMIT">限价出售</Radio>
+                <Radio value="MARKET" disabled={sellMethod === 'bridge'}>市价出售</Radio>
+                <Radio value="LIMIT" disabled={sellMethod === 'bridge'}>限价出售</Radio>
               </Radio.Group>
             </Form.Item>
 

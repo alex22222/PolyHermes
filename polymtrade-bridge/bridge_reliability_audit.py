@@ -46,6 +46,8 @@ FAILURE_BUCKET_PRIORITY = {
     "network_or_token_modal": 40,
     "live_position_insufficient": 20,
     "insufficient_balance": 15,
+    "market_stale": 14,
+    "duplicate_short_cycle_buy": 14,
     "read_only_account": 12,
     "insufficient_position": 10,
     "test_or_incomplete_record": 2,
@@ -69,6 +71,8 @@ FAILURE_BUCKET_ACTIONABILITY = {
     "network_or_token_modal": "account_setup_or_modal",
     "live_position_insufficient": "state_or_risk",
     "insufficient_balance": "state_or_risk",
+    "market_stale": "state_or_risk",
+    "duplicate_short_cycle_buy": "state_or_risk",
     "read_only_account": "account_setup_or_config",
     "insufficient_position": "state_or_risk",
     "test_or_incomplete_record": "historical_test_data",
@@ -92,6 +96,8 @@ FAILURE_BUCKET_NEXT_ACTION = {
     "network_or_token_modal": "Improve modal handling or account default network/token setup.",
     "live_position_insufficient": "Verify ledger/live portfolio drift; do not retry UI sell without real position.",
     "insufficient_balance": "Fund account or lower copy amount; not a browser reliability bug.",
+    "market_stale": "Expected skip for short-cycle markets that are already closed or too close to close.",
+    "duplicate_short_cycle_buy": "Expected skip: only the first BUY is copied for the same leader and BTC 5M market.",
     "read_only_account": "Enable a writable Bridge account or disable live trading for this account; not a browser reliability bug.",
     "insufficient_position": "Expected risk skip unless ledger drift is suspected.",
     "test_or_incomplete_record": "Historical/manual test or incomplete metadata; exclude from code-fix queue.",
@@ -214,6 +220,20 @@ FIXTURE_COVERAGE_RULES = [
     },
     {
         "bucket": "select_outcome",
+        "match": ["bitcoin up or down"],
+        "coverage_level": "exact",
+        "coverage_id": "btc_updown_binary_portfolio_fixture",
+        "note": "Covered by BTC Up/Down binary button and portfolio-row visibility fixtures.",
+    },
+    {
+        "bucket": "buy_dialog_open",
+        "match": ["bitcoin up or down"],
+        "coverage_level": "exact",
+        "coverage_id": "btc_updown_binary_buy_dialog_fixture",
+        "note": "Covered by BTC Up/Down binary button selection and BUY dialog-open guard fixtures.",
+    },
+    {
+        "bucket": "select_outcome",
         "match": ["team spirit", "iem cologne major"],
         "coverage_level": "exact",
         "coverage_id": "esports_team_selector_fixture",
@@ -302,6 +322,27 @@ FIXTURE_COVERAGE_RULES = [
         "coverage_level": "exact",
         "coverage_id": "goto_interrupted_navigation_retry_fixture",
         "note": "Historical page.goto interrupted-by-portfolio sample covered by goto navigation retry fixtures.",
+    },
+    {
+        "bucket": "navigation_race",
+        "match": ["bitcoin up or down", "execution context was destroyed"],
+        "coverage_level": "exact",
+        "coverage_id": "post_submit_navigation_race_fixture",
+        "note": "Covered by serializing portfolio scrapes with trades and treating post-submit navigation context loss as submitted.",
+    },
+    {
+        "bucket": "navigation_race",
+        "record_ids": [861],
+        "coverage_level": "exact",
+        "coverage_id": "shutdown_trade_lock_guard",
+        "note": "Historical restart-window trade covered by taking the trade lock before executor shutdown.",
+    },
+    {
+        "bucket": "target_market_missing",
+        "record_ids": [865],
+        "coverage_level": "exact",
+        "coverage_id": "short_cycle_market_stale_guard",
+        "note": "Historical BTC 5M market expired while queued; covered by pre-UI short-cycle stale skip guard.",
     },
     {
         "bucket": "navigation_network",
@@ -420,12 +461,21 @@ def classify_failure(error_message: Any) -> str:
         return "navigation_network"
     if "could not resolve polymtrade event" in text or "resolve event" in text:
         return "resolve_event"
-    if ("network" in text and "modal" in text) or "deposit modal" in text or ("token" in text and "modal" in text):
-        return "network_or_token_modal"
     if "live portfolio insufficient" in text or "no live position available" in text:
         return "live_position_insufficient"
-    if "insufficient balance" in text or "余额不足" in text:
+    if (
+        "insufficient balance" in text
+        or "insufficient usdc balance" in text
+        or "needs a deposit" in text
+        or "余额不足" in text
+    ):
         return "insufficient_balance"
+    if "short-cycle market stale" in text or "market stale or closing soon" in text:
+        return "market_stale"
+    if "duplicate short-cycle market buy skipped" in text:
+        return "duplicate_short_cycle_buy"
+    if ("network" in text and "modal" in text) or "deposit modal" in text or ("token" in text and "modal" in text):
+        return "network_or_token_modal"
     if "read-only account" in text or "read only account" in text or "does not support buy orders" in text:
         return "read_only_account"
     if "insufficient position" in text:
@@ -446,6 +496,8 @@ def classify_failure_row(row: dict[str, Any]) -> str:
         "navigation_network",
         "target_market_missing",
         "target_event_url_missing",
+        "sell_post_submit_no_effect",
+        "live_position_insufficient",
     }:
         title = normalize_text(row.get("market_title") or row.get("marketTitle"))
         external_id = normalize_text(row.get("external_trade_id") or row.get("externalTradeId"))
@@ -459,6 +511,10 @@ def classify_failure_row(row: dict[str, Any]) -> str:
         if bucket in {"navigation_race", "navigation_network"} and external_id.startswith("manual-") and (
             amount <= 0 or price <= 0
         ):
+            return "test_or_incomplete_record"
+        if bucket in {"sell_post_submit_no_effect", "live_position_insufficient"} and external_id.startswith(
+            "manual-"
+        ) and (amount <= 0 or price <= 0):
             return "test_or_incomplete_record"
         if "test" in title and (amount <= 0 or quantity <= 0 or external_id.startswith("manual-")):
             return "test_or_incomplete_record"

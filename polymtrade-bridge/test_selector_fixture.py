@@ -269,6 +269,30 @@ ESPORTS_TEAM_HTML = """
 </html>
 """
 
+BTC_UPDOWN_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <section class="event-card">
+      <h1>Bitcoin Up or Down - June 24, 6:25AM-6:30AM ET</h1>
+      <div>5 minute crypto market</div>
+      <div class="trade-buttons">
+        <button>Up\n45¢</button>
+        <button>Down\n57¢</button>
+      </div>
+    </section>
+  </main>
+  <script>
+    window.clickedLabels = [];
+    document.addEventListener("click", (event) => {
+      window.clickedLabels.push((event.target.innerText || event.target.textContent || "").trim());
+    });
+  </script>
+</body>
+</html>
+"""
+
 
 ESPORTS_MATCH_MARKET_HTML = """
 <!doctype html>
@@ -634,6 +658,22 @@ async def _run_selector_fixture() -> None:
                 )
                 clicked_labels = await page.evaluate("window.clickedLabels")
                 assert clicked_labels == [expected_label], (title, clicked_labels)
+
+            # BTC 5m Up/Down markets are binary markets: the outcome label is
+            # the side button itself, not a row anchor followed by Yes/No.
+            for outcome, expected_label in [("Down", "Down 57¢"), ("Up", "Up 45¢")]:
+                page = await browser.new_page()
+                await page.set_content(BTC_UPDOWN_HTML)
+                executor = PolymtradeExecutor()
+                executor.page = page
+                await executor._select_polymtrade_outcome(
+                    outcome,
+                    market_slug="btc-updown-5m-1782296700",
+                    market_title="Bitcoin Up or Down - June 24, 6:25AM-6:30AM ET",
+                    max_attempts=1,
+                )
+                clicked_labels = await page.evaluate("window.clickedLabels")
+                assert clicked_labels == [expected_label], (outcome, clicked_labels)
         finally:
             await browser.close()
 
@@ -977,6 +1017,8 @@ async def _run_network_modal_fixture() -> None:
 
             # Normal network selection modal: should select Polygon + USDC + Confirm.
             await page.set_content(NETWORK_MODAL_HTML)
+            assert await executor._is_network_modal_open() is True
+            assert await executor._is_deposit_or_insufficient_modal_open() is False
             selected = await executor._select_network_and_token_in_modal()
             assert selected is True, "Expected network/token selection to succeed"
             selections = await page.evaluate("window.selections")
@@ -988,6 +1030,8 @@ async def _run_network_modal_fixture() -> None:
             page2 = await browser.new_page()
             executor.page = page2
             await page2.set_content(DEPOSIT_MODAL_HTML)
+            assert await executor._is_network_modal_open() is True
+            assert await executor._is_deposit_or_insufficient_modal_open() is True
             selected2 = await executor._select_network_and_token_in_modal()
             assert selected2 is False, "Expected deposit modal to be rejected"
             selections2 = await page2.evaluate("window.selections")

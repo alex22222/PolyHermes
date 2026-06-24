@@ -195,6 +195,41 @@ data class BridgeAuditReconciliationPayload(
     @SerializedName("outcome_index") val outcomeIndex: Int? = null
 )
 
+data class BridgeAuditReconciliationRequest(
+    val status: String = "accepted_stale",
+    val note: String? = null,
+    val actor: String = "operator",
+    val marketId: String,
+    val marketTitle: String? = null,
+    val outcome: String,
+    val outcomeIndex: Int? = null
+)
+
+data class BridgeAuditReconciliationAnnotation(
+    val status: String? = null,
+    val note: String? = null,
+    val actor: String? = null,
+    @SerializedName("market_id") val marketId: String? = null,
+    @SerializedName("market_title") val marketTitle: String? = null,
+    val outcome: String? = null,
+    @SerializedName("outcome_index") val outcomeIndex: Int? = null,
+    @SerializedName("reconciled_at") val reconciledAt: Long? = null,
+    @SerializedName("updated_at") val updatedAt: Long? = null
+)
+
+data class BridgeAuditReconciliationListResponse(
+    val file: String? = null,
+    val count: Long? = null,
+    val annotations: Map<String, BridgeAuditReconciliationAnnotation> = emptyMap()
+)
+
+data class BridgeAuditReconciliationSaveResponse(
+    val status: String? = null,
+    val key: String? = null,
+    val file: String? = null,
+    val annotation: BridgeAuditReconciliationAnnotation? = null
+)
+
 /**
  * 桥接交易记录 DTO
  */

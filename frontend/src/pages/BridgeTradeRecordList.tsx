@@ -148,6 +148,16 @@ const BridgeTradeRecordList: React.FC = () => {
     if (lower.includes('could not click')) {
       return { key: 'click_button', label: t('bridgeTradeRecord.errorType.clickButton') || '按钮点击失败' }
     }
+    if (
+      lower.includes('execution context was destroyed') ||
+      lower.includes('target page, context or browser has been closed') ||
+      lower.includes('interrupted by another navigation')
+    ) {
+      return { key: 'navigation_race', label: t('bridgeTradeRecord.errorType.navigationRace') || '导航/重启竞态' }
+    }
+    if (lower.includes('duplicate short-cycle market buy skipped')) {
+      return { key: 'duplicate_short_cycle_buy', label: t('bridgeTradeRecord.errorType.duplicateShortCycleBuy') || '短周期重复买入已跳过' }
+    }
     if (lower.includes('network/deposit modal') || lower.includes('insufficient usdc balance') || lower.includes('needs a deposit')) {
       return { key: 'insufficient_balance', label: t('bridgeTradeRecord.errorType.insufficientBalance') || '余额不足' }
     }

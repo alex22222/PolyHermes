@@ -8,21 +8,39 @@ import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchEventDto
 import com.wrbug.polymarketbot.dto.LeaderPaperSessionDto
+import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPaperPromotionRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPaperPromotionResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPaperScoreResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchRunDto
 import com.wrbug.polymarketbot.dto.LeaderResearchRunRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchScannerPoolImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchScannerPoolImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchSourceStateDto
 import com.wrbug.polymarketbot.dto.LeaderResearchSummaryDto
 import com.wrbug.polymarketbot.enums.ErrorCode
+import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.enums.LeaderResearchTriggerType
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalConfirmRequiredException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityScoringService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivitySourceImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateNotReadyException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateLockedException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchDuplicateTrialConfigException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchJobService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMapper
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchRealMoneyForbiddenException
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScannerPoolImportService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScoringService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPaperPromotionService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperTradingService
 import org.slf4j.LoggerFactory
 import org.springframework.context.MessageSource
 import org.springframework.http.ResponseEntity
@@ -40,6 +58,12 @@ data class LeaderResearchPaperSessionsRequest(val candidateId: Long)
 class LeaderResearchController(
     private val jobService: LeaderResearchJobService,
     private val researchService: LeaderResearchService,
+    private val scannerPoolImportService: LeaderResearchScannerPoolImportService,
+    private val activityScoringService: LeaderResearchActivityScoringService,
+    private val activitySourceImportService: LeaderResearchActivitySourceImportService,
+    private val paperTradingService: LeaderPaperTradingService,
+    private val paperPromotionService: LeaderResearchPaperPromotionService,
+    private val scoringService: LeaderResearchScoringService,
     private val approvalService: LeaderResearchApprovalService,
     private val mapper: LeaderResearchMapper,
     private val messageSource: MessageSource
@@ -97,6 +121,73 @@ class LeaderResearchController(
     @PostMapping("/events/list")
     fun events(@RequestBody request: LeaderResearchEventsRequest): ResponseEntity<ApiResponse<List<LeaderResearchEventDto>>> {
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) { researchService.events(request.page, request.size) }
+    }
+
+    @PostMapping("/scanner-pool/import")
+    fun importScannerPool(
+        @RequestBody request: LeaderResearchScannerPoolImportRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchScannerPoolImportResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            scannerPoolImportService.importFromScannerPool(request)
+        }
+    }
+
+    @PostMapping("/activity-score/run")
+    fun runActivityScore(
+        @RequestBody request: LeaderResearchActivityScoreRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchActivityScoreResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            activityScoringService.scoreActivityPrescreen(request)
+        }
+    }
+
+    @PostMapping("/activity-source/import")
+    fun importActivitySource(
+        @RequestBody request: LeaderResearchActivitySourceImportRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchActivitySourceImportResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            activitySourceImportService.importFromActivitySource(request)
+        }
+    }
+
+    @PostMapping("/activity-score/promote-paper")
+    fun promoteActivityScoreToPaper(
+        @RequestBody request: LeaderResearchPaperPromotionRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchPaperPromotionResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            paperPromotionService.promote(request)
+        }
+    }
+
+    @PostMapping("/paper/process")
+    fun processPaper(
+        @RequestBody request: LeaderResearchPaperProcessRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchPaperProcessResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            val result = paperTradingService.processPaperCandidates(
+                runId = null,
+                batchSize = request.batchSize.coerceIn(1, 5000)
+            )
+            LeaderResearchPaperProcessResponse(
+                processed = result.processed,
+                filtered = result.filtered,
+                failed = result.failed
+            )
+        }
+    }
+
+    @PostMapping("/paper/score")
+    fun scorePaper(): ResponseEntity<ApiResponse<LeaderResearchPaperScoreResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            val states = listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
+            val scored = researchService.findCandidatesForStates(states)
+                .map { scoringService.scoreCandidate(it, runId = null) }
+            LeaderResearchPaperScoreResponse(
+                scoredCount = scored.size,
+                states = states.map { it.name },
+                scoreVersion = LeaderResearchScoringService.SCORE_VERSION
+            )
+        }
     }
 
     @PostMapping("/approval/create-disabled-trial-config")

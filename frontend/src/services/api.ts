@@ -1,6 +1,9 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import type {
   ApiResponse,
+  BridgeAuditReconciliationListResponse,
+  BridgeAuditReconciliationRequest,
+  BridgeAuditReconciliationSaveResponse,
   BridgeAuditRequest,
   BridgeAuditResponse,
   BridgeRuntimeStatus,
@@ -28,6 +31,8 @@ import type {
   LeaderResearchRunRequest,
   LeaderResearchSourceState,
   LeaderResearchSummary,
+  LoopGoalAction,
+  LoopGoalControlStatus,
   NotificationConfig,
   NotificationConfigRequest,
   NotificationConfigUpdateRequest,
@@ -413,13 +418,13 @@ export const apiService = {
      * 触发手动扫描
      */
     run: (data: { category?: string; dryRun?: boolean } = {}) =>
-      apiClient.post<ApiResponse<LeaderScanBatchResponse>>('/copy-trading/leaders/scan/run', data),
+      apiClient.post<ApiResponse<LeaderScanBatchResponse>>('/copy-trading/leaders/scan/run', data, { timeout: 120000 }),
 
     /**
      * 预览扫描结果（不写入数据库）
      */
     preview: (data: { category?: string } = {}) =>
-      apiClient.post<ApiResponse<LeaderScanPreviewResponse[]>>('/copy-trading/leaders/scan/preview', data),
+      apiClient.post<ApiResponse<LeaderScanPreviewResponse[]>>('/copy-trading/leaders/scan/preview', data, { timeout: 120000 }),
 
     /**
      * 获取扫描状态
@@ -431,7 +436,7 @@ export const apiService = {
      * 为所有 Leader 计算研究模块 copyability 评分
      */
     researchScore: () =>
-      apiClient.post<ApiResponse<{ scoredCount: number; message: string }>>('/copy-trading/leaders/scan/research-score/run', {})
+      apiClient.post<ApiResponse<{ scoredCount: number; message: string }>>('/copy-trading/leaders/scan/research-score/run', {}, { timeout: 120000 })
   },
 
   /**
@@ -478,6 +483,14 @@ export const apiService = {
 
     createDisabledTrialConfig: (data: LeaderResearchApprovalRequest) =>
       apiClient.post<ApiResponse<LeaderResearchApprovalResponse>>('/copy-trading/leader-research/approval/create-disabled-trial-config', data)
+  },
+
+  loopGoals: {
+    status: () =>
+      apiClient.post<ApiResponse<LoopGoalControlStatus>>('/loop-goals/status', {}),
+
+    update: (data: { goalKey: string; action: LoopGoalAction }) =>
+      apiClient.post<ApiResponse<LoopGoalControlStatus>>('/loop-goals/update', data)
   },
   
   /**
@@ -1029,6 +1042,18 @@ export const apiService = {
      */
     audit: (data: BridgeAuditRequest = {}) =>
       apiClient.post<ApiResponse<BridgeAuditResponse>>('/bridge/trades/audit', data),
+
+    /**
+     * 查询 Bridge audit reconciliation 注释
+     */
+    auditReconciliations: () =>
+      apiClient.post<ApiResponse<BridgeAuditReconciliationListResponse>>('/bridge/trades/audit/reconciliations', {}),
+
+    /**
+     * 人工确认 Bridge audit reconciliation 建议
+     */
+    upsertAuditReconciliation: (data: BridgeAuditReconciliationRequest) =>
+      apiClient.post<ApiResponse<BridgeAuditReconciliationSaveResponse>>('/bridge/trades/audit/reconciliations/upsert', data),
 
     /**
      * 查询 Bridge runtime 状态

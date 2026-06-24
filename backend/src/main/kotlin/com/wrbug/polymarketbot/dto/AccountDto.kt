@@ -221,8 +221,9 @@ data class PositionSellRequest(
 )
 
 /**
- * Bridge 只读账户仓位卖出请求
- * 不通过 PolyHermes 签名，而是转发给 Bridge 执行
+ * Bridge 仓位卖出请求
+ * 不通过 PolyHermes 签名，而是转发给 Bridge 执行。
+ * 适用于 Bridge 只读账户，以及选择 Bridge 执行方式的 Magic 钱包账户。
  */
 data class BridgePositionSellRequest(
     val accountId: Long,           // 账户ID（必需）

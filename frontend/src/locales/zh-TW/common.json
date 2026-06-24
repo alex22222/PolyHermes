@@ -376,6 +376,8 @@
       "resolveEvent": "事件解析失敗",
       "insufficientPosition": "倉位不足",
       "clickButton": "按鈕點擊失敗",
+      "navigationRace": "導航/重啟競態",
+      "duplicateShortCycleBuy": "短週期重複買入已跳過",
       "insufficientBalance": "餘額不足",
       "other": "其他"
     },
@@ -2094,5 +2096,12 @@
     "accountGuide": "CLOB V2 需要 pUSD 進行交易，請點擊帳戶操作欄中的 USDC.e → pUSD 按鈕完成遷移。",
     "accountGuideButton": "USDC.e → pUSD",
     "dismissGuide": "知道了"
+  },
+  "positionList": {
+    "sellMethod": "執行方式",
+    "sellMethodDirect": "後端直接賣出 (CLOB)",
+    "sellMethodBridge": "Bridge 瀏覽器執行",
+    "sellBridgeReadOnlyTip": "該帳戶為 Bridge 只讀帳戶，將透過 Bridge 瀏覽器執行市價賣出",
+    "sellBridgeTip": "Bridge 執行目前只支援市價單，由 Bridge 在瀏覽器會話中完成賣出"
   }
 }

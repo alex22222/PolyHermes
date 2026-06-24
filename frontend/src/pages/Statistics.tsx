@@ -111,6 +111,7 @@ const Statistics: React.FC = () => {
   const [stats, setStats] = useState<StatisticsType | null>(null)
   const [bridgeAudit, setBridgeAudit] = useState<BridgeAuditResponse | null>(null)
   const [loading, setLoading] = useState(false)
+  const [auditLoading, setAuditLoading] = useState(false)
   const [leadersLoading, setLeadersLoading] = useState(false)
   const [leaders, setLeaders] = useState<Leader[]>([])
   const [scope, setScope] = useState<StatisticsScope>('global')
@@ -207,11 +208,12 @@ const Statistics: React.FC = () => {
   }
 
   const fetchBridgeAudit = async () => {
+    setAuditLoading(true)
     try {
       const response = await apiService.bridgeTradeRecords.audit({
         limit: 500,
         failureLimit: 100,
-        portfolioTimeout: 90
+        portfolioTimeout: 30
       })
       if (response.data.code === 0 && response.data.data) {
         setBridgeAudit(response.data.data)
@@ -220,12 +222,14 @@ const Statistics: React.FC = () => {
       }
     } catch (error) {
       setBridgeAudit(null)
+    } finally {
+      setAuditLoading(false)
     }
   }
 
   const fetchStatistics = async () => {
     setLoading(true)
-    const bridgeAuditPromise = fetchBridgeAudit()
+    fetchBridgeAudit()
     try {
       const startTime = dateRange[0] ? dateRange[0].valueOf() : undefined
       const endTime = dateRange[1] ? dateRange[1].valueOf() : undefined
@@ -267,7 +271,6 @@ const Statistics: React.FC = () => {
       setStats(null)
       message.error(error.message || t('statistics.fetchFailed') || '获取统计信息失败')
     } finally {
-      await bridgeAuditPromise
       setLoading(false)
     }
   }
@@ -374,14 +377,14 @@ const Statistics: React.FC = () => {
               title="可处理失败桶"
               value={auditMonitor?.actionableFailureBucketCount || 0}
               valueStyle={{ color: (auditMonitor?.actionableFailureBucketCount || 0) > 0 ? '#cf1322' : undefined }}
-              loading={loading && !bridgeAudit}
+              loading={auditLoading && !bridgeAudit}
             />
           </Col>
           <Col xs={24} sm={12} md={6}>
             <Statistic
               title="最近失败数"
               value={auditMonitor?.recentFailureCount || auditMetrics?.recentFailureCount || 0}
-              loading={loading && !bridgeAudit}
+              loading={auditLoading && !bridgeAudit}
             />
           </Col>
           <Col xs={24} sm={12} md={6}>
@@ -389,14 +392,14 @@ const Statistics: React.FC = () => {
               title="Pending 超时"
               value={auditMonitor?.pendingTimeoutCount || auditMetrics?.pendingTimeoutCount || 0}
               valueStyle={{ color: (auditMonitor?.pendingTimeoutCount || 0) > 0 ? '#cf1322' : undefined }}
-              loading={loading && !bridgeAudit}
+              loading={auditLoading && !bridgeAudit}
             />
           </Col>
           <Col xs={24} sm={12} md={6}>
             <Statistic
               title="当前持仓快照"
               value={auditMetrics?.portfolioPositionCount || 0}
-              loading={loading && !bridgeAudit}
+              loading={auditLoading && !bridgeAudit}
             />
           </Col>
         </Row>

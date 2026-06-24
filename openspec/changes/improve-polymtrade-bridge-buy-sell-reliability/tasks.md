@@ -122,6 +122,10 @@
 - [x] 10.55 收敛 audit success mismatch 指标：stale 历史错配保留展示但不计入 active/strict actionable，fresh mismatch 才触发可行动状态，避免历史或外部平仓噪音干扰 SELL 可靠性监控。
 - [x] 10.56 为 stale success mismatch 增加只读 reconciliation suggestions，输出可人工确认的 annotation payload，降低历史账本噪音复盘成本且不自动掩盖真实 SELL 风险。
 - [x] 10.57 后端正式 audit DTO 与优化点日报接入 reconciliation suggestions，展示历史错配、当前错配、复盘建议和可行动问题，并列出前 8 条建议供人工复盘。
+- [x] 10.58 新增正式后端 reconciliation 代理接口与优化点日报人工确认按钮，必须二次确认后才写入 `/audit/reconciliations`，写入后刷新 audit，避免自动批量掩盖真实 SELL 风险。
+- [x] 10.59 收口手工零金额 SELL 历史失败：`manual-*` 且 amount/price 为 0 的 `sell_post_submit_no_effect` / `live_position_insufficient` 归入 `test_or_incomplete_record`，真实非零 SELL post-submit 失败仍保留为可见 bucket。
+- [x] 10.60 矫正 deposit/balance modal 失败分类：包含 `insufficient USDC balance` 或 `needs a deposit` 的网络/充值弹窗归入 `insufficient_balance`，避免误占 `network_or_token_modal` 队列。
+- [x] 10.61 BUY/SELL 执行链路新增 deposit/余额不足 modal guard，遇到充值/余额不足弹窗立即中止并报资金状态错误，不再重复选择或强制隐藏 modal。
 
 ## 11. 文档与记录
 

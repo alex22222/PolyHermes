@@ -113,6 +113,46 @@ class BridgeTradeRecorder:
             logger.warning(f"Failed to check existing bridge trade: {e}")
             return False
 
+    def has_prior_short_cycle_buy(
+        self,
+        market_id: str,
+        market_slug: Optional[str],
+        leader_address: Optional[str],
+    ) -> bool:
+        """Return True if this leader already has an active/success BUY on the market."""
+        if not leader_address:
+            return False
+        leader = leader_address.lower()
+        sql = """
+        SELECT 1 FROM bridge_trade_record
+        WHERE bridge_id = %s
+          AND side = 'BUY'
+          AND status IN ('PENDING', 'SUCCESS')
+          AND (
+            market_id = %s
+            OR (%s IS NOT NULL AND raw_payload LIKE %s)
+          )
+          AND LOWER(raw_payload) LIKE %s
+        LIMIT 1
+        """
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            self.bridge_id,
+                            market_id,
+                            market_slug,
+                            f'%"{market_slug}"%' if market_slug else None,
+                            f"%{leader}%",
+                        ),
+                    )
+                    return cur.fetchone() is not None
+        except Exception as e:
+            logger.warning(f"Failed to check prior short-cycle BUY: {e}")
+            return False
+
     def record_result(
         self,
         external_trade_id: Optional[str],

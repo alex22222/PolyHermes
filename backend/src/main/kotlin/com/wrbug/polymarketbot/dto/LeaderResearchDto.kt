@@ -5,6 +5,164 @@ data class LeaderResearchRunRequest(
     val triggerType: String = "MANUAL"
 )
 
+data class LeaderResearchScannerPoolImportRequest(
+    val dryRun: Boolean = false,
+    val politicsLimit: Int = 350,
+    val financeLimit: Int = 350,
+    val sportsLimit: Int = 150,
+    val cryptoLimit: Int = 150,
+    val onlyPending: Boolean = true,
+    val minDiscoveryScore: Int? = null
+)
+
+data class LeaderResearchScannerPoolImportCategoryDto(
+    val category: String,
+    val requestedLimit: Int,
+    val selectedCount: Int,
+    val createdCount: Int,
+    val updatedCount: Int,
+    val skippedLockedCount: Int,
+    val skippedExistingCount: Int
+)
+
+data class LeaderResearchScannerPoolImportPreviewItemDto(
+    val category: String,
+    val wallet: String,
+    val source: String,
+    val discoveryScore: Int,
+    val action: String,
+    val sourceEvidence: String
+)
+
+data class LeaderResearchScannerPoolImportResponse(
+    val dryRun: Boolean,
+    val requestedTotal: Int,
+    val selectedTotal: Int,
+    val createdTotal: Int,
+    val updatedTotal: Int,
+    val skippedLockedTotal: Int,
+    val skippedExistingTotal: Int,
+    val categories: List<LeaderResearchScannerPoolImportCategoryDto>,
+    val previewItems: List<LeaderResearchScannerPoolImportPreviewItemDto>
+)
+
+data class LeaderResearchActivityScoreRequest(
+    val states: List<String> = listOf("DISCOVERED", "CANDIDATE"),
+    val force: Boolean = false
+)
+
+data class LeaderResearchActivityScoreResponse(
+    val scoreVersion: String,
+    val scannedCount: Int,
+    val scoredCount: Int,
+    val skippedCount: Int,
+    val riskFlagCounts: Map<String, Int>,
+    val categoryCounts: Map<String, Int>
+)
+
+data class LeaderResearchActivitySourceImportRequest(
+    val dryRun: Boolean = false,
+    val categories: List<String> = listOf("politics", "finance"),
+    val limitPerCategory: Int = 100,
+    val lookbackDays: Int = 30,
+    val minEvents: Int = 12,
+    val minDistinctMarkets: Int = 3,
+    val minBuyEvents: Int = 3,
+    val minSellEvents: Int = 2,
+    val minSafePriceRatio: String = "0.25",
+    val maxTailPriceRatio: String = "0.45"
+)
+
+data class LeaderResearchActivitySourceCategoryDto(
+    val category: String,
+    val selectedCount: Int,
+    val createdCount: Int,
+    val updatedCount: Int,
+    val skippedExistingCount: Int,
+    val skippedLockedCount: Int
+)
+
+data class LeaderResearchActivitySourcePreviewItemDto(
+    val category: String,
+    val wallet: String,
+    val action: String,
+    val totalEvents: Long,
+    val distinctMarkets: Long,
+    val buyEvents: Long,
+    val sellEvents: Long,
+    val safePriceEvents: Long,
+    val tailPriceEvents: Long,
+    val avgAmount: String,
+    val totalAmount: String,
+    val lastEventTime: Long?,
+    val sourceEvidence: String
+)
+
+data class LeaderResearchActivitySourceImportResponse(
+    val dryRun: Boolean,
+    val requestedCategories: List<String>,
+    val selectedTotal: Int,
+    val createdTotal: Int,
+    val updatedTotal: Int,
+    val skippedExistingTotal: Int,
+    val skippedLockedTotal: Int,
+    val categories: List<LeaderResearchActivitySourceCategoryDto>,
+    val previewItems: List<LeaderResearchActivitySourcePreviewItemDto>
+)
+
+data class LeaderResearchPaperProcessRequest(
+    val batchSize: Int = 500
+)
+
+data class LeaderResearchPaperProcessResponse(
+    val processed: Int,
+    val filtered: Int,
+    val failed: Int
+)
+
+data class LeaderResearchPaperScoreResponse(
+    val scoredCount: Int,
+    val states: List<String>,
+    val scoreVersion: String
+)
+
+data class LeaderResearchPaperPromotionRequest(
+    val minScore: String = "80",
+    val politicsLimit: Int = 20,
+    val financeLimit: Int = 20,
+    val sportsLimit: Int = 5,
+    val cryptoLimit: Int = 5,
+    val dryRun: Boolean = false
+)
+
+data class LeaderResearchPaperPromotionCategoryDto(
+    val category: String,
+    val requestedLimit: Int,
+    val selectedCount: Int,
+    val promotedCount: Int,
+    val skippedRiskCount: Int
+)
+
+data class LeaderResearchPaperPromotionItemDto(
+    val candidateId: Long,
+    val wallet: String,
+    val category: String,
+    val score: String,
+    val previousState: String,
+    val nextState: String,
+    val riskFlags: List<String>
+)
+
+data class LeaderResearchPaperPromotionResponse(
+    val dryRun: Boolean,
+    val minScore: String,
+    val selectedTotal: Int,
+    val promotedTotal: Int,
+    val skippedRiskTotal: Int,
+    val categories: List<LeaderResearchPaperPromotionCategoryDto>,
+    val items: List<LeaderResearchPaperPromotionItemDto>
+)
+
 data class LeaderResearchRunDto(
     val id: Long,
     val status: String,

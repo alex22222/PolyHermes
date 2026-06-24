@@ -891,3 +891,73 @@ Bridge `/audit` 对未被 operator reconciliation 注释、且已判定为 `stal
 **And** 表格展示最多前 8 条建议
 **And** 每条建议展示置信度、市场、latest record id、outcome、账本/实仓数量和建议状态
 **And** 页面不提供自动写入 reconciliation 的操作
+
+### REQ-66: Reconciliation suggestions 必须支持人工确认写入
+
+PolyHermes 后端必须提供正式 Bridge reconciliation 代理接口，用于读取 `/audit/reconciliations` 注释和写入单条人工确认。写入接口必须校验 status、marketId 与 outcome，并只允许 `externally_closed`、`manual_closed`、`accepted_stale`、`wrong_market_known`。优化点日报的每条 reconciliation suggestion 必须提供显式 `确认` 操作，点击后必须弹出二次确认说明，确认后才调用后端代理写入 reconciliation。写入成功后页面必须刷新 audit。系统不得自动批量写入 suggestions。
+
+### SC-68: 人工确认 stale suggestion 后刷新 audit
+
+**Given** `/optimization-daily` 表格显示一条 `accepted_stale` suggestion
+**When** 用户点击该行 `确认`
+**Then** 页面弹出 `确认历史错配建议`
+**When** 用户在弹窗中确认
+**Then** 前端调用 `/api/bridge/trades/audit/reconciliations/upsert`
+**And** 请求体包含 suggestion 的 status、marketId、marketTitle、outcome、outcomeIndex、note 与 actor
+**And** 保存成功后提示 `已确认历史错配`
+**And** 页面重新拉取 audit 数据
+**And** 未点击确认时不得写入 reconciliation
+
+### REQ-67: 手工零金额 SELL 历史失败不得进入代码修复队列
+
+Bridge audit 必须识别 `manual-*` 外部 id、amount 或 price 为 0 的 SELL 历史测试/不完整记录。若这类记录被错误文本归类为 `sell_post_submit_no_effect` 或 `live_position_insufficient`，audit 必须将其降级为 `test_or_incomplete_record`，避免手工测试、未完整入账或零金额样本长期占用 SELL 代码修复队列。该降级仅适用于 `manual-*` 且零金额/零价格记录；真实外部 id 且非零金额/价格的 SELL post-submit 无效果失败必须继续保留原始 bucket 与 uncovered 状态。
+
+### SC-69: 手工零金额 SELL 记录降级但真实 post-submit 失败保留
+
+**Given** 历史记录 id 572 的 `external_trade_id` 以 `manual-` 开头
+**And** `amount=0` 或 `price=0`
+**And** error message 为 `SELL post-submit verification failed`
+**When** Bridge audit 对该记录分类
+**Then** 分类结果为 `test_or_incomplete_record`
+**And** 不出现在 `next_action_candidates`
+**Given** 另一条真实 SELL 记录的 `external_trade_id` 不是 `manual-*`
+**And** `amount>0` 且 `price>0`
+**And** error message 同样为 `SELL post-submit verification failed`
+**When** Bridge audit 对该记录分类
+**Then** 分类结果仍为 `sell_post_submit_no_effect`
+**And** 未被 coverage 覆盖时保留 uncovered 状态
+
+### REQ-68: Deposit/balance modal 必须归类为资金不足而非网络/代币选择
+
+Bridge audit 对错误文本中明确包含 `insufficient balance`、`insufficient USDC balance`、`needs a deposit` 或中文 `余额不足` 的失败，必须优先归类为 `insufficient_balance`。即使同一错误文本也包含 `Network/deposit modal` 或 modal 相关描述，也不得归类为 `network_or_token_modal`。只有没有明确资金不足/充值含义的 network/token modal 才保留 `network_or_token_modal`，用于后续 UI modal 处理优化。该规则用于区分账户资金/配置问题与 Bridge 浏览器执行链路问题，避免历史资金不足样本污染 BUY/SELL 代码修复队列。
+
+### SC-70: 资金不足 modal 不再占用 network_or_token_modal bucket
+
+**Given** Bridge 失败错误为 `Network/deposit modal keeps blocking the trade. The Bridge account probably has insufficient USDC balance or needs a deposit.`
+**When** Bridge audit 对错误分类
+**Then** 分类结果为 `insufficient_balance`
+**And** actionability 为 `state_or_risk`
+**And** 不出现在 `next_action_candidates`
+**Given** 另一条错误为 `Network/token modal keeps blocking the trade`
+**When** Bridge audit 对错误分类
+**Then** 分类结果仍为 `network_or_token_modal`
+
+### REQ-69: BUY/SELL 遇到 deposit/balance modal 必须立即中止
+
+Bridge 执行 BUY 或 SELL 时，若网络/代币选择弹窗中明确出现 `deposit`、`充值`、`insufficient`、`余额不足` 或 `not enough` 等资金不足信号，系统必须立即中止当前交易并抛出资金/充值状态错误。系统不得继续尝试选择 Polygon/USDC、不得关闭或强制隐藏该 modal 后继续输入金额或提交订单。普通 network/token selection modal 仍可按既有逻辑选择 Polygon/USDC 并确认。该规则用于减少余额不足账户上的无效点击、缩短失败路径，并让后续 audit 稳定归入 `insufficient_balance` 而非 BUY/SELL selector 失败。
+
+### SC-71: Deposit modal 不触发 Polygon/USDC 点击
+
+**Given** 页面显示 `选择网络和代币` modal
+**And** modal 文案包含 `Insufficient balance. Please deposit.`
+**When** Bridge 执行 modal 检测
+**Then** `_is_network_modal_open()` 返回 true
+**And** `_is_deposit_or_insufficient_modal_open()` 返回 true
+**When** Bridge 尝试处理该 modal
+**Then** 不点击 `Polygon`
+**And** 不点击 `USDC`
+**And** BUY/SELL 执行链路抛出包含 `Insufficient balance` 或 `deposit modal` 的错误
+**Given** 页面显示普通 `选择网络和代币` modal
+**And** modal 不包含资金不足/充值文案
+**When** Bridge 尝试处理该 modal
+**Then** 仍可选择 `Polygon` 与 `USDC` 并确认

@@ -56,10 +56,52 @@ EVENT_PAGE_NO_POSITION_HTML = """
 """
 
 
+EVENT_PAGE_WITH_UNRELATED_PORTFOLIO_POSITION_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <h1>Bitcoin Up or Down - June 24, 8:35AM-8:40AM ET</h1>
+    <section class="portfolio">
+      <h2>Portfolio</h2>
+      <div class="holding-row">
+        <div>Will Spain win Group H in the 2026 FIFA World Cup?</div>
+        <div>No - 14.8 shares</div>
+      </div>
+    </section>
+    <section class="market">
+      <button>Up 96c</button>
+      <button>Down 5c</button>
+      <p>This market will resolve to Up if Bitcoin ends higher; otherwise Down.</p>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
+EVENT_PAGE_WITH_TARGET_PORTFOLIO_POSITION_HTML = """
+<!doctype html>
+<html>
+<body>
+  <div class="holding-row">
+    <div>Bitcoin Up or Down - June 24, 8:35AM-8:40AM ET</div>
+    <div>Up - 1.04 shares</div>
+  </div>
+</body>
+</html>
+"""
+
+
 async def _make_executor(page):
     executor = PolymtradeExecutor()
     executor.page = page
     return executor
+
+
+class NavigationRaceConfirmPage:
+    async def query_selector(self, _selector):
+        raise Exception("Page.query_selector: Execution context was destroyed, most likely because of a navigation")
 
 
 async def test_get_event_page_position_quantity():
@@ -83,6 +125,26 @@ async def test_get_event_page_position_quantity():
             executor.page = page3
             qty3 = await executor._get_event_page_position_quantity("Yes")
             assert qty3 is None, f"Expected None, got {qty3}"
+
+            page4 = await browser.new_page()
+            await page4.set_content(EVENT_PAGE_WITH_UNRELATED_PORTFOLIO_POSITION_HTML)
+            executor.page = page4
+            qty4 = await executor._get_event_page_position_quantity(
+                "Up",
+                market_slug="btc-updown-5m-1782304500",
+                market_title="Bitcoin Up or Down - June 24, 8:35AM-8:40AM ET",
+            )
+            assert qty4 is None, f"Expected unrelated portfolio position to be ignored, got {qty4}"
+
+            page5 = await browser.new_page()
+            await page5.set_content(EVENT_PAGE_WITH_TARGET_PORTFOLIO_POSITION_HTML)
+            executor.page = page5
+            qty5 = await executor._get_event_page_position_quantity(
+                "Up",
+                market_slug="btc-updown-5m-1782304500",
+                market_title="Bitcoin Up or Down - June 24, 8:35AM-8:40AM ET",
+            )
+            assert qty5 == 1.04, f"Expected 1.04, got {qty5}"
         finally:
             await browser.close()
     print("test_get_event_page_position_quantity passed")
@@ -203,6 +265,13 @@ async def test_verify_buy_executed_no_change():
     print("test_verify_buy_executed_no_change passed")
 
 
+async def test_confirm_trade_treats_post_submit_navigation_race_as_submitted():
+    executor = PolymtradeExecutor()
+    executor.page = NavigationRaceConfirmPage()
+    await executor._confirm_trade()
+    print("test_confirm_trade_treats_post_submit_navigation_race_as_submitted passed")
+
+
 def main() -> int:
     tests = [
         test_get_event_page_position_quantity,
@@ -211,6 +280,7 @@ def main() -> int:
         test_verify_buy_executed_quantity_increased,
         test_verify_buy_executed_new_position,
         test_verify_buy_executed_no_change,
+        test_confirm_trade_treats_post_submit_navigation_race_as_submitted,
     ]
     for test in tests:
         asyncio.run(test())

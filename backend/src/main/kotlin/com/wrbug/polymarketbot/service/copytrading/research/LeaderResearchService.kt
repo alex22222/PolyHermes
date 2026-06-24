@@ -8,6 +8,7 @@ import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchEventDto
 import com.wrbug.polymarketbot.dto.LeaderResearchSourceStateDto
 import com.wrbug.polymarketbot.dto.LeaderResearchSummaryDto
+import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
 import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.repository.LeaderPaperPositionRepository
 import com.wrbug.polymarketbot.repository.LeaderPaperSessionRepository
@@ -36,6 +37,10 @@ class LeaderResearchService(
     private val leaderPoolRepository: LeaderPoolRepository,
     private val mapper: LeaderResearchMapper
 ) {
+    fun findCandidatesForStates(states: Collection<LeaderResearchState>): List<LeaderResearchCandidate> {
+        return candidateRepository.findByResearchStateIn(states)
+    }
+
     fun summary(): LeaderResearchSummaryDto {
         return LeaderResearchSummaryDto(
             discoveredCount = candidateRepository.countByResearchState(LeaderResearchState.DISCOVERED),

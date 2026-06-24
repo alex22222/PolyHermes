@@ -377,6 +377,8 @@
       "resolveEvent": "事件解析失败",
       "insufficientPosition": "仓位不足",
       "clickButton": "按钮点击失败",
+      "navigationRace": "导航/重启竞态",
+      "duplicateShortCycleBuy": "短周期重复买入已跳过",
       "insufficientBalance": "余额不足",
       "other": "其他"
     },
@@ -2094,5 +2096,12 @@
     "accountGuide": "CLOB V2 需要 pUSD 进行交易，请点击账户操作栏中的 USDC.e → pUSD 按钮完成迁移。",
     "accountGuideButton": "USDC.e → pUSD",
     "dismissGuide": "知道了"
+  },
+  "positionList": {
+    "sellMethod": "执行方式",
+    "sellMethodDirect": "后端直接卖出 (CLOB)",
+    "sellMethodBridge": "Bridge 浏览器执行",
+    "sellBridgeReadOnlyTip": "该账户为 Bridge 只读账户，将通过 Bridge 浏览器执行市价卖出",
+    "sellBridgeTip": "Bridge 执行当前只支持市价单，由 Bridge 在浏览器会话中完成卖出"
   }
 }
