@@ -22,6 +22,8 @@ import com.wrbug.polymarketbot.service.copytrading.scoring.CopyScoreService
 import com.wrbug.polymarketbot.service.common.BlockchainService
 import com.wrbug.polymarketbot.service.common.MarketService
 import com.wrbug.polymarketbot.service.common.PolymarketClobService
+import com.wrbug.polymarketbot.service.accounts.AccountExecutionModeService
+import com.wrbug.polymarketbot.service.bridge.BridgeWebhookClient
 import com.wrbug.polymarketbot.service.system.TelegramNotificationService
 import com.wrbug.polymarketbot.util.CryptoUtils
 import org.springframework.context.ApplicationContext
@@ -29,6 +31,7 @@ import org.springframework.context.ApplicationContextAware
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.math.BigDecimal
+import java.time.Instant
 import kotlin.math.max
 
 /**
@@ -54,6 +57,8 @@ open class CopyOrderTrackingService(
     private val cryptoUtils: CryptoUtils,
     private val marketService: MarketService,  // 市场信息服务
     private val copyScoreService: CopyScoreService,  // 统一跟单评分服务
+    private val accountExecutionModeService: AccountExecutionModeService,
+    private val bridgeWebhookClient: BridgeWebhookClient,
     private val telegramNotificationService: TelegramNotificationService? = null  // 可选，避免循环依赖
 ) : ApplicationContextAware {
 
@@ -74,6 +79,79 @@ open class CopyOrderTrackingService(
     private fun getSelf(): CopyOrderTrackingService {
         return applicationContext?.getBean(CopyOrderTrackingService::class.java)
             ?: throw IllegalStateException("ApplicationContext not initialized")
+    }
+
+    private suspend fun sendBridgeFallback(
+        copyTrading: CopyTrading,
+        account: Account,
+        trade: TradeResponse
+    ): Boolean {
+        if (!accountExecutionModeService.shouldFallbackToBridge(account)) {
+            return false
+        }
+
+        val leader = leaderRepository.findById(copyTrading.leaderId).orElse(null)
+        if (leader == null) {
+            logger.warn("Bridge fallback 跳过：Leader 不存在: leaderId=${copyTrading.leaderId}, copyTradingId=${copyTrading.id}")
+            return true
+        }
+
+        val marketId = resolveBridgeMarketId(trade)
+        if (marketId.isBlank()) {
+            logger.warn(
+                "Bridge fallback 跳过：无法确定市场(conditionId): accountId=${account.id}, " +
+                    "copyTradingId=${copyTrading.id}, tradeId=${trade.id}, tokenId=${trade.tokenId}"
+            )
+            return true
+        }
+
+        val market = runCatching { marketService.getMarket(marketId) }
+            .onFailure { e -> logger.warn("Bridge fallback 获取市场信息失败: marketId=$marketId, error=${e.message}") }
+            .getOrNull()
+
+        val accepted = bridgeWebhookClient.sendLeaderTrade(
+            BridgeWebhookClient.BridgeSignal(
+                timestamp = parseTradeTimestampMillis(trade.timestamp),
+                leaderAddress = leader.leaderAddress,
+                leaderName = leader.leaderName,
+                transactionHash = trade.id,
+                conditionId = marketId,
+                marketSlug = market?.eventSlug ?: market?.slug,
+                title = market?.title,
+                side = trade.side,
+                outcome = trade.outcome,
+                outcomeIndex = trade.outcomeIndex,
+                price = trade.price.toDoubleOrNull() ?: 0.0,
+                size = trade.size.toDoubleOrNull() ?: 0.0,
+                source = "copy_order_tracking_bridge_fallback"
+            )
+        )
+        if (!accepted) {
+            logger.warn(
+                "Bridge fallback 未发送: accountId=${account.id}, copyTradingId=${copyTrading.id}, " +
+                    "side=${trade.side}, tradeId=${trade.id}, marketId=$marketId"
+            )
+            return false
+        }
+        logger.info(
+            "已转发 Bridge fallback 信号: accountId=${account.id}, copyTradingId=${copyTrading.id}, " +
+                "leaderId=${copyTrading.leaderId}, side=${trade.side}, tradeId=${trade.id}, marketId=$marketId"
+        )
+        return true
+    }
+
+    private suspend fun resolveBridgeMarketId(trade: TradeResponse): String {
+        if (trade.market.isNotBlank()) {
+            return trade.market
+        }
+        val tokenId = trade.tokenId?.takeIf { it.isNotBlank() } ?: return ""
+        return marketService.getMarketInfoByTokenId(tokenId)?.conditionId.orEmpty()
+    }
+
+    private fun parseTradeTimestampMillis(timestamp: String): Long {
+        timestamp.toLongOrNull()?.let { return it }
+        return runCatching { Instant.parse(timestamp).toEpochMilli() }
+            .getOrElse { System.currentTimeMillis() }
     }
 
     // 使用 Mutex 保证线程安全（按交易ID锁定）
@@ -251,14 +329,18 @@ open class CopyOrderTrackingService(
                     val account = accountRepository.findById(copyTrading.accountId).orElse(null)
                         ?: continue
 
-                    // 验证账户API凭证
-                    if (account.apiKey == null || account.apiSecret == null || account.apiPassphrase == null) {
-                        logger.warn("账户未配置API凭证，跳过创建订单: accountId=${account.id}, copyTradingId=${copyTrading.id}")
+                    // 验证账户是否启用
+                    if (!account.isEnabled) {
                         continue
                     }
 
-                    // 验证账户是否启用
-                    if (!account.isEnabled) {
+                    // Bridge/Magic 账户通常没有 CLOB API 凭证，不能在这里静默跳过；
+                    // 需要转发到 Web Bridge，让桥接交易记录落 SUCCESS/FAILED。
+                    if (!accountExecutionModeService.hasClobApiCredentials(account)) {
+                        if (sendBridgeFallback(copyTrading, account, trade)) {
+                            continue
+                        }
+                        logger.warn("账户未配置API凭证，跳过创建订单: accountId=${account.id}, copyTradingId=${copyTrading.id}")
                         continue
                     }
 
@@ -615,6 +697,12 @@ open class CopyOrderTrackingService(
                         }
                     }
 
+                    val apiKey = account.apiKey
+                    if (apiKey == null) {
+                        logger.warn("账户 API Key 为空，跳过原生 CLOB 买入: accountId=${account.id}, copyTradingId=${copyTrading.id}")
+                        continue
+                    }
+
                     // 解密 API 凭证
                     val apiSecret = try {
                         decryptApiSecret(account)
@@ -631,7 +719,7 @@ open class CopyOrderTrackingService(
 
                     // 创建带认证的CLOB API客户端
                     val clobApi = retrofitFactory.createClobApi(
-                        account.apiKey,
+                        apiKey,
                         apiSecret,
                         apiPassphrase,
                         account.walletAddress
@@ -660,7 +748,7 @@ open class CopyOrderTrackingService(
                         side = "BUY",
                         price = buyPrice.toString(),
                         size = finalBuyQuantity.toString(),
-                        owner = account.apiKey,
+                        owner = apiKey,
                         copyTradingId = copyTrading.id!!,
                         tradeId = trade.id,
                         signatureType = orderSigningService.getSignatureTypeForWalletType(account.walletType)
@@ -947,14 +1035,17 @@ open class CopyOrderTrackingService(
                 return
             }
 
-        // 验证账户API凭证
-        if (account.apiKey == null || account.apiSecret == null || account.apiPassphrase == null) {
-            logger.warn("账户未配置API凭证，跳过创建卖出订单: accountId=${account.id}, copyTradingId=${copyTrading.id}")
+        // 验证账户是否启用
+        if (!account.isEnabled) {
             return
         }
 
-        // 验证账户是否启用
-        if (!account.isEnabled) {
+        // Bridge/Magic 账户无 CLOB API 凭证时，把卖出信号交给 Web Bridge 执行并记录结果。
+        if (!accountExecutionModeService.hasClobApiCredentials(account)) {
+            if (sendBridgeFallback(copyTrading, account, leaderSellTrade)) {
+                return
+            }
+            logger.warn("账户未配置API凭证，跳过创建卖出订单: accountId=${account.id}, copyTradingId=${copyTrading.id}")
             return
         }
 
@@ -1120,18 +1211,23 @@ open class CopyOrderTrackingService(
             return
         }
 
+        val apiKey = account.apiKey ?: run {
+            logger.warn("账户 API Key 为空，跳过原生 CLOB 卖出: accountId=${account.id}, copyTradingId=${copyTrading.id}")
+            return
+        }
+
         // 11. 构建订单请求
         // 跟单订单使用 FAK (Fill-And-Kill)，允许部分成交，未成交部分立即取消
         // 这样可以快速响应 Leader 的交易，避免订单长期挂单导致价格不匹配
         val orderRequest = NewOrderRequest(
             order = signedOrder,
-            owner = account.apiKey,
+            owner = apiKey,
             orderType = "FAK"  // Fill-And-Kill
         )
 
         // 12. 创建带认证的CLOB API客户端（使用解密后的凭证）
         val clobApi = retrofitFactory.createClobApi(
-            account.apiKey,
+            apiKey,
             apiSecret,
             apiPassphrase,
             account.walletAddress
@@ -1148,7 +1244,7 @@ open class CopyOrderTrackingService(
             side = "SELL",
             price = sellPrice.toString(),
             size = totalMatched.toString(),
-            owner = account.apiKey,
+            owner = apiKey,
             copyTradingId = copyTrading.id,
             tradeId = leaderSellTrade.id,
             signatureType = orderSigningService.getSignatureTypeForWalletType(account.walletType)

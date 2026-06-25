@@ -164,14 +164,19 @@ class LeaderResearchController(
         @RequestBody request: LeaderResearchPaperProcessRequest
     ): ResponseEntity<ApiResponse<LeaderResearchPaperProcessResponse>> {
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            val effectiveBatchSize = request.batchSize.coerceIn(1, LeaderPaperTradingService.MANUAL_MAX_PROCESSING_BATCH_SIZE)
             val result = paperTradingService.processPaperCandidates(
                 runId = null,
-                batchSize = request.batchSize.coerceIn(1, 5000)
+                batchSize = effectiveBatchSize
             )
             LeaderResearchPaperProcessResponse(
                 processed = result.processed,
                 filtered = result.filtered,
-                failed = result.failed
+                failed = result.failed,
+                requestedBatchSize = request.batchSize,
+                effectiveBatchSize = effectiveBatchSize,
+                maxBatchSize = LeaderPaperTradingService.MANUAL_MAX_PROCESSING_BATCH_SIZE,
+                truncated = request.batchSize != effectiveBatchSize
             )
         }
     }

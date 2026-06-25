@@ -68,6 +68,9 @@ const mapBridgeStatistics = (bridgeStats: BridgeTradeStatistics): StatisticsType
     maxLoss: bridgeStats.maxPositionLoss,
     openPositionCount: bridgeStats.openPositionCount,
     openPositionValue: bridgeStats.openPositionValue,
+    netCashflow: bridgeStats.netCashflow,
+    availableBalance: bridgeStats.availableBalance,
+    estimatedTotalAssets: bridgeStats.estimatedTotalAssets,
     attemptedOrders: bridgeStats.totalTrades,
     failedOrders: bridgeStats.failedTrades,
     pendingOrders: bridgeStats.pendingTrades
@@ -445,7 +448,9 @@ const Statistics: React.FC = () => {
           <Col xs={24} sm={12} md={8}>
             <Card>
               <Statistic
-                title={t('statistics.totalPnl') || '总盈亏'}
+                title={typeof stats?.openPositionCount === 'number'
+                  ? (t('statistics.openPositionPnl') || '当前持仓浮盈亏')
+                  : (t('statistics.totalPnl') || '总盈亏')}
                 value={formatUSDC(stats?.totalPnl || '0')}
                 prefix={<>{stats?.totalPnl && parseFloat(stats.totalPnl) >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />} $</>}
                 valueStyle={{ color: stats?.totalPnl && parseFloat(stats.totalPnl || '0') >= 0 ? '#3f8600' : '#cf1322' }}
@@ -497,6 +502,42 @@ const Statistics: React.FC = () => {
               />
             </Card>
           </Col>
+          {typeof stats?.netCashflow === 'string' && (
+            <Col xs={24} sm={12} md={8}>
+              <Card>
+                <Statistic
+                  title={t('statistics.netTradeOutflow') || '累计成交净流出'}
+                  value={formatUSDC(Math.abs(toNumber(stats.netCashflow)).toFixed(8))}
+                  prefix="$"
+                  loading={loading}
+                />
+              </Card>
+            </Col>
+          )}
+          {typeof stats?.availableBalance === 'string' && (
+            <Col xs={24} sm={12} md={8}>
+              <Card>
+                <Statistic
+                  title={t('statistics.availableBalance') || 'Bridge 可用余额'}
+                  value={formatUSDC(stats.availableBalance)}
+                  prefix="$"
+                  loading={loading}
+                />
+              </Card>
+            </Col>
+          )}
+          {typeof stats?.estimatedTotalAssets === 'string' && (
+            <Col xs={24} sm={12} md={8}>
+              <Card>
+                <Statistic
+                  title={t('statistics.estimatedTotalAssets') || 'Bridge 当前总资产估算'}
+                  value={formatUSDC(stats.estimatedTotalAssets)}
+                  prefix="$"
+                  loading={loading}
+                />
+              </Card>
+            </Col>
+          )}
           {typeof stats?.openPositionCount === 'number' && (
             <Col xs={24} sm={12} md={8}>
               <Card>

@@ -3055,3 +3055,198 @@
 - 当前 Bridge `last_error` 是余额不足：可用约 0.3000 USDC，固定跟单金额 1.0000，需要约 1.0500 含缓冲。
 - 若继续使用该 leader 跟单，需要先补充 Bridge 账户余额，或把 `copy_trading id=7` 的 fixed/min/max 金额下调到 Polymtrade 可接受的最小值；否则后续 BUY 会继续被余额预检拦截。
 - 下次部署 Bridge 时应避免在高频 leader 活跃窗口直接 stop/start；已加 webhook 重试，但正在执行中的浏览器交易仍可能被重启打断。
+
+## Iteration 60 Log
+
+**目标**：恢复并推进第二目标，继续扫链积累高质量 leader，优先 politics/finance，并把候选推进到 PAPER 观察和可试跟前置验证。
+
+**执行内容**：
+- 确认后端本地服务正在监听 `8000`，并通过本地 admin JWT 调用正式后端 API。
+- 恢复 loop goal 2：系统目标 `leader-discovery-goal-2` 已保持 active。
+- 先执行上一轮遗留 PAPER 评分：
+  - `paper/score` scoredCount=85。
+  - 起始状态：DISCOVERED=1321、PAPER=85、TRIAL_READY=0、COOLDOWN=5。
+- 发现 `paper/process batchSize=100` 仍会在 60 秒客户端超时；后台有进度但同步接口不适合大批量。
+- 改为小批量验证：`paper/process batchSize=10` 在 6.4 秒内完成，processed=5、filtered=5、failed=0。
+
+**扩源结果**：
+- Activity source 放宽 politics/finance 条件后真实导入：
+  - selectedTotal=205
+  - createdTotal=43
+  - updatedTotal=4
+  - politics created=18、updated=4
+  - finance created=25
+- Scanner pool 仅导入 politics/finance：
+  - selectedTotal=200
+  - createdTotal=196
+  - updatedTotal=4
+  - politics created=196、updated=4
+  - finance selected=0
+- Activity prescreen：
+  - scannedCount=1560
+  - scoredCount=239
+  - categoryCounts：politics=214、finance=25
+  - risk flags：small_sample=217、low_market_diversity=189、scanner_pool_unverified=196、low_average_size=23、tail_price_spray=6、low_safe_price_ratio=5、buy_only_no_exit=2。
+- PAPER 晋级：
+  - minScore=75
+  - selectedTotal=49
+  - promotedTotal=49
+  - politics promoted=9
+  - finance promoted=40
+
+**本轮结束状态**：
+- `leader_research_candidate`：
+  - DISCOVERED=1511
+  - PAPER=134
+  - TRIAL_READY=0
+  - COOLDOWN=5
+- `leader_activity_event` paper status：
+  - PROCESSED=1683
+  - FILTERED=817
+  - NEW=249260
+- `leader_paper_trade` 总数=2500。
+- PAPER 从 85 增加到 134；DISCOVERED 从 1321 增加到 1511。
+
+**当前 politics/finance 重点观察候选**：
+- politics candidate 617，wallet `0x9703676286b93c2eca71ca96e8757104519a69c2`，score=92.2388，paper trades=42，copyablePnL=23.7822，除 7 天观察期外已满足 TRIAL_READY 主要质量条件；但 evidence 混有 sports，需要继续分类复核。
+- politics candidate 1755，wallet `0x31c4578b25af36f34c8aa4cc85f0794bfbea622f`，score=83.7431，paper trades=10，copyablePnL=4.3690，样本刚过线，观察期不足。
+- politics candidate 786，wallet `0x30a28af9d4694b1967582a7915c6e048b7bc0b35`，score=76.5981，paper trades=22，copyablePnL=0.3047，回撤与过滤率良好，盈利边际偏薄。
+- finance candidate 340，wallet `0x0d2d845a6ff64e31e04a70afce8a573940767ff5`，score=91.6469，paper trades=41，copyablePnL=9.8380；但 evidence 混有 sports，需要分类复核后再考虑。
+- finance candidate 1740，wallet `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`，score=87.8093，paper trades=18，copyablePnL=6.7160，filteredRatio=0.10，当前 finance 纯 activity-source 候选里质量较好。
+- finance candidate 1742，wallet `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`，score=85.8934，paper trades=19，copyablePnL=10.2852，filteredRatio=0.05，已是当前重点研究 leader。
+- finance candidate 1699，wallet `0x7e31c4201a2a040e7c091d26407e4282ada2d45b`，score=85.4866，paper trades=15，copyablePnL=7.1534，unknownRatio=0.0947。
+- finance candidate 1704，wallet `0x8bbf889ddcbcc6919edc927b3bfa239c5b2cd9ad`，score=83.8789，paper trades=12，copyablePnL=6.7640，filteredRatio=0.40，仍需观察过滤率。
+
+**为什么还没有 TRIAL_READY**：
+- `LeaderPaperTradingService.isEligibleForTrialReady` 要求 PAPER 观察期至少 7 天。
+- 当前多数新增 PAPER session age 约 0.01-1.39 天，交易数、PnL、回撤、unknown exposure、filtered ratio 已有候选满足，但观察期未满足。
+- 因此本轮不能直接创建可试跟配置；继续 PAPER 观察是正确状态。
+
+**下一轮动作**：
+- 使用 `paper/process batchSize=10` 或 20 的稳定小批量循环，避免 100/500 这类同步超时。
+- 增加 paper process 性能优化任务：对市场估值/结算查询做缓存或异步化，并让接口返回 chunk progress。
+- 对高分但 evidence 混类的 politics/finance 候选做分类复核，尤其排除 sports 污染。
+- 继续扩 politics/finance 来源；scanner pool 这轮 finance 为 0，finance 主要依赖 activity-source，politics 则 scanner pool 有补给但 `scanner_pool_unverified` 风险较高。
+
+## Iteration 61 Log
+
+**目标**：继续推进第二目标，并修复上一轮暴露的 `paper/process` 手动批量过大导致 API 长时间阻塞的问题，让 PAPER 观察链路可持续循环。
+
+**问题定位**：
+- `LeaderPaperTradingService` 已有 chunk 处理，但默认 `processPaperCandidates()` batchSize 为 200，手动 API 又允许请求被 `coerceIn(1, 5000)` 放大。
+- 实测 `batchSize=100` 会 60 秒客户端超时；`batchSize=10` 稳定完成。
+- 跨事件缓存当前 market quote 虽可减少查询，但会改变同一市场 BUY/SELL 间的估值语义，可能影响 `CONFIRMED_ZERO` 与 unrealized PnL，因此本轮不采用缓存。
+
+**代码改动**：
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/service/copytrading/research/LeaderPaperTradingService.kt`
+  - 默认 `DEFAULT_PROCESSING_BATCH_SIZE` 调整为 20。
+  - 默认 `DEFAULT_PROCESSING_CHUNK_SIZE` 调整为 10。
+  - 新增 `MANUAL_MAX_PROCESSING_BATCH_SIZE=20`，作为手动 API 的硬上限。
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/dto/LeaderResearchDto.kt`
+  - `LeaderResearchPaperProcessRequest.batchSize` 默认值调整为 20。
+  - `LeaderResearchPaperProcessResponse` 增加 `requestedBatchSize`、`effectiveBatchSize`、`maxBatchSize`、`truncated`，让调用方知道是否被限流。
+- `backend/src/main/kotlin/com/wrbug/polymarketbot/controller/copytrading/research/LeaderResearchController.kt`
+  - `/paper/process` 使用 `MANUAL_MAX_PROCESSING_BATCH_SIZE` 压制手动批量。
+- `backend/src/test/kotlin/com/wrbug/polymarketbot/controller/copytrading/research/LeaderResearchControllerTest.kt`
+  - 覆盖传 `batchSize=100` 时实际按 20 处理并返回 `truncated=true`。
+
+**验证结果**：
+- `cd backend && JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew --no-daemon --no-parallel test --tests 'com.wrbug.polymarketbot.controller.copytrading.research.LeaderResearchControllerTest' --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperTradingServiceTest' --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchJobServiceTest' compileKotlin` 通过。
+- `cd backend && ... ./gradlew --no-daemon --no-parallel bootJar` 通过。
+- 后端已重启，当前 PID `76536` 监听 `8000`。
+- 正式 API 验证：
+  - 请求 `/api/copy-trading/leader-research/paper/process`，body `{"batchSize":100}`。
+  - 响应 `processed=15`、`filtered=5`、`failed=0`。
+  - 响应 `requestedBatchSize=100`、`effectiveBatchSize=20`、`maxBatchSize=20`、`truncated=true`。
+  - 请求耗时 16.3 秒，没有再 60 秒超时。
+- `paper/score` scoredCount=134。
+
+**本轮结束数据**：
+- `leader_research_candidate`：DISCOVERED=1511、PAPER=134、TRIAL_READY=0、COOLDOWN=5。
+- `leader_activity_event` paper status：PROCESSED=1931、FILTERED=879、NEW=250114。
+- `leader_paper_trade` 总数=2810。
+
+**当前优先观察候选更新**：
+- finance candidate 1742，wallet `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`，score=95.2304，paper trades=22，copyablePnL=12.0753，filteredRatio=0.0435。
+- politics candidate 617，wallet `0x9703676286b93c2eca71ca96e8757104519a69c2`，score=92.4348，paper trades=45，copyablePnL=25.4313，仍需 mixed sports evidence 复核。
+- finance candidate 1697，wallet `0x31cfb6c5368a727e2a504e2e0e5a18905a6c4de8`，score=88.8265，paper trades=11，copyablePnL=8.5152。
+- finance candidate 1699，wallet `0x7e31c4201a2a040e7c091d26407e4282ada2d45b`，score=85.9811，paper trades=18，copyablePnL=7.1534。
+- finance candidate 1740，wallet `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`，score=85.0872，paper trades=21，copyablePnL=5.2545。
+
+**下一轮动作**：
+- 用 `batchSize=20` 继续循环 paper process + paper score，直到本批高分 PAPER 的可跟单性样本更充分。
+- 对 candidate 617 和 340 这类 evidence 混入 sports 的高分候选做分类复核，避免偏离 politics/finance 80% 主目标。
+- 若 20 批量在更多轮次中仍超过 20 秒，应继续做异步 job/progress endpoint，而不是再放大同步 API。
+
+## Iteration 62 Log
+
+**目标**：继续推进第二目标，修复 politics/finance 高分候选里混入 sports/crypto evidence 的分类漏洞，避免错误 leader 进入主策略观察和后续试跟。
+
+**问题定位**：
+- 原 `LeaderResearchActivityScoringService` 和 `LeaderResearchPaperPromotionService` 使用 source evidence 中第一个 `category` 作为候选类别。
+- 对于 `scanner_pool:politics + scanner_pool:sports` 或 `scanner_pool:finance + scanner_pool:sports` 的候选，第一个标签会让系统把混类钱包当成 politics/finance。
+- 实例：
+  - candidate 617 `0x9703676286b93c2eca71ca96e8757104519a69c2`：politics evidence 后混入 sports evidence，paper PnL 很好但不能直接代表政治 leader。
+  - candidate 340 `0x0d2d845a6ff64e31e04a70afce8a573940767ff5`：finance evidence 后混入 sports evidence。
+
+**代码改动**：
+- 新增 `LeaderResearchCategoryEvidenceClassifier`：
+  - 解析 `sourceEvidence` 中所有 `category:` / `category=`。
+  - 统计分类出现次数。
+  - 若存在多个类别且主导占比低于 70%，标记 `mixed=true`。
+  - 输出主类别、分类计数、主导比例和 mixed 状态。
+- `LeaderResearchActivityScoringService`：
+  - 使用新 classifier 推断类别。
+  - reason 写入 `category_mix` 与 `category_dominance`。
+  - mixed evidence 增加 `mixed_category_evidence` risk flag。
+  - mixed evidence 分数 capped 到 60，避免进入高分 PAPER 晋级。
+- `LeaderResearchPaperPromotionService`：
+  - 使用新 classifier 推断类别。
+  - `mixed_category_evidence` 加入 hard exclude flags，避免新候选晋级 PAPER。
+- `LeaderResearchScoringService`：
+  - PAPER/copyability 评分时保留 `mixed_category_evidence`，避免已在 PAPER 的混类候选被 paper PnL 洗掉风险标签。
+- `LeaderResearchStateMachine`：
+  - PAPER -> TRIAL_READY 前先检查 hard risk。
+  - `mixed_category_evidence`、`unknown_category`、`tail_price_spray`、`buy_only_no_exit`、`sell_only_no_entry` 阻止自动 TRIAL_READY。
+
+**验证结果**：
+- `cd backend && JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew --no-daemon --no-parallel test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityScoringServiceTest' --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScoringServiceTest' --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchStateMachineTest' compileKotlin` 通过。
+- `cd backend && ... ./gradlew --no-daemon --no-parallel bootJar` 通过。
+- 后端已重启，当前 PID `3713` 监听 `8000`。
+- 正式 API 重评：
+  - `activity-score/run force=true`：scannedCount=1511、scoredCount=1511。
+  - riskFlagCounts 中新增/识别 `mixed_category_evidence=47`。
+  - `paper/score` scoredCount=134，随后晋级新 PAPER 后 scoredCount=175。
+
+**执行结果**：
+- `promote-paper dryRun` 在新规则下只选出 41 个无 hard risk politics/finance 候选。
+- 正式执行 `promote-paper`：
+  - selectedTotal=41
+  - promotedTotal=41
+  - politics promoted=1
+  - finance promoted=40
+- 小批量 paper process：
+  - `batchSize=20`
+  - processed=15
+  - filtered=5
+  - failed=0
+  - 请求耗时 15.35 秒。
+
+**本轮结束数据**：
+- `leader_research_candidate`：DISCOVERED=1470、PAPER=175、TRIAL_READY=0、COOLDOWN=5。
+- mixed category 分布：DISCOVERED=47、PAPER=15。
+- `leader_activity_event` paper status：PROCESSED=1946、FILTERED=884、NEW=251263。
+- `leader_paper_trade` 总数=2830。
+
+**当前 clean politics/finance 重点观察候选**：
+- politics candidate 1755，wallet `0x31c4578b25af36f34c8aa4cc85f0794bfbea622f`，score=80.2914，paper trades=10，copyablePnL=4.3690。
+- finance candidate 1742，wallet `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`，score=95.2348，paper trades=22，copyablePnL=12.0753。
+- finance candidate 1697，wallet `0x31cfb6c5368a727e2a504e2e0e5a18905a6c4de8`，score=88.8310，paper trades=11，copyablePnL=8.5152。
+- finance candidate 1699，wallet `0x7e31c4201a2a040e7c091d26407e4282ada2d45b`，score=85.9856，paper trades=18，copyablePnL=7.1534。
+- finance candidate 1740，wallet `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`，score=85.0917，paper trades=21，copyablePnL=5.2545。
+- finance candidate 1704，wallet `0x8bbf889ddcbcc6919edc927b3bfa239c5b2cd9ad`，score=83.4150，paper trades=12，copyablePnL=6.7640，但 filteredRatio=0.40，继续观察。
+
+**下一轮动作**：
+- 继续用 batchSize=20 循环 paper process + paper score，让新晋级 41 个 PAPER 产生真实模拟样本。
+- 针对 politics 来源不足问题继续扩源；本轮干净 politics 只晋级 1 个，说明 politics 高质量供给仍是瓶颈。
+- 考虑给前端 Leader Research 页面展示 `mixed_category_evidence` 的中文解释，避免用户误读被隔离的高分混类候选。

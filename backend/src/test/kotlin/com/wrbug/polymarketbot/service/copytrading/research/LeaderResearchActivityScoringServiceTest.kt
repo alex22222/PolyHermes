@@ -111,6 +111,40 @@ class LeaderResearchActivityScoringServiceTest {
         assertTrue(result.riskFlags.contains("sell_only_no_entry"))
     }
 
+    @Test
+    fun `compute caps mixed category evidence`() {
+        val candidate = LeaderResearchCandidate(
+            id = 4L,
+            normalizedWallet = "0x4444444444444444444444444444444444444444",
+            source = "SCANNER_POOL",
+            sourceEvidence = """
+                scanner_pool:1 | category:politics | discovery_score:90
+                scanner_pool:2 | category:sports | discovery_score:88
+            """.trimIndent()
+        )
+
+        val result = service.compute(
+            candidate,
+            metric(
+                totalEvents = 80,
+                distinctMarkets = 20,
+                buyEvents = 50,
+                sellEvents = 30,
+                usablePaperEvents = 75,
+                safePriceEvents = 70,
+                tailPriceEvents = 1,
+                avgAmount = BigDecimal("10.00"),
+                totalAmount = BigDecimal("800"),
+                lastEventTime = System.currentTimeMillis()
+            ),
+            runId = null
+        )
+
+        assertEquals("politics", result.category)
+        assertTrue(result.riskFlags.contains("mixed_category_evidence"))
+        assertTrue(result.totalScore <= BigDecimal("60"))
+    }
+
     private fun metric(
         totalEvents: Long,
         distinctMarkets: Long,

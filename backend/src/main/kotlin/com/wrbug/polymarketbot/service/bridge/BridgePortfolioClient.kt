@@ -17,7 +17,8 @@ import java.time.Duration
  */
 @Component
 class BridgePortfolioClient(
-    @Value("\${bridge.portfolio.url:http://localhost:8080/portfolio}") private val portfolioUrl: String
+    @Value("\${bridge.portfolio.url:http://localhost:8080/portfolio}") private val portfolioUrl: String,
+    @Value("\${bridge.balance.url:http://localhost:8080/balance}") private val balanceUrl: String
 ) {
 
     private val logger = LoggerFactory.getLogger(BridgePortfolioClient::class.java)
@@ -60,6 +61,33 @@ class BridgePortfolioClient(
         }
     }
 
+    fun fetchBalance(): BridgeBalanceResponse? {
+        return try {
+            val httpRequest = HttpRequest.newBuilder()
+                .uri(URI.create(balanceUrl))
+                .GET()
+                .timeout(Duration.ofSeconds(30))
+                .build()
+
+            val response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString())
+            if (response.statusCode() in 200..299) {
+                val body = response.body()
+                try {
+                    gson.fromJson(body, BridgeBalanceResponse::class.java)
+                } catch (e: Exception) {
+                    logger.warn("解析 Bridge /balance 响应失败: ${e.message}, body=$body")
+                    null
+                }
+            } else {
+                logger.warn("Bridge /balance 返回非 2xx: status=${response.statusCode()}, body=${response.body()}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("调用 Bridge /balance 失败: ${e.message}", e)
+            null
+        }
+    }
+
     data class BridgePortfolioResponse(
         @SerializedName("positions") val positions: List<BridgePortfolioPosition> = emptyList(),
         @SerializedName("synced_at") val syncedAt: Long? = null
@@ -76,5 +104,10 @@ class BridgePortfolioClient(
         @SerializedName("conditionId") val conditionId: String? = null,
         @SerializedName("marketSlug") val marketSlug: String? = null,
         @SerializedName("eventSlug") val eventSlug: String? = null
+    )
+
+    data class BridgeBalanceResponse(
+        @SerializedName("available_balance") val availableBalance: Double? = null,
+        @SerializedName("synced_at") val syncedAt: Long? = null
     )
 }

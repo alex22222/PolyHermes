@@ -15,6 +15,7 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Bridge webhook 客户端
@@ -29,6 +30,7 @@ class BridgeWebhookClient(
 
     private val logger = LoggerFactory.getLogger(BridgeWebhookClient::class.java)
     private val gson = Gson()
+    private val acceptedTxHashes = ConcurrentHashMap.newKeySet<String>()
 
     companion object {
         private val RETRY_DELAYS_MS = listOf(0L, 2_000L, 5_000L, 10_000L)
@@ -41,14 +43,22 @@ class BridgeWebhookClient(
             .build()
     }
 
+    fun isConfigured(): Boolean = webhookUrl.isNotBlank()
+
     /**
      * 异步发送 Leader 交易信号到 Bridge，并记录 webhook 调用日志。
      * 整个记录和发送过程在后台协程中完成，不影响主交易检测流程。
      */
-    fun sendLeaderTrade(signal: BridgeSignal) {
+    fun sendLeaderTrade(signal: BridgeSignal): Boolean {
         if (webhookUrl.isBlank()) {
-            logger.debug("Bridge webhook URL is empty, skipping signal send")
-            return
+            logger.warn("Bridge webhook URL is empty, skipping signal send: txHash=${signal.transactionHash}")
+            return false
+        }
+
+        val txHash = signal.transactionHash.trim()
+        if (txHash.isNotBlank() && !acceptedTxHashes.add(txHash.lowercase())) {
+            logger.debug("Bridge webhook duplicate skipped in memory: txHash=$txHash")
+            return true
         }
 
         val requestBody = gson.toJson(signal)
@@ -56,6 +66,18 @@ class BridgeWebhookClient(
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
             var log: BridgeWebhookLog? = null
             try {
+                val duplicateInDatabase = if (txHash.isNotBlank()) {
+                    withContext(Dispatchers.IO) {
+                        bridgeWebhookLogRepository.findFirstByTransactionHashIgnoreCase(txHash) != null
+                    }
+                } else {
+                    false
+                }
+                if (duplicateInDatabase) {
+                    logger.debug("Bridge webhook duplicate skipped by database: txHash=$txHash")
+                    return@launch
+                }
+
                 withContext(Dispatchers.IO) {
                     log = bridgeWebhookLogRepository.save(
                         BridgeWebhookLog(
@@ -150,6 +172,7 @@ class BridgeWebhookClient(
                 logger.error("Failed to send bridge webhook for txHash=${signal.transactionHash}: ${e.message}")
             }
         }
+        return true
     }
 
     /**

@@ -45,7 +45,7 @@ class LeaderResearchScoringService(
                 score = savedScore.totalScore,
                 scoreVersion = savedScore.scoreVersion,
                 reason = savedScore.reason,
-                riskFlags = buildRiskFlags(session),
+                riskFlags = buildRiskFlags(candidate, session),
                 lastScoredAt = now,
                 updatedAt = now
             )
@@ -131,9 +131,15 @@ class LeaderResearchScoringService(
         )
     }
 
-    private fun buildRiskFlags(session: LeaderPaperSession?): String? {
-        if (session == null) return "no_paper_session"
+    private fun buildRiskFlags(candidate: LeaderResearchCandidate, session: LeaderPaperSession?): String? {
         val flags = mutableListOf<String>()
+        val categoryEvidence = LeaderResearchCategoryEvidenceClassifier.classify(candidate.sourceEvidence, candidate.source)
+        if (categoryEvidence.mixed) flags += "mixed_category_evidence"
+        if (categoryEvidence.category == "unknown") flags += "unknown_category"
+        if (session == null) {
+            flags += "no_paper_session"
+            return flags.distinct().joinToString(",")
+        }
         if (session.maxDrawdown < BigDecimal("-15")) flags += "drawdown_gt_15"
         if (session.filteredRatio >= BigDecimal("0.50")) flags += "high_filtered_ratio"
         if (isTailPriceSpray(session)) flags += "tail_price_spray"

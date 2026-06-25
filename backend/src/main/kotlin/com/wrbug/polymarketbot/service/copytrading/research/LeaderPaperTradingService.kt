@@ -82,13 +82,13 @@ class LeaderPaperTradingService(
         return session
     }
 
-    fun processPaperCandidates(runId: Long? = null, batchSize: Int = 200): LeaderPaperProcessingResult {
+    fun processPaperCandidates(runId: Long? = null, batchSize: Int = DEFAULT_PROCESSING_BATCH_SIZE): LeaderPaperProcessingResult {
         return processPaperCandidatesInChunks(runId = runId, batchSize = batchSize)
     }
 
     fun processPaperCandidatesInChunks(
         runId: Long? = null,
-        batchSize: Int = 200,
+        batchSize: Int = DEFAULT_PROCESSING_BATCH_SIZE,
         chunkSize: Int = DEFAULT_PROCESSING_CHUNK_SIZE
     ): LeaderPaperProcessingResult {
         val targetTotal = batchSize.coerceAtLeast(1)
@@ -111,7 +111,7 @@ class LeaderPaperTradingService(
         return total
     }
 
-    fun processPaperCandidatesChunk(runId: Long? = null, batchSize: Int = 200): LeaderPaperProcessingResult {
+    fun processPaperCandidatesChunk(runId: Long? = null, batchSize: Int = DEFAULT_PROCESSING_BATCH_SIZE): LeaderPaperProcessingResult {
         val paperCandidates = candidateRepository.findByResearchStateIn(
             listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
         )
@@ -596,6 +596,8 @@ class LeaderPaperTradingService(
         private const val PAPER_MIN_AGE_MS = 7L * 24 * 60 * 60 * 1000
         private const val MAX_PROCESSING_ATTEMPTS = 3
         private const val FAIR_MAX_EVENTS_PER_WALLET = 25
-        const val DEFAULT_PROCESSING_CHUNK_SIZE = 100
+        const val DEFAULT_PROCESSING_BATCH_SIZE = 20
+        const val DEFAULT_PROCESSING_CHUNK_SIZE = 10
+        const val MANUAL_MAX_PROCESSING_BATCH_SIZE = 20
     }
 }

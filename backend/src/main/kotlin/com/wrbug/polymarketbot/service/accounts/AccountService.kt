@@ -47,7 +47,8 @@ class AccountService(
     private val telegramNotificationService: TelegramNotificationService? = null,  // 可选，避免循环依赖
     private val relayClientService: RelayClientService,
     private val jsonUtils: JsonUtils,
-    private val bridgePositionService: BridgePositionService
+    private val bridgePositionService: BridgePositionService,
+    private val accountExecutionModeService: AccountExecutionModeService
 ) {
 
     private val logger = LoggerFactory.getLogger(AccountService::class.java)
@@ -473,7 +474,8 @@ class AccountService(
                 return Result.success(
                     AccountSetupStatusDto(
                         proxyDeployed = false,
-                        tradingEnabled = account.apiKey != null && account.apiSecret != null && account.apiPassphrase != null,
+                        tradingEnabled = accountExecutionModeService.hasClobApiCredentials(account) ||
+                            accountExecutionModeService.canUseBridgeExecution(account),
                         tokensApproved = false,
                         approvalDetails = null,
                         error = "代理地址为空"
@@ -484,10 +486,9 @@ class AccountService(
             // 步骤1：代理钱包是否已部署
             val proxyDeployed = blockchainService.isProxyDeployed(proxyAddress)
 
-            // 步骤2：交易是否已启用（API 凭证是否已配置）
-            val tradingEnabled = account.apiKey != null &&
-                    account.apiSecret != null &&
-                    account.apiPassphrase != null
+            // 步骤2：交易执行是否已启用（原生 CLOB 或 Web Bridge 任一路径可执行）
+            val tradingEnabled = accountExecutionModeService.hasClobApiCredentials(account) ||
+                accountExecutionModeService.canUseBridgeExecution(account)
 
             // 步骤3：代币是否已批准（USDC 对各 spender 的 allowance，默认无限授权）
             val approvalDetails = mutableMapOf<String, String>()
@@ -2030,5 +2031,4 @@ class AccountService(
         return blockchainService.queryUsdceBalance(account.proxyAddress)
     }
 }
-
 

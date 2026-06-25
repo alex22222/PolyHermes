@@ -1,7 +1,9 @@
 package com.wrbug.polymarketbot.service.copytrading.research
 
+import com.wrbug.polymarketbot.entity.LeaderPaperSession
 import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
 import com.wrbug.polymarketbot.enums.LeaderResearchState
+import java.math.BigDecimal
 import com.wrbug.polymarketbot.repository.LeaderPaperSessionRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -71,6 +73,37 @@ class LeaderResearchStateMachineTest {
 
         assertEquals(LeaderResearchState.DISCOVERED, result.researchState)
         Mockito.verify(poolMappingService, Mockito.never()).syncCandidate(anyCandidate())
+    }
+
+    @Test
+    fun `mixed category evidence blocks trial ready transition`() {
+        val now = System.currentTimeMillis()
+        val candidate = LeaderResearchCandidate(
+            id = 1L,
+            normalizedWallet = "0x1111111111111111111111111111111111111111",
+            researchState = LeaderResearchState.PAPER,
+            lastSourceSeenAt = now,
+            riskFlags = "mixed_category_evidence"
+        )
+        val session = LeaderPaperSession(
+            id = 10L,
+            candidateId = 1L,
+            startedAt = now - 8L * 24 * 60 * 60 * 1000,
+            tradeCount = 12,
+            filteredCount = 0,
+            openExposure = BigDecimal("10"),
+            copyablePnl = BigDecimal("5"),
+            maxDrawdown = BigDecimal.ZERO,
+            unknownValuationExposure = BigDecimal.ZERO,
+            filteredRatio = BigDecimal.ZERO
+        )
+        Mockito.`when`(paperSessionRepository.findTopByCandidateIdOrderByStartedAtDesc(1L)).thenReturn(session)
+        Mockito.`when`(poolMappingService.syncCandidate(anyCandidate())).thenAnswer { it.arguments[0] }
+
+        val result = stateMachine.advance(candidate, runId = 99L)
+
+        assertEquals(LeaderResearchState.PAPER, result.researchState)
+        Mockito.verify(candidateRepository, Mockito.never()).save(anyCandidate())
     }
 
     private fun anyCandidate(): LeaderResearchCandidate {

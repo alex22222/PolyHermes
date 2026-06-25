@@ -1,10 +1,12 @@
 package com.wrbug.polymarketbot.controller.copytrading.research
 
 import com.wrbug.polymarketbot.dto.LeaderResearchApprovalRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchRunRequest
 import com.wrbug.polymarketbot.entity.LeaderResearchRun
 import com.wrbug.polymarketbot.enums.LeaderResearchTriggerType
 import com.wrbug.polymarketbot.enums.ErrorCode
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperProcessingResult
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalConfirmRequiredException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityScoringService
@@ -112,6 +114,23 @@ class LeaderResearchControllerTest {
         val response = controller.detail(LeaderResearchDetailRequest(candidateId = 0))
 
         assertEquals(ErrorCode.PARAM_INVALID.code, response.body!!.code)
+    }
+
+    @Test
+    fun `paper process caps oversized manual batch and reports effective size`() {
+        Mockito.`when`(paperTradingService.processPaperCandidates(runId = null, batchSize = 20))
+            .thenReturn(LeaderPaperProcessingResult(processed = 7, filtered = 3, failed = 0))
+
+        val response = controller.processPaper(LeaderResearchPaperProcessRequest(batchSize = 100))
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(7, response.body!!.data!!.processed)
+        assertEquals(3, response.body!!.data!!.filtered)
+        assertEquals(100, response.body!!.data!!.requestedBatchSize)
+        assertEquals(20, response.body!!.data!!.effectiveBatchSize)
+        assertEquals(20, response.body!!.data!!.maxBatchSize)
+        assertEquals(true, response.body!!.data!!.truncated)
+        Mockito.verify(paperTradingService).processPaperCandidates(runId = null, batchSize = 20)
     }
 
     @Test

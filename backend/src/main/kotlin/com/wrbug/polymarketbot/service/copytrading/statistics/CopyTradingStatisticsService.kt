@@ -31,6 +31,9 @@ class CopyTradingStatisticsService(
     private val accountRepository: AccountRepository,
     private val leaderRepository: LeaderRepository,
     private val filteredOrderRepository: FilteredOrderRepository,
+    private val bridgeTradeRecordRepository: BridgeTradeRecordRepository,
+    private val bridgePositionSnapshotRepository: BridgePositionSnapshotRepository,
+    private val bridgeWebhookLogRepository: BridgeWebhookLogRepository,
     private val marketService: com.wrbug.polymarketbot.service.common.MarketService,
     private val blockchainService: BlockchainService
 ) {
@@ -71,7 +74,14 @@ class CopyTradingStatisticsService(
             } else {
                 emptyList()
             }
-            val statistics = CopyTradingPnlCalculator.calculate(buyOrders, sellRecords, matchDetails, quotes)
+            // 若系统内没有 copy_order_tracking 记录（常见于 Bridge/Magic 钱包），
+            // 尝试从 bridge_trade_record + bridge_position_snapshot 推导统计口径。
+            val statistics = if (buyOrders.isEmpty() && sellRecords.isEmpty() && matchDetails.isEmpty()) {
+                calculateFromBridgeRecords(copyTradingId)
+                    ?: CopyTradingPnlCalculator.calculate(buyOrders, sellRecords, matchDetails, quotes)
+            } else {
+                CopyTradingPnlCalculator.calculate(buyOrders, sellRecords, matchDetails, quotes)
+            }
             val filteredOrderCount = filteredOrderRepository.countByCopyTradingId(copyTradingId)
             val diagnosis = CopyTradingRiskDiagnosisService.buildDiagnosis(
                 copyTrading = copyTrading,
@@ -118,6 +128,133 @@ class CopyTradingStatisticsService(
         } catch (e: Exception) {
             logger.error("获取统计信息失败: copyTradingId=$copyTradingId", e)
             Result.failure(e)
+        }
+    }
+    
+    /**
+     * 当 copy_order_tracking 为空时，尝试从 bridge_trade_record + bridge_position_snapshot
+     * 推导该 copyTrading 的统计口径。适用于 Bridge / Magic 钱包等不经过本地订单跟踪的执行路径。
+     */
+    private fun calculateFromBridgeRecords(copyTradingId: Long): CopyTradingPnlStatistics? {
+        try {
+            val copyTrading = copyTradingRepository.findById(copyTradingId).orElse(null) ?: return null
+            val leader = leaderRepository.findById(copyTrading.leaderId).orElse(null) ?: return null
+            val conditionIds = bridgeWebhookLogRepository
+                .findDistinctConditionIdsByLeaderAddress(leader.leaderAddress)
+                .filter { !it.isNullOrBlank() }
+            if (conditionIds.isEmpty()) {
+                return null
+            }
+            
+            val records = bridgeTradeRecordRepository.findByBridgeIdAndMarketIdIn(
+                "polymtrade-bridge",
+                conditionIds,
+                Pageable.unpaged()
+            ).content
+            
+            val successRecords = records.filter { it.status.equals("SUCCESS", ignoreCase = true) }
+            val buyRecords = successRecords.filter { it.side.equals("BUY", ignoreCase = true) }
+            val sellRecords = successRecords.filter { it.side.equals("SELL", ignoreCase = true) }
+            
+            if (buyRecords.isEmpty() && sellRecords.isEmpty()) {
+                return null
+            }
+            
+            val totalBuyQuantity = buyRecords.sumOf { it.quantity }
+            val totalBuyAmount = buyRecords.sumOf { it.amount }
+            val totalBuyOrders = buyRecords.size.toLong()
+            val avgBuyPrice = if (totalBuyQuantity.gt(BigDecimal.ZERO)) {
+                totalBuyAmount.div(totalBuyQuantity)
+            } else {
+                BigDecimal.ZERO
+            }
+            
+            val totalSellQuantity = sellRecords.sumOf { it.quantity }
+            val totalSellAmount = sellRecords.sumOf { it.amount }
+            val totalSellOrders = sellRecords.size.toLong()
+            
+            data class PositionKey(val marketId: String, val side: String)
+            val buyByKey = buyRecords.groupBy { PositionKey(it.marketId ?: "", it.side) }
+            val sellByKey = sellRecords.groupBy { PositionKey(it.marketId ?: "", it.side) }
+            val allKeys = (buyByKey.keys + sellByKey.keys).filter { it.marketId.isNotBlank() }
+            
+            val snapshots = bridgePositionSnapshotRepository.findByBridgeId("polymtrade-bridge")
+                .filter { it.marketId in conditionIds }
+            
+            var totalRealizedPnl = BigDecimal.ZERO
+            var currentPositionQuantity = BigDecimal.ZERO
+            var currentPositionCost = BigDecimal.ZERO
+            var currentPositionValue = BigDecimal.ZERO
+            var zeroValuePositionCost = BigDecimal.ZERO
+            var confirmedZeroValuePositionCost = BigDecimal.ZERO
+            val quoteStatuses = mutableListOf<PositionQuoteStatus>()
+            
+            allKeys.forEach { key ->
+                val buys = buyByKey[key] ?: emptyList()
+                val sells = sellByKey[key] ?: emptyList()
+                val keyBuyQty = buys.sumOf { it.quantity }
+                val keyBuyAmount = buys.sumOf { it.amount }
+                val keyAvgBuyPrice = if (keyBuyQty.gt(BigDecimal.ZERO)) {
+                    keyBuyAmount.div(keyBuyQty)
+                } else {
+                    BigDecimal.ZERO
+                }
+                val keySellQty = sells.sumOf { it.quantity }
+                val keySellAmount = sells.sumOf { it.amount }
+                
+                // 已实现盈亏按平均买入成本近似计算
+                val realizedQty = keySellQty.min(keyBuyQty)
+                val realizedPnl = keySellAmount.subtract(realizedQty.multi(keyAvgBuyPrice))
+                totalRealizedPnl = totalRealizedPnl.add(realizedPnl)
+                
+                val openQty = keyBuyQty.subtract(keySellQty).max(BigDecimal.ZERO)
+                if (openQty.gt(BigDecimal.ZERO)) {
+                    val cost = openQty.multi(keyAvgBuyPrice)
+                    val snapshot = snapshots.firstOrNull {
+                        it.marketId == key.marketId && it.side.equals(key.side, ignoreCase = true)
+                    }
+                    val value = snapshot?.currentValue ?: BigDecimal.ZERO
+                    currentPositionQuantity = currentPositionQuantity.add(openQty)
+                    currentPositionCost = currentPositionCost.add(cost)
+                    currentPositionValue = currentPositionValue.add(value)
+                    if (value.lte(BigDecimal.ZERO)) {
+                        zeroValuePositionCost = zeroValuePositionCost.add(cost)
+                        confirmedZeroValuePositionCost = confirmedZeroValuePositionCost.add(cost)
+                    }
+                    quoteStatuses.add(if (snapshot != null) PositionQuoteStatus.AVAILABLE else PositionQuoteStatus.NO_MATCH)
+                }
+            }
+            
+            val totalUnrealizedPnl = currentPositionValue.subtract(currentPositionCost)
+            val totalPnl = totalRealizedPnl.add(totalUnrealizedPnl)
+            val totalPnlPercent = if (totalBuyAmount.gt(BigDecimal.ZERO)) {
+                totalPnl.div(totalBuyAmount).multi(100).setScale(2, RoundingMode.HALF_UP)
+            } else {
+                BigDecimal.ZERO.setScale(2)
+            }
+            
+            return CopyTradingPnlStatistics(
+                totalBuyQuantity = totalBuyQuantity,
+                totalBuyOrders = totalBuyOrders,
+                totalBuyAmount = totalBuyAmount,
+                avgBuyPrice = avgBuyPrice,
+                totalSellQuantity = totalSellQuantity,
+                totalSellOrders = totalSellOrders,
+                totalSellAmount = totalSellAmount,
+                currentPositionQuantity = currentPositionQuantity,
+                currentPositionCost = currentPositionCost,
+                currentPositionValue = currentPositionValue,
+                zeroValuePositionCost = zeroValuePositionCost,
+                confirmedZeroValuePositionCost = confirmedZeroValuePositionCost,
+                quoteStatusSummary = QuoteStatusSummary.from(quoteStatuses),
+                totalRealizedPnl = totalRealizedPnl,
+                totalUnrealizedPnl = totalUnrealizedPnl,
+                totalPnl = totalPnl,
+                totalPnlPercent = totalPnlPercent
+            )
+        } catch (e: Exception) {
+            logger.warn("从 Bridge 记录推导跟单统计失败: copyTradingId=$copyTradingId", e)
+            return null
         }
     }
     

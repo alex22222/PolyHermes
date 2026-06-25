@@ -153,6 +153,61 @@ class BridgeTradeRecorder:
             logger.warning(f"Failed to check prior short-cycle BUY: {e}")
             return False
 
+    def has_any_prior_short_cycle_buy(
+        self,
+        market_id: str,
+        market_slug: Optional[str],
+    ) -> bool:
+        """Return True if any leader already has an active/success BUY on the market."""
+        sql = """
+        SELECT 1 FROM bridge_trade_record
+        WHERE bridge_id = %s
+          AND side = 'BUY'
+          AND status IN ('PENDING', 'SUCCESS')
+          AND (
+            market_id = %s
+            OR (%s IS NOT NULL AND raw_payload LIKE %s)
+          )
+        LIMIT 1
+        """
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            self.bridge_id,
+                            market_id,
+                            market_slug,
+                            f'%"{market_slug}"%' if market_slug else None,
+                        ),
+                    )
+                    return cur.fetchone() is not None
+        except Exception as e:
+            logger.warning(f"Failed to check any prior short-cycle BUY: {e}")
+            return False
+
+    def btc_5m_success_buy_usage_since(self, since_ms: int) -> tuple[int, Decimal]:
+        """Return count and amount of successful BTC 5M BUYs since a timestamp."""
+        sql = """
+        SELECT COUNT(*) AS buy_count, COALESCE(SUM(amount), 0) AS buy_amount
+        FROM bridge_trade_record
+        WHERE bridge_id = %s
+          AND side = 'BUY'
+          AND status = 'SUCCESS'
+          AND created_at >= %s
+          AND raw_payload LIKE %s
+        """
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (self.bridge_id, since_ms, '%btc-updown-5m-%'))
+                    row = cur.fetchone() or {}
+                    return int(row.get("buy_count") or 0), Decimal(str(row.get("buy_amount") or "0"))
+        except Exception as e:
+            logger.warning(f"Failed to check BTC 5M daily BUY usage: {e}")
+            return 0, Decimal("0")
+
     def record_result(
         self,
         external_trade_id: Optional[str],

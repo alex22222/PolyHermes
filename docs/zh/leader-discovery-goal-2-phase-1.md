@@ -587,3 +587,164 @@ discover -> normalize -> classify -> analyze -> score -> paper -> promote/reject
 
 5. 评分解释和风险标签页面展示：
    - 在 Leader 管理/Research 页面展示 `sell_only_no_entry`、`buy_only_no_exit`、`tail_price_spray`、`scanner_pool_unverified` 等标签解释。
+
+## 2026-06-25 恢复目标执行记录
+
+本轮恢复第二目标后，目标状态继续保持 active，并执行了一轮 politics/finance 优先的扩源、预筛评分、PAPER 晋级和小批量 paper 处理。
+
+### 本轮增量
+
+- Activity source 导入 politics/finance：
+  - selectedTotal=205
+  - createdTotal=43
+  - updatedTotal=4
+  - politics created=18、updated=4
+  - finance created=25
+- Scanner pool 导入 politics/finance：
+  - selectedTotal=200
+  - createdTotal=196
+  - updatedTotal=4
+  - politics created=196、updated=4
+  - finance selected=0
+- Activity prescreen：
+  - scannedCount=1560
+  - scoredCount=239
+  - politics=214、finance=25
+- 晋级 PAPER：
+  - minScore=75
+  - promotedTotal=49
+  - politics promoted=9
+  - finance promoted=40
+
+### 当前数据状态
+
+- DISCOVERED=1511
+- PAPER=134
+- TRIAL_READY=0
+- COOLDOWN=5
+- activePaperSessions=134
+- paper trades=2500
+- paper event status：PROCESSED=1683、FILTERED=817、NEW=249260
+
+### 当前优先观察候选
+
+- politics `0x9703676286b93c2eca71ca96e8757104519a69c2`：score=92.2388，paper trades=42，copyablePnL=23.7822，需复核 mixed sports evidence。
+- politics `0x31c4578b25af36f34c8aa4cc85f0794bfbea622f`：score=83.7431，paper trades=10，copyablePnL=4.3690，样本刚过线。
+- finance `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`：score=87.8093，paper trades=18，copyablePnL=6.7160，filteredRatio=0.10。
+- finance `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`：score=85.8934，paper trades=19，copyablePnL=10.2852，filteredRatio=0.05。
+- finance `0x7e31c4201a2a040e7c091d26407e4282ada2d45b`：score=85.4866，paper trades=15，copyablePnL=7.1534，unknownRatio=0.0947。
+
+### 本轮判断
+
+当前仍没有 TRIAL_READY，不是候选质量完全不足，而是 PAPER 到 TRIAL_READY 的硬门槛要求观察期至少 7 天。多位 politics/finance 候选已经满足交易数、PnL、回撤、unknown exposure、filtered ratio 等条件，但 session age 只有约 0.01-1.39 天，因此仍应停留在 PAPER。
+
+`paper/process batchSize=100` 会 60 秒客户端超时；`batchSize=10` 可稳定完成，6.4 秒处理 10 条事件。下一轮继续使用 10 或 20 的小批量循环，同时将 paper process 的估值查询缓存或异步化列为工程优化点。
+
+## 2026-06-25 PAPER 处理批量保护
+
+为了让第二目标可以稳定循环执行，本轮把 `paper/process` 从“调用方可请求大批量同步处理”调整为“手动 API 有硬上限并返回实际处理批量”。
+
+### 改动
+
+- `LeaderPaperTradingService.DEFAULT_PROCESSING_BATCH_SIZE=20`
+- `LeaderPaperTradingService.DEFAULT_PROCESSING_CHUNK_SIZE=10`
+- `LeaderPaperTradingService.MANUAL_MAX_PROCESSING_BATCH_SIZE=20`
+- `/api/copy-trading/leader-research/paper/process` 会把手动请求的 batchSize 压到 1-20。
+- 响应新增：
+  - `requestedBatchSize`
+  - `effectiveBatchSize`
+  - `maxBatchSize`
+  - `truncated`
+
+### 验证
+
+请求：
+
+```json
+{"batchSize":100}
+```
+
+响应确认：
+
+```json
+{
+  "processed": 15,
+  "filtered": 5,
+  "failed": 0,
+  "requestedBatchSize": 100,
+  "effectiveBatchSize": 20,
+  "maxBatchSize": 20,
+  "truncated": true
+}
+```
+
+本次请求耗时 16.3 秒，未再出现 60 秒客户端超时。
+
+### 当前观察进展
+
+- DISCOVERED=1511
+- PAPER=134
+- TRIAL_READY=0
+- paper trades=2810
+- paper event status：PROCESSED=1931、FILTERED=879、NEW=250114
+
+当前最值得继续观察的 finance 候选：
+
+- `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`：score=95.2304，paper trades=22，copyablePnL=12.0753，filteredRatio=0.0435。
+- `0x31cfb6c5368a727e2a504e2e0e5a18905a6c4de8`：score=88.8265，paper trades=11，copyablePnL=8.5152。
+- `0x7e31c4201a2a040e7c091d26407e4282ada2d45b`：score=85.9811，paper trades=18，copyablePnL=7.1534。
+- `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`：score=85.0872，paper trades=21，copyablePnL=5.2545。
+
+当前最值得继续观察的 politics 候选：
+
+- `0x9703676286b93c2eca71ca96e8757104519a69c2`：score=92.4348，paper trades=45，copyablePnL=25.4313；但 evidence 混入 sports，必须先做分类复核。
+
+## 2026-06-25 分类复核与混类隔离
+
+本轮修复了高分候选里 politics/finance 与 sports/crypto evidence 混杂的问题。此前系统会读取 `sourceEvidence` 中第一个 `category` 作为候选类别，导致部分 sports 热门市场钱包被误标为 politics 或 finance。
+
+### 新规则
+
+- 解析 `sourceEvidence` 中全部 `category:` / `category=`。
+- 统计各类别出现次数。
+- 若存在多个类别，且主导类别占比低于 70%，标记为 `mixed_category_evidence`。
+- `mixed_category_evidence`：
+  - activity prescreen 分数 capped 到 60。
+  - 禁止新候选自动晋级 PAPER。
+  - 已进入 PAPER 的候选会保留 risk flag。
+  - 禁止 PAPER 自动进入 TRIAL_READY。
+
+### 本轮效果
+
+- 重评 DISCOVERED/CANDIDATE：scannedCount=1511、scoredCount=1511。
+- 识别 mixed category evidence：47 个。
+- PAPER 中已有 mixed 候选：15 个。
+- candidate 617 `0x9703676286b93c2eca71ca96e8757104519a69c2` 已标记 `mixed_category_evidence`。
+- candidate 340 `0x0d2d845a6ff64e31e04a70afce8a573940767ff5` 已标记 `mixed_category_evidence`。
+
+### 新增 PAPER
+
+在新规则过滤后，本轮正式晋级 PAPER：
+
+- selectedTotal=41
+- promotedTotal=41
+- politics promoted=1
+- finance promoted=40
+
+当前状态：
+
+- DISCOVERED=1470
+- PAPER=175
+- TRIAL_READY=0
+- COOLDOWN=5
+- paper trades=2830
+
+当前 clean politics/finance 优先观察：
+
+- politics `0x31c4578b25af36f34c8aa4cc85f0794bfbea622f`：score=80.2914，paper trades=10，copyablePnL=4.3690。
+- finance `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`：score=95.2348，paper trades=22，copyablePnL=12.0753。
+- finance `0x31cfb6c5368a727e2a504e2e0e5a18905a6c4de8`：score=88.8310，paper trades=11，copyablePnL=8.5152。
+- finance `0x7e31c4201a2a040e7c091d26407e4282ada2d45b`：score=85.9856，paper trades=18，copyablePnL=7.1534。
+- finance `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`：score=85.0917，paper trades=21，copyablePnL=5.2545。
+
+下一轮继续补 politics 来源。本轮干净 politics 只晋级 1 个，说明 politics 高质量候选供给仍是主瓶颈。

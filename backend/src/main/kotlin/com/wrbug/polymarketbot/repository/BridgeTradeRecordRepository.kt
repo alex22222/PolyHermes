@@ -22,6 +22,8 @@ interface BridgeTradeRecordRepository : JpaRepository<BridgeTradeRecord, Long> {
 
     fun findByBridgeIdAndStatus(bridgeId: String, status: String, pageable: Pageable): Page<BridgeTradeRecord>
 
+    fun findByStatus(status: String, pageable: Pageable): Page<BridgeTradeRecord>
+
     fun findByExternalTradeId(externalTradeId: String): BridgeTradeRecord?
 
     /**

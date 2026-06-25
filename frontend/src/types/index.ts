@@ -858,6 +858,9 @@ export interface Statistics {
   maxLoss: string
   openPositionCount?: number
   openPositionValue?: string
+  netCashflow?: string
+  availableBalance?: string
+  estimatedTotalAssets?: string
   attemptedOrders?: number
   failedOrders?: number
   pendingOrders?: number
@@ -1872,6 +1875,8 @@ export interface BridgeTradeStatistics {
   successSellAmount: string
   totalFees: string
   netCashflow: string
+  availableBalance?: string
+  estimatedTotalAssets?: string
   totalPnl: string
   successRate: string
   avgSuccessTradeAmount: string

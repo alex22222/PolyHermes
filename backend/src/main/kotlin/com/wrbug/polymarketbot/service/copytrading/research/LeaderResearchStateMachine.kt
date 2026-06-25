@@ -59,7 +59,11 @@ class LeaderResearchStateMachine(
                 cooldownReason(latestSession, sourceFresh72h)?.let {
                     return transition(candidate, LeaderResearchState.COOLDOWN, runId, it)
                 }
-                if (latestSession != null && paperTradingService.isEligibleForTrialReady(latestSession, now)) {
+                if (
+                    latestSession != null &&
+                    !hasTrialBlockingRisk(candidate) &&
+                    paperTradingService.isEligibleForTrialReady(latestSession, now)
+                ) {
                     LeaderResearchState.TRIAL_READY
                 } else {
                     candidate.researchState
@@ -113,6 +117,15 @@ class LeaderResearchStateMachine(
         return candidate.agentOwned || candidate.leaderId != null || candidate.poolId != null
     }
 
+    private fun hasTrialBlockingRisk(candidate: LeaderResearchCandidate): Boolean {
+        val flags = candidate.riskFlags.orEmpty()
+            .split(",")
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .toSet()
+        return flags.any { it in TRIAL_BLOCKING_RISK_FLAGS }
+    }
+
     private fun transition(
         candidate: LeaderResearchCandidate,
         nextState: LeaderResearchState,
@@ -150,5 +163,12 @@ class LeaderResearchStateMachine(
         private const val SOURCE_STALE_72H_MS = 72L * 60 * 60 * 1000
         private const val SOURCE_RETIRE_30D_MS = 30L * 24 * 60 * 60 * 1000
         private const val COOLDOWN_MS = 3L * 24 * 60 * 60 * 1000
+        private val TRIAL_BLOCKING_RISK_FLAGS = setOf(
+            "mixed_category_evidence",
+            "unknown_category",
+            "tail_price_spray",
+            "buy_only_no_exit",
+            "sell_only_no_entry"
+        )
     }
 }

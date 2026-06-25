@@ -13,6 +13,8 @@ interface BridgeWebhookLogRepository : JpaRepository<BridgeWebhookLog, Long> {
 
     fun findByTransactionHash(transactionHash: String): BridgeWebhookLog?
 
+    fun findFirstByTransactionHashIgnoreCase(transactionHash: String): BridgeWebhookLog?
+
     fun findAllByOrderByCreatedAtDesc(pageable: Pageable): Page<BridgeWebhookLog>
 
     fun findByStatusOrderByCreatedAtDesc(status: String, pageable: Pageable): Page<BridgeWebhookLog>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Card, Table, Tag, Tabs, message, Space, Button, Tooltip, Radio, Typography } from 'antd'
+import { Alert, Card, Table, Tag, Tabs, message, Space, Button, Tooltip, Radio, Typography } from 'antd'
 import { useTranslation } from 'react-i18next'
 import { useMediaQuery } from 'react-responsive'
 import { ReloadOutlined } from '@ant-design/icons'
@@ -157,6 +157,18 @@ const BridgeTradeRecordList: React.FC = () => {
     }
     if (lower.includes('duplicate short-cycle market buy skipped')) {
       return { key: 'duplicate_short_cycle_buy', label: t('bridgeTradeRecord.errorType.duplicateShortCycleBuy') || '短周期重复买入已跳过' }
+    }
+    if (lower.includes('btc 5m high-price buy skipped')) {
+      return { key: 'btc_5m_high_price_buy', label: t('bridgeTradeRecord.errorType.btc5mHighPriceBuy') || 'BTC 5M 高价买入已跳过' }
+    }
+    if (lower.includes('btc 5m low-price buy skipped')) {
+      return { key: 'btc_5m_low_price_buy', label: t('bridgeTradeRecord.errorType.btc5mLowPriceBuy') || 'BTC 5M 低价买入已跳过' }
+    }
+    if (lower.includes('btc 5m global market buy skipped')) {
+      return { key: 'btc_5m_global_buy', label: t('bridgeTradeRecord.errorType.btc5mGlobalBuy') || 'BTC 5M 同市场买入已跳过' }
+    }
+    if (lower.includes('btc 5m daily buy') && lower.includes('limit skipped')) {
+      return { key: 'btc_5m_daily_limit_buy', label: t('bridgeTradeRecord.errorType.btc5mDailyLimitBuy') || 'BTC 5M 日限额已跳过' }
     }
     if (lower.includes('network/deposit modal') || lower.includes('insufficient usdc balance') || lower.includes('needs a deposit')) {
       return { key: 'insufficient_balance', label: t('bridgeTradeRecord.errorType.insufficientBalance') || '余额不足' }
@@ -463,6 +475,16 @@ const BridgeTradeRecordList: React.FC = () => {
           {t('bridgeTradeRecord.refresh') || '刷新'}
         </Button>
       </Space>
+
+      <Alert
+        type="info"
+        showIcon
+        message={t('bridgeTradeRecord.expectedSkipNoticeTitle') || '风控预期跳过会显示在失败记录中'}
+        description={
+          t('bridgeTradeRecord.expectedSkipNoticeDesc') ||
+          'BTC 5M 高/低价、同市场重复买入、日买入上限、仓位不足等硬规则命中时，Bridge 会写入 FAILED 记录并标注具体原因，可切换到“失败”查看。'
+        }
+      />
 
       <Table
         dataSource={records}

@@ -111,13 +111,17 @@ data class LeaderResearchActivitySourceImportResponse(
 )
 
 data class LeaderResearchPaperProcessRequest(
-    val batchSize: Int = 500
+    val batchSize: Int = 20
 )
 
 data class LeaderResearchPaperProcessResponse(
     val processed: Int,
     val filtered: Int,
-    val failed: Int
+    val failed: Int,
+    val requestedBatchSize: Int,
+    val effectiveBatchSize: Int,
+    val maxBatchSize: Int,
+    val truncated: Boolean
 )
 
 data class LeaderResearchPaperScoreResponse(

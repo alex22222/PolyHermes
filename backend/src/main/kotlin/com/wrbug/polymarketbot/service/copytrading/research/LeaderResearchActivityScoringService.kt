@@ -91,7 +91,8 @@ class LeaderResearchActivityScoringService(
         val tailPriceEvents = metric.getTailPriceEvents()
         val avgAmount = metric.getAvgAmount() ?: BigDecimal.ZERO
         val totalAmount = metric.getTotalAmount() ?: BigDecimal.ZERO
-        val category = inferCategory(candidate)
+        val categoryEvidence = LeaderResearchCategoryEvidenceClassifier.classify(candidate.sourceEvidence, candidate.source)
+        val category = categoryEvidence.category
         val now = System.currentTimeMillis()
         val ageMs = metric.getLastEventTime()?.let { now - it }
 
@@ -157,7 +158,8 @@ class LeaderResearchActivityScoringService(
             tailPriceRatio = tailPriceRatio,
             avgAmount = avgAmount,
             ageMs = ageMs,
-            candidate = candidate
+            candidate = candidate,
+            categoryEvidence = categoryEvidence
         )
         val capped = applyRiskCaps(rawScore, flags).setScale(8, RoundingMode.HALF_UP)
         val reason = listOf(
@@ -172,6 +174,8 @@ class LeaderResearchActivityScoringService(
             "avg_amount=${avgAmount.setScale(4, RoundingMode.HALF_UP)}",
             "total_amount=${totalAmount.setScale(4, RoundingMode.HALF_UP)}",
             "category=$category",
+            "category_mix=${categoryEvidence.counts}",
+            "category_dominance=${BigDecimal.valueOf(categoryEvidence.dominantRatio).format4()}",
             "activity_prescreen=true"
         ).joinToString("; ")
 
@@ -213,7 +217,8 @@ class LeaderResearchActivityScoringService(
         tailPriceRatio: BigDecimal,
         avgAmount: BigDecimal,
         ageMs: Long?,
-        candidate: LeaderResearchCandidate
+        candidate: LeaderResearchCandidate,
+        categoryEvidence: LeaderResearchCategoryEvidence
     ): List<String> {
         val flags = mutableListOf<String>()
         if (totalEvents == 0L) flags += "no_activity_sample"
@@ -226,6 +231,7 @@ class LeaderResearchActivityScoringService(
         if (safePriceRatio < BigDecimal("0.30") && totalEvents >= MIN_SAMPLE_EVENTS) flags += "low_safe_price_ratio"
         if (ageMs == null || ageMs > FRESH_30D_MS) flags += "stale_activity"
         if (category == "unknown") flags += "unknown_category"
+        if (categoryEvidence.mixed) flags += "mixed_category_evidence"
         if (candidate.source.contains("SCANNER_POOL") && totalEvents < MIN_SAMPLE_EVENTS) flags += "scanner_pool_unverified"
         return flags.distinct()
     }
@@ -239,19 +245,8 @@ class LeaderResearchActivityScoringService(
         if ("buy_only_no_exit" in flags) capped = capped.min(BigDecimal("55"))
         if ("sell_only_no_entry" in flags) capped = capped.min(BigDecimal("55"))
         if ("low_safe_price_ratio" in flags) capped = capped.min(BigDecimal("50"))
+        if ("mixed_category_evidence" in flags) capped = capped.min(BigDecimal("60"))
         return capped
-    }
-
-    private fun inferCategory(candidate: LeaderResearchCandidate): String {
-        val evidence = candidate.sourceEvidence.orEmpty().lowercase()
-        val fromEvidence = CATEGORY_REGEX.find(evidence)?.groupValues?.getOrNull(1)
-        return when (fromEvidence ?: candidate.source.lowercase()) {
-            "politics" -> "politics"
-            "finance" -> "finance"
-            "sports" -> "sports"
-            "crypto" -> "crypto"
-            else -> "unknown"
-        }
     }
 
     private fun ratio(numerator: Long, denominator: Long): BigDecimal {
@@ -275,6 +270,5 @@ class LeaderResearchActivityScoringService(
         private const val MIN_DISTINCT_MARKETS = 5L
         private const val FRESH_7D_MS = 7L * 24 * 60 * 60 * 1000
         private const val FRESH_30D_MS = 30L * 24 * 60 * 60 * 1000
-        private val CATEGORY_REGEX = Regex("category:([a-z_-]+)")
     }
 }

@@ -16,7 +16,6 @@ import com.wrbug.polymarketbot.repository.CopyTradingRepository
 import com.wrbug.polymarketbot.repository.LeaderRepository
 import org.slf4j.LoggerFactory
 import org.springframework.data.domain.Page
-import org.springframework.data.domain.PageImpl
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Sort
 import org.springframework.stereotype.Service
@@ -30,6 +29,7 @@ import java.math.RoundingMode
 class BridgeTradeRecordService(
     private val bridgeTradeRecordRepository: BridgeTradeRecordRepository,
     private val bridgePositionSnapshotRepository: BridgePositionSnapshotRepository,
+    private val bridgePortfolioClient: BridgePortfolioClient,
     private val copyTradingRepository: CopyTradingRepository,
     private val leaderRepository: LeaderRepository,
     private val bridgeWebhookLogRepository: BridgeWebhookLogRepository
@@ -56,10 +56,7 @@ class BridgeTradeRecordService(
                     bridgeTradeRecordRepository.findByBridgeId(request.bridgeId, pageRequest)
                 }
                 !request.status.isNullOrBlank() -> {
-                    // 状态过滤：内存分页（表数据量不大）
-                    val allPage = bridgeTradeRecordRepository.findAll(pageRequest)
-                    val filtered = allPage.content.filter { it.status == request.status }
-                    PageImpl(filtered, pageRequest, filtered.size.toLong())
+                    bridgeTradeRecordRepository.findByStatus(request.status, pageRequest)
                 }
                 else -> {
                     bridgeTradeRecordRepository.findAll(pageRequest)
@@ -211,6 +208,13 @@ class BridgeTradeRecordService(
             val positionPnlValues = openSnapshots.map { it.pnl ?: BigDecimal.ZERO }
             val maxPositionProfit = positionPnlValues.maxOrNull() ?: BigDecimal.ZERO
             val maxPositionLoss = positionPnlValues.minOrNull() ?: BigDecimal.ZERO
+            val availableBalance = if (bridgeId == null || bridgeId == "polymtrade-bridge") {
+                bridgePortfolioClient.fetchBalance()?.availableBalance
+                    ?.let { BigDecimal.valueOf(it).setScale(8, RoundingMode.HALF_UP) }
+            } else {
+                null
+            }
+            val estimatedTotalAssets = availableBalance?.add(openPositionValue)
 
             Result.success(
                 BridgeTradeStatisticsResponse(
@@ -227,6 +231,8 @@ class BridgeTradeRecordService(
                     successSellAmount = successSellAmount.toPlainString(),
                     totalFees = totalFees.toPlainString(),
                     netCashflow = netCashflow.toPlainString(),
+                    availableBalance = availableBalance?.toPlainString(),
+                    estimatedTotalAssets = estimatedTotalAssets?.toPlainString(),
                     totalPnl = openPositionPnl.toPlainString(),
                     successRate = successRate.toPlainString(),
                     avgSuccessTradeAmount = avgSuccessTradeAmount.toPlainString(),

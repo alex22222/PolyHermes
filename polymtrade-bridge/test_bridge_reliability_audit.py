@@ -40,6 +40,10 @@ def test_classify_failure_messages():
         "Insufficient balance for BUY: available 0.5 USDC": "insufficient_balance",
         "Short-cycle market stale or closing soon, skipped (seconds_to_close=12.0, buffer=45s)": "market_stale",
         "Duplicate short-cycle market BUY skipped: same leader already has a PENDING/SUCCESS BUY for this BTC 5M market": "duplicate_short_cycle_buy",
+        "BTC 5M high-price BUY skipped: price=0.90, max=0.65": "btc_5m_high_price_buy",
+        "BTC 5M low-price BUY skipped: price=0.10, min=0.20": "btc_5m_low_price_buy",
+        "BTC 5M global market BUY skipped: a PENDING/SUCCESS BUY already exists for this BTC 5M market": "btc_5m_global_buy",
+        "BTC 5M daily BUY count limit skipped: count=50, max=50": "btc_5m_daily_limit_buy",
         "Bridge read-only account does not support BUY orders": "read_only_account",
         "Insufficient position, skipped": "insufficient_position",
     }

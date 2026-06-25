@@ -85,6 +85,8 @@ data class BridgeTradeStatisticsResponse(
     val successSellAmount: String,
     val totalFees: String,
     val netCashflow: String,
+    val availableBalance: String?,
+    val estimatedTotalAssets: String?,
     val totalPnl: String,
     val successRate: String,
     val avgSuccessTradeAmount: String,

@@ -35,8 +35,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BTC_UPDOWN_STALE_BUFFER_SECONDS = int(os.getenv("BTC_UPDOWN_STALE_BUFFER_SECONDS", "45"))
+BTC_UPDOWN_STALE_BUFFER_SECONDS = int(os.getenv("BTC_UPDOWN_STALE_BUFFER_SECONDS", "90"))
 BTC_UPDOWN_5M_SECONDS = 300
+BTC_UPDOWN_5M_MIN_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MIN_BUY_PRICE", "0.20"))
+BTC_UPDOWN_5M_MAX_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MAX_BUY_PRICE", "0.65"))
+BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS = int(os.getenv("BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS", "50"))
 
 # Singleton PID lock to prevent multiple bridge instances from competing for the
 # same browser profile and opening multiple Chrome windows.
@@ -422,6 +425,20 @@ async def portfolio_positions():
         metrics.portfolio_errors += 1
         raise HTTPException(status_code=500, detail=result["error"])
     return result
+
+
+@app.get("/balance")
+async def account_balance():
+    """Return the current pUSD/USDC balance scraped from the logged-in page."""
+    if not executor or not executor.is_ready():
+        raise HTTPException(status_code=503, detail="Executor not ready")
+    if not executor.is_logged_in():
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    async with _trade_lock:
+        async with _portfolio_lock:
+            balance = await executor._get_usdc_balance()
+    return {"available_balance": balance, "synced_at": int(time.time() * 1000)}
 
 
 @app.get("/audit")
@@ -815,6 +832,89 @@ async def handle_signal(signal: LeaderTradeSignal):
                     logger.info(f"Config {cfg.id}: BUY quantity filtered")
                     continue
                 quantity = amount / price_dec
+                price_band_reason = _short_cycle_price_band_buy_reason(
+                    market_slug=signal.market_slug,
+                    side=side_upper,
+                    price=price_dec,
+                )
+                if price_band_reason:
+                    logger.info(
+                        f"Config {cfg.id}: BUY skipped for {signal.transaction_hash}: "
+                        f"{price_band_reason}"
+                    )
+                    if recorder:
+                        try:
+                            skip_id = recorder.record_pending(
+                                external_trade_id=signal.transaction_hash,
+                                market_id=signal.condition_id or signal.market_slug or "",
+                                market_title=signal.title,
+                                side=side_upper,
+                                outcome=signal.outcome,
+                                outcome_index=signal.outcome_index,
+                                quantity=quantity,
+                                price=price_dec,
+                                amount=amount,
+                                raw_payload=signal.model_dump(by_alias=True),
+                            )
+                            recorder.update_status(skip_id, "FAILED", price_band_reason)
+                        except Exception as rec_err:
+                            logger.warning(f"Failed to record BTC 5M price-band BUY skip: {rec_err}")
+                    continue
+                global_duplicate_reason = _short_cycle_global_buy_reason(
+                    market_slug=signal.market_slug,
+                    market_id=signal.condition_id or signal.market_slug or "",
+                )
+                if global_duplicate_reason:
+                    logger.info(
+                        f"Config {cfg.id}: BUY skipped for {signal.transaction_hash}: "
+                        f"{global_duplicate_reason}"
+                    )
+                    if recorder:
+                        try:
+                            skip_id = recorder.record_pending(
+                                external_trade_id=signal.transaction_hash,
+                                market_id=signal.condition_id or signal.market_slug or "",
+                                market_title=signal.title,
+                                side=side_upper,
+                                outcome=signal.outcome,
+                                outcome_index=signal.outcome_index,
+                                quantity=quantity,
+                                price=price_dec,
+                                amount=amount,
+                                raw_payload=signal.model_dump(by_alias=True),
+                            )
+                            recorder.update_status(skip_id, "FAILED", global_duplicate_reason)
+                        except Exception as rec_err:
+                            logger.warning(f"Failed to record global BTC 5M BUY skip: {rec_err}")
+                    continue
+                daily_limit_reason = _short_cycle_daily_limit_buy_reason(
+                    market_slug=signal.market_slug,
+                    side=side_upper,
+                    amount=amount,
+                )
+                if daily_limit_reason:
+                    logger.info(
+                        f"Config {cfg.id}: BUY skipped for {signal.transaction_hash}: "
+                        f"{daily_limit_reason}"
+                    )
+                    if recorder:
+                        try:
+                            skip_id = recorder.record_pending(
+                                external_trade_id=signal.transaction_hash,
+                                market_id=signal.condition_id or signal.market_slug or "",
+                                market_title=signal.title,
+                                side=side_upper,
+                                outcome=signal.outcome,
+                                outcome_index=signal.outcome_index,
+                                quantity=quantity,
+                                price=price_dec,
+                                amount=amount,
+                                raw_payload=signal.model_dump(by_alias=True),
+                            )
+                            recorder.update_status(skip_id, "FAILED", daily_limit_reason)
+                        except Exception as rec_err:
+                            logger.warning(f"Failed to record BTC 5M daily-limit BUY skip: {rec_err}")
+                    continue
                 duplicate_reason = _short_cycle_duplicate_buy_reason(
                     market_slug=signal.market_slug,
                     market_id=signal.condition_id or signal.market_slug or "",
@@ -1048,6 +1148,88 @@ def _short_cycle_market_stale_reason(
         return (
             "Short-cycle market stale or closing soon, skipped "
             f"(seconds_to_close={seconds_to_close:.1f}, buffer={BTC_UPDOWN_STALE_BUFFER_SECONDS}s)"
+        )
+    return None
+
+
+def _short_cycle_price_band_buy_reason(
+    market_slug: Optional[str],
+    side: str,
+    price: Decimal,
+) -> Optional[str]:
+    """Return a skip reason for BTC 5M BUYs outside the allowed price band."""
+    if side.upper() != "BUY" or not market_slug:
+        return None
+    if not re.search(r"btc-updown-5m-\d{10}", market_slug):
+        return None
+    if price < BTC_UPDOWN_5M_MIN_BUY_PRICE:
+        return (
+            "BTC 5M low-price BUY skipped: "
+            f"price={price}, min={BTC_UPDOWN_5M_MIN_BUY_PRICE}"
+        )
+    if price > BTC_UPDOWN_5M_MAX_BUY_PRICE:
+        return (
+            "BTC 5M high-price BUY skipped: "
+            f"price={price}, max={BTC_UPDOWN_5M_MAX_BUY_PRICE}"
+        )
+    return None
+
+
+def _short_cycle_global_buy_reason(
+    market_slug: Optional[str],
+    market_id: str,
+) -> Optional[str]:
+    """Return a skip reason if any BTC 5M BUY already exists for this market."""
+    if not market_slug or not re.search(r"btc-updown-5m-\d{10}", market_slug):
+        return None
+    if not recorder:
+        return None
+    if recorder.has_any_prior_short_cycle_buy(market_id=market_id, market_slug=market_slug):
+        return (
+            "BTC 5M global market BUY skipped: "
+            "a PENDING/SUCCESS BUY already exists for this BTC 5M market"
+        )
+    return None
+
+
+def _start_of_local_day_ms(now_seconds: Optional[float] = None) -> int:
+    now = now_seconds if now_seconds is not None else time.time()
+    local = time.localtime(now)
+    start = time.mktime(
+        (
+            local.tm_year,
+            local.tm_mon,
+            local.tm_mday,
+            0,
+            0,
+            0,
+            local.tm_wday,
+            local.tm_yday,
+            local.tm_isdst,
+        )
+    )
+    return int(start * 1000)
+
+
+def _short_cycle_daily_limit_buy_reason(
+    market_slug: Optional[str],
+    side: str,
+    amount: Decimal,
+    now_seconds: Optional[float] = None,
+) -> Optional[str]:
+    """Return a skip reason if daily BTC 5M successful BUY limits are exhausted."""
+    if side.upper() != "BUY" or not market_slug:
+        return None
+    if not re.search(r"btc-updown-5m-\d{10}", market_slug):
+        return None
+    if not recorder:
+        return None
+    since_ms = _start_of_local_day_ms(now_seconds)
+    count, _ = recorder.btc_5m_success_buy_usage_since(since_ms)
+    if count >= BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS:
+        return (
+            "BTC 5M daily BUY count limit skipped: "
+            f"count={count}, max={BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS}"
         )
     return None
 

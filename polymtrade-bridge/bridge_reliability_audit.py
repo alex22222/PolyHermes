@@ -48,6 +48,10 @@ FAILURE_BUCKET_PRIORITY = {
     "insufficient_balance": 15,
     "market_stale": 14,
     "duplicate_short_cycle_buy": 14,
+    "btc_5m_high_price_buy": 14,
+    "btc_5m_low_price_buy": 14,
+    "btc_5m_global_buy": 14,
+    "btc_5m_daily_limit_buy": 14,
     "read_only_account": 12,
     "insufficient_position": 10,
     "test_or_incomplete_record": 2,
@@ -73,6 +77,10 @@ FAILURE_BUCKET_ACTIONABILITY = {
     "insufficient_balance": "state_or_risk",
     "market_stale": "state_or_risk",
     "duplicate_short_cycle_buy": "state_or_risk",
+    "btc_5m_high_price_buy": "state_or_risk",
+    "btc_5m_low_price_buy": "state_or_risk",
+    "btc_5m_global_buy": "state_or_risk",
+    "btc_5m_daily_limit_buy": "state_or_risk",
     "read_only_account": "account_setup_or_config",
     "insufficient_position": "state_or_risk",
     "test_or_incomplete_record": "historical_test_data",
@@ -98,6 +106,10 @@ FAILURE_BUCKET_NEXT_ACTION = {
     "insufficient_balance": "Fund account or lower copy amount; not a browser reliability bug.",
     "market_stale": "Expected skip for short-cycle markets that are already closed or too close to close.",
     "duplicate_short_cycle_buy": "Expected skip: only the first BUY is copied for the same leader and BTC 5M market.",
+    "btc_5m_high_price_buy": "Expected skip: BTC 5M BUY price is above the configured positive-EV cap.",
+    "btc_5m_low_price_buy": "Expected skip: BTC 5M BUY price is below the allowed band and likely a tail trap.",
+    "btc_5m_global_buy": "Expected skip: only one BUY is allowed globally per BTC 5M market.",
+    "btc_5m_daily_limit_buy": "Expected skip: BTC 5M daily BUY count limit is exhausted.",
     "read_only_account": "Enable a writable Bridge account or disable live trading for this account; not a browser reliability bug.",
     "insufficient_position": "Expected risk skip unless ledger drift is suspected.",
     "test_or_incomplete_record": "Historical/manual test or incomplete metadata; exclude from code-fix queue.",
@@ -474,6 +486,14 @@ def classify_failure(error_message: Any) -> str:
         return "market_stale"
     if "duplicate short-cycle market buy skipped" in text:
         return "duplicate_short_cycle_buy"
+    if "btc 5m high-price buy skipped" in text:
+        return "btc_5m_high_price_buy"
+    if "btc 5m low-price buy skipped" in text:
+        return "btc_5m_low_price_buy"
+    if "btc 5m global market buy skipped" in text:
+        return "btc_5m_global_buy"
+    if "btc 5m daily buy" in text and "limit skipped" in text:
+        return "btc_5m_daily_limit_buy"
     if ("network" in text and "modal" in text) or "deposit modal" in text or ("token" in text and "modal" in text):
         return "network_or_token_modal"
     if "read-only account" in text or "read only account" in text or "does not support buy orders" in text:

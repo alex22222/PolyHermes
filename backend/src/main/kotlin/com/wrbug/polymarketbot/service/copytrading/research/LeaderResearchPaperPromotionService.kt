@@ -126,27 +126,19 @@ class LeaderResearchPaperPromotionService(
     }
 
     private fun inferCategory(candidate: LeaderResearchCandidate): String {
-        val evidence = candidate.sourceEvidence.orEmpty().lowercase()
-        return CATEGORY_REGEX.find(evidence)?.groupValues?.getOrNull(1)
-            ?: when {
-                "politics" in evidence -> "politics"
-                "finance" in evidence -> "finance"
-                "sports" in evidence -> "sports"
-                "crypto" in evidence -> "crypto"
-                else -> "unknown"
-            }
+        return LeaderResearchCategoryEvidenceClassifier.classify(candidate.sourceEvidence, candidate.source).category
     }
 
     companion object {
         private const val MAX_PROMOTE_PER_CATEGORY = 100
         private const val PREVIEW_LIMIT = 100
-        private val CATEGORY_REGEX = Regex("category[:=]([a-z_]+)")
         private val HARD_EXCLUDE_FLAGS = setOf(
             "tail_price_spray",
             "buy_only_no_exit",
             "low_safe_price_ratio",
             "no_activity_sample",
-            "unknown_category"
+            "unknown_category",
+            "mixed_category_evidence"
         )
     }
 }
