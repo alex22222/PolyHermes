@@ -942,6 +942,7 @@
     "title": "Statistics",
     "totalOrders": "Total Orders",
     "totalPnl": "Total P&L",
+    "historicalPnl": "Historical P&L",
     "openPositionPnl": "Open Position P&L",
     "winRate": "Win Rate",
     "avgPnl": "Average P&L",

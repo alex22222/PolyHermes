@@ -942,6 +942,7 @@
     "title": "统计信息",
     "totalOrders": "总订单数",
     "totalPnl": "总盈亏",
+    "historicalPnl": "历史盈亏",
     "openPositionPnl": "当前持仓浮盈亏",
     "winRate": "胜率",
     "avgPnl": "平均盈亏",

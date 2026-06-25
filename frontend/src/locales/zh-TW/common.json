@@ -942,6 +942,7 @@
     "title": "統計信息",
     "totalOrders": "總訂單數",
     "totalPnl": "總盈虧",
+    "historicalPnl": "歷史盈虧",
     "openPositionPnl": "當前持倉浮盈虧",
     "winRate": "勝率",
     "avgPnl": "平均盈虧",
