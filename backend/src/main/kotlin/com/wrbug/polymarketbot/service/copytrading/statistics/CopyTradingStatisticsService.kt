@@ -132,34 +132,35 @@ class CopyTradingStatisticsService(
     }
     
     /**
-     * 当 copy_order_tracking 为空时，尝试从 bridge_trade_record + bridge_position_snapshot
+     * 当 copy_order_tracking 为空时，尝试从 bridge_trade_record + 当前市场报价
      * 推导该 copyTrading 的统计口径。适用于 Bridge / Magic 钱包等不经过本地订单跟踪的执行路径。
      */
-    private fun calculateFromBridgeRecords(copyTradingId: Long): CopyTradingPnlStatistics? {
+    private suspend fun calculateFromBridgeRecords(copyTradingId: Long): CopyTradingPnlStatistics? {
         try {
             val copyTrading = copyTradingRepository.findById(copyTradingId).orElse(null) ?: return null
             val leader = leaderRepository.findById(copyTrading.leaderId).orElse(null) ?: return null
+            val account = accountRepository.findById(copyTrading.accountId).orElse(null)
             val conditionIds = bridgeWebhookLogRepository
                 .findDistinctConditionIdsByLeaderAddress(leader.leaderAddress)
                 .filter { !it.isNullOrBlank() }
             if (conditionIds.isEmpty()) {
                 return null
             }
-            
+
             val records = bridgeTradeRecordRepository.findByBridgeIdAndMarketIdIn(
                 "polymtrade-bridge",
                 conditionIds,
                 Pageable.unpaged()
             ).content
-            
+
             val successRecords = records.filter { it.status.equals("SUCCESS", ignoreCase = true) }
             val buyRecords = successRecords.filter { it.side.equals("BUY", ignoreCase = true) }
             val sellRecords = successRecords.filter { it.side.equals("SELL", ignoreCase = true) }
-            
+
             if (buyRecords.isEmpty() && sellRecords.isEmpty()) {
                 return null
             }
-            
+
             val totalBuyQuantity = buyRecords.sumOf { it.quantity }
             val totalBuyAmount = buyRecords.sumOf { it.amount }
             val totalBuyOrders = buyRecords.size.toLong()
@@ -168,27 +169,29 @@ class CopyTradingStatisticsService(
             } else {
                 BigDecimal.ZERO
             }
-            
+
             val totalSellQuantity = sellRecords.sumOf { it.quantity }
             val totalSellAmount = sellRecords.sumOf { it.amount }
             val totalSellOrders = sellRecords.size.toLong()
-            
-            data class PositionKey(val marketId: String, val side: String)
-            val buyByKey = buyRecords.groupBy { PositionKey(it.marketId ?: "", it.side) }
-            val sellByKey = sellRecords.groupBy { PositionKey(it.marketId ?: "", it.side) }
+
+            data class PositionKey(val marketId: String, val outcome: String?, val outcomeIndex: Int?)
+            data class OpenPosition(
+                val key: PositionKey,
+                val quantity: BigDecimal,
+                val cost: BigDecimal,
+                val avgBuyPrice: BigDecimal
+            )
+
+            val buyByKey = buyRecords.groupBy { PositionKey(it.marketId, it.outcome, it.outcomeIndex) }
+            val sellByKey = sellRecords.groupBy { PositionKey(it.marketId, it.outcome, it.outcomeIndex) }
             val allKeys = (buyByKey.keys + sellByKey.keys).filter { it.marketId.isNotBlank() }
-            
+
             val snapshots = bridgePositionSnapshotRepository.findByBridgeId("polymtrade-bridge")
                 .filter { it.marketId in conditionIds }
-            
+
             var totalRealizedPnl = BigDecimal.ZERO
-            var currentPositionQuantity = BigDecimal.ZERO
-            var currentPositionCost = BigDecimal.ZERO
-            var currentPositionValue = BigDecimal.ZERO
-            var zeroValuePositionCost = BigDecimal.ZERO
-            var confirmedZeroValuePositionCost = BigDecimal.ZERO
-            val quoteStatuses = mutableListOf<PositionQuoteStatus>()
-            
+            val openPositions = mutableListOf<OpenPosition>()
+
             allKeys.forEach { key ->
                 val buys = buyByKey[key] ?: emptyList()
                 val sells = sellByKey[key] ?: emptyList()
@@ -201,30 +204,80 @@ class CopyTradingStatisticsService(
                 }
                 val keySellQty = sells.sumOf { it.quantity }
                 val keySellAmount = sells.sumOf { it.amount }
-                
+
                 // 已实现盈亏按平均买入成本近似计算
                 val realizedQty = keySellQty.min(keyBuyQty)
                 val realizedPnl = keySellAmount.subtract(realizedQty.multi(keyAvgBuyPrice))
                 totalRealizedPnl = totalRealizedPnl.add(realizedPnl)
-                
+
                 val openQty = keyBuyQty.subtract(keySellQty).max(BigDecimal.ZERO)
                 if (openQty.gt(BigDecimal.ZERO)) {
                     val cost = openQty.multi(keyAvgBuyPrice)
-                    val snapshot = snapshots.firstOrNull {
-                        it.marketId == key.marketId && it.side.equals(key.side, ignoreCase = true)
-                    }
-                    val value = snapshot?.currentValue ?: BigDecimal.ZERO
-                    currentPositionQuantity = currentPositionQuantity.add(openQty)
-                    currentPositionCost = currentPositionCost.add(cost)
-                    currentPositionValue = currentPositionValue.add(value)
-                    if (value.lte(BigDecimal.ZERO)) {
-                        zeroValuePositionCost = zeroValuePositionCost.add(cost)
-                        confirmedZeroValuePositionCost = confirmedZeroValuePositionCost.add(cost)
-                    }
-                    quoteStatuses.add(if (snapshot != null) PositionQuoteStatus.AVAILABLE else PositionQuoteStatus.NO_MATCH)
+                    openPositions.add(OpenPosition(key, openQty, cost, keyAvgBuyPrice))
                 }
             }
-            
+
+            var currentPositionQuantity = BigDecimal.ZERO
+            var currentPositionCost = BigDecimal.ZERO
+            var currentPositionValue = BigDecimal.ZERO
+            var zeroValuePositionCost = BigDecimal.ZERO
+            var confirmedZeroValuePositionCost = BigDecimal.ZERO
+            val quoteStatuses = mutableListOf<PositionQuoteStatus>()
+
+            if (openPositions.isNotEmpty()) {
+                val quotes = buildPositionValuationQuotes(account?.proxyAddress)
+                val openMarketIds = openPositions.map { it.key.marketId }.distinct()
+                val gammaOutcomePrices = marketService.getOutcomePrices(openMarketIds)
+
+                openPositions.forEach { pos ->
+                    currentPositionQuantity = currentPositionQuantity.add(pos.quantity)
+                    currentPositionCost = currentPositionCost.add(pos.cost)
+
+                    val quote = quotes.firstOrNull { q ->
+                        q.marketId == pos.key.marketId && (
+                                (pos.key.outcomeIndex != null && q.outcomeIndex == pos.key.outcomeIndex) ||
+                                        (!q.side.isNullOrBlank() && q.side.equals(pos.key.outcome, ignoreCase = true))
+                                )
+                    }
+
+                    val snapshot = snapshots.firstOrNull {
+                        it.marketId == pos.key.marketId && it.side.equals(pos.key.outcome, ignoreCase = true)
+                    }
+
+                    val gammaPrice = gammaOutcomePrices[pos.key.marketId]
+                        ?.firstNotNullOfOrNull { (outcome, price) ->
+                            if (outcome.equals(pos.key.outcome, ignoreCase = true)) price else null
+                        }
+
+                    val value = when {
+                        quote != null -> pos.quantity.multi(quote.currentPrice)
+                        gammaPrice != null -> pos.quantity.multi(gammaPrice)
+                        snapshot != null -> snapshot.currentValue
+                        else -> pos.cost
+                    }
+                    currentPositionValue = currentPositionValue.add(value)
+
+                    when {
+                        quote != null -> quoteStatuses.add(PositionQuoteStatus.AVAILABLE)
+                        gammaPrice != null -> {
+                            quoteStatuses.add(PositionQuoteStatus.AVAILABLE)
+                            if (value.lte(BigDecimal.ZERO)) {
+                                zeroValuePositionCost = zeroValuePositionCost.add(pos.cost)
+                                confirmedZeroValuePositionCost = confirmedZeroValuePositionCost.add(pos.cost)
+                            }
+                        }
+                        snapshot != null -> {
+                            quoteStatuses.add(PositionQuoteStatus.AVAILABLE)
+                            if (snapshot.currentValue.lte(BigDecimal.ZERO)) {
+                                zeroValuePositionCost = zeroValuePositionCost.add(pos.cost)
+                                confirmedZeroValuePositionCost = confirmedZeroValuePositionCost.add(pos.cost)
+                            }
+                        }
+                        else -> quoteStatuses.add(PositionQuoteStatus.NO_MATCH)
+                    }
+                }
+            }
+
             val totalUnrealizedPnl = currentPositionValue.subtract(currentPositionCost)
             val totalPnl = totalRealizedPnl.add(totalUnrealizedPnl)
             val totalPnlPercent = if (totalBuyAmount.gt(BigDecimal.ZERO)) {
@@ -232,7 +285,7 @@ class CopyTradingStatisticsService(
             } else {
                 BigDecimal.ZERO.setScale(2)
             }
-            
+
             return CopyTradingPnlStatistics(
                 totalBuyQuantity = totalBuyQuantity,
                 totalBuyOrders = totalBuyOrders,

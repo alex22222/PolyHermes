@@ -10,7 +10,9 @@ import com.wrbug.polymarketbot.util.RetrofitFactory
 import com.wrbug.polymarketbot.util.CategoryValidator
 import com.wrbug.polymarketbot.util.getEventSlug
 import com.wrbug.polymarketbot.util.parseStringArray
+import com.wrbug.polymarketbot.util.toSafeBigDecimal
 import kotlinx.coroutines.delay
+import java.math.BigDecimal
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
@@ -64,6 +66,62 @@ class MarketService(
         }
     }
     
+    /**
+     * 批量获取市场当前各 outcome 的价格（从 Gamma API 读取）。
+     * 会同时查询活跃市场和已关闭市场，以覆盖 resolved 但尚未赎回的仓位。
+     * 返回 Map<marketId, Map<outcome, price>>，price 为 0~1 的 BigDecimal。
+     */
+    suspend fun getOutcomePrices(marketIds: List<String>): Map<String, Map<String, BigDecimal>> {
+        if (marketIds.isEmpty()) {
+            return emptyMap()
+        }
+
+        return try {
+            val gammaApi = retrofitFactory.createGammaApi()
+            val result = mutableMapOf<String, Map<String, BigDecimal>>()
+
+            // 活跃市场
+            val activeResponse = gammaApi.listMarkets(
+                conditionIds = marketIds,
+                limit = marketIds.size
+            )
+            if (activeResponse.isSuccessful && activeResponse.body() != null) {
+                activeResponse.body()!!.forEach { market ->
+                    val conditionId = market.conditionId ?: return@forEach
+                    val outcomes = market.outcomes.parseStringArray()
+                    val prices = market.outcomePrices.parseStringArray()
+                        .map { it.toSafeBigDecimal() }
+                    if (outcomes.isNotEmpty() && outcomes.size == prices.size) {
+                        result[conditionId] = outcomes.zip(prices).toMap()
+                    }
+                }
+            }
+
+            // 已关闭/resolved 市场（单独查询，API 对 closed 的批量 comma 分隔支持不稳定）
+            val closedResponse = gammaApi.listMarkets(
+                conditionIds = marketIds,
+                closed = true,
+                limit = marketIds.size
+            )
+            if (closedResponse.isSuccessful && closedResponse.body() != null) {
+                closedResponse.body()!!.forEach { market ->
+                    val conditionId = market.conditionId ?: return@forEach
+                    val outcomes = market.outcomes.parseStringArray()
+                    val prices = market.outcomePrices.parseStringArray()
+                        .map { it.toSafeBigDecimal() }
+                    if (outcomes.isNotEmpty() && outcomes.size == prices.size) {
+                        result[conditionId] = outcomes.zip(prices).toMap()
+                    }
+                }
+            }
+
+            result
+        } catch (e: Exception) {
+            logger.warn("从 Gamma API 获取 outcome 价格失败: ${e.message}", e)
+            emptyMap()
+        }
+    }
+
     /**
      * 批量获取市场信息
      */
