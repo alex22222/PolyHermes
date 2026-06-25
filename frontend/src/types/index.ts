@@ -1910,6 +1910,7 @@ export interface BridgeTradeStatistics {
   successSellAmount: string
   totalFees: string
   netCashflow: string
+  totalRealizedPnl: string
   availableBalance?: string
   estimatedTotalAssets?: string
   totalPnl: string

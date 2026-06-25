@@ -63,7 +63,7 @@ const mapBridgeStatistics = (bridgeStats: BridgeTradeStatistics): StatisticsType
   return {
     totalOrders: walletHistoricalOrders,
     totalPnl: bridgeStats.totalPnl,
-    historicalPnl: bridgeStats.netCashflow,
+    historicalPnl: bridgeStats.totalRealizedPnl,
     winRate: bridgeStats.successRate,
     avgPnl: walletHistoricalOrders > 0
       ? (toNumber(bridgeStats.totalPnl) / walletHistoricalOrders).toFixed(6)

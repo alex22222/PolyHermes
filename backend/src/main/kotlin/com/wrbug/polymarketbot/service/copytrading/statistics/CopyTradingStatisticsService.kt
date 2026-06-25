@@ -182,8 +182,14 @@ class CopyTradingStatisticsService(
                 val avgBuyPrice: BigDecimal
             )
 
-            val buyByKey = buyRecords.groupBy { PositionKey(it.marketId, it.outcome, it.outcomeIndex) }
-            val sellByKey = sellRecords.groupBy { PositionKey(it.marketId, it.outcome, it.outcomeIndex) }
+            // 忽略 outcome 大小写和空值差异，避免 BUY/SELL 被分到不同组。
+            fun BridgeTradeRecord.positionKey(): PositionKey {
+                val normalizedOutcome = this.outcome?.trim()?.lowercase()?.takeIf { it.isNotBlank() }
+                return PositionKey(this.marketId, normalizedOutcome, this.outcomeIndex)
+            }
+
+            val buyByKey = buyRecords.groupBy { it.positionKey() }
+            val sellByKey = sellRecords.groupBy { it.positionKey() }
             val allKeys = (buyByKey.keys + sellByKey.keys).filter { it.marketId.isNotBlank() }
 
             val snapshots = bridgePositionSnapshotRepository.findByBridgeId("polymtrade-bridge")

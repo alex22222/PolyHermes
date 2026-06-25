@@ -182,6 +182,35 @@ class BridgeTradeRecordService(
             val successSellAmount = successSellRecords.sumOf { it.amount }
             val totalFees = successRecords.sumOf { it.fee }
             val netCashflow = successSellAmount.subtract(successBuyAmount).subtract(totalFees)
+
+            // 历史盈亏（已实现盈亏）：按 outcome 维度匹配买卖，仅计算已卖出部分的成本差。
+            // 忽略 outcome 大小写和 outcomeIndex 差异，避免 BUY/SELL 因字段来源不同被分到不同组。
+            data class PositionKey(val marketId: String, val outcomeKey: String?)
+            fun BridgeTradeRecord.positionKey(): PositionKey {
+                val normalizedOutcome = this.outcome?.trim()?.lowercase()?.takeIf { it.isNotBlank() }
+                return PositionKey(this.marketId, normalizedOutcome ?: this.outcomeIndex?.toString())
+            }
+            val buyByKey = successBuyRecords.groupBy { it.positionKey() }
+            val sellByKey = successSellRecords.groupBy { it.positionKey() }
+            val allKeys = (buyByKey.keys + sellByKey.keys).toSet()
+            var totalRealizedPnl = BigDecimal.ZERO
+            allKeys.forEach { key ->
+                val buys = buyByKey[key] ?: emptyList()
+                val sells = sellByKey[key] ?: emptyList()
+                val keyBuyQty = buys.sumOf { it.quantity }
+                val keyBuyAmount = buys.sumOf { it.amount }
+                val keySellQty = sells.sumOf { it.quantity }
+                val keySellAmount = sells.sumOf { it.amount }
+                if (keyBuyQty > BigDecimal.ZERO) {
+                    val avgBuyPrice = keyBuyAmount.divide(keyBuyQty, 8, RoundingMode.HALF_UP)
+                    val realizedQty = keySellQty.min(keyBuyQty)
+                    totalRealizedPnl = totalRealizedPnl.add(keySellAmount.subtract(realizedQty.multiply(avgBuyPrice)))
+                } else if (keySellQty > BigDecimal.ZERO) {
+                    // 无买入成本的卖出，视为卖出金额全部为实现盈亏（通常为零值卖出）
+                    totalRealizedPnl = totalRealizedPnl.add(keySellAmount)
+                }
+            }
+
             val avgSuccessTradeAmount = if (successRecords.isNotEmpty()) {
                 successRecords.sumOf { it.amount }.divide(BigDecimal(successRecords.size), 8, RoundingMode.HALF_UP)
             } else {
@@ -231,6 +260,7 @@ class BridgeTradeRecordService(
                     successSellAmount = successSellAmount.toPlainString(),
                     totalFees = totalFees.toPlainString(),
                     netCashflow = netCashflow.toPlainString(),
+                    totalRealizedPnl = totalRealizedPnl.toPlainString(),
                     availableBalance = availableBalance?.toPlainString(),
                     estimatedTotalAssets = estimatedTotalAssets?.toPlainString(),
                     totalPnl = openPositionPnl.toPlainString(),
