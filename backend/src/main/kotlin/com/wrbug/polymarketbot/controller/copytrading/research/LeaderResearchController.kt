@@ -7,6 +7,7 @@ import com.wrbug.polymarketbot.dto.LeaderResearchCandidateDetailDto
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchEventDto
+import com.wrbug.polymarketbot.dto.LeaderResearchFunnelResponse
 import com.wrbug.polymarketbot.dto.LeaderPaperSessionDto
 import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreResponse
@@ -92,6 +93,11 @@ class LeaderResearchController(
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) { researchService.summary() }
     }
 
+    @PostMapping("/funnel")
+    fun funnel(): ResponseEntity<ApiResponse<LeaderResearchFunnelResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) { researchService.funnel() }
+    }
+
     @PostMapping("/candidates/list")
     fun list(@RequestBody request: LeaderResearchCandidateListRequest): ResponseEntity<ApiResponse<LeaderResearchCandidateListResponse>> {
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) { researchService.listCandidates(request) }
@@ -167,7 +173,8 @@ class LeaderResearchController(
             val effectiveBatchSize = request.batchSize.coerceIn(1, LeaderPaperTradingService.MANUAL_MAX_PROCESSING_BATCH_SIZE)
             val result = paperTradingService.processPaperCandidates(
                 runId = null,
-                batchSize = effectiveBatchSize
+                batchSize = effectiveBatchSize,
+                candidateIds = request.candidateIds
             )
             LeaderResearchPaperProcessResponse(
                 processed = result.processed,

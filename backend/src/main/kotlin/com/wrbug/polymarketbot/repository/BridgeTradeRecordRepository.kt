@@ -26,6 +26,14 @@ interface BridgeTradeRecordRepository : JpaRepository<BridgeTradeRecord, Long> {
 
     fun findByExternalTradeId(externalTradeId: String): BridgeTradeRecord?
 
+    @Query(
+        "SELECT b FROM BridgeTradeRecord b " +
+            "WHERE b.notificationStatus = 'PENDING' " +
+            "AND b.status IN ('SUCCESS', 'FAILED') " +
+            "ORDER BY b.updatedAt ASC"
+    )
+    fun findPendingNotificationRecords(pageable: Pageable): List<BridgeTradeRecord>
+
     /**
      * 查找所有包含原始 payload 的记录，用于 LeaderScanner 提取钱包地址
      */

@@ -82,14 +82,19 @@ class LeaderPaperTradingService(
         return session
     }
 
-    fun processPaperCandidates(runId: Long? = null, batchSize: Int = DEFAULT_PROCESSING_BATCH_SIZE): LeaderPaperProcessingResult {
-        return processPaperCandidatesInChunks(runId = runId, batchSize = batchSize)
+    fun processPaperCandidates(
+        runId: Long? = null,
+        batchSize: Int = DEFAULT_PROCESSING_BATCH_SIZE,
+        candidateIds: Collection<Long> = emptyList()
+    ): LeaderPaperProcessingResult {
+        return processPaperCandidatesInChunks(runId = runId, batchSize = batchSize, candidateIds = candidateIds)
     }
 
     fun processPaperCandidatesInChunks(
         runId: Long? = null,
         batchSize: Int = DEFAULT_PROCESSING_BATCH_SIZE,
-        chunkSize: Int = DEFAULT_PROCESSING_CHUNK_SIZE
+        chunkSize: Int = DEFAULT_PROCESSING_CHUNK_SIZE,
+        candidateIds: Collection<Long> = emptyList()
     ): LeaderPaperProcessingResult {
         val targetTotal = batchSize.coerceAtLeast(1)
         val effectiveChunkSize = chunkSize.coerceIn(1, targetTotal)
@@ -100,7 +105,8 @@ class LeaderPaperTradingService(
         while (remaining > 0) {
             val chunk = processor.processPaperCandidatesChunk(
                 runId = runId,
-                batchSize = minOf(effectiveChunkSize, remaining)
+                batchSize = minOf(effectiveChunkSize, remaining),
+                candidateIds = candidateIds
             )
             total = total + chunk
             val chunkTotal = chunk.processed + chunk.filtered + chunk.failed
@@ -111,10 +117,19 @@ class LeaderPaperTradingService(
         return total
     }
 
-    fun processPaperCandidatesChunk(runId: Long? = null, batchSize: Int = DEFAULT_PROCESSING_BATCH_SIZE): LeaderPaperProcessingResult {
-        val paperCandidates = candidateRepository.findByResearchStateIn(
-            listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
-        )
+    fun processPaperCandidatesChunk(
+        runId: Long? = null,
+        batchSize: Int = DEFAULT_PROCESSING_BATCH_SIZE,
+        candidateIds: Collection<Long> = emptyList()
+    ): LeaderPaperProcessingResult {
+        val targetIds = candidateIds.filter { it > 0 }.distinct()
+        val paperStates = listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
+        val paperCandidates = if (targetIds.isEmpty()) {
+            candidateRepository.findByResearchStateIn(paperStates)
+        } else {
+            candidateRepository.findAllById(targetIds)
+                .filter { it.researchState in paperStates }
+        }
         if (paperCandidates.isEmpty()) {
             return LeaderPaperProcessingResult(processed = 0, filtered = 0, failed = 0)
         }

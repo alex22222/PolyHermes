@@ -236,6 +236,49 @@ class LeaderPaperTradingServiceTest {
     }
 
     @Test
+    fun `process paper candidates can target specific candidate ids`() {
+        val candidate = paperCandidate(id = 42L, wallet = "0x4242424242424242424242424242424242424242")
+        val session = LeaderPaperSession(id = 10L, candidateId = candidate.id!!)
+        val event = paperEvent(
+            id = 100L,
+            stableKey = "targeted-buy",
+            side = "BUY",
+            price = "0.50",
+            size = "10",
+            wallet = candidate.normalizedWallet
+        )
+        val savedTrades = mutableListOf<LeaderPaperTrade>()
+        val savedPositions = mutableListOf<LeaderPaperPosition>()
+        val savedSessions = mutableListOf<LeaderPaperSession>()
+        stubPaperPipeline(
+            candidate = candidate,
+            session = session,
+            events = listOf(event),
+            savedTrades = savedTrades,
+            savedPositions = savedPositions,
+            savedSessions = savedSessions
+        )
+        Mockito.`when`(candidateRepository.findAllById(listOf(42L))).thenReturn(listOf(candidate))
+        runBlocking {
+            Mockito.`when`(marketPriceService.getCurrentMarketPrice("market-1", 0)).thenReturn(BigDecimal("0.60"))
+        }
+
+        val result = service.processPaperCandidates(runId = 9L, batchSize = 10, candidateIds = listOf(42L))
+
+        assertEquals(1, result.processed)
+        assertEquals(0, result.filtered)
+        assertEquals(0, result.failed)
+        Mockito.verify(candidateRepository, Mockito.atLeastOnce()).findAllById(listOf(42L))
+        Mockito.verify(candidateRepository, Mockito.never()).findByResearchStateIn(listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY))
+        Mockito.verify(activityEventRepository).findPaperProcessableForWalletsFair(
+            listOf(LeaderPaperProcessingStatus.NEW.name, LeaderPaperProcessingStatus.RETRYABLE.name),
+            setOf(candidate.normalizedWallet),
+            10,
+            10
+        )
+    }
+
+    @Test
     fun `processing failure becomes failed after max attempts and does not block batch`() {
         val candidate = paperCandidate()
         val session = LeaderPaperSession(id = 10L, candidateId = candidate.id!!)
@@ -368,9 +411,12 @@ class LeaderPaperTradingServiceTest {
         }
     }
 
-    private fun paperCandidate() = LeaderResearchCandidate(
-        id = 1L,
-        normalizedWallet = "0x1111111111111111111111111111111111111111",
+    private fun paperCandidate(
+        id: Long = 1L,
+        wallet: String = "0x1111111111111111111111111111111111111111"
+    ) = LeaderResearchCandidate(
+        id = id,
+        normalizedWallet = wallet,
         researchState = LeaderResearchState.PAPER
     )
 
@@ -380,13 +426,14 @@ class LeaderPaperTradingServiceTest {
         side: String,
         price: String,
         size: String,
-        processingAttempts: Int = 0
+        processingAttempts: Int = 0,
+        wallet: String = "0x1111111111111111111111111111111111111111"
     ) = LeaderActivityEvent(
         id = id,
         source = "ACTIVITY_DERIVED",
         sourceEventId = stableKey,
         stableEventKey = stableKey,
-        normalizedWallet = "0x1111111111111111111111111111111111111111",
+        normalizedWallet = wallet,
         marketId = "market-1",
         side = side,
         outcomeIndex = 0,

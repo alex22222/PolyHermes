@@ -764,6 +764,7 @@ class CopyTradingStatisticsService(
         return StatisticsResponse(
             totalOrders = totalOrders,
             totalPnl = totalPnl.toString(),
+            historicalPnl = totalPnl.toString(),
             winRate = winRate.toString(),
             avgPnl = avgPnl.toString(),
             maxProfit = maxProfit.toString(),

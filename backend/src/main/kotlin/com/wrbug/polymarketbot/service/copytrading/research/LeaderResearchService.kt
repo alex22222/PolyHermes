@@ -6,6 +6,9 @@ import com.wrbug.polymarketbot.dto.LeaderResearchCandidateDto
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchEventDto
+import com.wrbug.polymarketbot.dto.LeaderResearchFunnelCandidateDto
+import com.wrbug.polymarketbot.dto.LeaderResearchFunnelCategoryDto
+import com.wrbug.polymarketbot.dto.LeaderResearchFunnelResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchSourceStateDto
 import com.wrbug.polymarketbot.dto.LeaderResearchSummaryDto
 import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
@@ -22,6 +25,8 @@ import com.wrbug.polymarketbot.repository.LeaderResearchScoreRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchSourceStateRepository
 import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
+import java.math.BigDecimal
+import java.math.RoundingMode
 
 @Service
 class LeaderResearchService(
@@ -53,6 +58,78 @@ class LeaderResearchService(
             pendingRiskCount = candidateRepository.findByResearchStateIn(listOf(LeaderResearchState.COOLDOWN)).count().toLong(),
             lastRun = runRepository.findTopByOrderByStartedAtDesc()?.let { mapper.runDto(it) },
             sourceLimitations = mapper.sourceLimitations()
+        )
+    }
+
+    fun funnel(): LeaderResearchFunnelResponse {
+        val candidates = candidateRepository.findAll()
+        val paperCandidates = candidates.filter {
+            it.researchState in listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
+        }
+        val latestSessionsByCandidateId = paperCandidates
+            .mapNotNull { it.id }
+            .takeIf { it.isNotEmpty() }
+            ?.let { paperSessionRepository.findLatestByCandidateIds(it).associateBy { session -> session.candidateId } }
+            .orEmpty()
+        val cleanHighScore = paperCandidates.filter { candidate ->
+            val session = candidate.id?.let { latestSessionsByCandidateId[it] }
+            candidate.score != null &&
+                candidate.score >= HIGH_SCORE_THRESHOLD &&
+                candidate.riskFlags.isNullOrBlank() &&
+                session != null &&
+                session.tradeCount >= HIGH_SCORE_MIN_TRADES &&
+                session.copyablePnl > BigDecimal.ZERO
+        }
+        val categoryNames = listOf("politics", "finance", "sports", "crypto")
+        val categories = categoryNames.map { category ->
+            val categoryCandidates = candidates.filter { categoryOf(it) == category }
+            val categoryPaper = paperCandidates.filter { categoryOf(it) == category }
+            val categoryClean = cleanHighScore.filter { categoryOf(it) == category }
+            val top = categoryClean.maxByOrNull { it.score ?: BigDecimal.ZERO }
+            LeaderResearchFunnelCategoryDto(
+                category = category,
+                totalCandidates = categoryCandidates.size,
+                paperCandidates = categoryPaper.size,
+                cleanHighScoreCandidates = categoryClean.size,
+                topScore = top?.score?.format4(),
+                topCandidateId = top?.id
+            )
+        }
+        val priorityCandidates = cleanHighScore
+            .sortedWith(
+                compareByDescending<LeaderResearchCandidate> { it.score ?: BigDecimal.ZERO }
+                    .thenByDescending { candidate -> candidate.id?.let { latestSessionsByCandidateId[it]?.copyablePnl } ?: BigDecimal.ZERO }
+            )
+            .take(10)
+            .mapNotNull { candidate ->
+                val candidateId = candidate.id ?: return@mapNotNull null
+                val session = latestSessionsByCandidateId[candidateId] ?: return@mapNotNull null
+                LeaderResearchFunnelCandidateDto(
+                    candidateId = candidateId,
+                    wallet = candidate.normalizedWallet,
+                    category = categoryOf(candidate),
+                    score = candidate.score.format4(),
+                    tradeCount = session.tradeCount,
+                    filteredRatio = session.filteredRatio.format4(),
+                    copyablePnl = session.copyablePnl.format4(),
+                    maxDrawdown = session.maxDrawdown.format4(),
+                    researchState = candidate.researchState.name
+                )
+            }
+        return LeaderResearchFunnelResponse(
+            targetTotal = LEADER_DISCOVERY_TARGET,
+            totalCandidates = candidates.size,
+            managedLeaderTotal = leaderRepository.count(),
+            leaderPoolTotal = leaderPoolRepository.count(),
+            progressPercent = BigDecimal(candidates.size)
+                .multiply(BigDecimal("100"))
+                .divide(BigDecimal(LEADER_DISCOVERY_TARGET), 4, RoundingMode.HALF_UP)
+                .toPlainString(),
+            cleanHighScoreTotal = cleanHighScore.size,
+            criteria = "PAPER/TRIAL_READY, score>=80, riskFlags empty, tradeCount>=10, copyablePnl>0",
+            categories = categories,
+            priorityCandidates = priorityCandidates,
+            generatedAt = System.currentTimeMillis()
         )
     }
 
@@ -116,5 +193,31 @@ class LeaderResearchService(
 
     fun paperSessions(candidateId: Long): List<LeaderPaperSessionDto> {
         return paperSessionRepository.findByCandidateIdOrderByStartedAtDesc(candidateId).map { mapper.paperSessionDto(it) }
+    }
+
+    private fun categoryOf(candidate: LeaderResearchCandidate): String {
+        val evidence = candidate.sourceEvidence.orEmpty().lowercase()
+        val categoryMatch = Regex("category:([a-z_\\-]+)")
+            .findAll(evidence)
+            .mapNotNull { it.groupValues.getOrNull(1) }
+            .lastOrNull { it in listOf("politics", "finance", "sports", "crypto") }
+        return when {
+            categoryMatch != null -> categoryMatch
+            evidence.contains("politic") || evidence.contains("election") -> "politics"
+            evidence.contains("finance") || evidence.contains("fed") || evidence.contains("rate") -> "finance"
+            evidence.contains("sport") || evidence.contains("soccer") || evidence.contains("nba") -> "sports"
+            evidence.contains("crypto") || evidence.contains("bitcoin") || evidence.contains("btc") -> "crypto"
+            else -> "unknown"
+        }
+    }
+
+    private fun BigDecimal?.format4(): String {
+        return (this ?: BigDecimal.ZERO).setScale(4, RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()
+    }
+
+    companion object {
+        private const val LEADER_DISCOVERY_TARGET = 1000
+        private val HIGH_SCORE_THRESHOLD = BigDecimal("80")
+        private const val HIGH_SCORE_MIN_TRADES = 10
     }
 }

@@ -3250,3 +3250,619 @@
 - 继续用 batchSize=20 循环 paper process + paper score，让新晋级 41 个 PAPER 产生真实模拟样本。
 - 针对 politics 来源不足问题继续扩源；本轮干净 politics 只晋级 1 个，说明 politics 高质量供给仍是瓶颈。
 - 考虑给前端 Leader Research 页面展示 `mixed_category_evidence` 的中文解释，避免用户误读被隔离的高分混类候选。
+
+## Iteration 63 Log
+
+**目标**：恢复第二目标的下一步 loop，继续积累高质量 leader，优先推进 PAPER 观察样本，并检查 politics/finance 扩源瓶颈。
+
+**环境恢复**：
+- 用户登录密码已重置并验证：`admin / 11111111`。
+- 后端已由 `tmux` 会话 `polyhermes-backend` 接管，监听 `8000`。
+- 前端 `3000`、Bridge `8080` 均在线。
+
+**执行动作**：
+- `paper/process batchSize=20`：
+  - processed=15
+  - filtered=5
+  - failed=0
+  - duration≈17s
+- `paper/score`：
+  - scoredCount=175
+  - scoreVersion=`research-copyability-v1`
+- `promote-paper dryRun`：
+  - selectedTotal=17
+  - politics=0
+  - finance=11
+  - sports=4
+  - crypto=2
+- 正式 `promote-paper` 一次性执行 17 个时触发 HTTP 500，且后端短暂掉线；未产生部分晋级。
+- 改为小批量正式晋级：
+  - finance=1：成功 promoted=1
+  - finance=5：成功 promoted=5
+  - sports=2：成功 promoted=2
+  - crypto=1：成功 promoted=1
+  - PAPER 总数从 175 增至 184。
+- 晋级后 `paper/process batchSize=20`：
+  - processed=17
+  - filtered=3
+  - failed=0
+  - duration≈23s
+- 晋级后 `paper/score`：
+  - scoredCount=184
+
+**扩源结果**：
+- `activity-source/import` politics + finance，limitPerCategory=100：
+  - selectedTotal=111
+  - createdTotal=0
+  - updatedTotal=0
+  - skippedExistingTotal=111
+  - politics selected=11，全部已存在
+  - finance selected=100，全部已存在
+
+**当前数据**：
+- DISCOVERED=1461
+- PAPER=184
+- COOLDOWN=5
+- TRIAL_READY=0
+- activePaperSessions=184
+
+**当前高分 clean PAPER 重点观察候选**：
+- finance candidate 1742，wallet `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`，score=95.2944，trade_count=22，filtered_ratio=0.0435，copyablePnL=12.0753。
+- sports candidate 850，wallet `0xe9cbb1c9b3f7f411dd4fdf2ea7afa780c8b4d096`，score=94.0728，trade_count=59，filtered_ratio=0.1324，copyablePnL=12.0089。
+- finance candidate 34，wallet `0x328c2be6eba95a30b003255dc48f2b50e0eccbbc`，score=92.7769，trade_count=25，filtered_ratio=0.2188，copyablePnL=17.4971。
+- finance candidate 1629，wallet `0xc89d5c0f4d12aa83475b2b7804995578c46d9dc0`，score=89.2325，trade_count=10，filtered_ratio=0.1667，copyablePnL=8.3315。
+- finance candidate 1697，wallet `0x31cfb6c5368a727e2a504e2e0e5a18905a6c4de8`，score=88.8906，trade_count=11，filtered_ratio=0.2143，copyablePnL=8.5152。
+- finance candidate 1755，wallet `0x31c4578b25af36f34c8aa4cc85f0794bfbea622f`，score=80.3510，trade_count=10，filtered_ratio=0.2308，copyablePnL=4.3690，是当前较干净 politics 重点观察候选。
+
+**发现的问题**：
+- 一次性正式晋级 17 个候选不稳定，可能与 `stateMachine.advance` 同步 leader pool / paper session 的批量写入路径有关；小批量晋级稳定。
+- 新晋级候选大多只有 0-1 笔模拟，重评分后被 `small_sample` 降至约 59，符合保护预期。
+- 当前 activity-source 在默认条件下无法新增 politics/finance 候选，说明 politics 高质量供给已被当前源吃干，需要扩展新源或降低筛选维度后再二次过滤。
+
+**下一轮动作**：
+- 修复或规避 `promote-paper` 一次性正式晋级 17 个导致 500/掉线的问题：优先把后端接口内部拆为小批量事务，或增加 `maxPromotePerRequest` 保护。
+- 继续按小批量 `promote-paper` + `paper/process` + `paper/score` 推进剩余 finance/sports/crypto 候选。
+- 针对 politics 扩源：放宽 activity-source politics 的 `minSellEvents/minDistinctMarkets` 做 dry-run 对比，或接入新的 politics market/wallet 来源，而不是重复导入已存在候选。
+
+## Iteration 64 Log
+
+**目标**：修复第二目标 loop 中 `promote-paper` 一次性正式晋级过多候选导致 HTTP 500 / 后端掉线的问题，并继续推进剩余高分候选进入 PAPER 观察。
+
+**代码改动**：
+- `LeaderResearchPaperPromotionService`：
+  - 对正式晋级启用请求级全局上限 `LIVE_PROMOTE_BATCH_LIMIT=8`。
+  - dry-run 不限流，仍展示完整候选预览。
+  - 正式执行按类别顺序消耗本次上限，超出部分留给下一轮 loop。
+- `LeaderResearchPaperPromotionResponse`：
+  - 新增 `requestedSelectedTotal`。
+  - 新增 `effectiveSelectedLimit`。
+  - 新增 `truncated`。
+  - 旧字段保持兼容，前端无需同步即可继续展示。
+- 新增 `LeaderResearchPaperPromotionServiceTest`：
+  - 覆盖 dry-run 17 个候选完整预览。
+  - 覆盖正式晋级 17 个候选时只执行 8 个，并返回 `truncated=true`。
+
+**验证**：
+- `cd backend && JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew --no-daemon --no-parallel test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPaperPromotionServiceTest' --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchStateMachineTest' --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScoringServiceTest' --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityScoringServiceTest' compileKotlin` 通过。
+- `cd backend && ... ./gradlew --no-daemon --no-parallel bootJar` 通过。
+- 后端重新创建 `tmux` 会话 `polyhermes-backend` 并启动，当前监听 `8000` 的 Java PID 为 `42048`。
+
+**真实 API 验证**：
+- 使用原大请求：
+  - `politicsLimit=20`
+  - `financeLimit=20`
+  - `sportsLimit=5`
+  - `cryptoLimit=5`
+  - `dryRun=false`
+- 返回 HTTP 200，无 500，后端保持在线。
+- 本次剩余可晋级正好只有 8 个，因此响应为：
+  - selectedTotal=8
+  - promotedTotal=8
+  - requestedSelectedTotal=8
+  - effectiveSelectedLimit=8
+  - truncated=false
+- 这 8 个新增 PAPER：
+  - finance=5
+  - sports=2
+  - crypto=1
+
+**继续处理结果**：
+- 新晋级后 `paper/process batchSize=20`：
+  - processed=12
+  - filtered=8
+  - failed=0
+  - duration≈14s
+- `paper/score`：
+  - scoredCount=192
+- 再次 `promote-paper dryRun`：
+  - selectedTotal=0
+  - 当前没有 `score>=80` 的 DISCOVERED/CANDIDATE 可晋级。
+
+**当前数据**：
+- DISCOVERED=1453，max_score=60.0000。
+- PAPER=192，max_score=95.2985。
+- COOLDOWN=5。
+- TRIAL_READY=0。
+
+**当前高分 clean PAPER 重点观察候选**：
+- finance candidate 1742，wallet `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`，score=95.2985，trade_count=22，filtered_ratio=0.0435，copyablePnL=12.0753。
+- sports candidate 850，wallet `0xe9cbb1c9b3f7f411dd4fdf2ea7afa780c8b4d096`，score=94.0769，trade_count=59，filtered_ratio=0.1324，copyablePnL=12.0089。
+- finance candidate 34，wallet `0x328c2be6eba95a30b003255dc48f2b50e0eccbbc`，score=92.7810，trade_count=25，filtered_ratio=0.2188，copyablePnL=17.4971。
+- finance candidate 1697，wallet `0x31cfb6c5368a727e2a504e2e0e5a18905a6c4de8`，score=88.8947，trade_count=11，filtered_ratio=0.2143，copyablePnL=8.5152。
+- finance candidate 1629，wallet `0xc89d5c0f4d12aa83475b2b7804995578c46d9dc0`，score=87.4289，trade_count=11，filtered_ratio=0.1538，copyablePnL=7.3315。
+- politics candidate 1755，wallet `0x31c4578b25af36f34c8aa4cc85f0794bfbea622f`，score=80.3550，trade_count=10，filtered_ratio=0.2308，copyablePnL=4.3690。
+
+**下一轮动作**：
+- 当前高分 DISCOVERED/CANDIDATE 已清空，下一步必须换扩源策略，而不是继续重复 promote。
+- 针对 politics：做放宽参数 dry-run 对比，例如 `minSellEvents=1`、`minDistinctMarkets=2`、`limitPerCategory=200`，看是否能产生新增或更高分 politics 候选。
+- 针对 finance：可以继续扩 activity source 的 lookback 或从 scanner pool 导入更低 discoveryScore 的候选，但要保持 tail/low-size 风险二次过滤。
+- 对 PAPER=192 的候选继续滚动 `paper/process + paper/score`，等待更多真实模拟样本把 small_sample 候选拉开。
+
+## Iteration 65 Log
+
+**目标**：在高分 DISCOVERED/CANDIDATE 清空后，验证 politics 扩源瓶颈是否来自筛选条件过紧，并尝试补充 politics PAPER 观察样本。
+
+**Politics 放宽扩源对比**：
+- 方案 A dry-run：
+  - lookbackDays=30
+  - minEvents=8
+  - minDistinctMarkets=2
+  - minBuyEvents=2
+  - minSellEvents=1
+  - minSafePriceRatio=0.20
+  - maxTailPriceRatio=0.50
+  - selectedTotal=23
+  - createdTotal=0
+  - updatedTotal=0
+  - skippedExistingTotal=23
+- 方案 B dry-run：
+  - lookbackDays=45
+  - minEvents=6
+  - minDistinctMarkets=2
+  - minBuyEvents=1
+  - minSellEvents=1
+  - minSafePriceRatio=0.15
+  - maxTailPriceRatio=0.55
+  - selectedTotal=46
+  - createdTotal=6
+  - updatedTotal=4
+  - skippedExistingTotal=36
+
+**执行动作**：
+- 正式执行方案 B politics import：
+  - createdTotal=6
+  - updatedTotal=4
+  - skippedExistingTotal=36
+- `activity-score/run force=true`：
+  - scannedCount=1459
+  - scoredCount=1459
+  - categoryCounts: politics=705, finance=447, sports=156, crypto=151
+  - riskFlagCounts: small_sample=1317, low_market_diversity=1143, scanner_pool_unverified=1269, mixed_category_evidence=47, low_average_size=124, tail_price_spray=77, low_safe_price_ratio=86, buy_only_no_exit=64, sell_only_no_entry=16
+- `promote-paper dryRun` politics-only：
+  - selectedTotal=1
+  - candidate 2045，wallet `0xa42f127d7e8df9f16881ffcc9ed0bc0326875f5a`，activity score=100，无 prescreen risk flags。
+- 正式晋级 candidate 2045：
+  - promotedTotal=1
+  - 进入 PAPER。
+- `paper/process batchSize=20`：
+  - processed=15
+  - filtered=5
+  - failed=0
+- `paper/score`：
+  - scoredCount=193
+
+**新 politics 候选复核**：
+- candidate 2045，wallet `0xa42f127d7e8df9f16881ffcc9ed0bc0326875f5a`
+  - researchState=PAPER
+  - score=54.0001
+  - riskFlags=`high_filtered_ratio,small_sample`
+  - trade_count=1
+  - filtered_count=1
+  - filtered_ratio=0.5000
+  - copyablePnL=0
+- 结论：放宽参数可以补 politics PAPER 样本，但新增候选质量偏弱，重评分保护有效，不能作为可试跟候选。
+
+**当前数据**：
+- DISCOVERED=1458
+- PAPER=193
+- COOLDOWN=5
+- TRIAL_READY=0
+
+**下一轮动作**：
+- politics 不能只靠放宽阈值扩大；需要增加 politics 来源质量，例如从明确政治市场的高成交 matched orders、持仓盈利钱包、或外部 analytics 钱包榜导入。
+- 对新增 politics 候选继续 paper 观察，不进入试跟。
+- 继续滚动处理 PAPER=193 的模拟样本，等待 small_sample 候选自然分层。
+
+## Iteration 66 Log
+
+**目标**：继续推进第二目标，验证 scanner pool / activity source 是否仍能提供新的 politics/finance 候选，并修复 activity source 对已有候选新鲜 evidence 不刷新的问题。
+
+**数据盘点**：
+- research 状态：
+  - DISCOVERED=1458
+  - PAPER=193
+  - COOLDOWN=5
+- scanner pool 分布：
+  - politics: ANALYZED=1039, PENDING=913, PROMOTED=106, REJECTED=31
+  - finance: ANALYZED=548, PENDING=641, PROMOTED=97, REJECTED=89
+  - PENDING politics 最高 discoveryScore=38，PENDING finance 最高 discoveryScore=25，直接导入价值低。
+- scanner-pool dry-run：
+  - politics minDiscoveryScore=70/90 且 onlyPending=false：selected=100，全部 SKIP_EXISTING。
+  - finance minDiscoveryScore=70：selected=100，全部 SKIP_EXISTING。
+  - finance minDiscoveryScore=90：selected=58，全部 SKIP_EXISTING。
+- 结论：scanner pool 高分 politics/finance 已基本导入过，不是新增来源瓶颈。
+
+**代码改动**：
+- `LeaderResearchActivitySourceImportService`：
+  - 原逻辑只要已有 `activity_source:<category>` 就 `SKIP_EXISTING`。
+  - 新逻辑改为只有 evidence 文本完全相同才跳过。
+  - 若同一钱包同一 category 的统计窗口更新（events/markets/buy/sell/ratio/last_event_time 改变），则执行 UPDATE，追加新 evidence 并刷新 `lastSourceSeenAt`。
+- `LeaderResearchActivitySourceImportServiceTest`：
+  - 新增“已有 activity_source 但 evidence 变化时 UPDATE”的测试。
+  - 新增“evidence 完全相同时 SKIP_EXISTING”的测试。
+
+**验证**：
+- `cd backend && JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew --no-daemon --no-parallel test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivitySourceImportServiceTest' compileKotlin` 通过。
+- `cd backend && ... ./gradlew --no-daemon --no-parallel bootJar` 通过。
+- 后端已重启，当前监听 `8000` 的 Java PID 为 `59987`。
+- Bridge health 正常：`{"status":"ok","executor_ready":true}`。
+
+**真实运行结果**：
+- activity-source import politics+finance：
+  - selectedTotal=131
+  - createdTotal=1
+  - updatedTotal=94
+  - skippedExistingTotal=36
+  - politics: selected=11, updated=8, skippedExisting=3
+  - finance: selected=120, created=1, updated=86, skippedExisting=33
+- `activity-score/run force=true`：
+  - scannedCount=1459
+  - scoredCount=1459
+  - categoryCounts: politics=704, finance=448, sports=156, crypto=151
+- `promote-paper dryRun` politics+finance：
+  - selectedTotal=2
+  - politics=0
+  - finance=2
+  - candidates:
+    - candidate 2049, wallet `0x38bf7d014b6ac7c778e80daf63617263e23a28e2`, prescreen score=100
+    - candidate 1673, wallet `0xe5055891698b43217f58f15cfef5f231425ee3bf`, prescreen score=100
+- 正式晋级：
+  - promotedTotal=2
+  - finance=2
+- `paper/process batchSize=20`：
+  - processed=16
+  - filtered=4
+  - failed=0
+- `paper/score`：
+  - scoredCount=195
+
+**新增候选复核**：
+- candidate 2049 `0x38bf7d014b6ac7c778e80daf63617263e23a28e2`：
+  - PAPER
+  - score=59
+  - riskFlags=`small_sample`
+  - trade_count=0
+- candidate 1673 `0xe5055891698b43217f58f15cfef5f231425ee3bf`：
+  - PAPER
+  - score=59
+  - riskFlags=`small_sample`
+  - trade_count=0
+- 结论：刷新链路有效，新候选进入 PAPER，但被小样本保护拦住，不能作为可试跟。
+
+**当前高分 clean PAPER 观察候选**：
+- finance candidate 1742，wallet `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`，score=95.3029，trade_count=22，filtered_ratio=0.0435，copyablePnL=12.0753。
+- sports candidate 850，wallet `0xe9cbb1c9b3f7f411dd4fdf2ea7afa780c8b4d096`，score=94.0813，trade_count=59，filtered_ratio=0.1324，copyablePnL=12.0089。
+- finance candidate 34，wallet `0x328c2be6eba95a30b003255dc48f2b50e0eccbbc`，score=92.7853，trade_count=25，filtered_ratio=0.2188，copyablePnL=17.4971。
+- finance candidate 1629，wallet `0xc89d5c0f4d12aa83475b2b7804995578c46d9dc0`，score=89.7856，trade_count=12，filtered_ratio=0.1429，copyablePnL=8.4253。
+- finance candidate 1697，wallet `0x31cfb6c5368a727e2a504e2e0e5a18905a6c4de8`，score=88.8991，trade_count=11，filtered_ratio=0.2143，copyablePnL=8.5152。
+- finance candidate 1609，wallet `0x674887d1ac838099a48b629dff53f25b7b87ee08`，score=84.3196，trade_count=13，filtered_ratio=0，copyablePnL=4.6257。
+
+**下一轮动作**：
+- 继续滚动 `paper/process + paper/score`，让 newly promoted finance candidates 脱离 small_sample。
+- 对 politics 需要新增更高质量来源，而不是再重复 scanner pool；优先考虑从明确 politics 市场的盈利/高成交钱包中抽取，而不是 broad keyword activity source。
+- 可考虑给 activity-source import 增加 `refreshExisting` 返回/参数展示，方便前端看到“更新了多少旧候选”。
+
+## Iteration 67 - 2026-06-25 23:58 CST - activity-source 新钱包优先与严格金融增量
+
+**目标**：
+- 继续第二目标，解决 politics/finance activity-source 被旧钱包占满 selected 窗口的问题。
+- 在不降低质量阈值的前提下，找到新的高质量 finance leader 候选并推进 PAPER。
+
+**发现**：
+- politics 严格条件（30 天、events>=8、markets>=3、buy>=2、sell>=2、safe_ratio>=0.40、tail_ratio<=0.35）下没有未知钱包，短期 politics source 已接近挖空。
+- finance 严格条件下存在未知钱包，但原 importer 的 selected 窗口被已有钱包占满：
+  - limit=30 dry-run：created=0，updated=18，skippedExisting=12。
+  - limit=120 dry-run：created=0，updated=9，skippedExisting=111。
+- 根因：repository SQL 按质量排序没问题，但 service 在 `take(limit)` 前没有把 CREATE/UPDATE 和 SKIP_EXISTING 区分；旧钱包会吃掉探索额度。
+
+**代码改动**：
+- `LeaderResearchActivitySourceImportService`：
+  - source fetch 深度从 `limit * 3` 改成 `min(limit * 20, 1000)`。
+  - 在裁剪 selected 之前计算候选动作优先级：
+    - CREATE 优先级 0。
+    - evidence 变化的 UPDATE 优先级 1。
+    - unchanged SKIP_EXISTING 优先级 2。
+    - locked 优先级 3。
+  - 保留原 SQL 的质量排序，优先级只用于避免旧候选挤掉新增候选。
+- `LeaderResearchActivitySourceImportServiceTest`：
+  - 新增测试：当批次额度不足时，新钱包应排在 unchanged existing wallet 前面。
+
+**验证**：
+- `cd backend && JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew --no-daemon --no-parallel test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivitySourceImportServiceTest' compileKotlin bootJar` 通过。
+- 后端用 `./run_backend_local.sh` 重启成功，当前 Java PID `93676`，登录 OK。
+
+**真实运行结果**：
+- 严格 finance dry-run：
+  - selectedTotal=30
+  - createdTotal=30
+  - updatedTotal=0
+  - skippedExistingTotal=0
+- 正式导入：
+  - selectedTotal=30
+  - createdTotal=30
+  - updatedTotal=0
+  - skippedExistingTotal=0
+- `activity-score/run force=true`：
+  - scannedCount=1487
+  - scoredCount=1487
+  - categoryCounts: politics=704, finance=476, sports=156, crypto=151
+- `promote-paper`：
+  - selectedTotal=8
+  - promotedTotal=8
+  - truncated=false
+- `paper/process batchSize=40`：
+  - requestedBatchSize=40
+  - effectiveBatchSize=20
+  - truncated=true
+  - processed=17
+  - filtered=3
+  - failed=0
+- `paper/score`：
+  - scoredCount=203
+- summary：
+  - DISCOVERED=1479
+  - PAPER=203
+  - TRIAL_READY=0
+  - COOLDOWN=5
+
+**新增 PAPER 质量复核**：
+- 新晋级 8 个 finance 候选目前仍以 `small_sample` 为主：
+  - 2079 `0x983848691c445a1e235c1e49a69c49d8c4d3bcfe`: score=59, trade_count=0, risk=`small_sample`。
+  - 2064 `0xa21203771d5bdfa26d38ad080d52d5b814a01bc3`: score=59, trade_count=0, risk=`small_sample`。
+  - 2063 `0x3e5d55e7d987489ceb9a85984b43b75ad3fef957`: score=59, trade_count=1, copyablePnL=-1, risk=`small_sample`。
+  - 2062 `0xaf9264c8bf3c64487813c594cd7cab2cf4c59937`: score=59, trade_count=0, risk=`small_sample`。
+  - 2061 `0x3a603f6b4354c091f4171c6c40995315df188717`: score=59, trade_count=0, risk=`small_sample`。
+  - 2060 `0x06ae9a98783712fb490e9500481c67c3655af059`: score=45.0002, risk=`high_filtered_ratio,small_sample`。
+  - 2059 `0x026b72036f5121574ef6cb13fab94032823f8412`: score=59, trade_count=0, risk=`small_sample`。
+  - 2054 `0x06ee671e3e303bafe6ea9f07a8b5fa2186fa97d2`: score=59, trade_count=1, copyablePnL=-1, risk=`small_sample`。
+- 结论：本轮成功解决“新增被旧候选挤掉”的瓶颈，并积累 30 个严格 finance 新候选；但新晋级 PAPER 还不能进入真钱试跟，需继续滚动 paper processing 或提高可用 paper event 覆盖。
+
+**下一轮动作**：
+- 继续跑 `paper/process + paper/score`，观察新 finance 候选是否脱离 `small_sample`。
+- 增加“新增候选导入率”指标到日报/目标页，跟踪每轮 created/updated/skippedExisting。
+- politics 需要新来源：从明确 politics 市场的成交订单中按 realized/copyable proxy 选钱包，而不是继续 broad keyword + total amount。
+
+## Iteration 68 - 2026-06-26 00:18 CST - 定向 PAPER 验证与新 finance 高分候选
+
+**目标**：
+- 继续第二目标，解决新晋级 PAPER 候选被全池 fair processing 分流，无法快速脱离 `small_sample` 的问题。
+- 继续探索 politics 高质量新增来源。
+
+**运行态检查**：
+- 后端监听 8000，Java PID 从 `93676` 重启为 `58721`。
+- MySQL 3307 正常。
+- Bridge health：`{"status":"ok","executor_ready":true}`。
+- research summary 开始时：
+  - DISCOVERED=1479
+  - PAPER=203
+  - TRIAL_READY=0
+  - COOLDOWN=5
+
+**发现**：
+- 昨晚新晋级的 8 个 finance PAPER 候选仍有大量 `NEW` 且 `usable_for_paper=1` 的事件：
+  - 目标 8 个钱包合计事件状态：NEW=378、PROCESSED=2、FILTERED=1。
+- 原 `paper/process` 只能对全体 PAPER/TRIAL_READY 钱包 fair processing，无法优先验证刚晋级的新候选；这会拖慢 leader 质量确认。
+- politics 严格新增来源仍稀缺：
+  - strict politics unknown quality：0。
+  - geo politics unknown quality：0。
+  - 现有 politics clean PAPER 中 score>=80 仅 candidate 1755 一个较好。
+
+**代码改动**：
+- `LeaderResearchPaperProcessRequest` 新增 `candidateIds: List<Long> = emptyList()`。
+- `LeaderResearchController.processPaper` 透传 `candidateIds`。
+- `LeaderPaperTradingService`：
+  - `processPaperCandidates` / `processPaperCandidatesInChunks` / `processPaperCandidatesChunk` 新增可选 `candidateIds`。
+  - `candidateIds` 为空时保持原有全池行为。
+  - `candidateIds` 非空时仅加载指定 ID 中状态为 PAPER/TRIAL_READY 的候选，并只处理这些钱包的 NEW/RETRYABLE event。
+- 测试：
+  - `LeaderPaperTradingServiceTest` 新增定向 candidateIds 处理测试。
+  - `LeaderResearchControllerTest` 新增 controller 透传 candidateIds 测试。
+
+**验证**：
+- `cd backend && JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew --no-daemon --no-parallel test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperTradingServiceTest' --tests 'com.wrbug.polymarketbot.controller.copytrading.research.LeaderResearchControllerTest' compileKotlin` 通过。
+- `cd backend && ... ./gradlew --no-daemon --no-parallel bootJar` 通过。
+- 后端用 `./run_backend_local.sh` 重启成功，登录 OK。
+
+**运行结果**：
+- 先用旧全池处理跑 10 批：
+  - processed=161
+  - filtered=39
+  - failed=0
+  - 但新 8 个只从 PROCESSED=2 增至 PROCESSED=5，仍严重分流。
+- 使用新 `candidateIds` 定向处理 10 批：
+  - target candidateIds: 2079,2064,2063,2062,2061,2060,2059,2054
+  - processed=158
+  - filtered=42
+  - failed=0
+  - 目标 8 个钱包事件状态：PROCESSED=163、FILTERED=43、NEW=175。
+- `paper/score`：
+  - scoredCount=203。
+
+**新候选质量结果**：
+- 新 8 个中出现 2 个高质量 finance PAPER：
+  - candidate 2079, wallet `0x983848691c445a1e235c1e49a69c49d8c4d3bcfe`
+    - score=91.1332
+    - riskFlags=null
+    - trade_count=32
+    - filtered_ratio=0.0857
+    - copyablePnL=8.7053
+    - max_drawdown=0
+  - candidate 2063, wallet `0x3e5d55e7d987489ceb9a85984b43b75ad3fef957`
+    - score=87.8488
+    - riskFlags=null
+    - trade_count=18
+    - filtered_ratio=0.1429
+    - copyablePnL=7.4917
+    - max_drawdown=-1.3759
+- 新 8 个中其余：
+  - 2064/2061/2060 风险已清空但分数 71-74，暂不试跟。
+  - 2062/2059 亏损。
+  - 2054 有 `high_filtered_ratio,tail_price_spray`，应排除。
+- 当前全池 clean PAPER 且 score>=80、trade_count>=10、copyablePnL>0 的候选数：19。
+
+**下一轮动作**：
+- 将 candidate 2079、2063 标记为“finance 优先观察/可试跟候选”，进入人工确认或试跟配置创建候选队列。
+- 给目标日报/Leader 管理页增加“定向 paper process”入口和本轮新增转化指标：created -> promoted -> clean score>=80。
+- politics 继续需要新数据源，不是单纯放宽阈值；当前 persisted activity 中没有满足严格条件的未知 politics 钱包。
+
+## Iteration 69 - 2026-06-26 00:29 CST - Leader Research Funnel 可视化
+
+**目标**：
+- 继续第二目标，把“1000+ leader 积累”和“高质量可观察候选”从人工 SQL/日志变成系统可查询指标。
+- 在 Leader 研究页直接展示目标进度、分类转化和优先观察候选。
+
+**代码改动**：
+- 后端 DTO：
+  - 新增 `LeaderResearchFunnelResponse`。
+  - 新增 `LeaderResearchFunnelCategoryDto`。
+  - 新增 `LeaderResearchFunnelCandidateDto`。
+- 后端服务：
+  - `LeaderResearchService.funnel()` 聚合：
+    - targetTotal=1000。
+    - totalCandidates。
+    - progressPercent。
+    - cleanHighScoreTotal。
+    - 分类 politics/finance/sports/crypto 的 total/PAPER/clean high score。
+    - top 10 priorityCandidates。
+  - clean high score 标准：
+    - PAPER/TRIAL_READY。
+    - score>=80。
+    - riskFlags 为空。
+    - tradeCount>=10。
+    - copyablePnl>0。
+  - 类别从 evidence 的最后一个有效 `category:` 提取，多 evidence 钱包更贴近最新证据。
+- 后端接口：
+  - `POST /api/copy-trading/leader-research/funnel`。
+- 前端：
+  - `LeaderResearchFunnel*` 类型。
+  - `apiService.leaderResearch.funnel()`。
+  - Leader 研究页新增：
+    - Leader 积累漏斗。
+    - 分类转化。
+    - 优先观察候选。
+
+**验证**：
+- 后端：
+  - `cd backend && JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew --no-daemon --no-parallel test --tests 'com.wrbug.polymarketbot.controller.copytrading.research.LeaderResearchControllerTest' --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperTradingServiceTest' compileKotlin` 通过。
+  - `cd backend && ... ./gradlew --no-daemon --no-parallel compileKotlin bootJar` 通过。
+- 前端：
+  - `cd frontend && npm run build` 通过；仅有既有 chunk size warning。
+- 后端已重启，登录 OK。
+- funnel API 真实返回：
+  - targetTotal=1000。
+  - totalCandidates=1687。
+  - progressPercent=168.7000。
+  - cleanHighScoreTotal=19。
+  - 分类：
+    - politics: total=730, PAPER=29, clean=1, topCandidate=1755。
+    - finance: total=609, PAPER=148, clean=12, topCandidate=1742。
+    - sports: total=184, PAPER=16, clean=4, topCandidate=850。
+    - crypto: total=163, PAPER=10, clean=2, topCandidate=34。
+  - top priority candidates 前 5：
+    - 1742 finance score=95.3194。
+    - 850 sports score=94.0979。
+    - 34 crypto score=92.8019。
+    - 2079 finance score=91.1332。
+    - 1697 finance score=88.9156。
+
+**结论**：
+- “1000+ leader 积累”数量目标当前已超过，但高质量 clean 候选只有 19。
+- 目标瓶颈已经从“候选数量”转为“高质量转化率”和“政治来源质量”。
+- finance 方向有效，politics 方向仍只有 1 个 clean high score，需要新数据源而不是继续放宽 persisted activity 阈值。
+
+**下一轮动作**：
+- 在 funnel 基础上增加“目标配比健康度”：politics+finance 是否达到 clean 候选 80%，sports+crypto 是否控制在 20%。
+- 对 top finance 候选 2079/2063 生成试跟模板草案，但保持禁用，等待人工确认。
+- politics 继续探索外部/新来源：Polymarket Analytics、历史 profitable order 钱包、特定政治市场成交簿反查。
+
+## Iteration 70 - 2026-06-26 00:40 CST - 澄清 Leader 管理 555 与研究候选 1687 口径
+
+**问题**：
+- 用户在 Leader 管理看到 555 条，而 Leader Research funnel 显示 1687，容易理解成数据不一致。
+
+**核对结果**：
+- `leader_research_candidate`：1687，这是研究候选总数。
+- `copy_trading_leaders`：555，这是 Leader 管理正式 Leader 总数。
+- `copy_trading_leader_pool`：191，这是 Leader 池总数。
+- `leader_scanner_candidate_pool`：7090，这是扫链候选池原始/分析池。
+
+**代码改动**：
+- `LeaderResearchFunnelResponse` 增加：
+  - `managedLeaderTotal`
+  - `leaderPoolTotal`
+- `LeaderResearchService.funnel()` 返回正式 Leader 管理数和 Leader 池数。
+- Leader 研究页把卡片标题从“Leader 积累漏斗”改成“研究候选漏斗”，并展示：
+  - 研究候选目标进度。
+  - 正式 Leader 管理。
+  - Leader 池。
+  - 高质量可观察。
+
+**验证**：
+- `cd backend && ... ./gradlew --no-daemon --no-parallel compileKotlin bootJar` 通过。
+- `cd frontend && npm run build` 通过；只有既有 chunk size warning。
+- 后端已重启。
+- `/leader-research/funnel` 真实返回：
+  - `totalCandidates=1687`
+  - `managedLeaderTotal=555`
+  - `leaderPoolTotal=191`
+  - `cleanHighScoreTotal=19`
+
+**结论**：
+- 555 和 1687 都正确，但不是同一口径。
+- 1687 是研究候选总盘，555 是正式 Leader 管理页记录数；页面现在已显式区分。
+
+## Iteration 71 - 2026-06-26 01:16 CST - Bridge 模式接入 Telegram 推送
+
+**问题**：
+- 用户已配置 Telegram 且测试成功，但 Bridge 模式交易由 Python bridge 直接写入 `bridge_trade_record`，没有走后端 CLOB 订单通知链路。
+- 结果是 Bridge 成功、失败、规则跳过只在桥接交易记录里可见，不会主动推送。
+
+**代码改动**：
+- `bridge_trade_record` 增加通知去重字段：
+  - `notification_status`
+  - `notification_sent_at`
+  - `notification_error`
+- 新增 `BridgeTradeNotificationPollingService`：
+  - 每 5 秒扫描 `notification_status=PENDING` 且状态为 `SUCCESS/FAILED` 的 Bridge 记录。
+  - 发送 Telegram 纯文本中文消息，包含市场、方向、数量、价格、金额、Leader、跟单配置、Bridge、记录 ID、失败原因和时间。
+  - 发送后标记 `SENT`，异常时标记 `FAILED` 并记录错误。
+- Bridge 记录 DTO 增加通知状态字段，后续 UI 可展示“已推送/失败/跳过”。
+- Flyway 迁移 `V62__add_bridge_trade_notification_status.sql`：
+  - 新记录默认 `PENDING`。
+  - 已有历史记录迁移时统一标记 `SKIPPED`，避免重启后刷屏推送旧记录。
+
+**验证**：
+- 后端：
+  - `cd backend && JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew --no-daemon --no-parallel compileKotlin test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchNotificationSummaryServiceTest'` 通过。
+  - `cd backend && ... ./gradlew --no-daemon --no-parallel bootJar` 通过。
+- 后端已重启，Flyway 已执行迁移。
+- 数据库验证：
+  - `notification_status`、`notification_sent_at`、`notification_error` 字段存在。
+  - 历史 Bridge 记录：`SKIPPED/FAILED=1144`，`SKIPPED/SUCCESS=76`。
+  - 当前待推送终态旧记录：0。
+- Bridge runtime 健康检查：
+  - `http://localhost:8080/health` 返回 `status=ok, executor_ready=true`。
+
+**结论**：
+- Bridge 模式从现在开始会对新产生的成功/失败/规则跳过记录推送 Telegram。
+- 历史记录不会补推，避免 Telegram 噪音。

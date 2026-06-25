@@ -111,7 +111,8 @@ data class LeaderResearchActivitySourceImportResponse(
 )
 
 data class LeaderResearchPaperProcessRequest(
-    val batchSize: Int = 20
+    val batchSize: Int = 20,
+    val candidateIds: List<Long> = emptyList()
 )
 
 data class LeaderResearchPaperProcessResponse(
@@ -164,7 +165,10 @@ data class LeaderResearchPaperPromotionResponse(
     val promotedTotal: Int,
     val skippedRiskTotal: Int,
     val categories: List<LeaderResearchPaperPromotionCategoryDto>,
-    val items: List<LeaderResearchPaperPromotionItemDto>
+    val items: List<LeaderResearchPaperPromotionItemDto>,
+    val requestedSelectedTotal: Int = selectedTotal,
+    val effectiveSelectedLimit: Int = selectedTotal,
+    val truncated: Boolean = false
 )
 
 data class LeaderResearchRunDto(
@@ -194,6 +198,40 @@ data class LeaderResearchSummaryDto(
     val pendingRiskCount: Long,
     val lastRun: LeaderResearchRunDto?,
     val sourceLimitations: List<String>
+)
+
+data class LeaderResearchFunnelCategoryDto(
+    val category: String,
+    val totalCandidates: Int,
+    val paperCandidates: Int,
+    val cleanHighScoreCandidates: Int,
+    val topScore: String?,
+    val topCandidateId: Long?
+)
+
+data class LeaderResearchFunnelCandidateDto(
+    val candidateId: Long,
+    val wallet: String,
+    val category: String,
+    val score: String,
+    val tradeCount: Int,
+    val filteredRatio: String,
+    val copyablePnl: String,
+    val maxDrawdown: String,
+    val researchState: String
+)
+
+data class LeaderResearchFunnelResponse(
+    val targetTotal: Int,
+    val totalCandidates: Int,
+    val managedLeaderTotal: Long,
+    val leaderPoolTotal: Long,
+    val progressPercent: String,
+    val cleanHighScoreTotal: Int,
+    val criteria: String,
+    val categories: List<LeaderResearchFunnelCategoryDto>,
+    val priorityCandidates: List<LeaderResearchFunnelCandidateDto>,
+    val generatedAt: Long
 )
 
 data class LeaderResearchCandidateListRequest(

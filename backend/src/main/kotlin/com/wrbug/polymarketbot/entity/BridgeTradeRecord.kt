@@ -60,6 +60,15 @@ data class BridgeTradeRecord(
     @Column(name = "raw_payload", columnDefinition = "TEXT")
     var rawPayload: String? = null,
 
+    @Column(name = "notification_status", nullable = false, length = 30)
+    var notificationStatus: String = "PENDING",
+
+    @Column(name = "notification_sent_at")
+    var notificationSentAt: Long? = null,
+
+    @Column(name = "notification_error", columnDefinition = "TEXT")
+    var notificationError: String? = null,
+
     @Column(name = "executed_at")
     var executedAt: Long? = null,
 

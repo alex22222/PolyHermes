@@ -118,7 +118,7 @@ class LeaderResearchControllerTest {
 
     @Test
     fun `paper process caps oversized manual batch and reports effective size`() {
-        Mockito.`when`(paperTradingService.processPaperCandidates(runId = null, batchSize = 20))
+        Mockito.`when`(paperTradingService.processPaperCandidates(runId = null, batchSize = 20, candidateIds = emptyList()))
             .thenReturn(LeaderPaperProcessingResult(processed = 7, filtered = 3, failed = 0))
 
         val response = controller.processPaper(LeaderResearchPaperProcessRequest(batchSize = 100))
@@ -130,7 +130,23 @@ class LeaderResearchControllerTest {
         assertEquals(20, response.body!!.data!!.effectiveBatchSize)
         assertEquals(20, response.body!!.data!!.maxBatchSize)
         assertEquals(true, response.body!!.data!!.truncated)
-        Mockito.verify(paperTradingService).processPaperCandidates(runId = null, batchSize = 20)
+        Mockito.verify(paperTradingService).processPaperCandidates(runId = null, batchSize = 20, candidateIds = emptyList())
+    }
+
+    @Test
+    fun `paper process passes targeted candidate ids`() {
+        Mockito.`when`(paperTradingService.processPaperCandidates(runId = null, batchSize = 5, candidateIds = listOf(42L, 43L)))
+            .thenReturn(LeaderPaperProcessingResult(processed = 4, filtered = 1, failed = 0))
+
+        val response = controller.processPaper(
+            LeaderResearchPaperProcessRequest(batchSize = 5, candidateIds = listOf(42L, 43L))
+        )
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(4, response.body!!.data!!.processed)
+        assertEquals(1, response.body!!.data!!.filtered)
+        assertEquals(5, response.body!!.data!!.effectiveBatchSize)
+        Mockito.verify(paperTradingService).processPaperCandidates(runId = null, batchSize = 5, candidateIds = listOf(42L, 43L))
     }
 
     @Test

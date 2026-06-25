@@ -27,6 +27,7 @@ import type {
   LeaderResearchCandidateListRequest,
   LeaderResearchCandidateListResponse,
   LeaderResearchEvent,
+  LeaderResearchFunnel,
   LeaderResearchRun,
   LeaderResearchRunRequest,
   LeaderResearchSourceState,
@@ -468,6 +469,9 @@ export const apiService = {
 
     summary: () =>
       apiClient.post<ApiResponse<LeaderResearchSummary>>('/copy-trading/leader-research/summary', {}),
+
+    funnel: () =>
+      apiClient.post<ApiResponse<LeaderResearchFunnel>>('/copy-trading/leader-research/funnel', {}),
 
     listCandidates: (data: LeaderResearchCandidateListRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchCandidateListResponse>>('/copy-trading/leader-research/candidates/list', data),

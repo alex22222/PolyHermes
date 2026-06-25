@@ -524,6 +524,40 @@ export interface LeaderResearchSummary {
   sourceLimitations: string[]
 }
 
+export interface LeaderResearchFunnelCategory {
+  category: string
+  totalCandidates: number
+  paperCandidates: number
+  cleanHighScoreCandidates: number
+  topScore?: string
+  topCandidateId?: number
+}
+
+export interface LeaderResearchFunnelCandidate {
+  candidateId: number
+  wallet: string
+  category: string
+  score: string
+  tradeCount: number
+  filteredRatio: string
+  copyablePnl: string
+  maxDrawdown: string
+  researchState: string
+}
+
+export interface LeaderResearchFunnel {
+  targetTotal: number
+  totalCandidates: number
+  managedLeaderTotal: number
+  leaderPoolTotal: number
+  progressPercent: string
+  cleanHighScoreTotal: number
+  criteria: string
+  categories: LeaderResearchFunnelCategory[]
+  priorityCandidates: LeaderResearchFunnelCandidate[]
+  generatedAt: number
+}
+
 export interface LeaderResearchCandidateListRequest {
   page?: number
   size?: number
@@ -852,6 +886,7 @@ export interface OrderListResponse {
 export interface Statistics {
   totalOrders: number
   totalPnl: string
+  historicalPnl: string
   winRate: string
   avgPnl: string
   maxProfit: string

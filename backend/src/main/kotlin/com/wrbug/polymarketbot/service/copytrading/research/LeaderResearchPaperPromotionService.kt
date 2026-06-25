@@ -31,6 +31,9 @@ class LeaderResearchPaperPromotionService(
 
         val categories = mutableListOf<LeaderResearchPaperPromotionCategoryDto>()
         val items = mutableListOf<LeaderResearchPaperPromotionItemDto>()
+        val effectiveTotalLimit = if (request.dryRun) Int.MAX_VALUE else LIVE_PROMOTE_BATCH_LIMIT
+        var remainingLivePromotions = effectiveTotalLimit
+        var requestedSelectedTotal = 0
         var selectedTotal = 0
         var promotedTotal = 0
         var skippedRiskTotal = 0
@@ -53,9 +56,18 @@ class LeaderResearchPaperPromotionService(
                 .toList()
 
             val safe = categoryCandidates.filter { isPromotableRisk(it.riskFlagsList()) }
-            val selected = safe.take(limit)
+            val requestedSelected = safe.take(limit)
+            val selected = if (request.dryRun) {
+                requestedSelected
+            } else {
+                requestedSelected.take(remainingLivePromotions.coerceAtLeast(0))
+            }
+            requestedSelectedTotal += requestedSelected.size
             selectedTotal += selected.size
             skippedRiskTotal += (categoryCandidates.size - safe.size).coerceAtLeast(0)
+            if (!request.dryRun) {
+                remainingLivePromotions = (remainingLivePromotions - selected.size).coerceAtLeast(0)
+            }
 
             var promoted = 0
             selected.forEach { candidate ->
@@ -101,7 +113,10 @@ class LeaderResearchPaperPromotionService(
             promotedTotal = promotedTotal,
             skippedRiskTotal = skippedRiskTotal,
             categories = categories,
-            items = items.take(PREVIEW_LIMIT)
+            items = items.take(PREVIEW_LIMIT),
+            requestedSelectedTotal = requestedSelectedTotal,
+            effectiveSelectedLimit = if (request.dryRun) requestedSelectedTotal else LIVE_PROMOTE_BATCH_LIMIT,
+            truncated = !request.dryRun && requestedSelectedTotal > selectedTotal
         )
     }
 
@@ -131,6 +146,7 @@ class LeaderResearchPaperPromotionService(
 
     companion object {
         private const val MAX_PROMOTE_PER_CATEGORY = 100
+        private const val LIVE_PROMOTE_BATCH_LIMIT = 8
         private const val PREVIEW_LIMIT = 100
         private val HARD_EXCLUDE_FLAGS = setOf(
             "tail_price_spray",

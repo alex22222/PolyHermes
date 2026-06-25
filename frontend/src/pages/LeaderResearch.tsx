@@ -11,6 +11,7 @@ import {
   Form,
   Input,
   Modal,
+  Progress,
   Row,
   Select,
   Space,
@@ -37,6 +38,7 @@ import type {
   LeaderResearchCandidate,
   LeaderResearchCandidateDetail,
   LeaderResearchCandidateListResponse,
+  LeaderResearchFunnel,
   LeaderResearchSourceState,
   LeaderResearchState,
   LeaderResearchSummary
@@ -86,6 +88,7 @@ const valuationTag = (status?: string) => {
 const LeaderResearch: React.FC = () => {
   const { t } = useTranslation()
   const [summary, setSummary] = useState<LeaderResearchSummary | null>(null)
+  const [funnel, setFunnel] = useState<LeaderResearchFunnel | null>(null)
   const [candidates, setCandidates] = useState<LeaderResearchCandidateListResponse>({ list: [], total: 0, summary: summaryFallback })
   const [sourceHealth, setSourceHealth] = useState<LeaderResearchSourceState[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
@@ -102,9 +105,10 @@ const LeaderResearch: React.FC = () => {
   const loadAll = async (showLoading = true) => {
     if (showLoading) setLoading(true)
     try {
-      const [candidateResp, summaryResp, sourceResp, accountResp] = await Promise.all([
+      const [candidateResp, summaryResp, funnelResp, sourceResp, accountResp] = await Promise.all([
         apiService.leaderResearch.listCandidates({ page: 0, size: 50, state: stateFilter, query: query || undefined }),
         apiService.leaderResearch.summary(),
+        apiService.leaderResearch.funnel(),
         apiService.leaderResearch.sourceHealth(),
         apiService.accounts.list()
       ])
@@ -115,6 +119,9 @@ const LeaderResearch: React.FC = () => {
       }
       if (summaryResp.data.code === 0 && summaryResp.data.data) {
         setSummary(summaryResp.data.data)
+      }
+      if (funnelResp.data.code === 0 && funnelResp.data.data) {
+        setFunnel(funnelResp.data.data)
       }
       if (sourceResp.data.code === 0 && sourceResp.data.data) {
         setSourceHealth(sourceResp.data.data)
@@ -333,6 +340,57 @@ const LeaderResearch: React.FC = () => {
         <Col xs={24} sm={12} lg={4}><Card><Statistic title={t('leaderResearch.states.COOLDOWN')} value={activeSummary.cooldownCount} /></Card></Col>
         <Col xs={24} sm={12} lg={4}><Card><Statistic title={t('leaderResearch.states.RETIRED')} value={activeSummary.retiredCount} /></Card></Col>
       </Row>
+
+      {funnel && (
+        <Row gutter={[16, 16]}>
+          <Col xs={24} lg={8}>
+            <Card title="研究候选漏斗">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Statistic title="研究候选目标进度" value={`${funnel.totalCandidates}/${funnel.targetTotal}`} />
+                <Progress percent={Math.min(100, Number(funnel.progressPercent))} />
+                <Statistic title="正式 Leader 管理" value={funnel.managedLeaderTotal} />
+                <Statistic title="Leader 池" value={funnel.leaderPoolTotal} />
+                <Statistic title="高质量可观察" value={funnel.cleanHighScoreTotal} />
+                <Text type="secondary">{funnel.criteria}</Text>
+              </Space>
+            </Card>
+          </Col>
+          <Col xs={24} lg={8}>
+            <Card title="分类转化">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                {funnel.categories.map(category => (
+                  <Space key={category.category} style={{ justifyContent: 'space-between', width: '100%' }}>
+                    <Text strong>{category.category}</Text>
+                    <Text>{category.totalCandidates} / PAPER {category.paperCandidates} / 高分 {category.cleanHighScoreCandidates}</Text>
+                    <Tag color={category.cleanHighScoreCandidates > 0 ? 'green' : 'default'}>
+                      {category.topScore || '-'}
+                    </Tag>
+                  </Space>
+                ))}
+              </Space>
+            </Card>
+          </Col>
+          <Col xs={24} lg={8}>
+            <Card title="优先观察候选">
+              {funnel.priorityCandidates.length > 0 ? (
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {funnel.priorityCandidates.slice(0, 5).map(candidate => (
+                    <Space key={candidate.candidateId} style={{ justifyContent: 'space-between', width: '100%' }}>
+                      <Space direction="vertical" size={0}>
+                        <Text strong>#{candidate.candidateId} {candidate.wallet.slice(0, 10)}...</Text>
+                        <Text type="secondary">{candidate.category} · {candidate.tradeCount} trades · PnL {candidate.copyablePnl}</Text>
+                      </Space>
+                      <Tag color="green">{candidate.score}</Tag>
+                    </Space>
+                  ))}
+                </Space>
+              ) : (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无高质量候选" />
+              )}
+            </Card>
+          </Col>
+        </Row>
+      )}
 
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={12}>

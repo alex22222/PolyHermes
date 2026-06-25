@@ -255,6 +255,7 @@ data class CategoryStatisticsRequest(
 data class StatisticsResponse(
     val totalOrders: Long,
     val totalPnl: String,
+    val historicalPnl: String,
     val winRate: String,
     val avgPnl: String,
     val maxProfit: String,

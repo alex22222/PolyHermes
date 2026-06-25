@@ -55,10 +55,22 @@ class LeaderResearchActivitySourceImportService(
                 minSellEvents = request.minSellEvents.coerceIn(1, 1000),
                 minSafePriceRatio = minSafePriceRatio,
                 maxTailPriceRatio = maxTailPriceRatio,
-                limit = limit * OVERSAMPLE_FACTOR
+                limit = (limit * OVERSAMPLE_FACTOR).coerceAtMost(MAX_SOURCE_SCAN_PER_CATEGORY)
             )
                 .asSequence()
                 .filter { selectedWallets.add(it.getNormalizedWallet().lowercase()) }
+                .map { source ->
+                    val normalizedWallet = source.getNormalizedWallet().lowercase()
+                    val sourceEvidence = sourceEvidence(category, source)
+                    val existing = candidateRepository.findByNormalizedWallet(normalizedWallet)
+                    ActivitySourceSelection(
+                        source = source,
+                        normalizedWallet = normalizedWallet,
+                        sourceEvidence = sourceEvidence,
+                        priority = selectionPriority(existing, sourceEvidence)
+                    )
+                }
+                .sortedBy { it.priority }
                 .take(limit)
                 .toList()
 
@@ -68,9 +80,10 @@ class LeaderResearchActivitySourceImportService(
             var skippedLocked = 0
             selectedTotal += selected.size
 
-            selected.forEachIndexed { index, source ->
-                val normalizedWallet = source.getNormalizedWallet().lowercase()
-                val sourceEvidence = sourceEvidence(category, source)
+            selected.forEachIndexed { index, selection ->
+                val source = selection.source
+                val normalizedWallet = selection.normalizedWallet
+                val sourceEvidence = selection.sourceEvidence
                 val existing = candidateRepository.findByNormalizedWallet(normalizedWallet)
                 val leader = leaderRepository.findByLeaderAddress(normalizedWallet)
                 val action = when {
@@ -82,7 +95,7 @@ class LeaderResearchActivitySourceImportService(
                         created += 1
                         "CREATE"
                     }
-                    existing.sourceEvidence?.contains("activity_source:$category") == true -> {
+                    hasExactEvidence(existing.sourceEvidence, sourceEvidence) -> {
                         skippedExisting += 1
                         "SKIP_EXISTING"
                     }
@@ -237,6 +250,22 @@ class LeaderResearchActivitySourceImportService(
         return lines.takeLast(20).joinToString("\n")
     }
 
+    private fun hasExactEvidence(existing: String?, incoming: String): Boolean {
+        return existing.orEmpty()
+            .lines()
+            .map { it.trim() }
+            .any { it == incoming.trim() }
+    }
+
+    private fun selectionPriority(existing: LeaderResearchCandidate?, sourceEvidence: String): Int {
+        return when {
+            existing == null -> 0
+            existing.locked || existing.provenance == LeaderCandidateProvenance.MANUAL_LOCKED -> 3
+            hasExactEvidence(existing.sourceEvidence, sourceEvidence) -> 2
+            else -> 1
+        }
+    }
+
     private fun String.toBigDecimalOrDefault(default: BigDecimal): BigDecimal {
         return runCatching { BigDecimal(this) }.getOrDefault(default)
     }
@@ -249,11 +278,19 @@ class LeaderResearchActivitySourceImportService(
         const val SOURCE_ACTIVITY_SOURCE = "ACTIVITY_SOURCE"
         private const val MAX_IMPORT_PER_CATEGORY = 500
         private const val PREVIEW_LIMIT = 100
-        private const val OVERSAMPLE_FACTOR = 3
+        private const val OVERSAMPLE_FACTOR = 20
+        private const val MAX_SOURCE_SCAN_PER_CATEGORY = 1000
         private const val DAY_MS = 24L * 60 * 60 * 1000
         private val CATEGORY_PATTERNS = mapOf(
             "politics" to "(election|president|senate|congress|parliament|trump|biden|democrat|republican|israel|ukraine|russia|china|mexico|tariff|war|ceasefire|nato|eu|iran|gaza|minister|court|supreme)",
             "finance" to "(fed|rate|rates|interest|inflation|cpi|gdp|recession|tariff|dollar|treasury|nasdaq|dow|sp500|s-p-500|spx|stock|stocks|oil|gold|unemployment|jobs|fomc|yield)"
         )
     }
+
+    private data class ActivitySourceSelection(
+        val source: LeaderResearchActivitySourceProjection,
+        val normalizedWallet: String,
+        val sourceEvidence: String,
+        val priority: Int
+    )
 }

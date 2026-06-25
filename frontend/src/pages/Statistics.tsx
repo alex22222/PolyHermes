@@ -22,6 +22,7 @@ const isZeroStatistics = (value: StatisticsType | null | undefined): boolean => 
   return (
     toNumber(value.totalOrders) === 0 &&
     toNumber(value.totalPnl) === 0 &&
+    toNumber(value.historicalPnl) === 0 &&
     toNumber(value.winRate) === 0 &&
     toNumber(value.avgPnl) === 0 &&
     toNumber(value.maxProfit) === 0 &&
@@ -36,6 +37,7 @@ const aggregateDetailStatistics = (details: CopyTradingStatistics[]): Statistics
 
   const totalOrders = details.reduce((sum, item) => sum + (item.totalBuyOrders || 0), 0)
   const totalPnl = details.reduce((sum, item) => sum + toNumber(item.totalPnl), 0)
+  const historicalPnl = details.reduce((sum, item) => sum + toNumber(item.totalRealizedPnl), 0)
   const pnlValues = details.map((item) => toNumber(item.totalPnl))
   const nonZeroDetails = pnlValues.filter((value) => value !== 0)
   const winningDetails = nonZeroDetails.filter((value) => value > 0).length
@@ -43,6 +45,7 @@ const aggregateDetailStatistics = (details: CopyTradingStatistics[]): Statistics
   return {
     totalOrders,
     totalPnl: totalPnl.toFixed(6),
+    historicalPnl: historicalPnl.toFixed(6),
     winRate: nonZeroDetails.length > 0 ? ((winningDetails / nonZeroDetails.length) * 100).toFixed(2) : '0',
     avgPnl: totalOrders > 0 ? (totalPnl / totalOrders).toFixed(6) : '0',
     maxProfit: Math.max(0, ...pnlValues).toFixed(6),
@@ -60,6 +63,7 @@ const mapBridgeStatistics = (bridgeStats: BridgeTradeStatistics): StatisticsType
   return {
     totalOrders: walletHistoricalOrders,
     totalPnl: bridgeStats.totalPnl,
+    historicalPnl: bridgeStats.netCashflow,
     winRate: bridgeStats.successRate,
     avgPnl: walletHistoricalOrders > 0
       ? (toNumber(bridgeStats.totalPnl) / walletHistoricalOrders).toFixed(6)
@@ -454,6 +458,17 @@ const Statistics: React.FC = () => {
                 value={formatUSDC(stats?.totalPnl || '0')}
                 prefix={<>{stats?.totalPnl && parseFloat(stats.totalPnl) >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />} $</>}
                 valueStyle={{ color: stats?.totalPnl && parseFloat(stats.totalPnl || '0') >= 0 ? '#3f8600' : '#cf1322' }}
+                loading={loading}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} md={8}>
+            <Card>
+              <Statistic
+                title={t('statistics.historicalPnl') || '历史盈亏'}
+                value={formatUSDC(stats?.historicalPnl || '0')}
+                prefix={<>{stats?.historicalPnl && parseFloat(stats.historicalPnl) >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />} $</>}
+                valueStyle={{ color: stats?.historicalPnl && parseFloat(stats.historicalPnl || '0') >= 0 ? '#3f8600' : '#cf1322' }}
                 loading={loading}
               />
             </Card>
