@@ -1,17 +1,17 @@
 package com.wrbug.polymarketbot.service.copytrading.research
 
-import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceCategoryDto
-import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceImportRequest
-import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceImportResponse
-import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourcePreviewItemDto
+import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceCategoryDto
+import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourcePreviewItemDto
 import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
 import com.wrbug.polymarketbot.enums.LeaderCandidateProvenance
 import com.wrbug.polymarketbot.enums.LeaderResearchEventType
 import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.repository.LeaderActivityEventRepository
 import com.wrbug.polymarketbot.repository.LeaderRepository
-import com.wrbug.polymarketbot.repository.LeaderResearchActivitySourceProjection
 import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
+import com.wrbug.polymarketbot.repository.LeaderResearchMarketPeerSourceProjection
 import com.wrbug.polymarketbot.util.CategoryValidator
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -19,14 +19,14 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 
 @Service
-class LeaderResearchActivitySourceImportService(
+class LeaderResearchMarketPeerSourceImportService(
     private val activityEventRepository: LeaderActivityEventRepository,
     private val candidateRepository: LeaderResearchCandidateRepository,
     private val leaderRepository: LeaderRepository,
     private val eventService: LeaderResearchEventService
 ) {
     @Transactional
-    fun importFromActivitySource(request: LeaderResearchActivitySourceImportRequest): LeaderResearchActivitySourceImportResponse {
+    fun importFromMarketPeerSource(request: LeaderResearchMarketPeerSourceImportRequest): LeaderResearchMarketPeerSourceImportResponse {
         val categories = request.categories
             .mapNotNull { CategoryValidator.normalizeCategory(it) }
             .filter { LeaderResearchMarketCategoryPatterns.contains(it) }
@@ -34,11 +34,11 @@ class LeaderResearchActivitySourceImportService(
             .ifEmpty { listOf("politics", "finance") }
         val limit = request.limitPerCategory.coerceIn(1, MAX_IMPORT_PER_CATEGORY)
         val since = System.currentTimeMillis() - request.lookbackDays.coerceIn(1, 365).toLong() * DAY_MS
-        val minSafePriceRatio = request.minSafePriceRatio.toBigDecimalOrDefault(BigDecimal("0.25"))
-        val maxTailPriceRatio = request.maxTailPriceRatio.toBigDecimalOrDefault(BigDecimal("0.45"))
-        val previewItems = mutableListOf<LeaderResearchActivitySourcePreviewItemDto>()
+        val minSafePriceRatio = request.minSafePriceRatio.toBigDecimalOrDefault(BigDecimal("0.20"))
+        val maxTailPriceRatio = request.maxTailPriceRatio.toBigDecimalOrDefault(BigDecimal("0.50"))
         val selectedWallets = mutableSetOf<String>()
-        val categoryResults = mutableListOf<LeaderResearchActivitySourceCategoryDto>()
+        val categoryResults = mutableListOf<LeaderResearchMarketPeerSourceCategoryDto>()
+        val previewItems = mutableListOf<LeaderResearchMarketPeerSourcePreviewItemDto>()
         var selectedTotal = 0
         var createdTotal = 0
         var updatedTotal = 0
@@ -46,13 +46,16 @@ class LeaderResearchActivitySourceImportService(
         var skippedLockedTotal = 0
 
         categories.forEach { category ->
-            val selected = activityEventRepository.discoverWalletsFromActivitySource(
+            val selected = activityEventRepository.discoverWalletsFromMarketPeerSource(
                 since = since,
                 marketPattern = LeaderResearchMarketCategoryPatterns.patternFor(category),
+                hotMarketLimit = request.hotMarketLimit.coerceIn(1, MAX_HOT_MARKET_LIMIT),
+                minMarketEvents = request.minMarketEvents.coerceIn(1, 5000),
+                minMarketWallets = request.minMarketWallets.coerceIn(1, 5000),
                 minEvents = request.minEvents.coerceIn(1, 1000),
                 minDistinctMarkets = request.minDistinctMarkets.coerceIn(1, 1000),
-                minBuyEvents = request.minBuyEvents.coerceIn(1, 1000),
-                minSellEvents = request.minSellEvents.coerceIn(1, 1000),
+                minBuyEvents = request.minBuyEvents.coerceIn(0, 1000),
+                minSellEvents = request.minSellEvents.coerceIn(0, 1000),
                 minSafePriceRatio = minSafePriceRatio,
                 maxTailPriceRatio = maxTailPriceRatio,
                 limit = (limit * OVERSAMPLE_FACTOR).coerceAtMost(MAX_SOURCE_SCAN_PER_CATEGORY)
@@ -63,7 +66,7 @@ class LeaderResearchActivitySourceImportService(
                     val normalizedWallet = source.getNormalizedWallet().lowercase()
                     val sourceEvidence = sourceEvidence(category, source)
                     val existing = candidateRepository.findByNormalizedWallet(normalizedWallet)
-                    ActivitySourceSelection(
+                    MarketPeerSourceSelection(
                         source = source,
                         normalizedWallet = normalizedWallet,
                         sourceEvidence = sourceEvidence,
@@ -81,7 +84,6 @@ class LeaderResearchActivitySourceImportService(
             selectedTotal += selected.size
 
             selected.forEachIndexed { index, selection ->
-                val source = selection.source
                 val normalizedWallet = selection.normalizedWallet
                 val sourceEvidence = selection.sourceEvidence
                 val existing = candidateRepository.findByNormalizedWallet(normalizedWallet)
@@ -113,7 +115,7 @@ class LeaderResearchActivitySourceImportService(
                                 normalizedWallet = normalizedWallet,
                                 leaderId = leader?.id,
                                 researchState = LeaderResearchState.DISCOVERED,
-                                source = SOURCE_ACTIVITY_SOURCE,
+                                source = SOURCE_MARKET_PEER_SOURCE,
                                 sourceRank = index + 1,
                                 agentOwned = true,
                                 provenance = if (leader == null) {
@@ -133,7 +135,7 @@ class LeaderResearchActivitySourceImportService(
                         candidateRepository.save(
                             existing.copy(
                                 leaderId = existing.leaderId ?: leader?.id,
-                                source = mergeSource(existing.source, SOURCE_ACTIVITY_SOURCE),
+                                source = mergeSource(existing.source, SOURCE_MARKET_PEER_SOURCE),
                                 sourceRank = existing.sourceRank ?: index + 1,
                                 provenance = if (existing.provenance == LeaderCandidateProvenance.AGENT_CREATED && leader != null) {
                                     LeaderCandidateProvenance.USER_LEADER
@@ -153,14 +155,14 @@ class LeaderResearchActivitySourceImportService(
                             LeaderResearchEventType.CANDIDATE_UPDATED
                         },
                         candidateId = saved.id,
-                        reason = "Candidate imported from activity source",
+                        reason = "Candidate imported from market peer source",
                         payloadSummary = sourceEvidence,
-                        dedupeKey = "activity-source-import:$category:$normalizedWallet"
+                        dedupeKey = "market-peer-source-import:$category:$normalizedWallet"
                     )
                 }
 
                 if (previewItems.size < PREVIEW_LIMIT) {
-                    previewItems += previewItem(category, normalizedWallet, action, source, sourceEvidence)
+                    previewItems += previewItem(category, normalizedWallet, action, selection.source, sourceEvidence)
                 }
             }
 
@@ -168,7 +170,7 @@ class LeaderResearchActivitySourceImportService(
             updatedTotal += updated
             skippedExistingTotal += skippedExisting
             skippedLockedTotal += skippedLocked
-            categoryResults += LeaderResearchActivitySourceCategoryDto(
+            categoryResults += LeaderResearchMarketPeerSourceCategoryDto(
                 category = category,
                 selectedCount = selected.size,
                 createdCount = created,
@@ -178,7 +180,7 @@ class LeaderResearchActivitySourceImportService(
             )
         }
 
-        return LeaderResearchActivitySourceImportResponse(
+        return LeaderResearchMarketPeerSourceImportResponse(
             dryRun = request.dryRun,
             requestedCategories = categories,
             selectedTotal = selectedTotal,
@@ -195,10 +197,10 @@ class LeaderResearchActivitySourceImportService(
         category: String,
         wallet: String,
         action: String,
-        source: LeaderResearchActivitySourceProjection,
+        source: LeaderResearchMarketPeerSourceProjection,
         sourceEvidence: String
-    ): LeaderResearchActivitySourcePreviewItemDto {
-        return LeaderResearchActivitySourcePreviewItemDto(
+    ): LeaderResearchMarketPeerSourcePreviewItemDto {
+        return LeaderResearchMarketPeerSourcePreviewItemDto(
             category = category,
             wallet = wallet,
             action = action,
@@ -211,16 +213,17 @@ class LeaderResearchActivitySourceImportService(
             avgAmount = source.getAvgAmount().format4(),
             totalAmount = source.getTotalAmount().format4(),
             lastEventTime = source.getLastEventTime(),
+            topMarkets = topMarkets(source),
             sourceEvidence = sourceEvidence
         )
     }
 
-    private fun sourceEvidence(category: String, source: LeaderResearchActivitySourceProjection): String {
+    private fun sourceEvidence(category: String, source: LeaderResearchMarketPeerSourceProjection): String {
         val totalEvents = source.getTotalEvents().coerceAtLeast(1)
         val safeRatio = BigDecimal(source.getSafePriceEvents()).divide(BigDecimal(totalEvents), 4, RoundingMode.HALF_UP)
         val tailRatio = BigDecimal(source.getTailPriceEvents()).divide(BigDecimal(totalEvents), 4, RoundingMode.HALF_UP)
         return listOf(
-            "activity_source:$category",
+            "market_peer_source:$category",
             "category:$category",
             "events:${source.getTotalEvents()}",
             "markets:${source.getDistinctMarkets()}",
@@ -230,8 +233,19 @@ class LeaderResearchActivitySourceImportService(
             "tail_price_ratio:$tailRatio",
             "avg_amount:${source.getAvgAmount().format4()}",
             "total_amount:${source.getTotalAmount().format4()}",
+            "top_markets:${topMarkets(source).joinToString(",")}",
             "last_event_time:${source.getLastEventTime() ?: 0}"
         ).joinToString(" | ")
+    }
+
+    private fun topMarkets(source: LeaderResearchMarketPeerSourceProjection): List<String> {
+        return source.getTopMarkets()
+            ?.split(",")
+            ?.map { it.trim() }
+            ?.filter { it.isNotBlank() }
+            ?.distinct()
+            ?.take(5)
+            .orEmpty()
     }
 
     private fun mergeSource(existing: String, incoming: String): String {
@@ -275,16 +289,17 @@ class LeaderResearchActivitySourceImportService(
     }
 
     companion object {
-        const val SOURCE_ACTIVITY_SOURCE = "ACTIVITY_SOURCE"
+        const val SOURCE_MARKET_PEER_SOURCE = "MARKET_PEER_SOURCE"
         private const val MAX_IMPORT_PER_CATEGORY = 500
+        private const val MAX_HOT_MARKET_LIMIT = 200
         private const val PREVIEW_LIMIT = 100
         private const val OVERSAMPLE_FACTOR = 20
         private const val MAX_SOURCE_SCAN_PER_CATEGORY = 1000
         private const val DAY_MS = 24L * 60 * 60 * 1000
     }
 
-    private data class ActivitySourceSelection(
-        val source: LeaderResearchActivitySourceProjection,
+    private data class MarketPeerSourceSelection(
+        val source: LeaderResearchMarketPeerSourceProjection,
         val normalizedWallet: String,
         val sourceEvidence: String,
         val priority: Int

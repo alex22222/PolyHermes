@@ -198,8 +198,8 @@ const PositionList: React.FC = () => {
   const handlePositionPushMessage = (message: PositionPushMessage) => {
     if (message.type === 'FULL') {
       // 全量推送：直接替换（这是首次连接时的数据，完全以推送数据为准）
-      setCurrentPositions(message.currentPositions || [])
-      setHistoryPositions(message.historyPositions || [])
+      setCurrentPositions(dedupePositions(message.currentPositions || []))
+      setHistoryPositions(dedupePositions(message.historyPositions || []))
       setLoading(false)
       console.log('收到仓位全量推送:', {
         current: message.currentPositions?.length || 0,
@@ -267,7 +267,23 @@ const PositionList: React.FC = () => {
       }
     })
 
-    return result
+    return dedupePositions(result)
+  }
+
+  const dedupePositions = (positions: AccountPosition[]): AccountPosition[] => {
+    const byKey = new Map<string, AccountPosition>()
+    positions.forEach(position => {
+      const key = getPositionKey(position)
+      const existing = byKey.get(key)
+      if (!existing) {
+        byKey.set(key, position)
+        return
+      }
+      const existingValue = parseFloat(existing.currentValue || '0')
+      const nextValue = parseFloat(position.currentValue || '0')
+      byKey.set(key, nextValue >= existingValue ? position : existing)
+    })
+    return Array.from(byKey.values())
   }
 
   const fetchAccounts = async () => {
@@ -292,8 +308,8 @@ const PositionList: React.FC = () => {
       const response = await apiService.accounts.positionsList()
       if (response.data.code === 0 && response.data.data) {
         const data = response.data.data
-        setCurrentPositions(data.currentPositions || [])
-        setHistoryPositions(data.historyPositions || [])
+        setCurrentPositions(dedupePositions(data.currentPositions || []))
+        setHistoryPositions(dedupePositions(data.historyPositions || []))
       } else {
         message.error(response.data.msg || '获取仓位数据失败')
       }
@@ -660,7 +676,7 @@ const PositionList: React.FC = () => {
 
     return (
       <Row gutter={[16, 16]}>
-        {paginatedPositions.map((position, index) => {
+        {paginatedPositions.map((position) => {
           const pnlNum = parseFloat(position.pnl || '0')
           const isProfit = pnlNum >= 0
           // 只有当前仓位才根据盈亏显示边框颜色
@@ -668,7 +684,7 @@ const PositionList: React.FC = () => {
             ? (isProfit ? 'rgba(82, 196, 26, 0.2)' : 'rgba(245, 34, 45, 0.2)')
             : 'rgba(0,0,0,0.06)'
 
-          const cardKey = `${position.accountId}-${position.marketId}-${index}`
+          const cardKey = getPositionKey(position)
           const isExpanded = expandedCards.has(cardKey)
           // 移动端需要折叠功能，桌面端始终展开
           const shouldCollapse = isMobile && !isExpanded
@@ -1432,7 +1448,7 @@ const PositionList: React.FC = () => {
           <Table
             dataSource={filteredPositions}
             columns={columns}
-            rowKey={(record, index) => `${record.accountId}-${record.marketId}-${index}`}
+            rowKey={(record) => getPositionKey(record)}
             loading={loading}
             pagination={{
               current: currentPage,
@@ -1798,4 +1814,3 @@ const PositionList: React.FC = () => {
 }
 
 export default PositionList
-

@@ -132,6 +132,13 @@ class AuditReconciliationRequest(BaseModel):
     actor: str = "operator"
 
 
+class AccountSelectRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    account_id: int = Field(..., alias="account_id")
+    expected_wallet_address: str = Field(..., alias="expected_wallet_address")
+
+
 # Global executor instance
 executor: Optional[PolymtradeExecutor] = None
 rule_engine: Optional[CopyTradingRuleEngine] = None
@@ -370,20 +377,30 @@ async def account_info():
         raise HTTPException(status_code=401, detail="Not logged in")
 
     try:
-        # Navigate to the portfolio page where the referral link contains the full wallet address.
-        info = await executor.navigate_to("https://polym.trade/portfolio")
-        text = info.get("text_sample", "") + " " + info.get("title", "")
+        async with _trade_lock:
+            async with _portfolio_lock:
+                address = await executor.get_wallet_address()
+                text = ""
+                if executor.page:
+                    try:
+                        text = await executor.page.inner_text("body", timeout=5000)
+                    except Exception:
+                        text = ""
 
-        # The referral link is the most reliable full-address source.
-        ref_match = re.search(r'[?&]ref=(0x[a-fA-F0-9]{40})', text)
-        if ref_match:
-            address = ref_match.group(1)
-        else:
-            # Fallback: any full Ethereum address visible on the page.
-            addresses = re.findall(r'0x[a-fA-F0-9]{40}', text)
-            if not addresses:
-                raise HTTPException(status_code=404, detail="Wallet address not found in page")
-            address = addresses[0]
+                if not address:
+                    # Fallback for older page states where get_wallet_address cannot
+                    # parse the body after navigation but debug text still has a ref.
+                    info = await executor.navigate_to("https://polym.trade/portfolio")
+                    text = (info.get("text_sample", "") + " " + info.get("title", "")).strip()
+                    ref_match = re.search(r'[?&]ref=(0x[a-fA-F0-9]{40})', text)
+                    if ref_match:
+                        address = ref_match.group(1).lower()
+                    else:
+                        addresses = re.findall(r'0x[a-fA-F0-9]{40}', text)
+                        address = addresses[0].lower() if addresses else None
+
+        if not address:
+            raise HTTPException(status_code=404, detail="Wallet address not found in page")
 
         # If an email is visible on the page, assume Magic (Privy embedded wallet);
         # otherwise treat as a Safe/Web3 wallet.
@@ -400,6 +417,48 @@ async def account_info():
     except Exception as e:
         logger.error(f"Failed to extract account info: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to extract account info: {e}")
+
+
+@app.post("/account/select")
+async def select_account(request: AccountSelectRequest):
+    """Bind the current browser session to a PolyHermes account id.
+
+    The Bridge has one persistent browser session. This endpoint intentionally
+    does not log into another Magic wallet silently; it verifies the currently
+    visible wallet first, then switches copy-trading config filtering.
+    """
+    if not executor or not executor.is_ready():
+        raise HTTPException(status_code=503, detail="Executor not ready")
+    if not executor.is_logged_in():
+        raise HTTPException(status_code=401, detail="Not logged in")
+    if not rule_engine:
+        raise HTTPException(status_code=503, detail="Rule engine not initialized")
+    if request.account_id <= 0:
+        raise HTTPException(status_code=400, detail="account_id must be positive")
+
+    account = await account_info()
+    current_wallet = (account.get("wallet_address") or "").lower()
+    expected_wallet = request.expected_wallet_address.lower()
+    if current_wallet != expected_wallet:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Current Bridge wallet does not match selected account. "
+                f"current={current_wallet}, expected={expected_wallet}"
+            ),
+        )
+
+    rule_engine.set_account_id(request.account_id)
+    rule_engine.refresh_if_needed()
+
+    return {
+        "success": True,
+        "message": "Bridge current account selected",
+        "account_id": request.account_id,
+        "wallet_address": current_wallet,
+        "copy_trading_account_id": rule_engine.active_account_id,
+        "copy_trading_config_count": rule_engine.config_count,
+    }
 
 
 @app.get("/portfolio")

@@ -543,6 +543,32 @@ export interface LeaderResearchFunnelCandidate {
   copyablePnl: string
   maxDrawdown: string
   researchState: string
+  trialReadiness: LeaderResearchTrialReadiness
+}
+
+export interface LeaderResearchTrialReadiness {
+  eligible: boolean
+  level: 'TRIAL_READY' | 'FAST_WATCH' | 'OBSERVE' | string
+  label: string
+  blockers: string[]
+  fastWatchBlockers: string[]
+  ageHours: number
+  stableHighScoreCount: number
+  requiredStableHighScoreCount: number
+}
+
+export interface LeaderResearchAllocationHealth {
+  primaryCategories: string[]
+  secondaryCategories: string[]
+  primaryTargetPercent: string
+  secondaryTargetPercent: string
+  primaryActualPercent: string
+  secondaryActualPercent: string
+  primaryCleanHighCount: number
+  secondaryCleanHighCount: number
+  primaryDeficitCount: number
+  status: 'EMPTY' | 'HEALTHY' | 'WATCH' | 'DEFICIT' | string
+  message: string
 }
 
 export interface LeaderResearchFunnel {
@@ -554,7 +580,228 @@ export interface LeaderResearchFunnel {
   cleanHighScoreTotal: number
   criteria: string
   categories: LeaderResearchFunnelCategory[]
+  allocationHealth: LeaderResearchAllocationHealth
   priorityCandidates: LeaderResearchFunnelCandidate[]
+  generatedAt: number
+}
+
+export interface LeaderResearchPoliticsSourceDiagnoseRequest {
+  lookbackDays?: number
+  minEvents?: number
+  minDistinctMarkets?: number
+  minBuyEvents?: number
+  minSellEvents?: number
+  minSafePriceRatio?: string
+  maxTailPriceRatio?: string
+  limit?: number
+}
+
+export interface LeaderResearchPoliticsSourceBucket {
+  bucket: string
+  count: number
+  description: string
+}
+
+export interface LeaderResearchPoliticsSourceSample {
+  wallet: string
+  action: string
+  totalEvents: number
+  distinctMarkets: number
+  buyEvents: number
+  sellEvents: number
+  safePriceRatio: string
+  tailPriceRatio: string
+  avgAmount: string
+  totalAmount: string
+  currentState?: string
+  currentScore?: string
+  riskFlags: string[]
+  blockers: string[]
+}
+
+export interface LeaderResearchPoliticsSourceDiagnose {
+  category: string
+  lookbackDays: number
+  scannedWallets: number
+  passImportCriteria: number
+  unknownWallets: number
+  existingWallets: number
+  paperWallets: number
+  cleanHighWallets: number
+  eligibleForPaperNow: number
+  buckets: LeaderResearchPoliticsSourceBucket[]
+  samples: LeaderResearchPoliticsSourceSample[]
+  generatedAt: number
+}
+
+export interface LeaderResearchMarketPeerSourceImportRequest {
+  dryRun?: boolean
+  categories?: string[]
+  limitPerCategory?: number
+  lookbackDays?: number
+  hotMarketLimit?: number
+  minMarketEvents?: number
+  minMarketWallets?: number
+  minEvents?: number
+  minDistinctMarkets?: number
+  minBuyEvents?: number
+  minSellEvents?: number
+  minSafePriceRatio?: string
+  maxTailPriceRatio?: string
+}
+
+export interface LeaderResearchMarketPeerSourceCategory {
+  category: string
+  selectedCount: number
+  createdCount: number
+  updatedCount: number
+  skippedExistingCount: number
+  skippedLockedCount: number
+}
+
+export interface LeaderResearchMarketPeerSourcePreviewItem {
+  category: string
+  wallet: string
+  action: string
+  totalEvents: number
+  distinctMarkets: number
+  buyEvents: number
+  sellEvents: number
+  safePriceEvents: number
+  tailPriceEvents: number
+  avgAmount: string
+  totalAmount: string
+  lastEventTime?: number
+  topMarkets: string[]
+  sourceEvidence: string
+}
+
+export interface LeaderResearchMarketPeerSourceImportResponse {
+  dryRun: boolean
+  requestedCategories: string[]
+  selectedTotal: number
+  createdTotal: number
+  updatedTotal: number
+  skippedExistingTotal: number
+  skippedLockedTotal: number
+  categories: LeaderResearchMarketPeerSourceCategory[]
+  previewItems: LeaderResearchMarketPeerSourcePreviewItem[]
+}
+
+export interface LeaderResearchExternalAnalyticsImportItem {
+  wallet: string
+  category: string
+  sourceName?: string
+  externalRank?: number
+  externalScore?: string
+  note?: string
+}
+
+export interface LeaderResearchExternalAnalyticsImportRequest {
+  dryRun?: boolean
+  items?: LeaderResearchExternalAnalyticsImportItem[]
+  defaultCategory?: string
+  defaultSourceName?: string
+  maxItems?: number
+}
+
+export interface LeaderResearchExternalAnalyticsImportPreviewItem {
+  wallet: string
+  category: string
+  sourceName: string
+  action: string
+  externalRank?: number
+  externalScore?: string
+  sourceEvidence: string
+}
+
+export interface LeaderResearchExternalAnalyticsImportResponse {
+  dryRun: boolean
+  requestedTotal: number
+  selectedTotal: number
+  createdTotal: number
+  updatedTotal: number
+  skippedInvalidTotal: number
+  skippedExistingTotal: number
+  skippedLockedTotal: number
+  previewItems: LeaderResearchExternalAnalyticsImportPreviewItem[]
+}
+
+export interface LeaderResearchOfficialLeaderboardImportRequest {
+  dryRun?: boolean
+  categories?: string[]
+  timePeriods?: string[]
+  orderBys?: string[]
+  limitPerPage?: number
+  maxPagesPerQuery?: number
+  maxItems?: number
+}
+
+export interface LeaderResearchOfficialLeaderboardFetch {
+  category: string
+  timePeriod: string
+  orderBy: string
+  requestedPages: number
+  fetchedItems: number
+  error?: string
+}
+
+export interface LeaderResearchOfficialLeaderboardImportResponse {
+  dryRun: boolean
+  sourceName: string
+  fetchedTotal: number
+  dedupedTotal: number
+  fetches: LeaderResearchOfficialLeaderboardFetch[]
+  importResult: LeaderResearchExternalAnalyticsImportResponse
+}
+
+export interface LeaderResearchOfficialLeaderboardDiagnoseRequest {
+  sampleLimit?: number
+  staleHours?: number
+}
+
+export interface LeaderResearchOfficialLeaderboardBucket {
+  bucket: string
+  count: number
+  description: string
+}
+
+export interface LeaderResearchOfficialLeaderboardCategory {
+  category: string
+  total: number
+  paper: number
+  cleanHigh: number
+  fastWatch: number
+  readyForPaper: number
+  noActivitySample: number
+  staleActivity: number
+}
+
+export interface LeaderResearchOfficialLeaderboardSample {
+  candidateId: number
+  wallet: string
+  category: string
+  bucket: string
+  researchState: string
+  score?: string
+  riskFlags: string[]
+  lastSourceAgeHours?: number
+  paperTrades?: number
+  filteredRatio?: string
+  copyablePnl?: string
+  sourceEvidence?: string
+}
+
+export interface LeaderResearchOfficialLeaderboardDiagnoseResponse {
+  total: number
+  paperTotal: number
+  cleanHighTotal: number
+  fastWatchTotal: number
+  readyForPaperTotal: number
+  buckets: LeaderResearchOfficialLeaderboardBucket[]
+  categories: LeaderResearchOfficialLeaderboardCategory[]
+  riskFlagCounts: Record<string, number>
+  samples: LeaderResearchOfficialLeaderboardSample[]
   generatedAt: number
 }
 
@@ -1025,7 +1272,13 @@ export interface PositionPushMessage {
  * 获取仓位唯一键
  */
 export function getPositionKey(position: AccountPosition): string {
-  return `${position.accountId}-${position.marketId}-${position.side}`
+  return [
+    String(position.accountId),
+    (position.marketId || '').toLowerCase(),
+    position.outcomeIndex ?? '',
+    (position.side || '').toLowerCase(),
+    String(position.isCurrent)
+  ].join('|')
 }
 
 /**

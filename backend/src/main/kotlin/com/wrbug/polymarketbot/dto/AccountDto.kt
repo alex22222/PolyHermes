@@ -105,6 +105,29 @@ data class AccountBalanceRequest(
 )
 
 /**
+ * Bridge 当前浏览器会话账户状态
+ */
+data class BridgeCurrentAccountStatusResponse(
+    val ready: Boolean,
+    val loggedIn: Boolean,
+    val walletAddress: String? = null,
+    val walletType: String? = null,
+    val accountId: Long? = null,
+    val accountName: String? = null,
+    val matched: Boolean = false,
+    val copyTradingAccountId: Long? = null,
+    val copyTradingConfigCount: Int = 0,
+    val lastError: String? = null
+)
+
+/**
+ * 将某个账户设为当前 Bridge 操作账户
+ */
+data class BridgeSelectAccountRequest(
+    val accountId: Long
+)
+
+/**
  * 账户信息响应
  */
 data class AccountDto(
@@ -151,7 +174,12 @@ data class AccountBalanceResponse(
     val availableBalance: String,  // 可用余额（RPC 查询的 USDC 余额）
     val positionBalance: String,  // 仓位余额（持仓总价值）
     val totalBalance: String,  // 总余额 = 可用余额 + 仓位余额
-    val positions: List<PositionDto> = emptyList()
+    val positions: List<PositionDto> = emptyList(),
+    val walletBalance: String = availableBalance,  // 钱包可用余额；Bridge 模式下来自页面 pUSD/USDC 余额
+    val currentPositionValue: String = positionBalance,  // 持仓当前价值，不是钱包余额
+    val totalAssetValue: String = totalBalance,  // 总资产估值 = 钱包余额 + 持仓当前价值
+    val balanceSource: String = "chain",
+    val sourceAccountWallet: String? = null
 )
 
 /**
@@ -359,4 +387,3 @@ data class RedeemablePositionInfo(
     val quantity: String,
     val value: String               // 价值（USDC，1:1）
 )
-

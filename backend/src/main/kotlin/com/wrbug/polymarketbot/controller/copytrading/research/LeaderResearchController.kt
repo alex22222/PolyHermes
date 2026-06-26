@@ -7,7 +7,15 @@ import com.wrbug.polymarketbot.dto.LeaderResearchCandidateDetailDto
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchEventDto
+import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchFunnelResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardDiagnoseRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardDiagnoseResponse
 import com.wrbug.polymarketbot.dto.LeaderPaperSessionDto
 import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreResponse
@@ -18,6 +26,8 @@ import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperPromotionRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperPromotionResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperScoreResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchRunDto
 import com.wrbug.polymarketbot.dto.LeaderResearchRunRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchScannerPoolImportRequest
@@ -34,8 +44,13 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivi
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateNotReadyException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateLockedException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchDuplicateTrialConfigException
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchExternalAnalyticsImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchJobService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMapper
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMarketPeerSourceImportService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardImportService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardDiagnoseService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPoliticsSourceDiagnoseService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchRealMoneyForbiddenException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScannerPoolImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScoringService
@@ -62,6 +77,11 @@ class LeaderResearchController(
     private val scannerPoolImportService: LeaderResearchScannerPoolImportService,
     private val activityScoringService: LeaderResearchActivityScoringService,
     private val activitySourceImportService: LeaderResearchActivitySourceImportService,
+    private val marketPeerSourceImportService: LeaderResearchMarketPeerSourceImportService,
+    private val externalAnalyticsImportService: LeaderResearchExternalAnalyticsImportService,
+    private val officialLeaderboardImportService: LeaderResearchOfficialLeaderboardImportService,
+    private val officialLeaderboardDiagnoseService: LeaderResearchOfficialLeaderboardDiagnoseService,
+    private val politicsSourceDiagnoseService: LeaderResearchPoliticsSourceDiagnoseService,
     private val paperTradingService: LeaderPaperTradingService,
     private val paperPromotionService: LeaderResearchPaperPromotionService,
     private val scoringService: LeaderResearchScoringService,
@@ -153,6 +173,51 @@ class LeaderResearchController(
     ): ResponseEntity<ApiResponse<LeaderResearchActivitySourceImportResponse>> {
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
             activitySourceImportService.importFromActivitySource(request)
+        }
+    }
+
+    @PostMapping("/market-peer-source/import")
+    fun importMarketPeerSource(
+        @RequestBody request: LeaderResearchMarketPeerSourceImportRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchMarketPeerSourceImportResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            marketPeerSourceImportService.importFromMarketPeerSource(request)
+        }
+    }
+
+    @PostMapping("/external-analytics/import")
+    fun importExternalAnalytics(
+        @RequestBody request: LeaderResearchExternalAnalyticsImportRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchExternalAnalyticsImportResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            externalAnalyticsImportService.importFromExternalAnalytics(request)
+        }
+    }
+
+    @PostMapping("/official-leaderboard/import")
+    fun importOfficialLeaderboard(
+        @RequestBody request: LeaderResearchOfficialLeaderboardImportRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchOfficialLeaderboardImportResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            officialLeaderboardImportService.importFromOfficialLeaderboard(request)
+        }
+    }
+
+    @PostMapping("/official-leaderboard/diagnose")
+    fun diagnoseOfficialLeaderboard(
+        @RequestBody request: LeaderResearchOfficialLeaderboardDiagnoseRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchOfficialLeaderboardDiagnoseResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            officialLeaderboardDiagnoseService.diagnose(request)
+        }
+    }
+
+    @PostMapping("/politics-source/diagnose")
+    fun diagnosePoliticsSource(
+        @RequestBody request: LeaderResearchPoliticsSourceDiagnoseRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchPoliticsSourceDiagnoseResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            politicsSourceDiagnoseService.diagnose(request)
         }
     }
 

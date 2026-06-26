@@ -29,6 +29,9 @@ const AccountList: React.FC = () => {
   const [accountImportModalVisible, setAccountImportModalVisible] = useState(false)
   const [accountImportForm] = Form.useForm()
   const [wrapLoading, setWrapLoading] = useState<Record<number, boolean>>({})
+  const [bridgeStatus, setBridgeStatus] = useState<any | null>(null)
+  const [bridgeStatusLoading, setBridgeStatusLoading] = useState(false)
+  const [bridgeSelectLoading, setBridgeSelectLoading] = useState<Record<number, boolean>>({})
   const [migrationGuideVisible, setMigrationGuideVisible] = useState(false)
 
   const ACCOUNT_GUIDE_KEY = 'clob_v2_account_guide_dismissed'
@@ -70,7 +73,53 @@ const AccountList: React.FC = () => {
 
   useEffect(() => {
     fetchAccounts()
+    fetchBridgeStatus()
   }, [fetchAccounts])
+
+  const fetchBridgeStatus = async () => {
+    setBridgeStatusLoading(true)
+    try {
+      const response = await apiService.accounts.bridgeCurrent()
+      if (response.data.code === 0) {
+        setBridgeStatus(response.data.data)
+      } else {
+        setBridgeStatus(null)
+      }
+    } catch (error) {
+      console.error('获取 Bridge 当前账户失败:', error)
+      setBridgeStatus(null)
+    } finally {
+      setBridgeStatusLoading(false)
+    }
+  }
+
+  const isBridgeCurrentAccount = (account: Account) => {
+    if (!bridgeStatus?.walletAddress) return false
+    const wallet = bridgeStatus.walletAddress.toLowerCase()
+    return wallet === account.walletAddress?.toLowerCase() || wallet === account.proxyAddress?.toLowerCase()
+  }
+
+  const canSelectBridgeAccount = (account: Account) => {
+    return account.walletType?.toLowerCase() === 'magic' || account.readOnly === true
+  }
+
+  const handleSelectBridgeAccount = async (account: Account) => {
+    setBridgeSelectLoading(prev => ({ ...prev, [account.id]: true }))
+    try {
+      const response = await apiService.accounts.selectBridgeCurrent(account.id)
+      if (response.data.code === 0) {
+        setBridgeStatus(response.data.data)
+        message.success('已设为当前 Bridge 操作账户')
+        setBalanceMap({})
+      } else {
+        message.error(response.data.msg || '切换 Bridge 当前账户失败')
+      }
+    } catch (error: any) {
+      message.error(error.message || '切换 Bridge 当前账户失败')
+    } finally {
+      setBridgeSelectLoading(prev => ({ ...prev, [account.id]: false }))
+    }
+  }
 
   // 首次进入且有账户时显示迁移引导
   useEffect(() => {
@@ -363,7 +412,7 @@ const AccountList: React.FC = () => {
       }
     },
     {
-      title: t('accountList.balance'),
+      title: '资产',
       dataIndex: 'balance',
       key: 'balance',
       render: (_: any, record: Account) => {
@@ -371,8 +420,24 @@ const AccountList: React.FC = () => {
           return <Spin size="small" />
         }
         const balanceObj = balanceMap[record.id]
-        const balance = balanceObj?.total || record.balance || '-'
-        return balance && balance !== '-' && typeof balance === 'string' ? `$${formatUSDC(balance)}` : '-'
+        if (!balanceObj) return '-'
+        if (balanceObj.total === '-') return '-'
+        return (
+          <div style={{ lineHeight: 1.5, minWidth: 140 }}>
+            <div>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>钱包余额</Typography.Text>
+              <div style={{ color: '#52c41a', fontWeight: 600 }}>${formatUSDC(balanceObj.available)}</div>
+            </div>
+            <div>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>持仓当前价值</Typography.Text>
+              <div>${formatUSDC(balanceObj.position)}</div>
+            </div>
+            <div>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>总资产估值</Typography.Text>
+              <div style={{ color: '#1890ff', fontWeight: 600 }}>${formatUSDC(balanceObj.total)}</div>
+            </div>
+          </div>
+        )
       }
     },
     {
@@ -420,6 +485,35 @@ const AccountList: React.FC = () => {
               <EditOutlined style={{ fontSize: '16px', color: '#1890ff' }} />
             </div>
           </Tooltip>
+
+          {canSelectBridgeAccount(record) && (
+            <Tooltip title={isBridgeCurrentAccount(record) ? '当前 Bridge 操作账户' : '设为当前 Bridge 操作账户'}>
+              <div
+                onClick={() => {
+                  if (!isBridgeCurrentAccount(record)) {
+                    handleSelectBridgeAccount(record)
+                  }
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: '32px',
+                  height: '32px',
+                  cursor: isBridgeCurrentAccount(record) ? 'default' : 'pointer',
+                  borderRadius: '6px',
+                  transition: 'background-color 0.2s'
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f6ffed'}
+                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+              >
+                <WalletOutlined
+                  style={{ fontSize: '16px', color: isBridgeCurrentAccount(record) ? '#52c41a' : '#722ed1' }}
+                  spin={bridgeSelectLoading[record.id]}
+                />
+              </div>
+            </Tooltip>
+          )}
 
           <Tooltip title="USDC.e → pUSD">
             <div
@@ -537,6 +631,29 @@ const AccountList: React.FC = () => {
         />
       )}
 
+      <Alert
+        message={
+          bridgeStatusLoading
+            ? '正在读取 Bridge 当前账户...'
+            : bridgeStatus?.walletAddress
+              ? `Bridge 当前账户：${bridgeStatus.accountName || bridgeStatus.accountId || '未匹配账户'} (${bridgeStatus.walletAddress.slice(0, 6)}...${bridgeStatus.walletAddress.slice(-4)})`
+              : 'Bridge 当前账户未就绪'
+        }
+        description={
+          bridgeStatus?.walletAddress
+            ? `跟单执行账户 ID：${bridgeStatus.copyTradingAccountId || '-'}，有效跟单配置：${bridgeStatus.copyTradingConfigCount || 0} 个。切换 Magic 钱包后，请在对应账户行点击钱包图标设为当前 Bridge 操作账户。`
+            : 'Bridge 是单浏览器会话，多 Magic 钱包需要先在 Bridge 浏览器中切换登录的钱包，再回到账户管理确认当前账户。'
+        }
+        type={bridgeStatus?.matched ? 'success' : 'warning'}
+        showIcon
+        action={
+          <Button size="small" icon={<ReloadOutlined />} onClick={fetchBridgeStatus} loading={bridgeStatusLoading}>
+            刷新
+          </Button>
+        }
+        style={{ marginBottom: 16, ...(isMobile ? { margin: '0 8px 12px' } : {}) }}
+      />
+
       <Card style={{
         margin: isMobile ? '0 -8px' : '0',
         borderRadius: isMobile ? '0' : undefined
@@ -600,10 +717,13 @@ const AccountList: React.FC = () => {
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
                         <div>
                           <div style={{ fontSize: '10px', color: '#8c8c8c' }}>
-                            {t('accountList.totalBalance')}
+                            钱包余额
                           </div>
                           <div style={{ fontSize: '14px', fontWeight: '600', color: '#52c41a' }}>
-                            {balance?.total && balance.total !== '-' ? `$${formatUSDC(balance.total)}` : '-'}
+                            {balance?.available && balance.available !== '-' ? `$${formatUSDC(balance.available)}` : '-'}
+                          </div>
+                          <div style={{ fontSize: '10px', color: '#8c8c8c', marginTop: 2 }}>
+                            持仓当前价值 {balance?.position && balance.position !== '-' ? `$${formatUSDC(balance.position)}` : '-'}
                           </div>
                         </div>
                         <div style={{ textAlign: 'right' }}>
@@ -676,6 +796,25 @@ const AccountList: React.FC = () => {
                           <span style={{ fontSize: '10px', color: '#8c8c8c', marginTop: '2px' }}>{t('clobMigration.accountGuideButton')}</span>
                         </div>
                       </Tooltip>
+
+                      {canSelectBridgeAccount(account) && (
+                        <Tooltip title={isBridgeCurrentAccount(account) ? '当前 Bridge 操作账户' : '设为当前 Bridge 操作账户'}>
+                          <div
+                            onClick={() => {
+                              if (!isBridgeCurrentAccount(account)) {
+                                handleSelectBridgeAccount(account)
+                              }
+                            }}
+                            style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: isBridgeCurrentAccount(account) ? 'default' : 'pointer', padding: '4px 8px' }}
+                          >
+                            <WalletOutlined
+                              style={{ fontSize: '18px', color: isBridgeCurrentAccount(account) ? '#52c41a' : '#722ed1' }}
+                              spin={bridgeSelectLoading[account.id]}
+                            />
+                            <span style={{ fontSize: '10px', color: '#8c8c8c', marginTop: '2px' }}>Bridge</span>
+                          </div>
+                        </Tooltip>
+                      )}
 
                       <Popconfirm
                         title={t('accountList.deleteConfirm')}
@@ -832,7 +971,7 @@ const AccountList: React.FC = () => {
                   </Tag>
                 </Descriptions.Item>
               )}
-              <Descriptions.Item label={t('accountList.totalBalance')} span={isMobile ? 1 : 2}>
+              <Descriptions.Item label="总资产估值" span={isMobile ? 1 : 2}>
                 {detailBalanceLoading ? (
                   <Spin size="small" />
                 ) : detailBalance ? (
@@ -843,7 +982,7 @@ const AccountList: React.FC = () => {
                   <span style={{ color: '#999' }}>-</span>
                 )}
               </Descriptions.Item>
-              <Descriptions.Item label={t('accountList.available')}>
+              <Descriptions.Item label="钱包余额">
                 {detailBalanceLoading ? (
                   <Spin size="small" />
                 ) : detailBalance ? (
@@ -854,7 +993,7 @@ const AccountList: React.FC = () => {
                   <span style={{ color: '#999' }}>-</span>
                 )}
               </Descriptions.Item>
-              <Descriptions.Item label={t('accountList.position')}>
+              <Descriptions.Item label="持仓当前价值">
                 {detailBalanceLoading ? (
                   <Spin size="small" />
                 ) : detailBalance ? (
@@ -1032,4 +1171,3 @@ const AccountList: React.FC = () => {
 }
 
 export default AccountList
-

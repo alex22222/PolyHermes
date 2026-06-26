@@ -27,7 +27,17 @@ import type {
   LeaderResearchCandidateListRequest,
   LeaderResearchCandidateListResponse,
   LeaderResearchEvent,
+  LeaderResearchExternalAnalyticsImportRequest,
+  LeaderResearchExternalAnalyticsImportResponse,
   LeaderResearchFunnel,
+  LeaderResearchMarketPeerSourceImportRequest,
+  LeaderResearchMarketPeerSourceImportResponse,
+  LeaderResearchOfficialLeaderboardDiagnoseRequest,
+  LeaderResearchOfficialLeaderboardDiagnoseResponse,
+  LeaderResearchOfficialLeaderboardImportRequest,
+  LeaderResearchOfficialLeaderboardImportResponse,
+  LeaderResearchPoliticsSourceDiagnose,
+  LeaderResearchPoliticsSourceDiagnoseRequest,
   LeaderResearchRun,
   LeaderResearchRunRequest,
   LeaderResearchSourceState,
@@ -308,6 +318,18 @@ export const apiService = {
      */
     balance: (data: { accountId?: number }) => 
       apiClient.post<ApiResponse<any>>('/accounts/balance', data),
+
+    /**
+     * 查询 Bridge 当前浏览器会话账户
+     */
+    bridgeCurrent: () =>
+      apiClient.post<ApiResponse<any>>('/accounts/bridge-current', {}),
+
+    /**
+     * 将账户设为 Bridge 当前操作账户
+     */
+    selectBridgeCurrent: (accountId: number) =>
+      apiClient.post<ApiResponse<any>>('/accounts/bridge-current/select', { accountId }),
     
     /**
      * 查询所有账户的仓位列表
@@ -481,6 +503,21 @@ export const apiService = {
 
     sourceHealth: () =>
       apiClient.post<ApiResponse<LeaderResearchSourceState[]>>('/copy-trading/leader-research/source-health', {}),
+
+    diagnosePoliticsSource: (data: LeaderResearchPoliticsSourceDiagnoseRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchPoliticsSourceDiagnose>>('/copy-trading/leader-research/politics-source/diagnose', data),
+
+    importMarketPeerSource: (data: LeaderResearchMarketPeerSourceImportRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchMarketPeerSourceImportResponse>>('/copy-trading/leader-research/market-peer-source/import', data, { timeout: 120000 }),
+
+    importExternalAnalytics: (data: LeaderResearchExternalAnalyticsImportRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchExternalAnalyticsImportResponse>>('/copy-trading/leader-research/external-analytics/import', data, { timeout: 120000 }),
+
+    importOfficialLeaderboard: (data: LeaderResearchOfficialLeaderboardImportRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchOfficialLeaderboardImportResponse>>('/copy-trading/leader-research/official-leaderboard/import', data, { timeout: 120000 }),
+
+    diagnoseOfficialLeaderboard: (data: LeaderResearchOfficialLeaderboardDiagnoseRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchOfficialLeaderboardDiagnoseResponse>>('/copy-trading/leader-research/official-leaderboard/diagnose', data, { timeout: 120000 }),
 
     events: (data: { page?: number; size?: number } = {}) =>
       apiClient.post<ApiResponse<LeaderResearchEvent[]>>('/copy-trading/leader-research/events/list', data),

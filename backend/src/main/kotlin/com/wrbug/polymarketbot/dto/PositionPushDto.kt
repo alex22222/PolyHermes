@@ -21,9 +21,14 @@ data class PositionPushMessage(
 
 /**
  * 仓位键（用于唯一标识一个仓位）
- * 格式：accountId-marketId-side
+ * 格式：accountId-marketId-outcomeIndex-side-isCurrent
  */
 fun AccountPositionDto.getPositionKey(): String {
-    return "${accountId}-${marketId}-${side}"
+    return listOf(
+        accountId.toString(),
+        marketId.lowercase(),
+        outcomeIndex?.toString() ?: "",
+        side.lowercase(),
+        isCurrent.toString()
+    ).joinToString("|")
 }
-

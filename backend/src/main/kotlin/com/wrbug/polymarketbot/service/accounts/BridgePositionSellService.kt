@@ -4,6 +4,7 @@ import com.wrbug.polymarketbot.dto.BridgePositionSellRequest
 import com.wrbug.polymarketbot.dto.BridgePositionSellResponse
 import com.wrbug.polymarketbot.repository.AccountRepository
 import com.wrbug.polymarketbot.service.bridge.BridgeExecutorClient
+import com.wrbug.polymarketbot.service.bridge.BridgePortfolioClient
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
@@ -20,7 +21,8 @@ import java.math.RoundingMode
 class BridgePositionSellService(
     private val accountRepository: AccountRepository,
     private val bridgePositionService: BridgePositionService,
-    private val bridgeExecutorClient: BridgeExecutorClient
+    private val bridgeExecutorClient: BridgeExecutorClient,
+    private val bridgePortfolioClient: BridgePortfolioClient
 ) {
 
     private val logger = LoggerFactory.getLogger(BridgePositionSellService::class.java)
@@ -40,6 +42,18 @@ class BridgePositionSellService(
             val canUseBridge = account.isReadOnly || account.walletType.equals("magic", ignoreCase = true)
             if (!canUseBridge) {
                 return Result.failure(IllegalStateException("该账户不是 Bridge 只读账户或 Magic 钱包，请使用普通卖出接口"))
+            }
+
+            val runtimeWallet = bridgePortfolioClient.fetchAccount()?.walletAddress
+                ?: return Result.failure(IllegalStateException("Bridge 未登录或无法读取当前浏览器钱包，不能执行 Bridge 卖出"))
+            val walletMatches = runtimeWallet.equals(account.walletAddress, ignoreCase = true) ||
+                runtimeWallet.equals(account.proxyAddress, ignoreCase = true)
+            if (!walletMatches) {
+                return Result.failure(
+                    IllegalStateException(
+                        "Bridge 当前登录钱包是 ${maskAddress(runtimeWallet)}，不是所选账户 ${maskAddress(account.walletAddress)}。请先在账户管理中切换当前 Bridge 账户。"
+                    )
+                )
             }
 
             // 2. 市价单校验（Bridge 当前只支持市价执行）
@@ -120,6 +134,14 @@ class BridgePositionSellService(
         } catch (e: Exception) {
             logger.error("Bridge 仓位卖出失败", e)
             Result.failure(e)
+        }
+    }
+
+    private fun maskAddress(address: String): String {
+        return if (address.length >= 10) {
+            "${address.take(6)}...${address.takeLast(4)}"
+        } else {
+            address
         }
     }
 }

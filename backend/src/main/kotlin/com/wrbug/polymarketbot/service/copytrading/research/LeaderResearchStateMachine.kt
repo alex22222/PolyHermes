@@ -6,6 +6,7 @@ import com.wrbug.polymarketbot.enums.LeaderResearchEventType
 import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.repository.LeaderPaperSessionRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
+import com.wrbug.polymarketbot.repository.LeaderResearchScoreRepository
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.math.BigDecimal
@@ -14,6 +15,7 @@ import java.math.BigDecimal
 class LeaderResearchStateMachine(
     private val candidateRepository: LeaderResearchCandidateRepository,
     private val paperSessionRepository: LeaderPaperSessionRepository,
+    private val scoreRepository: LeaderResearchScoreRepository,
     private val paperTradingService: LeaderPaperTradingService,
     private val poolMappingService: LeaderResearchPoolMappingService,
     private val eventService: LeaderResearchEventService
@@ -61,8 +63,8 @@ class LeaderResearchStateMachine(
                 }
                 if (
                     latestSession != null &&
-                    !hasTrialBlockingRisk(candidate) &&
-                    paperTradingService.isEligibleForTrialReady(latestSession, now)
+                    isCleanHighCandidate(candidate, latestSession, now) &&
+                    hasStableCleanHighScores(candidate)
                 ) {
                     LeaderResearchState.TRIAL_READY
                 } else {
@@ -97,15 +99,17 @@ class LeaderResearchStateMachine(
         } else {
             saved
         }
-        return if (withSession.researchState.canSyncToLeaderPool()) {
+        return if (shouldSyncToLeaderPool(withSession)) {
             poolMappingService.syncCandidate(withSession)
         } else {
             withSession
         }
     }
 
-    private fun LeaderResearchState.canSyncToLeaderPool(): Boolean {
-        return this != LeaderResearchState.DISCOVERED
+    private fun shouldSyncToLeaderPool(candidate: LeaderResearchCandidate): Boolean {
+        return candidate.researchState == LeaderResearchState.TRIAL_READY ||
+            candidate.leaderId != null ||
+            candidate.poolId != null
     }
 
     private fun cooldownReason(session: LeaderPaperSession?, sourceFresh72h: Boolean): String? {
@@ -117,13 +121,19 @@ class LeaderResearchStateMachine(
         return candidate.agentOwned || candidate.leaderId != null || candidate.poolId != null
     }
 
-    private fun hasTrialBlockingRisk(candidate: LeaderResearchCandidate): Boolean {
-        val flags = candidate.riskFlags.orEmpty()
-            .split(",")
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .toSet()
-        return flags.any { it in TRIAL_BLOCKING_RISK_FLAGS }
+    private fun isCleanHighCandidate(candidate: LeaderResearchCandidate, session: LeaderPaperSession, now: Long): Boolean {
+        return (candidate.score ?: BigDecimal.ZERO) >= TRIAL_READY_MIN_SCORE &&
+            candidate.riskFlags.isNullOrBlank() &&
+            paperTradingService.isEligibleForTrialReady(session, now)
+    }
+
+    private fun hasStableCleanHighScores(candidate: LeaderResearchCandidate): Boolean {
+        val candidateId = candidate.id ?: return false
+        val latestScores = scoreRepository.findByCandidateIdOrderByCreatedAtDesc(candidateId)
+            .filter { it.scoreVersion == LeaderResearchScoringService.SCORE_VERSION }
+            .take(TRIAL_READY_STABLE_SCORE_WINDOW)
+        return latestScores.size >= TRIAL_READY_STABLE_SCORE_WINDOW &&
+            latestScores.all { it.totalScore >= TRIAL_READY_MIN_SCORE }
     }
 
     private fun transition(
@@ -163,12 +173,7 @@ class LeaderResearchStateMachine(
         private const val SOURCE_STALE_72H_MS = 72L * 60 * 60 * 1000
         private const val SOURCE_RETIRE_30D_MS = 30L * 24 * 60 * 60 * 1000
         private const val COOLDOWN_MS = 3L * 24 * 60 * 60 * 1000
-        private val TRIAL_BLOCKING_RISK_FLAGS = setOf(
-            "mixed_category_evidence",
-            "unknown_category",
-            "tail_price_spray",
-            "buy_only_no_exit",
-            "sell_only_no_entry"
-        )
+        private val TRIAL_READY_MIN_SCORE = BigDecimal("80")
+        private const val TRIAL_READY_STABLE_SCORE_WINDOW = 3
     }
 }

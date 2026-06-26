@@ -88,6 +88,106 @@ class BridgePortfolioClient(
         }
     }
 
+    fun fetchAccount(): BridgeAccountResponse? {
+        return try {
+            val base = URI.create(balanceUrl)
+            val accountUri = URI(base.scheme, base.authority, "/account", null, null)
+            val httpRequest = HttpRequest.newBuilder()
+                .uri(accountUri)
+                .GET()
+                .timeout(Duration.ofSeconds(10))
+                .build()
+
+            val response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString())
+            if (response.statusCode() in 200..299) {
+                val body = response.body()
+                try {
+                    gson.fromJson(body, BridgeAccountResponse::class.java)
+                } catch (e: Exception) {
+                    logger.warn("解析 Bridge /account 响应失败: ${e.message}, body=$body")
+                    null
+                }
+            } else {
+                logger.warn("Bridge /account 返回非 2xx: status=${response.statusCode()}, body=${response.body()}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("调用 Bridge /account 失败: ${e.message}", e)
+            null
+        }
+    }
+
+    fun fetchStatus(): BridgeRuntimeStatusResponse? {
+        return try {
+            val base = URI.create(balanceUrl)
+            val statusUri = URI(base.scheme, base.authority, "/status", null, null)
+            val httpRequest = HttpRequest.newBuilder()
+                .uri(statusUri)
+                .GET()
+                .timeout(Duration.ofSeconds(10))
+                .build()
+
+            val response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString())
+            if (response.statusCode() in 200..299) {
+                val body = response.body()
+                try {
+                    gson.fromJson(body, BridgeRuntimeStatusResponse::class.java)
+                } catch (e: Exception) {
+                    logger.warn("解析 Bridge /status 响应失败: ${e.message}, body=$body")
+                    null
+                }
+            } else {
+                logger.warn("Bridge /status 返回非 2xx: status=${response.statusCode()}, body=${response.body()}")
+                null
+            }
+        } catch (e: Exception) {
+            logger.error("调用 Bridge /status 失败: ${e.message}", e)
+            null
+        }
+    }
+
+    fun selectAccount(accountId: Long, expectedWalletAddress: String): BridgeSelectAccountResponse? {
+        return try {
+            val base = URI.create(balanceUrl)
+            val selectUri = URI(base.scheme, base.authority, "/account/select", null, null)
+            val payload = gson.toJson(
+                mapOf(
+                    "account_id" to accountId,
+                    "expected_wallet_address" to expectedWalletAddress
+                )
+            )
+            val httpRequest = HttpRequest.newBuilder()
+                .uri(selectUri)
+                .POST(HttpRequest.BodyPublishers.ofString(payload))
+                .header("Content-Type", "application/json")
+                .timeout(Duration.ofSeconds(20))
+                .build()
+
+            val response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString())
+            val body = response.body()
+            if (response.statusCode() in 200..299) {
+                try {
+                    gson.fromJson(body, BridgeSelectAccountResponse::class.java)
+                } catch (e: Exception) {
+                    logger.warn("解析 Bridge /account/select 响应失败: ${e.message}, body=$body")
+                    null
+                }
+            } else {
+                logger.warn("Bridge /account/select 返回非 2xx: status=${response.statusCode()}, body=$body")
+                BridgeSelectAccountResponse(
+                    success = false,
+                    message = body,
+                    accountId = accountId,
+                    walletAddress = null,
+                    copyTradingAccountId = null
+                )
+            }
+        } catch (e: Exception) {
+            logger.error("调用 Bridge /account/select 失败: ${e.message}", e)
+            null
+        }
+    }
+
     data class BridgePortfolioResponse(
         @SerializedName("positions") val positions: List<BridgePortfolioPosition> = emptyList(),
         @SerializedName("synced_at") val syncedAt: Long? = null
@@ -109,5 +209,27 @@ class BridgePortfolioClient(
     data class BridgeBalanceResponse(
         @SerializedName("available_balance") val availableBalance: Double? = null,
         @SerializedName("synced_at") val syncedAt: Long? = null
+    )
+
+    data class BridgeAccountResponse(
+        @SerializedName("wallet_address") val walletAddress: String? = null,
+        @SerializedName("wallet_type") val walletType: String? = null,
+        @SerializedName("source") val source: String? = null
+    )
+
+    data class BridgeRuntimeStatusResponse(
+        @SerializedName("ready") val ready: Boolean = false,
+        @SerializedName("logged_in") val loggedIn: Boolean = false,
+        @SerializedName("last_error") val lastError: String? = null,
+        @SerializedName("copy_trading_account_id") val copyTradingAccountId: Long? = null,
+        @SerializedName("copy_trading_config_count") val copyTradingConfigCount: Int = 0
+    )
+
+    data class BridgeSelectAccountResponse(
+        @SerializedName("success") val success: Boolean = false,
+        @SerializedName("message") val message: String? = null,
+        @SerializedName("account_id") val accountId: Long? = null,
+        @SerializedName("wallet_address") val walletAddress: String? = null,
+        @SerializedName("copy_trading_account_id") val copyTradingAccountId: Long? = null
     )
 }

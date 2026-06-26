@@ -392,6 +392,57 @@ class AccountController(
     }
 
     /**
+     * 查询 Bridge 当前浏览器会话账户
+     */
+    @PostMapping("/bridge-current")
+    fun getBridgeCurrentAccount(): ResponseEntity<ApiResponse<BridgeCurrentAccountStatusResponse>> {
+        return try {
+            val result = accountService.getBridgeCurrentAccountStatus()
+            result.fold(
+                onSuccess = { status ->
+                    ResponseEntity.ok(ApiResponse.success(status))
+                },
+                onFailure = { e ->
+                    logger.error("查询 Bridge 当前账户失败: ${e.message}", e)
+                    ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
+                }
+            )
+        } catch (e: Exception) {
+            logger.error("查询 Bridge 当前账户异常: ${e.message}", e)
+            ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
+        }
+    }
+
+    /**
+     * 将账户管理中的账户设为 Bridge 当前操作账户
+     */
+    @PostMapping("/bridge-current/select")
+    fun selectBridgeCurrentAccount(@RequestBody request: BridgeSelectAccountRequest): ResponseEntity<ApiResponse<BridgeCurrentAccountStatusResponse>> {
+        return try {
+            if (request.accountId <= 0) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ACCOUNT_ID_INVALID, messageSource = messageSource))
+            }
+            val result = accountService.selectBridgeCurrentAccount(request.accountId)
+            result.fold(
+                onSuccess = { status ->
+                    ResponseEntity.ok(ApiResponse.success(status))
+                },
+                onFailure = { e ->
+                    logger.error("切换 Bridge 当前账户失败: ${e.message}", e)
+                    when (e) {
+                        is IllegalArgumentException -> ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, e.message, messageSource))
+                        is IllegalStateException -> ResponseEntity.ok(ApiResponse.error(ErrorCode.BUSINESS_ERROR, e.message, messageSource))
+                        else -> ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            logger.error("切换 Bridge 当前账户异常: ${e.message}", e)
+            ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
+        }
+    }
+
+    /**
      * 查询所有账户的仓位列表
      */
     @PostMapping("/positions/list")
@@ -696,4 +747,3 @@ class AccountController(
     }
 
 }
-

@@ -3866,3 +3866,2789 @@
 **结论**：
 - Bridge 模式从现在开始会对新产生的成功/失败/规则跳过记录推送 Telegram。
 - 历史记录不会补推，避免 Telegram 噪音。
+
+## Iteration 72 - 2026-06-26 10:18 CST - 第二目标扩源并修复 PAPER 池污染
+
+**目标**：
+- 恢复第二目标 loop：继续积累 1000+ 高质量 leader，政治/金融优先。
+- 本轮重点验证 activity source 是否还能产生新增候选，并避免低样本候选进入正式 Leader 池。
+
+**初始状态**：
+- 后端、Bridge 均在线；Bridge `/health` 返回 `status=ok, executor_ready=true`。
+- `/leader-research/funnel`：
+  - totalCandidates=1687
+  - managedLeaderTotal=595
+  - leaderPoolTotal=191
+  - cleanHighScoreTotal=19
+  - politics clean=1，finance clean=12，sports clean=4，crypto clean=2。
+
+**扩源 dry-run 结论**：
+- scanner pool 高分 politics/finance 已基本吃干：
+  - selectedTotal=394，createdTotal=0，skippedExistingTotal=394。
+- activity source 仍有增量：
+  - politics 放宽参数：created=6，updated=33。
+  - finance deeper：created=250。
+
+**执行动作**：
+- 正式导入 politics relaxed：
+  - selected=54，created=6，updated=33。
+- 正式导入 finance deeper：
+  - selected=250，created=250。
+- activity score：
+  - scanned=1735，scored=1735。
+  - categoryCounts: politics=711, finance=717, sports=156, crypto=151。
+- promote dry-run：
+  - selected=24，politics=4，finance=20。
+- 先按旧逻辑晋级并 paper process：
+  - promoted=32。
+  - paper process processed=31，filtered=9。
+  - paper score 后新增 32 个全部被 `small_sample` 限制到 45-59 分，无 clean high。
+
+**发现的问题**：
+- 状态机原本 `canSyncToLeaderPool()` 对除 DISCOVERED 外所有状态都同步 Leader Pool。
+- 这导致 PAPER 观察候选即使 paper 后低分，也会创建正式 Leader 管理和 Leader Pool 记录。
+- 本轮新增 32 个 PAPER 中：
+  - clean_after_paper_count=0。
+  - 其中 31 个新建陌生 leader/pool 无任何 copy_trading 引用。
+
+**修复**：
+- `LeaderResearchStateMachine`：
+  - 从“非 DISCOVERED 都同步池”改为：
+    - `TRIAL_READY` 才新建/同步正式 Leader Pool。
+    - 已有 `leaderId` 或 `poolId` 的候选仍可同步 metadata，避免破坏既有 leader。
+- 新增测试：
+  - 新 PAPER 候选只启动观察，不创建 Leader Pool。
+  - TRIAL_READY 候选会同步 Leader Pool。
+- 清理本轮误创建数据：
+  - 删除 31 个无 copy_trading 引用的新建 `RESEARCH_AGENT/WATCH/PAPER` pool 和对应新建 leader。
+  - 移除 1 个绑定既有 leader 的新建 WATCH pool，但保留既有 leader。
+
+**修复后真实路径验证**：
+- 重新打包并重启后端。
+- 再晋级 8 个 finance 到 PAPER：
+  - before: managed=595, pool=191, paper=235。
+  - promoted=8，paper process processed=16，filtered=4。
+  - after: managed=595, pool=191, paper=243。
+  - 证明 PAPER 观察不会再污染正式 Leader 管理/池子。
+- 当前 funnel：
+  - totalCandidates=1943。
+  - managedLeaderTotal=595。
+  - leaderPoolTotal=191。
+  - cleanHighScoreTotal=19。
+  - finance paper=180，politics paper=37。
+
+**验证**：
+- `cd backend && JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew --no-daemon --no-parallel test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchStateMachineTest' compileKotlin` 通过。
+- `cd backend && ... ./gradlew --no-daemon --no-parallel bootJar` 通过。
+- 后端已重启，仅一个进程监听 8000。
+- Bridge 仍健康：`status=ok, executor_ready=true`。
+
+**结论**：
+- 数量目标进一步推进：研究候选从 1687 增至 1943，PAPER 从 203 增至 243。
+- 高质量 clean 候选仍为 19，说明新增候选需要更多 paper 样本，不应直接进入正式 Leader 池。
+- 本轮最重要改进是把 PAPER 观察层和正式可跟单 Leader 池重新隔离，避免低样本候选污染跟单候选池。
+
+**下一轮动作**：
+- 继续滚动处理 PAPER=243 的模拟样本，等待 small_sample 候选自然分层。
+- 对 finance 剩余高分 DISCOVERED 继续小批量进 PAPER，但不进入正式池。
+- politics 仍需更高质量外部来源，单纯放宽 activity source 只能补样本，不能明显增加 clean high。
+
+## Iteration 73 - 2026-06-26 10:31 CST - 滚动 PAPER 样本并观察 clean high 分层
+
+**目标**：
+- 在修复 PAPER/Leader Pool 隔离后，继续滚动处理 `PAPER=243` 的模拟样本。
+- 判断 small_sample 候选是否能自然分层，且确认正式 Leader 管理/池子不被污染。
+
+**初始状态**：
+- Bridge `/health` 正常：`status=ok, executor_ready=true`。
+- 后端单实例监听 8000。
+- 状态：
+  - totalCandidates=1943。
+  - PAPER=243。
+  - cleanHighScoreTotal=19。
+  - small_trade_sessions=152。
+  - managedLeaderTotal=595。
+  - leaderPoolTotal=191。
+
+**执行动作**：
+- 连续执行 8 轮：
+  - `POST /api/copy-trading/leader-research/paper/process`
+  - `POST /api/copy-trading/leader-research/paper/score`
+- 总处理结果：
+  - processed=124。
+  - filtered=36。
+  - failed=0。
+  - scoredCount 每轮为 243。
+
+**观察结果**：
+- 第 1-4 轮后：
+  - cleanHighScoreTotal 从 19 升至 21。
+  - politics clean 从 1 升至 2。
+  - finance clean 从 12 升至 13。
+- 第 5-8 轮后：
+  - cleanHighScoreTotal 回到 19。
+  - politics clean 保持 2。
+  - finance clean 回到 11。
+- 说明 rolling paper 会真实拉开质量：
+  - 有的候选获得更多样本后升上来。
+  - 有的 finance 候选因为 filtered ratio 或 PnL 回撤被压下去。
+  - 这符合目标，不应把 activity prescreen 的 100 分直接当可跟单评分。
+
+**当前 clean high 重点候选**：
+- finance `1742`：wallet `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`
+  - score=95.6187，tradeCount=22，filteredRatio=0.0435，copyablePnl=12.0753。
+- finance `2079`：wallet `0x983848691c445a1e235c1e49a69c49d8c4d3bcfe`
+  - score=91.4324，tradeCount=32，filteredRatio=0.0857，copyablePnl=8.7053。
+- finance `1660`：wallet `0x5b6331e7ff0831a3fe2ed12004747db1a9c911a4`
+  - score=91.1937，tradeCount=18，filteredRatio=0.2800，copyablePnl=10.1530。
+  - 注意：filteredRatio 偏高，继续观察。
+- politics `360`：wallet `0x645a91730f588c5586e8860936a7e3554303fd84`
+  - score=83.8075，tradeCount=19，filteredRatio=0，copyablePnl=4.4010。
+  - 注意：sourceEvidence 中同时有 scanner finance/politics 与 activity politics，当前按最新 activity politics 归类；进入试跟前需要分类复核。
+- politics `1755`：wallet `0x31c4578b25af36f34c8aa4cc85f0794bfbea622f`
+  - score=80.6752，tradeCount=10，filteredRatio=0.2308，copyablePnl=4.3690。
+
+**当前 funnel**：
+- totalCandidates=1943。
+- managedLeaderTotal=595。
+- leaderPoolTotal=191。
+- cleanHighScoreTotal=19。
+- 分类：
+  - politics: total=741, paper=37, clean=2, topCandidate=360。
+  - finance: total=854, paper=180, clean=11, topCandidate=1742。
+  - sports: total=184, paper=16, clean=4, topCandidate=850。
+  - crypto: total=163, paper=10, clean=2, topCandidate=34。
+
+**结论**：
+- 本轮没有新增代码，但目标状态更真实：clean high 候选从短暂 21 回到 19，说明系统正在过滤 activity-score 虚高候选。
+- politics 出现新的 clean high 候选 360，但因为证据来源混杂，需要继续观察，不应直接进入实盘跟单。
+- 正式 Leader 管理和 Leader Pool 数量保持 595/191，PAPER 滚动未污染正式池。
+
+**下一轮动作**：
+- 增加“clean high 稳定性”判断：连续多轮 paper score 仍满足 clean high 才允许进入 TRIAL_READY 或推荐试跟。
+- 对 candidate 360 做分类证据复核，避免混类 politics 候选误入政治配比。
+- 继续对 finance 剩余高分 DISCOVERED 小批量进入 PAPER，但坚持不进入正式池。
+
+## Iteration 74 - 2026-06-26 10:31 CST - 固化 clean high 稳定性与混类拦截
+
+**目标**：
+- 把上一轮人工判断固化到代码：候选不能因为某一轮短暂高分就进入 `TRIAL_READY`。
+- 修复 candidate 360 这类“3 条 politics + 1 条 finance”证据没有被标记 mixed 的问题。
+
+**代码改动**：
+- `LeaderResearchStateMachine`：
+  - PAPER -> TRIAL_READY 现在必须满足：
+    - 当前 score >= 80。
+    - 当前 riskFlags 为空。
+    - paper session 满足原有可试跟条件。
+    - 最近 3 次 `research-copyability-v1` 评分都 >= 80。
+  - 移除旧的“只拦截部分 risk flags”逻辑，改为 riskFlags 必须为空。
+- `LeaderResearchCategoryEvidenceClassifier`：
+  - mixed dominance 阈值从 `0.70` 收紧到 `0.80`。
+  - 目的：当一个候选有 25% 跨类证据时，也进入 `mixed_category_evidence`，避免误入政治/金融配比。
+- 测试：
+  - 新增“只有 2 次稳定高分不能进 TRIAL_READY”。
+  - 新增“最近 3 次里有 1 次低于 80 不能进 TRIAL_READY”。
+  - 新增“3:1 跨类证据也会被标记 mixed”。
+
+**验证**：
+- `cd backend && JAVA_HOME=/Users/henry/projects/polyhermes/jdk17/Contents/Home PATH=/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin:$PATH ./gradlew --no-daemon --no-parallel test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchStateMachineTest' --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScoringServiceTest' compileKotlin` 通过。
+- `cd backend && ... ./gradlew --no-daemon --no-parallel bootJar` 通过。
+- 后端已重启，单实例监听 8000。
+- Bridge 健康：`status=ok, executor_ready=true`。
+
+**真实数据验证**：
+- 重跑 `paper/score`：
+  - scoredCount=243。
+- candidate 360：
+  - score=83.8116。
+  - riskFlags 从空变成 `mixed_category_evidence`。
+- clean high：
+  - 从 19 降到 18。
+- TRIAL_READY：
+  - 仍为 0，没有自动误推进。
+- Leader 管理/池子：
+  - managed=595。
+  - pool=191。
+
+**结论**：
+- 系统现在更保守、更贴近目标：稳定高分 + 无风险标记才可能进入可试跟阶段。
+- candidate 360 虽然 paper 表现好，但证据混类，已被正确排除出 clean high。
+- 当前高质量候选减少到 18，但质量更可信。
+
+**下一轮动作**：
+- 增加“目标配比健康度”：politics+finance clean high 需要接近 80%，sports+crypto 控制在 20%。
+- 继续扩 politics/finance 来源，尤其 politics 需要新来源而不是单纯放宽 activity source。
+- 对当前 18 个 stable clean high 做类别配比和试跟优先级排序。
+
+## Iteration 75 - 2026-06-26 10:45 CST - 暴露目标配比健康度
+
+**目标**：
+- 把第二目标中的“政治/金融 80%，体育/加密 20%”变成可观测指标，而不是只靠人工看分类数量。
+- 让 Leader Research 页面能直接提示当前候选结构是否偏离目标配比，并指出主类别缺口。
+
+**代码改动**：
+- 后端 `LeaderResearchFunnelResponse` 新增 `allocationHealth`：
+  - primaryCategories: `politics`, `finance`。
+  - secondaryCategories: `sports`, `crypto`。
+  - primaryTargetPercent: `80`。
+  - secondaryTargetPercent: `20`。
+  - primaryActualPercent / secondaryActualPercent。
+  - primaryCleanHighCount / secondaryCleanHighCount。
+  - primaryDeficitCount。
+  - status: `EMPTY` / `HEALTHY` / `WATCH` / `DEFICIT`。
+  - message: 中文解释当前配比状态。
+- 前端 Leader Research 页面在“研究候选漏斗”卡片内新增“主类别配比”展示：
+  - 显示政治/金融 clean high 占比。
+  - 显示目标进度条。
+  - 显示 politics/finance 与 sports/crypto 的 clean high 数量。
+  - 显示后端返回的中文健康度提示。
+
+**验证**：
+- 后端测试与编译通过：
+  - `LeaderResearchStateMachineTest`
+  - `LeaderResearchScoringServiceTest`
+  - `compileKotlin`
+- 前端构建通过：
+  - `npm run build`
+  - 仅保留既有 warning：`api.ts` 动静态 import 混用、chunk 大小超过 500k。
+- 后端 `bootJar` 通过并已重启。
+- Backend 单实例监听 8000。
+- Bridge 健康：
+  - `status=ok`
+  - `executor_ready=true`
+
+**真实数据验证**：
+- `GET/POST /api/copy-trading/leader-research/funnel` 当前返回：
+  - clean high 总数：18。
+  - primary clean high：12。
+  - secondary clean high：6。
+  - primaryActualPercent：66.6667%。
+  - secondaryActualPercent：33.3333%。
+  - primaryDeficitCount：3。
+  - status：`DEFICIT`。
+  - message：`主类别 politics/finance 明显不足，至少还需补 3 个 clean high 候选。`
+- 当前分类 clean high：
+  - politics：1，topCandidateId=1755。
+  - finance：11，topCandidateId=1742。
+  - sports：4。
+  - crypto：2。
+- 当前优先候选第一名：
+  - candidateId=1742。
+  - wallet=`0xe7ce284302936fd06ffc7ad05f13c648c513d53a`。
+  - category=`finance`。
+  - score=95.6227。
+  - tradeCount=22。
+  - filteredRatio=0.0435。
+  - copyablePnl=12.0753。
+  - state=`PAPER`。
+
+**结论**：
+- 第二目标现在有了可执行的结构性反馈：不是“候选越多越好”，而是 clean high 候选必须向政治/金融主类别倾斜。
+- 当前状态明确为 `DEFICIT`，说明下一轮不应优先扩大 sports/crypto，而应继续找 politics/finance，尤其 politics。
+
+**下一轮动作**：
+- 继续扩 politics/finance 数据源，并把新增候选先进入 PAPER 观察。
+- 对当前 18 个 clean high 做试跟优先级排序，但优先级排序必须参考 allocationHealth，避免 sports/crypto 抢占主类别预算。
+- 在页面或 API 增加“为什么未进入 TRIAL_READY”的原因聚合，方便下一轮把 PAPER 候选推进到可试跟。
+
+## Iteration 76 - 2026-06-26 10:49 CST - 扩 finance PAPER 并暴露试跟阻塞原因
+
+**目标**：
+- 继续推进第二目标：优先补 politics/finance 主类别候选，并解释高分候选为什么没有进入可试跟。
+
+**执行动作**：
+- activity-source 正式导入，参数：
+  - categories=`politics,finance`
+  - limitPerCategory=25
+  - lookbackDays=60
+  - minEvents=8
+  - minDistinctMarkets=2
+  - minBuyEvents=2
+  - minSellEvents=1
+  - minSafePriceRatio=0.20
+  - maxTailPriceRatio=0.50
+- 导入结果：
+  - selectedTotal=50。
+  - createdTotal=25。
+  - updatedTotal=5。
+  - skippedExistingTotal=20。
+  - politics：created=0，updated=5，skippedExisting=20。
+  - finance：created=25，updated=0。
+- activity prescreen：
+  - scannedCount=1720。
+  - scoredCount=1720。
+  - categoryCounts：politics=707，finance=706，sports=156，crypto=151。
+  - 主要风险：small_sample=1507、scanner_pool_unverified=1255、low_market_diversity=1132。
+- promote PAPER：
+  - dry-run 显示 politics=0、finance=20 可晋级。
+  - 正式晋级受 live batch limit 限制，promotedTotal=8。
+  - 新晋级全部为 finance。
+- paper process + score 连续 3 轮：
+  - 轮 1：processed=16，filtered=4，failed=0，scoredCount=251。
+  - 轮 2：processed=12，filtered=8，failed=0，scoredCount=251。
+  - 轮 3：processed=17，filtered=3，failed=0，scoredCount=251。
+
+**代码改动**：
+- `LeaderResearchFunnelCandidateDto` 新增 `trialReadiness`：
+  - eligible。
+  - blockers。
+  - ageHours。
+  - stableHighScoreCount。
+  - requiredStableHighScoreCount。
+- `LeaderResearchService.funnel()` 为优先候选计算试跟准备度：
+  - score>=80。
+  - riskFlags 为空。
+  - PAPER 观察至少 7 天。
+  - 通过模拟交易 >=10。
+  - 模拟总样本 >=10。
+  - copyablePnL>0。
+  - maxDrawdown>=-15。
+  - unknown valuation exposure <=20%。
+  - filteredRatio<50%。
+  - 最近 3 次 `research-copyability-v1` 评分均 >=80。
+- 前端 Leader Research 页面“优先观察候选”展示：
+  - 可试跟 / 观察中。
+  - 第一条阻塞原因。
+  - 稳定高分计数，例如 `3/3`。
+
+**验证**：
+- 后端通过：
+  - `LeaderResearchStateMachineTest`
+  - `LeaderResearchScoringServiceTest`
+  - `compileKotlin`
+  - `bootJar`
+- 前端通过：
+  - `npm run build`
+  - 保留既有 warning：`api.ts` 动静态 import 混用、chunk 大小超过 500k。
+- 后端已通过 `run_backend_local.sh` 重启：
+  - PID=45910。
+  - 监听 8000。
+- Bridge 健康：
+  - `status=ok`
+  - `executor_ready=true`
+
+**真实数据验证**：
+- funnel 当前：
+  - totalCandidates=1968。
+  - PAPER=251。
+  - cleanHighScoreTotal=18。
+  - primary clean high=12。
+  - secondary clean high=6。
+  - primaryActualPercent=66.6667%。
+  - status=`DEFICIT`。
+  - primaryDeficitCount=3。
+- 第一优先候选：
+  - candidateId=1742。
+  - wallet=`0xe7ce284302936fd06ffc7ad05f13c648c513d53a`。
+  - category=finance。
+  - score=95.6282。
+  - tradeCount=22。
+  - copyablePnl=12.0753。
+  - stableHighScoreCount=3/3。
+  - trialReadiness.eligible=false。
+  - blocker=`PAPER 观察不足 7 天：当前 43 小时`。
+
+**结论**：
+- finance 来源仍能补新候选：本轮新增 25 个、推进 8 个进入 PAPER。
+- politics 扩源明显瓶颈：宽松 activity-source 下仍没有新 politics 可晋级 PAPER，只能更新 5 个已有候选。
+- 当前最强 finance 候选 1742 质量条件基本达标，未进入 TRIAL_READY 的主要原因是 7 天观察期未满，不是评分或稳定性失败。
+- clean high 数暂未提升，符合预期：新 PAPER 候选需要更多模拟交易样本后才能进入 clean high。
+
+**下一轮动作**：
+- 继续滚动处理 PAPER=251 的模拟样本，优先观察新晋级 finance 候选是否转化为 clean high。
+- 针对 politics 单独扩源：需要扩大政治关键词和来源，而不是继续重复当前 activity-source 参数。
+- 增加 politics-source 诊断，输出“为什么没有 politics 可晋级”的原因分布。
+
+## Iteration 77 - 2026-06-26 11:08 CST - 增加快速观察层并按主类别缺口排序
+
+**背景**：
+- 用户追问“观察为什么一定要 7 天”。
+- 复核结果：
+  - OpenSpec 设计中明确要求 `PAPER -> TRIAL_READY` 纸跟时间 >= 7 天。
+  - 代码中 `PAPER_MIN_AGE_MS = 7L * 24 * 60 * 60 * 1000`。
+- 判断：
+  - 7 天适合保留为正式 `TRIAL_READY` 安全闸门。
+  - 但为了加快第二目标 leader 筛选，可以增加一个不创建跟单配置的快速观察层。
+
+**代码改动**：
+- `LeaderResearchTrialReadinessDto` 新增：
+  - `level`：`TRIAL_READY` / `FAST_WATCH` / `OBSERVE`。
+  - `label`：中文标签。
+  - `fastWatchBlockers`：快速观察层的阻塞原因。
+- `LeaderResearchService` 新增快速观察判定：
+  - score >= 85。
+  - riskFlags 为空。
+  - PAPER 观察 >= 48 小时。
+  - 通过模拟交易 >= 20。
+  - 模拟总样本 >= 20。
+  - copyablePnL > 0。
+  - maxDrawdown >= -8。
+  - unknown valuation exposure <= 10%。
+  - filteredRatio < 20%。
+  - 最近 3 次 `research-copyability-v1` 评分均 >= 80。
+- 重要边界：
+  - `eligible` 仍只代表正式可试跟。
+  - `FAST_WATCH` 不会绕过 `TRIAL_READY`，不会创建正式跟单配置。
+- 优先候选排序调整：
+  - 当 allocationHealth 显示 politics/finance 主类别有缺口时，优先观察候选先排 politics/finance，再按 score 和 copyablePnL 排序。
+  - 避免 sports/crypto 在主类别 DEFICIT 时抢占 top 位。
+- 前端 Leader Research 页面：
+  - 展示 `可试跟` / `快速观察` / `观察中`。
+  - `FAST_WATCH` 用蓝色标签。
+  - 普通观察继续展示第一条正式阻塞原因。
+
+**验证**：
+- 后端通过：
+  - `LeaderResearchStateMachineTest`
+  - `LeaderResearchScoringServiceTest`
+  - `compileKotlin`
+  - `bootJar`
+- 前端通过：
+  - `npm run build`
+  - 保留既有 warning：`api.ts` 动静态 import 混用、chunk 大小超过 500k。
+- 后端已重启：
+  - PID=7791。
+  - 监听 8000。
+- Bridge 健康：
+  - `status=ok`
+  - `executor_ready=true`
+
+**真实数据验证**：
+- allocationHealth：
+  - primaryActualPercent=66.6667%。
+  - primaryDeficitCount=3。
+  - status=`DEFICIT`。
+- 优先候选 top8 现在全部为 finance：
+  - 1742：score=95.6282，tradeCount=22，filteredRatio=0.0435，age=44h，level=`OBSERVE`。
+    - 正式阻塞：`PAPER 观察不足 7 天：当前 44 小时`。
+    - 快速观察阻塞：`快速观察至少需要 48 小时：当前 44 小时`。
+  - 2079：score=91.4419，tradeCount=32，filteredRatio=0.0857，age=12h，level=`OBSERVE`。
+  - 1660：score=90.7878，tradeCount=18，filteredRatio=0.3077，age=15h，level=`OBSERVE`。
+  - 1697：score=89.2244，tradeCount=11，filteredRatio=0.2143，age=15h，level=`OBSERVE`。
+  - 2063：score=88.1576，tradeCount=18，filteredRatio=0.1429，age=12h，level=`OBSERVE`。
+  - 1699：score=86.3789，tradeCount=18，filteredRatio=0.2174，age=44h，level=`OBSERVE`。
+  - 1611：score=86.2773，tradeCount=50，filteredRatio=0.1228，age=14h，level=`OBSERVE`。
+  - 1740：score=85.485，tradeCount=21，filteredRatio=0.087，age=44h，level=`OBSERVE`。
+
+**结论**：
+- 系统现在能区分：
+  - 正式可试跟：仍需 7 天，安全闸门不变。
+  - 快速观察：满足更严交易质量但未满 7 天，用于加速研究判断。
+  - 普通观察：继续等待样本或风险指标改善。
+- 当前主类别候选里还没有 `FAST_WATCH`，1742 最接近，主要差约 4 小时观察期。
+- politics 仍是最明显短板；finance 有多个接近快速观察的候选。
+
+**下一轮动作**：
+- 等 1742/1740/1699 等 44h 候选超过 48h 后，重跑 funnel，确认是否进入 `FAST_WATCH`。
+- 继续 paper/process 新晋级 finance，争取把更多主类别候选推到 clean high。
+- 单独做 politics-source 诊断，输出无 politics 晋级的原因分布。
+
+## Iteration 78 - 2026-06-26 13:18 CST - politics-source 诊断并新增 1 个政治 PAPER
+
+**目标**：
+- 把 politics 扩源瓶颈从“感觉缺来源”变成可重复诊断数据。
+- 在不写库的诊断基础上，发现可用新增 politics 钱包后再走正式导入、评分、PAPER 晋级。
+
+**代码改动**：
+- 新增只读诊断接口：
+  - `POST /api/copy-trading/leader-research/politics-source/diagnose`
+- 新增 DTO：
+  - `LeaderResearchPoliticsSourceDiagnoseRequest`
+  - `LeaderResearchPoliticsSourceDiagnoseResponse`
+  - `LeaderResearchPoliticsSourceBucketDto`
+  - `LeaderResearchPoliticsSourceSampleDto`
+- 新增 service：
+  - `LeaderResearchPoliticsSourceDiagnoseService`
+- 诊断能力：
+  - 从 `leader_activity_event` 按 politics 关键词聚合钱包。
+  - 左连接 `leader_research_candidate` 和 `leader_paper_session`。
+  - 输出：
+    - scannedWallets。
+    - passImportCriteria。
+    - unknownWallets / existingWallets。
+    - paperWallets / cleanHighWallets。
+    - eligibleForPaperNow。
+    - blocker bucket 计数。
+    - top sample 钱包与阻塞原因。
+- 诊断不导入、不评分、不推进状态。
+
+**验证**：
+- 后端通过：
+  - `LeaderResearchControllerTest`
+  - `compileKotlin`
+  - `bootJar`
+- 后端已重启：
+  - PID=93209。
+  - 监听 8000。
+- 前端服务在线：
+  - `http://localhost:3000` 可访问。
+- Bridge 健康：
+  - `status=ok`
+  - `executor_ready=true`
+
+**politics-source 诊断结果**：
+- 请求参数：
+  - lookbackDays=60。
+  - minEvents=8。
+  - minDistinctMarkets=2。
+  - minBuyEvents=2。
+  - minSellEvents=1。
+  - minSafePriceRatio=0.20。
+  - maxTailPriceRatio=0.50。
+  - limit=500。
+- 结果：
+  - scannedWallets=500。
+  - passImportCriteria=31。
+  - unknownWallets=275。
+  - existingWallets=225。
+  - paperWallets=43。
+  - cleanHighWallets=3。
+  - eligibleForPaperNow=1。
+- Top blockers：
+  - events_below_8：295。
+  - safe_ratio_below_0.2000：238。
+  - already_in_research_pool：225。
+  - score_below_75：213。
+  - tail_ratio_above_0.5000：191。
+  - sell_below_1：183。
+  - risk:small_sample：97。
+  - risk:low_safe_price_ratio：86。
+  - buy_below_2：85。
+  - risk:tail_price_spray：75。
+  - risk:scanner_pool_unverified：59。
+  - already_paper：43。
+
+**正式执行**：
+- politics activity-source import：
+  - selectedTotal=31。
+  - createdTotal=1。
+  - updatedTotal=5。
+  - skippedExistingTotal=25。
+- 新增 politics 钱包：
+  - wallet=`0xad5353afe30c2da57709e2704ef3ccdcf67eef24`。
+  - totalEvents=10。
+  - distinctMarkets=7。
+  - buyEvents=9。
+  - sellEvents=1。
+  - safePriceRatio=0.8000。
+  - tailPriceRatio=0.2000。
+  - avgAmount=2.5934。
+  - totalAmount=25.9339。
+- activity-score：
+  - scannedCount=1713。
+  - scoredCount=1713。
+  - categoryCounts：politics=708，finance=698，sports=156，crypto=151。
+- politics promote PAPER：
+  - selectedTotal=1。
+  - promotedTotal=1。
+  - candidateId=2361。
+  - score=96.25000000。
+  - riskFlags=[]。
+- paper process：
+  - processed=17。
+  - filtered=3。
+  - failed=0。
+- paper score：
+  - scoredCount=252。
+
+**最新 funnel**：
+- totalCandidates=1969。
+- PAPER=252。
+- cleanHighScoreTotal=17。
+- primary clean high=14。
+- secondary clean high=3。
+- primaryActualPercent=82.3529%。
+- allocationHealth status=`HEALTHY`。
+- politics：
+  - totalCandidates=742。
+  - paperCandidates=38。
+  - cleanHighScoreCandidates=1。
+  - topCandidateId=1755。
+- finance：
+  - totalCandidates=879。
+  - paperCandidates=188。
+  - cleanHighScoreCandidates=13。
+  - topCandidateId=1742。
+
+**结论**：
+- politics 源并非完全枯竭，但当前持久化活动数据里，高质量未知 politics 钱包非常少。
+- 主要瓶颈是：
+  - 样本不足。
+  - 安全价格比例不足。
+  - 长尾极端价格过高。
+  - 缺少 sell/退出行为。
+  - 许多高活动钱包已经在研究池或 PAPER 中。
+- 本轮实际新增 1 个 politics PAPER，说明诊断接口能产出可执行增量，但 politics 仍需要更好的来源，而不是单纯放宽阈值。
+- cleanHigh 总数从 18 降到 17，但主类别占比变为 HEALTHY，原因是 sports/crypto clean high 数下降；这提醒后续需要同时看总数和配比，不能只看比例。
+
+**下一轮动作**：
+- 对 candidate 2361 做 targeted paper/process，确认是否有足够后续可模拟交易。
+- 将 politics-source 诊断结果接入 Leader Research 页面，便于直接看到 politics 扩源瓶颈。
+- 继续探索 politics 新来源：明确政治市场的高成交对手方、盈利 paper 钱包、外部 analytics 排名。
+
+## Iteration 79 - 2026-06-26 13:26 CST - 验证 politics 2361 并接入页面诊断
+
+**目标**：
+- 对上一轮新增的 politics candidate 2361 做定向 PAPER 处理，避免它在全局 252 个 PAPER 里排队。
+- 将 politics-source 诊断接入 Leader Research 页面，让扩源瓶颈可视化。
+
+**执行动作**：
+- 对 candidateId=2361 连续执行 3 轮 targeted paper/process：
+  - 第 1 轮：processed=10，filtered=10，failed=0。
+  - 第 2 轮：processed=11，filtered=6，failed=0。
+  - 第 3 轮：processed=0，filtered=0，failed=0。
+- 每轮后执行 `paper/score`：
+  - scoredCount=252。
+
+**candidate 2361 当前状态**：
+- wallet=`0xad5353afe30c2da57709e2704ef3ccdcf67eef24`。
+- state=`PAPER`。
+- score=86.50647386。
+- riskFlags=[]。
+- paper session：
+  - tradeCount=21。
+  - filteredCount=16。
+  - filteredRatio=0.43243243。
+  - copyablePnl=8.99567978。
+  - maxDrawdown=-1.19444189。
+  - unknownValuationExposure=0。
+  - openExposure=13.378162。
+- 结论：
+  - 2361 初步质量不错，PnL/回撤/未知估值都可接受。
+  - 但 filteredRatio=43.24%，接近 50% 上限；且 PAPER 年龄太短，不能快速试跟。
+
+**前端接入**：
+- `frontend/src/types/index.ts` 新增 politics-source 诊断类型：
+  - `LeaderResearchPoliticsSourceDiagnoseRequest`
+  - `LeaderResearchPoliticsSourceDiagnose`
+  - `LeaderResearchPoliticsSourceBucket`
+  - `LeaderResearchPoliticsSourceSample`
+- `frontend/src/services/api.ts` 新增：
+  - `apiService.leaderResearch.diagnosePoliticsSource()`
+- `frontend/src/pages/LeaderResearch.tsx` 新增展示：
+  - “政治来源诊断”卡片：
+    - 扫描钱包。
+    - 通过阈值。
+    - 可新增 PAPER。
+    - 未知钱包。
+    - 已在池中。
+    - 已 PAPER。
+    - lookback 与 clean high。
+  - “政治来源阻塞”卡片：
+    - top blocker bucket。
+    - 中文解释。
+  - “政治来源样本”卡片：
+    - 样本钱包。
+    - action。
+    - events/markets/buy/sell。
+    - safe/tail ratio。
+    - 当前阻塞原因。
+
+**验证**：
+- 前端：
+  - `npm run build` 通过。
+  - 保留既有 Vite warning：`api.ts` 动静态 import 混用、chunk 大小超过 500k。
+- 后端：
+  - 上一轮已通过 `LeaderResearchControllerTest`、`compileKotlin`、`bootJar` 并重启。
+  - 本轮运行态 API 验证通过。
+- 服务：
+  - 前端 3000 在线。
+  - 后端 8000 在线，PID=93209。
+  - Bridge 8080 在线，`executor_ready=true`。
+
+**最新 politics-source 诊断**：
+- scannedWallets=500。
+- passImportCriteria=32。
+- unknownWallets=275。
+- existingWallets=225。
+- paperWallets=43。
+- cleanHighWallets=3。
+- eligibleForPaperNow=0。
+- top blockers：
+  - events_below_8：294。
+  - safe_ratio_below_0.2000：240。
+  - already_in_research_pool：225。
+  - score_below_75：214。
+  - tail_ratio_above_0.5000：193。
+
+**结论**：
+- 上一轮唯一可直接新增的 politics 钱包已经进入 PAPER，当前没有新的 `UNKNOWN_ELIGIBLE` politics 钱包。
+- politics-source 诊断已经从命令行能力变成页面能力，可以持续观察瓶颈是否变化。
+- 2361 值得继续观察，但因为过滤率偏高和 PAPER 年龄不足，不应进入快速观察或试跟。
+
+**下一轮动作**：
+- 针对 2361 持续观察后续活动事件，若 filteredRatio 降低且 age 增长，再评估 FAST_WATCH。
+- politics 扩源需要第二类来源：明确政治市场的高成交对手方、盈利 paper 钱包、外部 analytics 排名，而不是继续重复当前 activity-source。
+- 可以把 politics-source 诊断的 `eligibleForPaperNow > 0` 做成日报/告警，发现新可用政治钱包时自动触发导入评估。
+
+## Iteration 80 - 2026-06-26 13:33 CST - 滚动评分确认 politics 2361 成为 clean high
+
+**目标**：
+- 继续滚动观察主类别候选，确认 2361 是否能转化为有效 politics clean high。
+- 让页面明确提示 politics activity-source 是否还有可新增 PAPER 候选。
+
+**执行动作**：
+- 执行 `paper/score`：
+  - scoredCount=252。
+  - states=`PAPER,TRIAL_READY`。
+  - scoreVersion=`research-copyability-v1`。
+- 重新拉取 funnel。
+- 前端 Leader Research 改动：
+  - “政治来源诊断”卡片新增状态提示。
+  - 若 `eligibleForPaperNow > 0`，显示发现可新增政治 PAPER 候选。
+  - 若为 0，显示当前 activity-source 暂无可新增政治 PAPER 候选，优先寻找新来源。
+
+**最新 funnel**：
+- totalCandidates=1969。
+- cleanHighScoreTotal=18。
+- primaryCleanHighCount=15。
+- secondaryCleanHighCount=3。
+- primaryActualPercent=83.3333%。
+- allocationHealth=`HEALTHY`。
+- politics：
+  - totalCandidates=742。
+  - paperCandidates=38。
+  - cleanHighScoreCandidates=2。
+  - topCandidateId=2361。
+  - topScore=86.5086。
+- finance：
+  - totalCandidates=879。
+  - paperCandidates=188。
+  - cleanHighScoreCandidates=13。
+  - topCandidateId=1742。
+
+**2361 当前观察结果**：
+- category=politics。
+- score=86.5086。
+- tradeCount=21。
+- filteredRatio=0.4324。
+- copyablePnl=8.9957。
+- readiness level=`OBSERVE`。
+- blocker=`PAPER 观察不足 7 天：当前 0 小时`。
+- fastWatchBlocker=`快速观察至少需要 48 小时：当前 0 小时`。
+
+**诊断状态**：
+- politics-source：
+  - scannedWallets=500。
+  - passImportCriteria=32。
+  - unknownWallets=275。
+  - existingWallets=225。
+  - paperWallets=43。
+  - cleanHighWallets=3。
+  - eligibleForPaperNow=0。
+- top blockers：
+  - events_below_8=294。
+  - safe_ratio_below_0.2000=240。
+  - already_in_research_pool=225。
+  - score_below_75=214。
+  - tail_ratio_above_0.5000=193。
+
+**验证**：
+- `npm run build` 通过。
+- 保留既有 Vite warning：`api.ts` 动静态 import 混用、chunk 大小超过 500k。
+- 前端 3000 在线。
+- 后端 8000 在线。
+- Bridge 8080 健康：`executor_ready=true`。
+
+**结论**：
+- candidate 2361 已从新增 politics PAPER 转化为 politics clean high，并成为当前 politics topCandidate。
+- 当前 politics activity-source 已无可直接新增 PAPER 的未知钱包。
+- 短期内继续重复当前 politics activity-source 收益很低。
+
+**下一轮动作**：
+- 开始实现第二类 politics 来源诊断：
+  - 从明确政治市场中寻找高成交对手方。
+  - 从 paper 盈利的 politics 钱包关联市场反查其他活跃钱包。
+  - 对比外部 analytics 来源，形成可导入候选列表。
+- 对 2361 后续活动继续增量 paper/process，重点看 filteredRatio 是否能从 43% 降下来。
+
+## Iteration 81 - 2026-06-26 13:48 CST - politics 诊断去噪与服务恢复验证
+
+**目标**：
+- 继续第二目标，提升 politics 来源诊断准确性，避免把体育、加密或公司地区收入市场误当成政治候选来源。
+- 验证“无服务了”后的前端、后端、Bridge 运行态。
+
+**服务检查**：
+- 前端 3000 在线。
+- Bridge 8080 在线，`executor_ready=true`。
+- 后端旧进程 PID=93209 对 `SIGTERM` 未正常退出，shutdown hook 报 `GracefulShutdownCallback` class not found；使用 `kill -9` 清理后，新建 `polyhermes-backend` tmux session。
+- 后端新 PID=40323，8000 在线，登录接口和 leader research 接口验证通过。
+
+**诊断修复**：
+- 收紧 `LeaderResearchPoliticsSourceDiagnoseService.POLITICS_PATTERN`：
+  - 移除裸 `eu`，避免匹配非政治字符串。
+  - 移除裸 `china` / `mexico`，避免把公司地区收入、世界杯球队等市场误分类为 politics。
+  - 保留并补强明确政治/地缘政治词：`taiwan`、`military-clash`、`nominee`、`governor`、`primary`、`hezbollah`、`lebanon`、`crimea`、`diplomatic`、`netanyahu` 等。
+
+**旧 pattern vs 新 pattern 数据对比**：
+- 旧 pattern：
+  - unknown scanned=5088。
+  - eligible_unknown=0。
+  - top markets 包含真实政治市场，但也依赖裸 `china/mexico/eu`，有潜在误分类风险。
+- 新 pattern：
+  - unknown scanned=4088。
+  - eligible_unknown=0。
+  - top markets 保留 Israel / Russia / Iran / Ukraine / Parliament / Election 等明确政治市场。
+
+**运行态 politics-source 诊断**：
+- lookbackDays=60，limit=500。
+- scannedWallets=500。
+- passImportCriteria=18。
+- unknownWallets=290。
+- existingWallets=210。
+- paperWallets=34。
+- cleanHighWallets=2。
+- eligibleForPaperNow=0。
+- top blockers：
+  - events_below_8=341。
+  - safe_ratio_below_0.2000=272。
+  - tail_ratio_above_0.5000=231。
+  - already_in_research_pool=210。
+  - score_below_75=203。
+
+**验证**：
+- 后端 `LeaderResearchControllerTest`、`compileKotlin`、`bootJar` 通过。
+- 后端运行态接口验证通过。
+- 前端 3000、Bridge 8080 保持在线。
+
+**结论**：
+- 当前 politics activity-source 没有新的 `UNKNOWN_ELIGIBLE` 钱包；重复跑同一来源无法有效增加高质量 politics leader。
+- 收紧后诊断更可信，页面上的 politics 来源瓶颈不再被明显非政治市场稀释。
+- 下一轮应进入外部/第二来源：Polymarket Analytics、明确政治市场高成交钱包、盈利 PAPER 钱包关联市场，而不是继续放宽当前阈值。
+
+**下一轮动作**：
+- 新增或脚本化第二来源候选发现：
+  - 从明确 politics market 的高成交/多市场钱包中找未知候选。
+  - 对现有 clean politics PAPER 的共同市场对手方做二跳筛选，但需要求跨市场活跃，避免一次性散户。
+  - 优先接入外部 analytics 数据源，作为 activity-source 之外的独立候选入口。
+
+## Iteration 82 - 2026-06-26 14:24 CST - 第二来源 market-peer-source 与分类误伤修复
+
+**目标**：
+- 把“明确政治/金融热门市场对手方”从一次性 SQL 变成正式可重复 API 来源。
+- 继续按第二目标扩 politics/finance 候选，但避免把 BTC 5M、体育球员、政治 stockpile 等误归为 finance。
+
+**代码变更**：
+- 新增 `/api/copy-trading/leader-research/market-peer-source/import`。
+- 新增 `LeaderResearchMarketPeerSourceImportService`：
+  - 先按类别 pattern 选 hot markets。
+  - 再在 hot markets 中按 wallet 聚合。
+  - 要求跨市场、买卖都有、安全价格比例/长尾比例达标。
+  - 支持 `dryRun` 与正式导入。
+  - 对 locked / 已有 evidence 做保护。
+  - source 标记为 `MARKET_PEER_SOURCE`。
+- 前端 `api.ts` 和 `types/index.ts` 补齐 market-peer-source API 类型，后续页面/日报可以直接接入。
+
+**分类修复**：
+- finance pattern 修复：
+  - `dow` 会误匹配 `btc-updown-5m` 的 `down`，已替换为 `dow-jones`。
+  - `fed` 会误匹配 `federico`，已替换为 `the-fed`、`fed-rate`、`feds-upper` 等 slug 语境。
+  - `stock` 会误匹配政治市场 `stockpile`，已替换为 `stock-market`。
+  - 补充/保留真实金融市场词：`rate-cut`、`rate-hike`、`interest-rate`、`crude-oil`、`wti`、`gold`、`spx` 等。
+- 同步修复旧 `activity-source` 与新 `market-peer-source`，避免未来继续把 BTC 5M 当 finance。
+
+**运行验证**：
+- 严格参数：
+  - categories=`politics,finance`
+  - lookbackDays=60
+  - hotMarketLimit=50
+  - minMarketEvents=25
+  - minMarketWallets=20
+  - minEvents=8
+  - minDistinctMarkets=2
+  - minBuyEvents=2
+  - minSellEvents=1
+  - minSafePriceRatio=0.20
+  - maxTailPriceRatio=0.50
+- dry-run 结果：
+  - selectedTotal=1。
+  - politics selected=1，finance selected=0。
+  - 唯一 politics 钱包 `0x8a98109fb0f1d87d9bfcb4486ba3587b95c51b92` 为已存在候选，当前 evidence 已更新，后续 dry-run 为 `SKIP_EXISTING`。
+- 放宽 finance 小样本参数：
+  - hotMarketLimit=80
+  - minMarketEvents=10
+  - minMarketWallets=5
+  - minEvents=5
+  - minDistinctMarkets=2
+  - minBuyEvents=1
+  - minSellEvents=1
+  - 发现 1 个已存在 finance 候选 `0x5d634050ad89f172afb340437ed3170eaa2c9075`，正式更新 evidence。
+
+**候选质量复核**：
+- politics candidate 105：
+  - wallet=`0x8a98109fb0f1d87d9bfcb4486ba3587b95c51b92`
+  - state=PAPER。
+  - score=67.5244。
+  - riskFlags=`mixed_category_evidence,high_filtered_ratio,tail_price_spray`。
+  - 不应晋级。
+- finance candidate 114：
+  - wallet=`0x5d634050ad89f172afb340437ed3170eaa2c9075`
+  - state=DISCOVERED。
+  - score=60.0000。
+  - riskFlags=`mixed_category_evidence`。
+  - 不应晋级。
+- `activity-score/run force=true`：
+  - scannedCount=1712。
+  - scoredCount=1712。
+  - categoryCounts：politics=707，finance=698，sports=156，crypto=151。
+
+**验证**：
+- 后端：
+  - `LeaderResearchControllerTest` 通过。
+  - `compileKotlin` 通过。
+  - `bootJar` 通过。
+- 前端：
+  - `npm run build` 通过。
+  - 保留既有 Vite warning：`api.ts` 动静态 import 混用、chunk 大小超过 500k。
+- 服务：
+  - 后端已重启，PID=72094，8000 在线。
+
+**结论**：
+- 第二来源正式落地，但当前本地 `leader_activity_event` 中没有新的高质量 politics/finance 钱包可直接入池。
+- finance 候选来源之前确实被 BTC 5M 污染，已修复；这比盲目新增数量更重要，否则会继续把不适合的短周期 crypto leader 伪装成 finance。
+- 当前瓶颈变为“真实外部数据源不足”，不是导入接口缺失。
+
+**下一轮动作**：
+- 把 market-peer-source 入口接到 Leader Research 页面或日报，展示 strict/relaxed 两组结果。
+- 接入或半自动导入外部 analytics 来源，优先找真实 finance/politics 钱包，而不是只依赖本地 activity_event。
+- 对 finance pattern 继续做分类单测，防止裸词误伤重新出现。
+
+## Iteration 83 - 2026-06-26 14:47 CST - 第二来源页面化与分类测试护栏
+
+**目标**：
+- 让 market-peer-source 的 strict/relaxed 结果在 Leader Research 页面可见。
+- 固化上一轮发现的 finance 分类误伤，防止 BTC 5M / 足球运动员 / 政治 stockpile 被再次归为 finance。
+
+**代码变更**：
+- 新增 `LeaderResearchMarketCategoryPatterns`：
+  - activity-source 与 market-peer-source 共用同一套 politics/finance market pattern。
+  - 避免两个来源各自维护词表导致 drift。
+- 新增 `LeaderResearchMarketCategoryPatternsTest`：
+  - finance 应匹配：
+    - Fed interest-rate 市场。
+    - SPX 市场。
+    - WTI 市场。
+    - Gold 市场。
+  - finance 应拒绝：
+    - `btc-updown-5m-*`。
+    - `will-federico-valverde...`。
+    - `uranium-stockpile...`。
+  - politics 应匹配：
+    - Israel/Hezbollah。
+    - US/Iran diplomatic。
+    - Ukraine/Crimea。
+- Leader Research 页面新增“热门市场对手方来源”卡片：
+  - 自动展示 strict dry-run 摘要。
+  - 展示 strict 分类 selected/created/updated。
+  - 展示样本 wallet、events、markets、buy/sell、top markets、action。
+  - 支持按钮运行 `relaxed finance` dry-run。
+
+**运行态验证**：
+- strict market-peer-source：
+  - selectedTotal=1。
+  - createdTotal=0。
+  - updatedTotal=0。
+  - skippedExistingTotal=1。
+  - politics selected=1，finance selected=0。
+  - 唯一样本仍为已存在 politics 钱包 `0x8a98109fb0f1d87d9bfcb4486ba3587b95c51b92`，action=`SKIP_EXISTING`。
+
+**验证**：
+- 后端：
+  - `LeaderResearchMarketCategoryPatternsTest` 通过。
+  - `LeaderResearchControllerTest` 通过。
+  - `compileKotlin` 通过。
+  - `bootJar` 通过。
+- 前端：
+  - `npm run build` 通过。
+  - 保留既有 Vite warning：`api.ts` 动静态 import 混用、chunk 大小超过 500k。
+- 服务：
+  - 后端重启成功，PID=90103。
+  - market-peer-source API 运行态验证通过。
+
+**结论**：
+- 第二来源现在不只是后端能力，已经进入 Leader Research 页面，可直接观察 strict/relaxed 来源结果。
+- 分类质量有测试护栏，避免继续把不适合跟单策略的 BTC 5M 伪装成 finance。
+- 当前本地 activity_event 下 strict 第二来源仍没有新增高质量 politics/finance 钱包。
+
+**下一轮动作**：
+- 进入真正外部 analytics/排行榜来源接入：
+  - 优先从 Polymarket Analytics / Polyburg 报告提到的渠道获取 wallet。
+  - 将外部候选导入为独立 source，例如 `EXTERNAL_ANALYTICS_SOURCE`。
+  - 用现有 activity-score + market-peer evidence 二次筛选，避免只凭外部排名入池。
+
+## Iteration 84 - 2026-06-26 15:13 CST - 外部 analytics wallet 导入入口
+
+**目标**：
+- 继续第二目标，打通 Polyburg / Polymarket Analytics / Dune / 手工排行榜 wallet 到研究候选池的正式入口。
+- 避免后续每次拿到外部地址都写一次性 SQL 或脚本。
+
+**资料复核**：
+- 找到 iCloud Obsidian 报告目录：
+  - `/Users/henry/Library/Mobile Documents/iCloud~md~obsidian/Documents/warehouse/报告/polyburg 报告/report.md`
+- 报告包含可落地方法论：
+  - Polyburg 公开公式：`Score = win_rate × ln(1 + total_trades)`。
+  - 过滤高频交易者：每周超过 20 笔交易的钱包被排除。
+  - 过滤对冲者：同一市场双边下注 YES+NO 的交易者被排除。
+  - 低样本过滤：已结算交易少于 50 笔的钱包被排除。
+  - 不活跃过滤：过去 30 天无交易的钱包被排除。
+- 当前报告没有直接列出可导入 wallet 地址，因此本轮不正式导入外部地址。
+
+**代码变更**：
+- 新增 `POST /api/copy-trading/leader-research/external-analytics/import`。
+- 新增 `LeaderResearchExternalAnalyticsImportService`：
+  - 输入字段：wallet、category、sourceName、externalRank、externalScore、note。
+  - 支持 `dryRun`。
+  - 无效地址 `SKIP_INVALID`。
+  - locked/manual locked 候选 `SKIP_LOCKED`。
+  - 相同 evidence `SKIP_EXISTING`。
+  - 新 wallet 创建 `DISCOVERED` candidate。
+  - 已有 wallet 更新 source/evidence/lastSourceSeenAt。
+  - source 标记为 `EXTERNAL_ANALYTICS_SOURCE`。
+- 前端 `api.ts` 与 `types/index.ts` 已补 external analytics import 类型和 API 方法。
+- 新增 `LeaderResearchExternalAnalyticsImportServiceTest`。
+- Controller 测试补 external analytics import 委托测试。
+
+**运行态验证**：
+- dry-run payload：
+  - 有效已有 politics wallet `0x9703676286b93c2eca71ca96e8757104519a69c2`。
+  - 无效地址 `not-a-wallet`。
+- API 返回：
+  - requestedTotal=2。
+  - selectedTotal=1。
+  - updatedTotal=1。
+  - skippedInvalidTotal=1。
+  - 有效 wallet action=`UPDATE`。
+  - 无效地址 action=`SKIP_INVALID`。
+- 本轮未正式写入伪外部地址，避免污染候选池。
+
+**验证**：
+- 后端：
+  - `LeaderResearchExternalAnalyticsImportServiceTest` 通过。
+  - `LeaderResearchControllerTest` 通过。
+  - `compileKotlin` 通过。
+  - `bootJar` 通过。
+- 前端：
+  - `npm run build` 通过。
+  - 保留既有 Vite warning：`api.ts` 动静态 import 混用、chunk 大小超过 500k。
+- 服务：
+  - 后端重启成功，PID=36316。
+  - external analytics endpoint 运行态验证通过。
+
+**结论**：
+- 外部来源入口已经可用；后续只要拿到 Polyburg/Polymarket Analytics/Dune 的 wallet 列表，就能以正式 source 进入研究候选池。
+- 当前实际瓶颈从“系统没有外部导入口”转为“需要获取真实外部 wallet 列表”。
+
+**下一轮动作**：
+- 从 Polyburg top traders / Polymarket Analytics 页面或导出的 CSV 中抓取/整理 wallet。
+- 调用 external analytics import 正式导入真实 politics/finance wallet。
+- 导入后执行：
+  - `activity-score/run force=true`
+  - `activity-score/promote-paper`
+  - `paper/process`
+  - `paper/score`
+  - funnel 复核主类别 clean high 变化。
+
+## Iteration 85 - 2026-06-26 15:36 CST - 外部榜单粘贴导入页面
+
+**目标**：
+- 执行 Polymarket Analytics / Dune 外部来源方案，在没有 API key / Query ID 的情况下先打通可用的手工/CSV 粘贴导入。
+- 让外部排行榜 wallet 可以直接从 Leader Research 页面进入 `EXTERNAL_ANALYTICS_SOURCE`，再走本地评分和 PAPER 验证。
+
+**接入判断**：
+- Polymarket Analytics / Falcon API 方向需要 token。
+- Dune API 方向需要 API key 和具体 Query ID。
+- 当前本地没有这些凭证，因此本轮优先落地手工/导出列表导入，避免继续等待外部权限。
+
+**代码变更**：
+- `LeaderResearchExternalAnalyticsImportItemDto.sourceName` 默认值从 `external` 改为空字符串。
+  - 这样 item 未填来源时，会正确使用 request 的 `defaultSourceName`。
+- Leader Research 页面新增“导入外部名单”按钮和弹窗：
+  - 支持粘贴多行 wallet。
+  - 每行格式可为：`0x... finance 92` 或 `0x... politics 88`。
+  - 自动解析 wallet、category、score。
+  - 支持 Dry-run。
+  - 支持正式导入。
+  - 展示请求数、选中数、新建、更新、无效、重复/锁定和样本 action。
+- 该入口适配来源：
+  - Polymarket Analytics 手工榜单。
+  - Dune CSV/表格导出。
+  - Polyburg/其他工具整理后的 wallet 列表。
+
+**运行态验证**：
+- dry-run 请求：
+  - `defaultSourceName=polymarket_analytics`
+  - item 未传 `sourceName`
+  - wallet=`0x9703676286b93c2eca71ca96e8757104519a69c2`
+- API 返回：
+  - sourceName=`polymarket_analytics`
+  - sourceEvidence=`external_analytics:polymarket_analytics | category:politics | rank:1 | external_score:92`
+  - action=`UPDATE`
+- 确认默认来源名修复生效。
+
+**验证**：
+- 后端：
+  - `LeaderResearchExternalAnalyticsImportServiceTest` 通过。
+  - `LeaderResearchControllerTest` 通过。
+  - `compileKotlin` 通过。
+  - `bootJar` 通过。
+- 前端：
+  - `npm run build` 通过。
+  - 保留既有 Vite warning：`api.ts` 动静态 import 混用、chunk 大小超过 500k。
+- 服务：
+  - 后端重启成功，PID=86996。
+  - external analytics import 运行态 dry-run 验证通过。
+
+**结论**：
+- 外部榜单接入已经进入可操作状态：不需要等 API key，就可以从 Polymarket Analytics/Dune 导出的 wallet 列表直接导入。
+- 下一步重点不再是系统入口，而是获取真实高质量外部 wallet 列表。
+
+**下一轮动作**：
+- 从 Polymarket Analytics 手工导出或复制 top traders wallet，优先 politics/finance。
+- 或创建 Dune query，导出 wallet/category/score，再粘贴到页面导入。
+- 正式导入后立刻跑：
+  - `activity-score/run force=true`
+  - `activity-score/promote-paper`
+  - `paper/process`
+  - `paper/score`
+
+## Iteration 86 - 2026-06-26 15:40 CST - Polymarket Analytics 页面复制尝试
+
+**目标**：
+- 尝试通过 Polymarket Analytics 页面复制方式获取 top traders / wallet 列表，再进入外部榜单导入入口。
+
+**尝试结果**：
+- `curl https://polymarketanalytics.com/` 返回 Vercel 403，响应头包含 `x-vercel-mitigated: deny`。
+- 内置浏览器可打开首页标题，但对 DOM、截图、`/traders` 导航读取多次超时，无法稳定提取表格或 wallet。
+- 新标签直开 `https://polymarketanalytics.com/traders` 也未完成导航。
+- 已用系统 Chrome 打开：
+  - `https://polymarketanalytics.com/traders`
+  - `http://localhost:3000/leader-research`
+
+**结论**：
+- 当前环境无法自动从 Polymarket Analytics 页面复制出真实 wallet 列表；更像是站点防护/前端加载对自动化不友好，而不是本地导入链路问题。
+- 本地 `Leader Research -> 导入外部名单` 入口已经可用于人工复制粘贴。
+
+**建议下一步**：
+- 用户在 Chrome 中完成 Polymarket Analytics 登录/页面打开后，手动复制排行榜行。
+- 粘贴到本地 `Leader Research -> 导入外部名单`，来源填写 `polymarket_analytics`。
+- 推荐行格式：
+  - `0x... politics 92`
+  - `0x... finance 88`
+- 先执行 Dry-run；确认新建/更新数量和样本 action 正常后再正式导入。
+
+## Iteration 87 - 2026-06-26 15:58 CST - Scanner pool 扩源与 PAPER 推进闭环
+
+**目标**：
+- 在 Polymarket Analytics 页面复制受阻后，继续推进第二目标中可直接执行的闭环：
+  - 盘点候选池。
+  - 从 scanner pool 按政治/金融优先扩源。
+  - 强制重评分。
+  - 将高分候选分批推进 PAPER。
+  - 记录可跟踪的高分 PAPER 候选与瓶颈。
+
+**起始盘点**：
+- `leader_research_candidate`: 1969。
+- `copy_trading_leaders`: 595。
+- `leader_scanner_candidate_pool`: 7090。
+- `leader_activity_event`: 311831，其中 `usable_for_discovery=311831`、`usable_for_paper=299539`。
+- 起始状态：
+  - DISCOVERED 1704。
+  - PAPER 260。
+  - COOLDOWN 5。
+- 政治 DISCOVERED 707，但 80 分以上为 0；政治 PAPER 39，其中 80 分以上 4。
+
+**动作 1 - PAPER 晋级第一批**：
+- dry-run:
+  - selectedTotal=25。
+  - politics=0、finance=20、sports=4、crypto=1。
+- formal:
+  - selectedTotal=8。
+  - promotedTotal=8。
+  - requestedSelectedTotal=25。
+  - effectiveSelectedLimit=8。
+  - truncated=true。
+- 原因确认：
+  - `LeaderResearchPaperPromotionService.LIVE_PROMOTE_BATCH_LIMIT = 8`，正式执行单批硬上限是 8。
+- `paper/process`:
+  - processed=17。
+  - filtered=3。
+  - failed=0。
+  - requestedBatchSize=100。
+  - effectiveBatchSize=20。
+  - truncated=true。
+- `paper/score`:
+  - scoredCount=260。
+  - scoreVersion=`research-copyability-v1`。
+
+**动作 2 - scanner pool 扩源**：
+- dry-run 参数：
+  - politicsLimit=150。
+  - financeLimit=150。
+  - sportsLimit=25。
+  - cryptoLimit=25。
+  - onlyPending=true。
+  - minDiscoveryScore=40。
+- dry-run 结果：
+  - selectedTotal=349。
+  - createdTotal=62。
+  - updatedTotal=207。
+  - skippedExistingTotal=80。
+  - politics: selected=150, created=13, updated=57, skippedExisting=80。
+  - finance: selected=150, created=0, updated=150。
+  - sports: selected=25, created=25。
+  - crypto: selected=24, created=24。
+- formal 结果与 dry-run 一致。
+- `activity-score/run`:
+  - states=`DISCOVERED,CANDIDATE`。
+  - force=true。
+  - scannedCount=1766。
+  - scoredCount=1766。
+  - skippedCount=0。
+  - categoryCounts: politics=776, finance=634, sports=181, crypto=175。
+  - 主要 risk flags:
+    - small_sample=1556。
+    - scanner_pool_unverified=1312。
+    - low_market_diversity=1180。
+    - mixed_category_evidence=249。
+
+**动作 3 - PAPER 晋级第二批**：
+- 扩源重评分后 dry-run:
+  - selectedTotal=28。
+  - politics=0、finance=20、sports=5、crypto=3。
+- formal:
+  - selectedTotal=8。
+  - promotedTotal=8。
+  - requestedSelectedTotal=28。
+  - effectiveSelectedLimit=8。
+  - truncated=true。
+- 晋级样本:
+  - `0x74c8d69115faf6a3b5e3482f736080385f709962` finance score=100。
+  - `0x63540a1a71d2c0f01ed8676c1086b1625b4ea1c0` finance score=100。
+  - `0xf3f358f9185ae08572b67e36ba233cec8ae09e5b` finance score=98.47619040。
+  - `0x94dc07a53ba0ce770a220b1c945052f014515e19` finance score=98。
+- `paper/process`:
+  - processed=17。
+  - filtered=3。
+  - failed=0。
+  - truncated=false。
+- `paper/score`:
+  - scoredCount=268。
+  - scoreVersion=`research-copyability-v1`。
+
+**最终状态**：
+- `leader_research_candidate`: 2031。
+- `copy_trading_leaders`: 595。
+- `leader_scanner_candidate_pool` PENDING: 3974。
+- 候选状态：
+  - DISCOVERED 1766。
+  - PAPER 268。
+  - COOLDOWN 5。
+- 分类状态：
+  - politics DISCOVERED 776，PAPER 39。
+  - finance DISCOVERED 626，PAPER 206。
+  - sports DISCOVERED 181，PAPER 14。
+  - crypto DISCOVERED 175，PAPER 9。
+
+**当前高分 PAPER 候选样本**：
+- finance `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`
+  - score=95.76615800。
+  - trade_count=22。
+  - filtered_ratio=0.04347826。
+  - copyable_pnl=12.07527939。
+  - max_drawdown=0。
+- politics `0x9703676286b93c2eca71ca96e8757104519a69c2`
+  - score=92.97057685。
+  - trade_count=45。
+  - filtered_ratio=0.23728814。
+  - copyable_pnl=25.43130878。
+  - max_drawdown=-1.00030000。
+- finance `0x983848691c445a1e235c1e49a69c49d8c4d3bcfe`
+  - score=91.57989520。
+  - trade_count=32。
+  - filtered_ratio=0.08571429。
+  - copyable_pnl=8.70530240。
+  - max_drawdown=0。
+
+**结论**：
+- 本轮在没有外部页面可复制数据的情况下，仍通过 scanner pool 完成了 62 个新增候选和 207 个候选更新。
+- 当前系统候选已超过 1000，达到数量目标的底座，但“高质量政治新候选”仍不足：
+  - politics DISCOVERED 数量多，但高分不足。
+  - politics PAPER 中已有少量强候选，需要继续积累交易样本与稳定高分。
+- 金融方向表现更成熟，PAPER 高分候选数量明显更多，可继续作为主力观察池。
+
+**下一轮动作**：
+- 继续按 8 个 live 上限分批推进高分 DISCOVERED 到 PAPER。
+- 针对政治候选质量瓶颈，优先做两件事：
+  - 从 Dune/手工外部榜单补充真实 politics profitable wallets。
+  - 对 politics scanner pool 增加“已结算盈利/卖出行为/非单一热门市场”过滤，减少大量 60 分以下候选。
+- 对当前 top PAPER 候选跑更严格的 trial-readiness/funnel 复核，挑出可进入试跟配置的 1-3 个。
+
+## Iteration 88 - 2026-06-26 16:28 CST - Scanner pool 活动质量过滤
+
+**目标**：
+- 修复上一轮暴露的政治候选质量瓶颈：
+  - politics DISCOVERED 数量很多，但多数分数被封顶在 30/59/60。
+  - 新导入的 politics pending pool 大量只有 1-2 条事件、1 个市场，进入研究池后必然触发 `small_sample`、`low_market_diversity`、`scanner_pool_unverified`。
+
+**诊断证据**：
+- politics DISCOVERED risk group:
+  - `small_sample,low_market_diversity,scanner_pool_unverified`: 412。
+  - `small_sample,low_market_diversity,mixed_category_evidence,scanner_pool_unverified`: 162。
+  - `tail_price_spray,low_safe_price_ratio`: 36。
+- politics pending pool 高 discovery_score 样本中，大量钱包只有：
+  - events=1。
+  - markets=1。
+  - buy/sell 只有单边。
+- 这说明仅靠 `discovery_score` 导入 politics，会把热点市场单笔钱包灌入候选池，后续评分自然无法超过阈值。
+
+**代码变更**：
+- `LeaderResearchScannerPoolImportRequest` 新增可选活动质量过滤字段，默认关闭，不改变旧 API 行为：
+  - `requireActivityQuality=false`。
+  - `minActivityEvents=20`。
+  - `minActivityDistinctMarkets=5`。
+  - `minActivityBuyEvents=3`。
+  - `minActivitySellEvents=2`。
+  - `minActivitySafePriceRatio=0.30`。
+  - `maxActivityTailPriceRatio=0.45`。
+- `LeaderActivityEventRepository` 新增 `aggregateDiscoveryMetricsForWallets(wallets)`：
+  - 按 wallet 聚合 discovery 可用事件。
+  - 输出 events、distinct markets、buy/sell、安全价格、长尾价格、金额与最后事件时间。
+- `LeaderResearchScannerPoolImportService` 在 `requireActivityQuality=true` 时：
+  - 先从 scanner pool oversample。
+  - 再按 activity quality 过滤。
+  - 最后才取 limit。
+  - 这样避免低样本 wallet 占用 politics/finance 扩源名额。
+- 新增单元测试：
+  - `activity quality filter removes low sample scanner candidates`。
+
+**验证**：
+- 后端测试和编译：
+  - `./gradlew --no-daemon --no-parallel test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScannerPoolImportServiceTest' compileKotlin`
+  - BUILD SUCCESSFUL。
+- 后端打包：
+  - `./gradlew --no-daemon --no-parallel bootJar`
+  - BUILD SUCCESSFUL。
+- 后端重启：
+  - 使用 `run_backend_local.sh` 启动，DB 指向 `localhost:3307`。
+  - 新后端 PID=36229，8000 端口正常监听。
+
+**运行态验证**：
+- quality dry-run 参数：
+  - politicsLimit=150。
+  - financeLimit=150。
+  - sportsLimit=0。
+  - cryptoLimit=0。
+  - onlyPending=true。
+  - minDiscoveryScore=35。
+  - requireActivityQuality=true。
+  - minActivityEvents=20。
+  - minActivityDistinctMarkets=5。
+  - minActivityBuyEvents=3。
+  - minActivitySellEvents=2。
+  - minActivitySafePriceRatio=0.30。
+  - maxActivityTailPriceRatio=0.45。
+- dry-run 结果：
+  - requestedTotal=300。
+  - selectedTotal=32。
+  - createdTotal=0。
+  - updatedTotal=26。
+  - skippedExistingTotal=6。
+  - politics selected=13, updated=11, skippedExisting=2。
+  - finance selected=19, updated=15, skippedExisting=4。
+- formal 结果与 dry-run 一致。
+- 重评分：
+  - scannedCount=1758。
+  - scoredCount=1758。
+  - skippedCount=0。
+  - categoryCounts: politics=777, finance=627, sports=180, crypto=174。
+- PAPER 晋级 dry-run:
+  - selectedTotal=26。
+  - politics=0。
+  - finance=20。
+  - sports=4。
+  - crypto=2。
+
+**结论**：
+- 新过滤成功把 300 个候选压缩到 32 个高活动质量候选，避免继续扩大低质量 politics DISCOVERED。
+- 但 politics 仍未出现新的 80+ 晋级候选，说明下一步不能只靠 scanner pool，需要引入外部 politics profitable leader 来源或已结算盈利维度。
+
+**下一轮动作**：
+- 将 `requireActivityQuality=true` 作为后续 scanner pool politics/finance 扩源的默认运行参数。
+- 针对 politics 进一步做：
+  - 优先接入 Dune/外部榜单/手工复制的 profitable politics wallet。
+  - 或在本地从已结算/可计算 pnl 的 paper session 中反查 politics 高 copyable_pnl wallet。
+- 继续分批推进现有 finance 高分 DISCOVERED 到 PAPER，但不要用低质量 scanner pool 继续堆 politics 数量。
+
+## Iteration 89 - 2026-06-26 16:45 CST - PAPER 候选复核与下一批 finance 晋级
+
+**目标**：
+- 复核当前 PAPER 候选的 funnel/trial-readiness，确认是否已有可进入试跟配置的政治/金融 leader。
+- 继续按正式 live 上限推进高分 DISCOVERED 到 PAPER，扩大后续观察池。
+
+**funnel 复核 - 晋级前**：
+- summary:
+  - DISCOVERED=1758。
+  - PAPER=268。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel:
+  - totalCandidates=2031。
+  - cleanHighScoreTotal=18。
+  - primaryCleanHighCount=17。
+  - primaryActualPercent=94.4444%。
+  - allocationHealth=HEALTHY。
+- 当前没有 TRIAL_READY，主要原因不是分数不够，而是 PAPER 观察时间不足 7 天。
+- 候选观察信号：
+  - finance `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`
+    - score=95.7662。
+    - tradeCount=22。
+    - filteredRatio=0.0435。
+    - copyablePnl=12.0753。
+    - maxDrawdown=0。
+    - ageHours=47。
+    - fastWatchBlocker 仅剩：快速观察至少需要 48 小时。
+  - finance `0x983848691c445a1e235c1e49a69c49d8c4d3bcfe`
+    - score=91.5799。
+    - tradeCount=32。
+    - filteredRatio=0.0857。
+    - copyablePnl=8.7053。
+    - ageHours=15。
+  - politics `0xad5353afe30c2da57709e2704ef3ccdcf67eef24`
+    - score=86.5667。
+    - tradeCount=21。
+    - filteredRatio=0.4324。
+    - copyablePnl=8.9957。
+    - ageHours=2。
+    - 阻塞：观察时间短，过滤率偏高。
+
+**动作 - PAPER 晋级下一批**：
+- promote dry-run:
+  - selectedTotal=26。
+  - politics=0。
+  - finance=20。
+  - sports=4。
+  - crypto=2。
+- formal promote:
+  - selectedTotal=8。
+  - promotedTotal=8。
+  - requestedSelectedTotal=26。
+  - effectiveSelectedLimit=8。
+  - truncated=true。
+  - 本批全部为 finance。
+- 晋级样本：
+  - `0xb91233c3469aef022dd5755f2a686d18201f2a20` finance score=100。
+  - `0x923bd021ea4d5dad79d156058e6dbdcc680eae9f` finance score=97.33333335。
+  - `0x7498b6f6889dc49dd29350c861e1115d37ba59c6` finance score=97.125。
+  - `0x966dfabbe9d8171c756be390163aa1500edf4abf` finance score=97.11538460。
+- paper/process:
+  - processed=18。
+  - filtered=2。
+  - failed=0。
+- paper/score:
+  - scoredCount=276。
+  - scoreVersion=`research-copyability-v1`。
+
+**funnel 复核 - 晋级后**：
+- candidate state:
+  - DISCOVERED=1750。
+  - PAPER=276。
+  - COOLDOWN=5。
+- active paper aggregate:
+  - sessions=281。
+  - trades=2670。
+  - avg_trades=9.50。
+  - copyable_pnl_sum=38.8271。
+  - realized_pnl_sum=2.1549。
+- funnel:
+  - cleanHighScoreTotal=15。
+  - primaryCleanHighCount=14。
+  - primaryActualPercent=93.3333%。
+  - allocationHealth=HEALTHY。
+- 高优先候选：
+  - finance `0x983848691c445a1e235c1e49a69c49d8c4d3bcfe`
+    - score=91.5863。
+    - tradeCount=32。
+    - filteredRatio=0.0857。
+    - copyablePnl=8.7053。
+    - ageHours=15。
+  - finance `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`
+    - score=90.7725。
+    - tradeCount=22。
+    - filteredRatio=0.0435。
+    - copyablePnl=12.0753。
+    - ageHours=47。
+    - 仍是最接近 FAST_WATCH 的 finance 候选。
+  - politics `0xad5353afe30c2da57709e2704ef3ccdcf67eef24`
+    - score=86.5731。
+    - tradeCount=21。
+    - filteredRatio=0.4324。
+    - copyablePnl=8.9957。
+    - ageHours=2。
+
+**结论**：
+- 当前目标底座继续扩大：PAPER 从 268 提升到 276。
+- 仍无 TRIAL_READY，因为观察期不足；但 finance 已出现接近 FAST_WATCH 的候选。
+- politics 方向目前不是数量瓶颈，而是高质量/低过滤率候选不足；`0xad535...` 可继续观察，但不适合立即试跟。
+
+**下一轮动作**：
+- 等 finance `0xe7ce...d53a` 超过 48 小时后复核 funnel，若 fastWatchBlockers 清空，可考虑生成禁用试跟模板供人工确认。
+- 继续按 8 个 live 上限推进 finance 高分 DISCOVERED 到 PAPER。
+- politics 继续依赖外部 profitable wallet / Dune / Polymarket Analytics 手工导入，而不是普通 scanner pool 扩源。
+
+## Iteration 90 - 2026-06-26 16:59 CST - FAST_WATCH 复核与继续扩充 PAPER
+
+**目标**：
+- 复核上一轮最接近 FAST_WATCH 的 finance 候选是否跨过 48 小时门槛。
+- 若系统允许，则创建禁用试跟配置；若不允许，记录原因并继续扩充 PAPER 候选池。
+
+**初始复核**：
+- 后端在线：
+  - PID=36229。
+  - 8000 端口监听正常。
+- summary:
+  - DISCOVERED=1750。
+  - PAPER=276。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`:
+  - state=PAPER。
+  - score=90.7725。
+  - tradeCount=22。
+  - filteredRatio=0.0435。
+  - copyablePnl=12.0753。
+  - maxDrawdown=0。
+  - ageHours=47。
+  - fastWatchBlocker: `快速观察至少需要 48 小时`。
+- `0x983848691c445a1e235c1e49a69c49d8c4d3bcfe`:
+  - state=PAPER。
+  - score=91.5863。
+  - tradeCount=32。
+  - filteredRatio=0.0857。
+  - copyablePnl=8.7053。
+  - ageHours=15。
+- politics `0xad5353afe30c2da57709e2704ef3ccdcf67eef24`:
+  - state=PAPER。
+  - score=86.5731。
+  - tradeCount=21。
+  - filteredRatio=0.4324。
+  - copyablePnl=8.9957。
+  - ageHours=2。
+  - 仍不适合试跟：观察时间短且过滤率偏高。
+
+**动作 1 - 继续推进高分 DISCOVERED 到 PAPER**：
+- formal promote:
+  - selectedTotal=8。
+  - promotedTotal=8。
+  - requestedSelectedTotal=26。
+  - effectiveSelectedLimit=8。
+  - truncated=true。
+  - 本批全部为 finance。
+- 晋级样本：
+  - `0x81529ca89509fbaf1eedd1f38b3e957372e75b51` score=96.77272735。
+  - `0xce3120e4226b0a38cf27c0de3b442893c169b28e` score=96.60000000。
+  - `0x36eb62226456433f791b9b0ba1837aa42d2d6831` score=96.50000005。
+  - `0x7121364063e70c2929ed22bd8c51ca9e4723b28d` score=96.46116500。
+- paper/process:
+  - processed=16。
+  - filtered=4。
+  - failed=0。
+- paper/score:
+  - scoredCount=284。
+  - scoreVersion=`research-copyability-v1`。
+
+**动作 2 - 等待 48 小时门槛并复核**：
+- 等待约 5 分钟后复核 funnel。
+- 结果：
+  - `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`
+    - level=FAST_WATCH。
+    - label=快速观察。
+    - fastWatchBlockers=[]。
+    - blockers 仍包含：`PAPER 观察不足 7 天：当前 48 小时`。
+  - `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`
+    - level=FAST_WATCH。
+    - label=快速观察。
+    - fastWatchBlockers=[]。
+    - blockers 仍包含：`PAPER 观察不足 7 天：当前 48 小时`。
+
+**禁用试跟配置检查**：
+- `approval/create-disabled-trial-config` 接口要求：
+  - `candidate.researchState == TRIAL_READY`。
+  - `confirm=true`。
+  - 创建出的 copy trading 配置默认 `enabled=false`。
+- 当前 FAST_WATCH 候选仍是 `PAPER`，不是 `TRIAL_READY`。
+- 因此本轮不创建禁用试跟配置；该保护避免 FAST_WATCH 阶段过早进入跟单配置。
+
+**最终状态**：
+- summary:
+  - DISCOVERED=1742。
+  - PAPER=284。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel:
+  - totalCandidates=2031。
+  - cleanHighScoreTotal=14。
+  - primaryCleanHighCount=13。
+  - primaryActualPercent=92.8571%。
+  - allocationHealth=HEALTHY。
+- 当前明确 FAST_WATCH 候选：
+  - finance `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`。
+  - finance `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`。
+
+**结论**：
+- 第二目标有了明确的“快速观察”候选，但系统不会也不应该在 FAST_WATCH 阶段自动创建跟单配置。
+- PAPER 池继续扩大到 284；finance 高分观察池进一步加厚。
+- politics 仍无 FAST_WATCH 级别可跟候选，继续需要外部 profitable politics wallet 来源。
+
+**下一轮动作**：
+- 定期复核 FAST_WATCH 候选是否持续高分、低过滤率、正 PnL。
+- 继续按 8 个 live 上限推进 finance 高分 DISCOVERED 到 PAPER。
+- 当候选进入 TRIAL_READY 后，才调用 `approval/create-disabled-trial-config` 创建禁用试跟配置供人工启用。
+
+## Iteration 91 - 2026-06-26 17:05 CST - 严格 activity-source 外部补源复核
+
+**目标**：
+- 在普通 scanner pool 边际收益下降后，使用更严格的 activity-source 条件查找 politics/finance 高质量钱包。
+- 验证是否能补出新的 politics/finance PAPER 或 FAST_WATCH 候选。
+
+**动作**：
+- strict dry-run 条件：
+  - categories=`politics,finance`。
+  - lookbackDays=60。
+  - minEvents=20。
+  - minDistinctMarkets=5。
+  - minBuyEvents=3。
+  - minSellEvents=2。
+  - minSafePriceRatio=0.30。
+  - maxTailPriceRatio=0.45。
+- dry-run 结果：
+  - selectedTotal=4。
+  - created=0。
+  - updated=2。
+  - skippedExisting=2。
+  - 全部为 politics；finance=0。
+- formal import 结果与 dry-run 一致：
+  - selectedTotal=4。
+  - created=0。
+  - updated=2。
+  - skippedExisting=2。
+- 重新运行：
+  - `activity-score/run`：scanned=1742，scored=1742。
+  - `paper/score`：scoredCount=284。
+
+**复核结果**：
+- summary：
+  - DISCOVERED=1742。
+  - PAPER=284。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel：
+  - totalCandidates=2031。
+  - cleanHighScoreTotal=15。
+  - primaryCleanHighCount=14。
+  - primaryActualPercent=93.3333%。
+  - allocationHealth=HEALTHY。
+- 新增 strict politics 复核样本：
+  - `0xc8ab97a9089a9ff7e6ef0688e6e591a066946418`：PAPER，score=75.2627，copyablePnl=1.9726，filteredRatio=0.35。
+  - `0x9f92355417d3001149a03e1cdcfecef40d482c2d`：PAPER，score=75.2341，copyablePnl=-1.7748，risk=`mixed_category_evidence`。
+  - `0x510f4963b66b1b18505faab74b0bb943d1dda43c`：PAPER，score=70.0290，copyablePnl=-0.7419，filteredRatio=0.4359。
+  - `0x758b87dd3b6491bb122634be5d465d180a120a1c`：DISCOVERED，score=60，risk=`mixed_category_evidence`。
+
+**结论**：
+- 严格 activity-source 只能补出极少 politics 钱包，且质量还没有达到可试跟水平。
+- politics 仍是外部数据源瓶颈，不适合继续靠本地 activity-source 放宽阈值硬推。
+- finance 仍有两个 FAST_WATCH：
+  - `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`。
+  - `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`。
+
+**下一轮动作**：
+- 继续尝试 Polymarket Analytics / Dune / Polyburg 页面复制或导出方式，作为独立外部 wallet 来源。
+- 页面复制导入时必须保留完整 `0x` 钱包地址；只有缩略地址无法入池。
+
+## Iteration 92 - 2026-06-26 17:15 CST - Polymarket Analytics 页面复制方式验证
+
+**目标**：
+- 尝试通过 Polymarket Analytics 页面复制方式获取 leader wallet。
+- 如果站点阻止自动化访问，则确保本地导入入口支持用户手工复制整行文本后解析导入。
+
+**外部页面尝试**：
+- in-app browser 打开 `https://polymarketanalytics.com/traders`：
+  - 导航超时，无法稳定读取页面内容。
+- 命令行请求确认：
+  - `curl -I -L --max-time 20 https://polymarketanalytics.com/traders` 返回 HTTP 403。
+  - 响应头包含 `server: Vercel` 与 `x-vercel-mitigated: deny`。
+  - 页面正文为 `Forbidden`。
+
+**代码动作**：
+- 增强 `LeaderResearch` 页面外部名单解析：
+  - 从整行文本中提取第一个完整 `0x[a-fA-F0-9]{40}` 钱包地址。
+  - 支持复制行里包含 URL，例如 `https://polymarket.com/profile/0x...`。
+  - 表头或无完整钱包地址的行自动跳过，不再作为无效 wallet 发送。
+  - category 从整行中识别 `politics|finance|sports|crypto`，否则使用默认分类。
+  - score 只接受严格数字或百分比字段，避免把 URL 误判为分数。
+
+**验证**：
+- 后端 dry-run 验证通过：
+  - sourceName=`polymarket_analytics`。
+  - requestedTotal=2。
+  - selectedTotal=2。
+  - updatedTotal=2。
+  - skippedInvalidTotal=0。
+- 前端构建通过：
+  - `cd frontend && npm run build`。
+  - 仅有既有 chunk size / dynamic import 警告。
+
+**结论**：
+- 当前环境不能直接自动复制 Polymarket Analytics 页面，原因是站点防护返回 403。
+- 但“页面复制方式”的本地链路已可用：只要用户从浏览器页面复制的文本里包含完整 wallet 地址，`Leader 管理 -> 导入外部名单` 可以解析并 dry-run/正式导入。
+
+**下一轮动作**：
+- 用户在正常 Chrome 登录/打开 Polymarket Analytics 后，复制排行榜行或导出 CSV。
+- 粘贴到 `Leader Research / Leader 管理 -> 导入外部名单`：
+  - 默认分类优先选 `finance` 或 `politics`。
+  - 来源名称填 `polymarket_analytics`。
+  - 先点 Dry-run，确认 `选中 > 0` 且 `无效 = 0` 后再正式导入。
+
+## Iteration 93 - 2026-06-26 16:47 CST - 继续推进 PAPER 池与 politics market-peer 补源
+
+**目标**：
+- 按第二目标继续扩充高质量 leader 观察池，政治/金融优先。
+- 不把 activity 预筛高分直接当作可跟单；必须经过 PAPER 模拟和风控过滤。
+
+**初始复核**：
+- 后端在线：
+  - `java` PID=36229，8000 端口监听正常。
+  - 登录 API 正常返回 token。
+- 前端在线：
+  - `node` PID=20436，3000 端口监听正常。
+- summary：
+  - DISCOVERED=1742。
+  - PAPER=284。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel：
+  - totalCandidates=2031。
+  - cleanHighScoreTotal=15。
+  - 主类别 politics/finance clean high=14。
+  - 主类别占比=93.3333%，allocationHealth=HEALTHY。
+  - politics：total=669，paper=41，cleanHigh=2。
+  - finance：total=985，paper=235，cleanHigh=12。
+
+**动作 1 - 高分 DISCOVERED 晋级 PAPER**：
+- promote dry-run：
+  - selectedTotal=26。
+- formal promote：
+  - selectedTotal=8。
+  - promotedTotal=8。
+  - requestedSelectedTotal=26。
+  - effectiveSelectedLimit=8。
+  - truncated=true。
+  - 本批全部为 finance。
+- 晋级候选：
+  - `0x3b693e05417ef5508cdb8cb91a50179804af9c68` candidate 2356，score=95.6250。
+  - `0xd47815209ee28529bbedf864dc992bd65bf89239` candidate 2250，score=95.4118。
+  - `0x0b9486a260e2fad1c6a62a520af3b39f0ed6805f` candidate 2225，score=95.0000。
+  - `0x3f6b4a9d1c4fa74bc359872f2f05864a65ab276a` candidate 2132，score=95.0000，risk=`low_average_size`。
+  - `0x04fb8c082ba8ecee098f9a1a99608f0cc28ee909` candidate 2254，score=94.9444。
+  - `0x2494345f3f94b5bf4b8188cd32ea5fa5fc419a83` candidate 2175，score=94.5185。
+  - `0xa34837a6cba2592bb952ce6c6204d2aea05bdad3` candidate 2262，score=94.4091。
+  - `0x5e32bad4e912a884e7d62e6430d0615e0ad68496` candidate 2217，score=94.3095。
+
+**动作 2 - PAPER 模拟处理与评分**：
+- `paper/process`：
+  - processed=14。
+  - filtered=6。
+  - failed=0。
+  - requestedBatchSize=30。
+  - effectiveBatchSize=20。
+  - truncated=true。
+- `paper/score`：
+  - scoredCount=292。
+  - scoreVersion=`research-copyability-v1`。
+- 结果：
+  - PAPER 从 284 增至 292。
+  - DISCOVERED 从 1742 降至 1734。
+  - TRIAL_READY 仍为 0。
+  - cleanHighScoreTotal 仍为 15。
+- 新晋级 finance 候选在真实 PAPER 后被压低：
+  - 多数因为 `small_sample` 得分降到 59。
+  - candidate 2254 因 `filteredRatio=1` 触发 `high_filtered_ratio`，score=45.0001。
+  - candidate 2217 因 `filteredRatio=0.5` 触发 `high_filtered_ratio`，score=54.6923。
+- 结论：PAPER 隔离层有效，activity 预筛高分不能直接进入可跟单。
+
+**动作 3 - FAST_WATCH / TRIAL_READY 审计**：
+- 按后端 FAST_WATCH 规则从数据库复核：
+  - score>=85。
+  - riskFlags 为空。
+  - PAPER age>=48h。
+  - tradeCount>=20。
+  - copyablePnl>0。
+  - maxDrawdown>=-8。
+  - unknown valuation exposure ratio<=10%。
+  - filteredRatio<20%。
+- 当前 FAST_WATCH 条件清空：
+  - finance `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`
+    - score=90.8086。
+    - ageHours=49.1。
+    - trades=22。
+    - filteredRatio=0.0435。
+    - copyablePnl=12.0753。
+    - maxDrawdown=0。
+  - finance `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`
+    - score=85.6655。
+    - ageHours=49.1。
+    - trades=21。
+    - filteredRatio=0.0870。
+    - copyablePnl=5.2545。
+    - maxDrawdown=0。
+- 仍未进入 TRIAL_READY：
+  - 7 天 PAPER 观察期未满足。
+  - TRIAL_READY count=0。
+- 其他接近候选：
+  - finance `0x983848691c445a1e235c1e49a69c49d8c4d3bcfe`：score=91.6236，trades=32，PnL=8.7053，但 ageHours=16.7，未到 48h。
+  - politics `0xad5353afe30c2da57709e2704ef3ccdcf67eef24`：score=86.6105，trades=21，PnL=8.9957，但 ageHours=3.5 且 filteredRatio=0.4324，不适合快速观察。
+  - politics `0x645a91730f588c5586e8860936a7e3554303fd84`：score=95.1955，trades=37，PnL=10.4872，但 risk=`mixed_category_evidence` 且 ageHours=6.6。
+
+**动作 4 - market-peer politics 补源**：
+- strict market-peer dry-run：
+  - selectedTotal=1。
+  - created=0。
+  - updated=0。
+  - skippedExisting=1。
+- finance relaxed dry-run：
+  - selectedTotal=1。
+  - created=0。
+  - skippedExisting=1。
+- politics relaxed dry-run：
+  - selectedTotal=4。
+  - created=0。
+  - updated=4。
+- politics relaxed formal：
+  - selectedTotal=4。
+  - created=0。
+  - updated=4。
+  - 更新的钱包包括：
+    - `0x8a98109fb0f1d87d9bfcb4486ba3587b95c51b92`。
+    - `0xc8ab97a9089a9ff7e6ef0688e6e591a066946418`。
+    - `0x38e59b36aae31b164200d0cad7c3fe5e0ee795e7`。
+    - `0xa3af760e15e6b6bd3c43d8cf2ae6952f0a9bb7a6`。
+- 重跑 `activity-score/run`：
+  - scanned=1734。
+  - scored=1734。
+  - categoryCounts：politics=777，finance=603，sports=180，crypto=174。
+- 重跑 `paper/score`：
+  - scoredCount=292。
+
+**最终状态**：
+- summary：
+  - DISCOVERED=1734。
+  - PAPER=292。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel：
+  - totalCandidates=2031。
+  - cleanHighScoreTotal=15。
+  - 主类别 politics/finance clean high=14。
+  - 主类别占比=93.3333%，allocationHealth=HEALTHY。
+  - politics：total=670，paper=42，cleanHigh=2，topCandidateId=2361，topScore=86.6105。
+  - finance：total=984，paper=242，cleanHigh=12，topCandidateId=2079，topScore=91.6236。
+
+**结论**：
+- 本轮把 8 个 finance 预筛高分候选纳入 PAPER，但真实模拟后多数被小样本/过滤率压下，没有污染正式 Leader 池。
+- 当前最接近可试跟的仍是两个 FAST_WATCH finance，但系统仍要求 7 天观察，不能自动创建跟单配置。
+- politics 仍是质量瓶颈：有高分样本，但主要被 mixed evidence、观察时间短或过滤率高拦住。
+- market-peer 补源当前更适合补证据，不足以显著新增候选。
+
+**下一轮动作**：
+- 继续滚动 PAPER/process + score，让 292 个 PAPER 候选获得更多样本。
+- 继续等待/复核 finance FAST_WATCH 候选是否保持低过滤率和正 PnL。
+- politics 需要从外部排行榜/Analytics/Dune 导入完整 wallet；本地 activity/market-peer 来源已经接近边际枯竭。
+
+## Iteration 94 - 2026-06-26 16:53 CST - PAPER 滚动增强与继续小批量 finance 晋级
+
+**目标**：
+- 继续推进第二目标：累积并验证高质量 leader，政治/金融优先。
+- 本轮优先增加现有 PAPER 的模拟样本，再小批量扩充 finance PAPER。
+
+**初始复核**：
+- 后端在线：
+  - `java` PID=36229，8000 端口监听正常。
+- 前端在线：
+  - `node` PID=20436，3000 端口监听正常。
+- summary：
+  - DISCOVERED=1734。
+  - PAPER=292。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel：
+  - totalCandidates=2031。
+  - cleanHighScoreTotal=15。
+  - 主类别 politics/finance clean high=14。
+  - 主类别占比=93.3333%，allocationHealth=HEALTHY。
+  - politics：total=670，paper=42，cleanHigh=2。
+  - finance：total=984，paper=242，cleanHigh=12。
+- promote dry-run：
+  - selectedTotal=21。
+  - politics=0。
+  - finance=15。
+  - sports=4。
+  - crypto=2。
+
+**动作 1 - 滚动 PAPER 模拟样本**：
+- 连续执行 5 轮 `paper/process`，每轮请求 batchSize=30，后端有效上限=20。
+- 5 轮结果：
+  - processed=76。
+  - filtered=24。
+  - failed=0。
+- 重跑 `paper/score`：
+  - scoredCount=292。
+  - scoreVersion=`research-copyability-v1`。
+
+**滚动后状态**：
+- summary：
+  - DISCOVERED=1734。
+  - PAPER=292。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel：
+  - cleanHighScoreTotal 从 15 升至 17。
+  - 主类别 politics/finance clean high 从 14 升至 16。
+  - 主类别占比=94.1176%，allocationHealth=HEALTHY。
+  - politics：cleanHigh=2，topCandidateId=2361，topScore=86.6126。
+  - finance：cleanHigh=14，topCandidateId=1609，topScore=94.3528。
+- 结论：
+  - 继续滚动 PAPER 样本能真实拉开 finance 候选质量。
+  - 本轮新增 clean high 主要来自 finance。
+
+**FAST_WATCH / TRIAL_READY 审计**：
+- 当前 FAST_WATCH 条件清空的候选仍为 2 个 finance：
+  - `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`
+    - score=90.8120。
+    - ageHours=49.2。
+    - trades=22。
+    - filteredRatio=0.0435。
+    - copyablePnl=12.0753。
+    - maxDrawdown=0。
+    - trial blocker：`age<7d:49.2h`。
+  - `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`
+    - score=85.6689。
+    - ageHours=49.2。
+    - trades=21。
+    - filteredRatio=0.0870。
+    - copyablePnl=5.2545。
+    - maxDrawdown=0。
+    - trial blocker：`age<7d:49.2h`。
+- TRIAL_READY-like：
+  - 0。
+  - 仍没有候选满足 7 天观察期。
+- 新的强势 finance：
+  - `0x674887d1ac838099a48b629dff53f25b7b87ee08` candidate 1609：
+    - score=94.3528。
+    - trades=45。
+    - filteredRatio=0.0816。
+    - copyablePnl=10.6592。
+    - blocker：ageHours=19.4，未到 48h。
+  - `0x75cc3b63a2f2423085e10706c78b494017b93ce1` candidate 1611：
+    - score=87.9061。
+    - trades=60。
+    - filteredRatio=0.1781。
+    - copyablePnl=12.3629。
+    - blocker：ageHours=19.4，未到 48h。
+
+**politics 审计**：
+- politics 高分仍未达到 FAST_WATCH：
+  - `0x645a91730f588c5586e8860936a7e3554303fd84` candidate 360：
+    - score=95.1989。
+    - trades=47。
+    - copyablePnl=15.9700。
+    - blocked by `mixed_category_evidence` 和 ageHours=6.7。
+  - `0x328c2be6eba95a30b003255dc48f2b50e0eccbbc` candidate 34：
+    - score=93.2945。
+    - blocked by `mixed_category_evidence` 和 filteredRatio=0.2188。
+  - `0xad5353afe30c2da57709e2704ef3ccdcf67eef24` candidate 2361：
+    - score=86.6126。
+    - riskFlags 为空，但 ageHours=3.6 且 filteredRatio=0.4324。
+- 结论：
+  - politics 不是数量问题，而是分类证据和可复制过滤率问题。
+  - 继续依赖外部 Analytics/Dune/排行榜完整 wallet 导入更有价值。
+
+**动作 2 - 小批量晋级 finance 到 PAPER**：
+- formal promote：
+  - selectedTotal=8。
+  - promotedTotal=8。
+  - 本批全部为 finance。
+  - requestedSelectedTotal=21。
+  - effectiveSelectedLimit=8。
+  - truncated=true。
+- 晋级候选：
+  - `0x9d59ddd4fc73895942a2643654063827ff755d33` candidate 2357，score=94.0814。
+  - `0x8bf9ae97bce9ab947bc071c08245d03f145b1f3b` candidate 2267，score=93.7500。
+  - `0xaf4d8b57af872a2e2519b9b92b71c6859cc0b5f6` candidate 2086，score=93.6429。
+  - `0x162e0ed01a0e487beded744e5289f7b2521afe52` candidate 2111，score=93.6034。
+  - `0x947fdb883f2ccbde77c63e4c1aba8a99ecb5f249` candidate 2359，score=93.5000。
+  - `0xddc8fdb11bbed4cefbf7ecfe20793941029e3742` candidate 2251，score=93.4444。
+  - `0x18803d2aeb7f7dcdd53475b6154851b7fd37eebc` candidate 2269，score=93.2857。
+  - `0xa4f22a6919e5428926d648fdf15a292f917829c2` candidate 1765，score=92.7143。
+- 晋级后跑 1 轮 `paper/process`：
+  - processed=18。
+  - filtered=2。
+  - failed=0。
+- 重跑 `paper/score`：
+  - scoredCount=300。
+
+**最终状态**：
+- summary：
+  - DISCOVERED=1726。
+  - PAPER=300。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel：
+  - totalCandidates=2031。
+  - cleanHighScoreTotal=17。
+  - 主类别 politics/finance clean high=16。
+  - 主类别占比=94.1176%，allocationHealth=HEALTHY。
+  - politics：total=670，paper=42，cleanHigh=2，topCandidateId=2361，topScore=86.6132。
+  - finance：total=984，paper=250，cleanHigh=14，topCandidateId=1609，topScore=94.3535。
+  - sports：paper=4，cleanHigh=1。
+  - crypto：paper=4，cleanHigh=0。
+
+**结论**：
+- 本轮有效推进了第二目标：
+  - PAPER 观察池从 292 扩到 300。
+  - clean high 从 15 增到 17。
+  - finance clean high 从 12 增到 14。
+  - 模拟处理失败为 0。
+- 最接近可跟单的仍是两个 finance FAST_WATCH；候选 1609 和 1611 可能在跨过 48h 后成为新的 FAST_WATCH。
+- politics 仍需外部高质量来源，当前内部链上/market-peer 来源持续暴露混类和过滤率问题。
+
+**下一轮动作**：
+- 继续滚动 PAPER/process + score，尤其观察新晋级的 8 个 finance 是否被小样本/过滤率压下。
+- 等 candidate 1609、1611 接近 48h 后复核 FAST_WATCH。
+- 继续从 Polymarket Analytics/Dune/外部榜单导入完整 politics/finance wallet，补足 politics 质量短板。
+
+## Iteration 95 - 2026-06-26 16:57 CST - 主类别晋级池吃干与 PAPER 样本校正
+
+**目标**：
+- 继续推进第二目标，优先验证上一轮新晋级 finance PAPER 是否是真信号。
+- 保持 politics/finance 主类别优先，不把 sports/crypto 继续往 PAPER 推。
+
+**初始复核**：
+- 后端在线：
+  - `java` PID=36229，8000 端口监听正常。
+- 前端在线：
+  - `node` PID=20436，3000 端口监听正常。
+- summary：
+  - DISCOVERED=1726。
+  - PAPER=300。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel：
+  - totalCandidates=2031。
+  - cleanHighScoreTotal=17。
+  - 主类别 politics/finance clean high=16。
+  - 主类别占比=94.1176%，allocationHealth=HEALTHY。
+  - politics：total=670，paper=42，cleanHigh=2。
+  - finance：total=984，paper=250，cleanHigh=14。
+- promote dry-run：
+  - selectedTotal=13。
+  - politics=0。
+  - finance=7。
+  - sports=4。
+  - crypto=2。
+
+**动作 1 - 滚动处理新晋级 PAPER 样本**：
+- 连续执行 6 轮 `paper/process`，每轮请求 batchSize=30，后端有效上限=20。
+- 6 轮总结果：
+  - processed=105。
+  - filtered=15。
+  - failed=0。
+- 重跑 `paper/score`：
+  - scoredCount=300。
+  - scoreVersion=`research-copyability-v1`。
+
+**滚动后状态**：
+- summary：
+  - DISCOVERED=1726。
+  - PAPER=300。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel：
+  - cleanHighScoreTotal=17，保持不变。
+  - 主类别 politics/finance clean high=16，保持不变。
+  - finance topScore 从 94.3535 降到 92.6045，topCandidateId 仍为 1609。
+- 结论：
+  - 更多 PAPER 样本在校正过热候选，finance top score 降温但 clean high 数量稳定。
+  - 模拟处理链路本轮失败为 0。
+
+**上一轮新晋级 8 个 finance 审计**：
+- `0x9d59ddd4fc73895942a2643654063827ff755d33` candidate 2357：
+  - score=59。
+  - trades=7。
+  - filteredRatio=0.3636。
+  - copyablePnl=2.2272。
+  - risk=`small_sample`。
+- `0x8bf9ae97bce9ab947bc071c08245d03f145b1f3b` candidate 2267：
+  - score=59。
+  - trades=1。
+  - risk=`small_sample`。
+- `0xaf4d8b57af872a2e2519b9b92b71c6859cc0b5f6` candidate 2086：
+  - score=59。
+  - trades=0。
+  - risk=`small_sample`。
+- `0x162e0ed01a0e487beded744e5289f7b2521afe52` candidate 2111：
+  - score=55.2047。
+  - trades=2。
+  - filteredRatio=0.6667。
+  - risk=`high_filtered_ratio,small_sample`。
+- `0x947fdb883f2ccbde77c63e4c1aba8a99ecb5f249` candidate 2359：
+  - score=59。
+  - trades=0。
+  - risk=`small_sample`。
+- `0xddc8fdb11bbed4cefbf7ecfe20793941029e3742` candidate 2251：
+  - score=59。
+  - trades=0。
+  - risk=`small_sample`。
+- `0x18803d2aeb7f7dcdd53475b6154851b7fd37eebc` candidate 2269：
+  - score=59。
+  - trades=0。
+  - risk=`small_sample`。
+- `0xa4f22a6919e5428926d648fdf15a292f917829c2` candidate 1765：
+  - score=59。
+  - trades=1。
+  - risk=`small_sample`。
+- 结论：
+  - 上一轮新晋级 8 个 finance 都没有进入 clean high。
+  - PAPER 隔离层继续有效，预筛高分被真实模拟样本压下。
+
+**FAST_WATCH / TRIAL_READY 审计**：
+- 当前 FAST_WATCH 条件清空的候选仍为 2 个 finance：
+  - `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`
+    - score=90.8142。
+    - ageHours=49.3。
+    - trades=22。
+    - filteredRatio=0.0435。
+    - copyablePnl=12.0753。
+    - blocker：`age<7d:49.3h`。
+  - `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`
+    - score=85.6711。
+    - ageHours=49.3。
+    - trades=21。
+    - filteredRatio=0.0870。
+    - copyablePnl=5.2545。
+    - blocker：`age<7d:49.3h`。
+- TRIAL_READY-like：
+  - 0。
+- 其他 finance 候选：
+  - candidate 1609：score=92.6045，trades=53，filteredRatio=0.0702，copyablePnl=9.0388，blocker=`age<48h:19.5`。
+  - candidate 1611：score=87.7654，trades=68，filteredRatio=0.1605，copyablePnl=9.7966，blocker=`age<48h:19.5`。
+  - candidate 2079：score=91.6280，trades=32，filteredRatio=0.0857，copyablePnl=8.7053，blocker=`age<48h:16.9`。
+
+**politics 审计**：
+- politics 仍没有 FAST_WATCH：
+  - candidate 360：score=95.2012，trades=54，copyablePnl=19.9839，但 risk=`mixed_category_evidence`，ageHours=6.8。
+  - candidate 34：score=93.2967，但 risk=`mixed_category_evidence`，filteredRatio=0.2188。
+  - candidate 617：score=93.0187，但 risk=`mixed_category_evidence`，filteredRatio=0.2373。
+  - candidate 2361：score=86.6148，riskFlags 为空，但 ageHours=3.7 且 filteredRatio=0.4324。
+- 结论：
+  - politics 质量瓶颈没有缓解。
+  - 需要外部高质量 politics wallet 或更强的分类证据来源。
+
+**动作 2 - 只晋级剩余 finance，不推进 sports/crypto**：
+- 为避免偏离政治/金融主目标，formal promote 设置：
+  - politicsLimit=20。
+  - financeLimit=20。
+  - sportsLimit=0。
+  - cryptoLimit=0。
+- formal promote 结果：
+  - selectedTotal=7。
+  - promotedTotal=7。
+  - 全部为 finance。
+- 晋级候选：
+  - `0x068162f52e8534620c419c174be1aa5337dff713` candidate 2358，score=92.2468。
+  - `0xb64e6e653d4d7815c0fbfc2f93bbb9245b06fec1` candidate 2151，score=92.2273。
+  - `0x00b10f05d44d91eb1a0d4620263972152c476784` candidate 2256，score=92.0000，risk=`low_average_size`。
+  - `0x10613ca3f9b25b24b6b1615c8744808073bf99f1` candidate 2271，score=91.5000。
+  - `0x580dbe563496d8c57c8c724f761c9ca4b02ccfb5` candidate 2360，score=90.5000。
+  - `0x5d55f82ec7a774126f5a0ffd3a44039ac3674c59` candidate 2218，score=89.6250。
+  - `0xf27d40745542dc871e127acff3a1c9d3910d9a88` candidate 2272，score=87.2500。
+- 晋级后执行 1 轮 `paper/process`：
+  - processed=14。
+  - filtered=6。
+  - failed=0。
+- 重跑 `paper/score`：
+  - scoredCount=307。
+
+**最终状态**：
+- summary：
+  - DISCOVERED=1719。
+  - PAPER=307。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel：
+  - totalCandidates=2031。
+  - cleanHighScoreTotal=17。
+  - 主类别 politics/finance clean high=16。
+  - 主类别占比=94.1176%，allocationHealth=HEALTHY。
+  - politics：total=670，paper=42，cleanHigh=2，topCandidateId=2361，topScore=86.6155。
+  - finance：total=984，paper=257，cleanHigh=14，topCandidateId=1609，topScore=92.6052。
+  - sports：paper=4，cleanHigh=1。
+  - crypto：paper=4，cleanHigh=0。
+- promote dry-run with sports/crypto disabled：
+  - politics=0。
+  - finance=0。
+  - selectedTotal=0。
+
+**结论**：
+- 主类别 politics/finance 可晋级池已经吃干。
+- PAPER 观察池从 300 增至 307。
+- clean high 保持 17，没有因为新 finance 晋级而虚增。
+- 两个 finance FAST_WATCH 继续稳定，但没有 TRIAL_READY。
+- politics 仍无法靠现有内部来源突破，需要外部 wallet 来源。
+
+**下一轮动作**：
+- 继续滚动 307 个 PAPER 样本，观察 7 个新 finance 是否被小样本/过滤率压下。
+- 等 candidate 1609、1611、2079 满 48h 后复核是否新增 FAST_WATCH。
+- 重点切换到外部 politics/finance 来源：Polymarket Analytics/Dune/排行榜完整 wallet 粘贴导入，否则主类别晋级池短期不会再增长。
+
+## Iteration 96 - 2026-06-26 17:06 CST - 内部补源确认枯竭与 PAPER 继续滚动
+
+**目标**：
+- 在主类别 politics/finance 可晋级池归零后，确认内部补源是否还有新 wallet。
+- 继续滚动 PAPER 样本，观察 clean high 和 FAST_WATCH 是否变化。
+
+**初始状态**：
+- 服务状态：
+  - 后端 `java` PID=36229，8000 端口监听正常。
+  - 前端 `node` PID=20436，3000 端口监听正常。
+- summary：
+  - DISCOVERED=1719。
+  - PAPER=307。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel：
+  - totalCandidates=2031。
+  - cleanHighScoreTotal=17。
+  - 主类别 politics/finance clean high=16。
+  - 主类别占比=94.1176%，allocationHealth=HEALTHY。
+  - politics：total=670，paper=42，cleanHigh=2。
+  - finance：total=984，paper=257，cleanHigh=14。
+- promote dry-run with sports/crypto disabled：
+  - politics=0。
+  - finance=0。
+  - selectedTotal=0。
+
+**动作 1 - 内部补源 dry-run**：
+- activity-source strict：
+  - selectedTotal=4。
+  - created=0。
+  - updated=0。
+  - skippedExisting=4。
+  - 全部为 politics 既有候选。
+- activity-source relaxed：
+  - selectedTotal=12。
+  - created=0。
+  - updated=5。
+  - skippedExisting=7。
+  - politics selected=11，updated=4。
+  - finance selected=1，updated=1。
+- market-peer relaxed：
+  - selectedTotal=5。
+  - created=0。
+  - updated=0。
+  - skippedExisting=5。
+
+**结论 - 内部补源**：
+- 内部 activity-source / market-peer 已无法产生新的 politics/finance wallet。
+- relaxed activity-source 仍可补充已有候选证据，但不会增加候选数量。
+- 这确认上一轮判断：主类别短期增量必须依赖外部完整 wallet 来源。
+
+**动作 2 - 正式补充已有候选证据**：
+- 正式执行 activity-source relaxed：
+  - selectedTotal=12。
+  - created=0。
+  - updated=5。
+  - skippedExisting=7。
+- 更新样本：
+  - politics `0x21ffd2b7a212a6f277ed3eca1a9f8efcbca90d71`。
+  - politics `0x5c0af092b533934008144d223d704b4cbebfa2c3`。
+  - politics `0x38e59b36aae31b164200d0cad7c3fe5e0ee795e7`。
+  - politics `0x74957ea27ac4fbdee46d861fdae357859ff67fcf`。
+  - 另有 1 个 finance 既有候选更新。
+- 重跑 `activity-score/run`：
+  - scanned=1719。
+  - scored=1719。
+  - categoryCounts：politics=777，finance=588，sports=180，crypto=174。
+  - riskFlagCounts 主要仍为：
+    - small_sample=1554。
+    - low_market_diversity=1180。
+    - scanner_pool_unverified=1312。
+    - mixed_category_evidence=251。
+
+**动作 3 - PAPER 滚动处理**：
+- 连续执行 4 轮 `paper/process`：
+  - processed=51。
+  - filtered=29。
+  - failed=0。
+- 重跑 `paper/score`：
+  - scoredCount=307。
+  - scoreVersion=`research-copyability-v1`。
+
+**滚动后状态**：
+- summary：
+  - DISCOVERED=1719。
+  - PAPER=307。
+  - TRIAL_READY=0。
+  - COOLDOWN=5。
+- funnel：
+  - cleanHighScoreTotal 从 17 升到 18。
+  - 主类别 politics/finance clean high 从 16 升到 17。
+  - 主类别占比=94.4444%，allocationHealth=HEALTHY。
+  - politics：total=669，paper=42，cleanHigh=2，topCandidateId=2361，topScore=86.6195。
+  - finance：total=985，paper=257，cleanHigh=15，topCandidateId=1609，topScore=92.6273。
+
+**FAST_WATCH / TRIAL_READY 审计**：
+- FAST_WATCH 条件清空仍为 2 个 finance：
+  - `0xe7ce284302936fd06ffc7ad05f13c648c513d53a`
+    - score=90.8189。
+    - ageHours=49.4。
+    - trades=22。
+    - filteredRatio=0.0435。
+    - copyablePnl=12.0753。
+    - blocker：`age<7d:49.4h`。
+  - `0x783134dbc526f5fe75dc3e770b9b6bdac39c5eb1`
+    - score=85.6758。
+    - ageHours=49.4。
+    - trades=21。
+    - filteredRatio=0.0870。
+    - copyablePnl=5.2545。
+    - blocker：`age<7d:49.4h`。
+- TRIAL_READY-like：
+  - 0。
+- 值得继续观察的 finance：
+  - candidate 1609 `0x674887d1ac838099a48b629dff53f25b7b87ee08`
+    - score=92.6273。
+    - trades=54。
+    - filteredRatio=0.0690。
+    - copyablePnl=9.0388。
+    - blocker：`age<48h:19.6`。
+  - candidate 2079 `0x983848691c445a1e235c1e49a69c49d8c4d3bcfe`
+    - score=91.6327。
+    - trades=32。
+    - filteredRatio=0.0857。
+    - copyablePnl=8.7053。
+    - blocker：`age<48h:17.1`。
+  - candidate 1612 `0x5e2b9261b0c4f697b55bf921ff2bc227183d9101`
+    - score=87.6362。
+    - trades=57。
+    - filteredRatio=0.1972。
+    - copyablePnl=10.7818。
+    - blocker：`age<48h:20.0`。
+  - candidate 1611 `0x75cc3b63a2f2423085e10706c78b494017b93ce1`
+    - score=85.0726。
+    - trades=76。
+    - filteredRatio=0.1556。
+    - copyablePnl=8.4108。
+    - blocker：`age<48h:19.6`。
+
+**politics 审计**：
+- politics 仍没有 FAST_WATCH：
+  - candidate 360：
+    - score=95.2059。
+    - trades=57。
+    - copyablePnl=21.7382。
+    - blocked by `mixed_category_evidence` and ageHours=6.9。
+  - candidate 34：
+    - score=93.3014。
+    - blocked by `mixed_category_evidence` and filteredRatio=0.2188。
+  - candidate 617：
+    - score=93.0234。
+    - blocked by `mixed_category_evidence` and filteredRatio=0.2373。
+  - candidate 2361：
+    - score=86.6195。
+    - riskFlags 为空，但 ageHours=3.9 且 filteredRatio=0.4324。
+
+**最终复核**：
+- promote dry-run with sports/crypto disabled：
+  - politics=0。
+  - finance=0。
+  - selectedTotal=0。
+
+**结论**：
+- 本轮没有新增 wallet，但提高了已有 PAPER 样本质量：
+  - clean high 从 17 增到 18。
+  - finance clean high 从 14 增到 15。
+  - paper/process 失败为 0。
+- 内部补源已经明确枯竭：只能更新已有候选，不能产生新的 politics/finance wallet。
+- 下一步不应继续重复内部 promote，应切到外部 wallet 来源导入。
+
+**下一轮动作**：
+- 继续滚动 307 个 PAPER 样本，等待 1609、1611、1612、2079 接近 48h。
+- 从 Polymarket Analytics / Dune / 外部排行榜复制完整 politics/finance wallet，通过“导入外部名单”入口导入。
+- 若无法立刻拿到外部 wallet，则继续 PAPER 滚动和 FAST_WATCH 复核，不再重复内部补源空转。
+
+### Iteration 97 - Polymarket Analytics 页面复制入口验证（2026-06-26）
+
+**目标**：
+- 尝试 Polymarket Analytics 页面复制方式，为外部高质量 leader 来源建立可落地入口。
+
+**执行结果**：
+- 本机直接访问 `docs.polymarket.com` 与 `data-api.polymarket.com` 均连接超时：
+  - shell 方式无法稳定直连 Polymarket 域名。
+  - 页面复制方式仍可作为人工补源入口，不依赖后端直连外网。
+- 复核官方 Data API 方向：
+  - Polymarket 官方文档存在 trader leaderboard rankings 端点。
+  - 端点方向可用于后续自动化抓取，但当前本机网络不可用，需要代理或可访问网络环境。
+- 优化 Leader Research 外部导入弹窗：
+  - 文案改为支持从 Polymarket Analytics / Dune / Polyburg 手工榜单直接粘贴。
+  - 默认来源名改为 `polymarket_analytics_page_copy`。
+  - 示例改为页面复制风格：rank + trader + wallet + category + score。
+- 使用模拟页面复制行执行后端 dry-run：
+  - requestedTotal=2。
+  - selectedTotal=2。
+  - createdTotal=1。
+  - updatedTotal=1。
+  - skippedInvalidTotal=0。
+  - sourceEvidence 正确写入 `external_analytics:polymarket_analytics_page_copy`。
+
+**验证**：
+- `frontend npm run build` 通过。
+- 外部名单 dry-run API 返回 code=0，证明页面复制路径可以进入现有 leader research 导入链路。
+
+**结论**：
+- 页面复制方式可用：只要 Polymarket Analytics 页面能复制出完整 `0x` 钱包地址，系统可以识别并进入 DISCOVERED/UPDATE。
+- 当前瓶颈不是解析或导入逻辑，而是本机无法直连 Polymarket 域名；下一步应让用户从浏览器页面复制 politics/finance leaderboard 行，或给后端 shell 配可用代理后改为官方 Data API 自动抓取。
+
+### Iteration 98 - 官方 Leaderboard 自动补源闭环（2026-06-26）
+
+**目标**：
+- 将 Polymarket 官方 leaderboard 变成系统可一键抓取的 politics/finance 外部 leader 来源，并把候选推进到评分和 PAPER 链路。
+
+**代码变更**：
+- 新增后端接口：
+  - `POST /api/copy-trading/leader-research/official-leaderboard/import`
+  - 默认抓取 politics/finance、MONTH、PNL。
+  - 返回 `fetches`，明确展示每个 category/timePeriod/orderBy 的抓取数量和错误。
+- 新增 `LeaderResearchOfficialLeaderboardImportService`：
+  - 使用官方 `https://data-api.polymarket.com/v1/leaderboard`。
+  - 分页抓取并解析 `proxyWallet`/`wallet`/`address`。
+  - 复用 `LeaderResearchExternalAnalyticsImportService`，不绕过现有去重、锁定、evidence、评分和 PAPER 规则。
+- 修复 external analytics 导入更新已有候选时的 `source` 字段超长问题：
+  - `leader_research_candidate.source` 实际长度为 50。
+  - 详细来源继续写入 `sourceEvidence`。
+  - `source` 只保留能放下的短来源标签，避免事务回滚。
+- 前端 Leader Research 外部导入弹窗新增：
+  - “官方榜单 Dry-run”。
+  - “官方榜单导入”。
+  - 抓取结果区：抓取、去重、错误数，以及每个来源查询的错误详情。
+
+**验证**：
+- 后端测试通过：
+  - `LeaderResearchExternalAnalyticsImportServiceTest`
+  - `LeaderResearchOfficialLeaderboardImportServiceTest`
+  - `LeaderResearchControllerTest`
+- 后端 `bootJar` 通过。
+- 前端 `npm run build` 通过。
+- 本地后端已强制重启到新 jar。
+
+**数据执行结果**：
+- 官方 leaderboard dry-run：
+  - fetchedTotal=400。
+  - dedupedTotal=381。
+  - politics MONTH PNL fetchedItems=200。
+  - finance MONTH PNL fetchedItems=200。
+  - fetchErrors=0。
+  - createdTotal=329。
+  - updatedTotal=52。
+- 正式导入：
+  - requestedTotal=381。
+  - selectedTotal=381。
+  - createdTotal=329。
+  - updatedTotal=52。
+  - skippedInvalidTotal=0。
+  - skippedExistingTotal=0。
+  - skippedLockedTotal=0。
+- DB 复核：
+  - `polymarket_official_leaderboard` evidence count=381。
+  - DISCOVERED=376。
+  - PAPER=5。
+- 活动评分：
+  - scannedCount=2048。
+  - scoredCount=2048。
+  - categoryCounts：politics=953，finance=745，sports=178，crypto=172。
+- 主类别 PAPER 提拔：
+  - dry-run selectedTotal=3。
+  - 正式 promotedTotal=3。
+  - politics promoted=2。
+  - finance promoted=1。
+  - sports/crypto limit=0。
+- 新提拔候选：
+  - politics candidate 2816 `0xc7d02944a76b9f83b199e9090ecc92c82d241f8a`，score=98.64044950。
+  - politics candidate 2810 `0x21064fd320bfd5a86f8c92a94d3209edf4154dea`，score=98.02040810。
+  - finance candidate 2846 `0x38d812aff0b79f3bf5da2a477f780bcc163eea7c`，score=100.00000000。
+- PAPER 处理：
+  - processed=11。
+  - filtered=9。
+  - failed=0。
+- PAPER 评分：
+  - scoredCount=310。
+
+**当前 funnel**：
+- totalCandidates=2360。
+- politics：
+  - totalCandidates=844。
+  - paperCandidates=43。
+  - cleanHighScoreCandidates=2。
+- finance：
+  - totalCandidates=1146。
+  - paperCandidates=260。
+  - cleanHighScoreCandidates=15。
+
+**结论**：
+- 第二目标的外部补源瓶颈被明显缓解：单轮新增/更新 381 个官方 leaderboard politics/finance 钱包，其中 329 个是新候选。
+- 新来源进入了系统评分和 PAPER 链路，并且 PAPER 执行失败为 0。
+- 当前新增 leaderboard 候选中只有 3 个立刻满足无风险高分 PAPER 门槛，其余多为 small sample / stale/no activity，需要继续滚动观察或补充更细的成交历史。
+
+**下一轮动作**：
+- 增加 WEEK/ALL + VOL 维度，继续扩大 politics/finance 外部来源，但需要控制重复和巨鲸偏差。
+- 对 official leaderboard 来源增加质量诊断：区分高 PNL 巨鲸、近期高频、可跟单小额、低滑点市场。
+- 对新 PAPER 三个候选单独观察 24-48h，优先检查是否有可跟单市场、是否存在低价长尾/巨额不可复制风险。
+
+### Iteration 99 - 扩展官方榜单维度与提拔一致性修复（2026-06-26）
+
+**目标**：
+- 在 Iteration 98 的官方 leaderboard 基础上，继续引入 WEEK/ALL + PNL/VOL 维度，优先扩大 politics/finance 候选池，并修复提拔 dry-run 与正式状态机不一致的问题。
+
+**基线**：
+- summary：
+  - DISCOVERED=2045。
+  - PAPER=310。
+  - COOLDOWN=5。
+- funnel：
+  - totalCandidates=2360。
+  - cleanHighScoreTotal=18。
+  - politics total=844，paper=43，cleanHigh=2。
+  - finance total=1146，paper=260，cleanHigh=15。
+- official leaderboard evidence：
+  - total=381。
+  - DISCOVERED=373。
+  - PAPER=8。
+
+**扩展来源 dry-run**：
+- WEEK + PNL/VOL：
+  - fetchedTotal=400。
+  - dedupedTotal=334。
+  - createdTotal=172。
+  - updatedTotal=162。
+  - fetchErrors=0。
+- ALL + PNL/VOL：
+  - fetchedTotal=400。
+  - dedupedTotal=322。
+  - createdTotal=248。
+  - updatedTotal=74。
+  - fetchErrors=0。
+
+**正式导入**：
+- WEEK + PNL/VOL：
+  - requestedTotal=334。
+  - selectedTotal=334。
+  - createdTotal=172。
+  - updatedTotal=162。
+  - skippedInvalidTotal=0。
+  - skippedExistingTotal=0。
+  - skippedLockedTotal=0。
+- ALL + PNL/VOL：
+  - requestedTotal=322。
+  - selectedTotal=322。
+  - createdTotal=225。
+  - updatedTotal=97。
+  - skippedInvalidTotal=0。
+  - skippedExistingTotal=0。
+  - skippedLockedTotal=0。
+- official leaderboard evidence：
+  - total 从 381 增至 805。
+  - official DISCOVERED=790。
+  - official PAPER=14。
+  - official COOLDOWN=1。
+
+**评分与 PAPER 链路**：
+- activity-score/run：
+  - scannedCount=2442。
+  - scoredCount=2442。
+  - categoryCounts：politics=1172，finance=921，sports=177，crypto=172。
+  - 主要风险：
+    - small_sample=1772。
+    - low_market_diversity=1351。
+    - scanner_pool_unverified=1312。
+    - no_activity_sample=470。
+    - stale_activity=470。
+- promote dry-run：
+  - selectedTotal=4。
+  - finance=4。
+  - politics=0。
+- 正式 promote：
+  - selectedTotal=4。
+  - promotedTotal=3。
+  - finance promoted=3。
+  - sports/crypto limit=0。
+- 新进入 PAPER：
+  - finance candidate 3120 `0xb527a4db04c36f2f358f1475189b5e0387c23b52`。
+  - finance candidate 1828 `0xa364d9ee6e737b743da4029d4384e01bbb27d4b3`。
+  - finance candidate 3155 `0x4ffe49ba2a4cae123536a8af4fda48faeb609f71`。
+- PAPER 处理：
+  - processed=13。
+  - filtered=7。
+  - failed=0。
+- paper/score：
+  - scoredCount=313。
+
+**一致性修复**：
+- 发现 candidate 1684 在 dry-run 中显示可提拔，但正式状态机没有推进：
+  - wallet=`0xc3584c39a46f3a134d0b26b747b839480ac5c52e`。
+  - score=100。
+  - lastSourceSeenAt 已超过 48h，新鲜度约 50h。
+- 修复 `LeaderResearchPaperPromotionService`：
+  - dry-run 和正式提拔前都检查状态机一致的新鲜度条件。
+  - 要求 sourceFresh48h。
+  - 锁定候选不选中。
+  - 与状态机一致处理 `score>=60` 或可 bootstrap paper observation。
+- 新增测试：
+  - `stale source candidate is not selected for paper promotion dry run`。
+- 修复后复核：
+  - promote dry-run selectedTotal=0。
+  - candidate 1684 不再显示为可提拔。
+
+**最终状态**：
+- summary：
+  - DISCOVERED=2439。
+  - PAPER=313。
+  - COOLDOWN=5。
+- funnel：
+  - totalCandidates=2757。
+  - cleanHighScoreTotal=18。
+  - politics total=1055，paper=43，cleanHigh=2。
+  - finance total=1333，paper=263，cleanHigh=15。
+  - allocationHealth=HEALTHY，primaryActualPercent=94.4444。
+- official leaderboard evidence：
+  - total=805。
+  - finance DISCOVERED=345，PAPER=5。
+  - politics DISCOVERED=443，PAPER=11，COOLDOWN=1。
+
+**验证**：
+- 后端测试通过：
+  - `LeaderResearchPaperPromotionServiceTest`。
+- 后端 `bootJar` 通过。
+- 前端 `npm run build` 通过。
+- 后端已重启到最新 jar。
+
+**结论**：
+- 官方榜单外部补源继续有效：本轮新增 397 个 politics/finance 候选，候选总量提升到 2757。
+- WEEK/ALL + VOL 带来不少新增，但真正能立刻进入 PAPER 的仍很少，说明 scoring/risk gate 在过滤大量无活动样本和 stale activity，这是符合高质量目标的。
+- dry-run 与正式提拔的一致性已修复，后续页面显示“可提拔”会更可信。
+
+**下一轮动作**：
+- 对 official leaderboard 来源加质量诊断视图或接口：
+  - 区分 `no_activity_sample`、`stale_activity`、`small_sample`、`巨鲸高 pnl 但不可复制`。
+  - 按 politics/finance 输出“值得补历史/值得观察/应排除”。
+- 针对新进入 PAPER 的 3120、1828、3155 观察：
+  - 3120：PAPER 初期 copyable_pnl 为负且 small_sample，需要谨慎。
+  - 1828：偏 BTC up/down，需要检查是否违反 BTC 5M/短周期规则。
+  - 3155：filteredRatio 高，已出现 high_filtered_ratio 和 small_sample，短期不应进入跟单。
+
+### Iteration 100 - Official Leaderboard 质量诊断接口与页面入口（2026-06-26）
+
+**目标**：
+- 把 official leaderboard 大量补源后的质量瓶颈显性化，避免只看到候选数量增长，却不知道哪些值得补历史、观察、排除。
+
+**代码变更**：
+- 新增后端接口：
+  - `POST /api/copy-trading/leader-research/official-leaderboard/diagnose`
+- 新增 `LeaderResearchOfficialLeaderboardDiagnoseService`：
+  - 只读诊断 `sourceEvidence` 中包含 `polymarket_official_leaderboard` 的候选。
+  - 按 bucket 分组：
+    - `READY_FOR_PAPER`
+    - `FAST_WATCH`
+    - `CLEAN_HIGH`
+    - `PAPER_OBSERVING`
+    - `SMALL_SAMPLE`
+    - `NO_ACTIVITY_SAMPLE`
+    - `STALE_ACTIVITY`
+    - `HIGH_FILTERED_RATIO`
+    - `HARD_RISK`
+    - `CATEGORY_CONFLICT`
+    - `OTHER_RISK`
+    - `LOCKED`
+    - `OBSERVE`
+  - 输出 politics/finance 分类汇总、risk flag 汇总、样本候选。
+- 新增 repository 查询：
+  - `findOfficialLeaderboardCandidates()`。
+- 前端 `LeaderResearch` 外部导入弹窗新增：
+  - “官方榜单诊断”按钮。
+  - “官方榜单质量诊断”摘要卡。
+  - 展示总数、PAPER、干净高分、快速观察、可进 PAPER、无活动样本、主要 bucket、分类汇总和样本候选。
+
+**验证**：
+- 后端测试通过：
+  - `LeaderResearchOfficialLeaderboardDiagnoseServiceTest`。
+  - `LeaderResearchControllerTest`。
+- 后端 `bootJar` 通过。
+- 前端 `npm run build` 通过。
+- 后端已强制重启，端口 8000 新 PID 生效。
+
+**真实诊断结果**：
+- official leaderboard total=805。
+- paperTotal=16。
+- cleanHighTotal=1。
+- fastWatchTotal=0。
+- readyForPaperTotal=0。
+- buckets：
+  - `NO_ACTIVITY_SAMPLE`=470。
+  - `SMALL_SAMPLE`=234。
+  - `HARD_RISK`=65。
+  - `CATEGORY_CONFLICT`=33。
+  - `CLEAN_HIGH`=1。
+  - `PAPER_OBSERVING`=1。
+  - `HIGH_FILTERED_RATIO`=1。
+- categories：
+  - politics total=448，paper=11，cleanHigh=0，readyForPaper=0，noActivitySample=256。
+  - finance total=357，paper=5，cleanHigh=1，readyForPaper=0，noActivitySample=214。
+- riskFlagCounts 主要为：
+  - no_activity_sample=470。
+  - stale_activity=470。
+  - small_sample=271。
+  - low_market_diversity=199。
+  - mixed_category_evidence=58。
+  - tail_price_spray=49。
+  - low_safe_price_ratio=48。
+
+**关键样本**：
+- 唯一 clean high：
+  - candidate 1660 `0x5b6331e7ff0831a3fe2ed12004747db1a9c911a4`。
+  - category=finance。
+  - score=91.2542。
+  - PAPER trades=22。
+  - filteredRatio=0.2903。
+  - copyablePnl=14.5642。
+  - 仍需注意过滤率偏高，快速观察 bucket 为空。
+- PAPER_OBSERVING：
+  - candidate 153 `0xc8ab97a9089a9ff7e6ef0688e6e591a066946418`。
+  - score=75.293。
+  - filteredRatio=0.35。
+  - copyablePnl=1.9726。
+  - 分类证据混杂，暂不适合直接跟单。
+
+**结论**：
+- official leaderboard 是有效补源，但不是直接跟单名单：
+  - 805 个候选里 470 个没有足够系统活动样本。
+  - 234 个小样本。
+  - 65 个硬风险。
+  - 当前只有 1 个 clean high，且没有 fast watch。
+- 这说明 leaderboard 高 PnL/高成交量本身不足以证明可跟单；系统必须继续依赖 activity sample、PAPER、过滤率、PnL、分类一致性。
+
+**下一轮动作**：
+- 针对 `NO_ACTIVITY_SAMPLE=470`：
+  - 增加“补历史活动”入口或后台任务，按 official leaderboard 钱包批量回填最近成交。
+  - 优先 politics/finance，优先 external_score 高且非 VOL 负收益样本。
+- 针对 `SMALL_SAMPLE=234`：
+  - 建立最小可评分样本缺口统计，区分差几笔交易可进入 PAPER。
+- 针对 `HARD_RISK=65`：
+  - 输出排除样本列表，避免进入跟单模板。

@@ -38,6 +38,10 @@ interface LeaderResearchActivitySourceProjection {
     fun getLastEventTime(): Long?
 }
 
+interface LeaderResearchMarketPeerSourceProjection : LeaderResearchActivitySourceProjection {
+    fun getTopMarkets(): String?
+}
+
 @Repository
 interface LeaderResearchRunRepository : JpaRepository<LeaderResearchRun, Long> {
     fun findTopByOrderByStartedAtDesc(): LeaderResearchRun?
@@ -55,6 +59,15 @@ interface LeaderResearchCandidateRepository : JpaRepository<LeaderResearchCandid
     fun findByResearchStateIn(states: Collection<LeaderResearchState>, pageable: Pageable): Page<LeaderResearchCandidate>
     fun findAllByOrderByUpdatedAtDesc(pageable: Pageable): Page<LeaderResearchCandidate>
     fun countByResearchState(researchState: LeaderResearchState): Long
+
+    @Query(
+        """
+        select c from LeaderResearchCandidate c
+        where lower(coalesce(c.sourceEvidence, '')) like '%polymarket_official_leaderboard%'
+        order by c.score desc, c.lastSourceSeenAt desc
+        """
+    )
+    fun findOfficialLeaderboardCandidates(): List<LeaderResearchCandidate>
 
     @Query(
         """
@@ -159,6 +172,37 @@ interface LeaderActivityEventRepository : JpaRepository<LeaderActivityEvent, Lon
           coalesce(sum(coalesce(e.amount, e.price * e.size, 0)), 0) as totalAmount,
           max(e.event_time) as lastEventTime
         from leader_activity_event e
+        where e.normalized_wallet in (:wallets)
+          and e.usable_for_discovery = 1
+        group by e.normalized_wallet
+        """,
+        nativeQuery = true
+    )
+    fun aggregateDiscoveryMetricsForWallets(
+        @Param("wallets") wallets: Collection<String>
+    ): List<LeaderResearchActivitySourceProjection>
+
+    @Query(
+        value = """
+        select
+          e.normalized_wallet as normalizedWallet,
+          count(e.id) as totalEvents,
+          count(distinct e.market_id) as distinctMarkets,
+          coalesce(sum(case when upper(e.side) = 'BUY' then 1 else 0 end), 0) as buyEvents,
+          coalesce(sum(case when upper(e.side) = 'SELL' then 1 else 0 end), 0) as sellEvents,
+          coalesce(sum(case
+            when e.price >= 0.10000000
+             and e.price <= 0.80000000
+             and e.size > 0
+             and e.market_id is not null
+            then 1 else 0 end), 0) as safePriceEvents,
+          coalesce(sum(case
+            when e.price < 0.05000000 or e.price > 0.95000000
+            then 1 else 0 end), 0) as tailPriceEvents,
+          avg(coalesce(e.amount, e.price * e.size)) as avgAmount,
+          coalesce(sum(coalesce(e.amount, e.price * e.size, 0)), 0) as totalAmount,
+          max(e.event_time) as lastEventTime
+        from leader_activity_event e
         where e.normalized_wallet regexp '^0x[a-f0-9]{40}$'
           and e.event_time >= :since
           and (
@@ -192,6 +236,82 @@ interface LeaderActivityEventRepository : JpaRepository<LeaderActivityEvent, Lon
         @Param("maxTailPriceRatio") maxTailPriceRatio: BigDecimal,
         @Param("limit") limit: Int
     ): List<LeaderResearchActivitySourceProjection>
+
+    @Query(
+        value = """
+        with hot_markets as (
+          select
+            e.market_id,
+            max(coalesce(e.market_slug, e.market_title, e.market_id)) as marketSlug,
+            count(e.id) as marketEvents,
+            count(distinct e.normalized_wallet) as marketWallets,
+            coalesce(sum(coalesce(e.amount, e.price * e.size, 0)), 0) as marketAmount
+          from leader_activity_event e
+          where e.market_id is not null
+            and e.event_time >= :since
+            and (
+              lower(coalesce(e.market_slug, '')) regexp :marketPattern
+              or lower(coalesce(e.market_title, '')) regexp :marketPattern
+            )
+          group by e.market_id
+          having marketEvents >= :minMarketEvents
+             and marketWallets >= :minMarketWallets
+          order by marketAmount desc, marketEvents desc, marketWallets desc
+          limit :hotMarketLimit
+        )
+        select
+          e.normalized_wallet as normalizedWallet,
+          count(e.id) as totalEvents,
+          count(distinct e.market_id) as distinctMarkets,
+          coalesce(sum(case when upper(e.side) = 'BUY' then 1 else 0 end), 0) as buyEvents,
+          coalesce(sum(case when upper(e.side) = 'SELL' then 1 else 0 end), 0) as sellEvents,
+          coalesce(sum(case
+            when e.price >= 0.10000000
+             and e.price <= 0.80000000
+             and e.size > 0
+             and e.market_id is not null
+            then 1 else 0 end), 0) as safePriceEvents,
+          coalesce(sum(case
+            when e.price < 0.05000000 or e.price > 0.95000000
+            then 1 else 0 end), 0) as tailPriceEvents,
+          avg(coalesce(e.amount, e.price * e.size)) as avgAmount,
+          coalesce(sum(coalesce(e.amount, e.price * e.size, 0)), 0) as totalAmount,
+          max(e.event_time) as lastEventTime,
+          substring_index(group_concat(distinct hm.marketSlug order by hm.marketAmount desc separator ','), ',', 5) as topMarkets
+        from leader_activity_event e
+        inner join hot_markets hm on hm.market_id = e.market_id
+        where e.normalized_wallet regexp '^0x[a-f0-9]{40}$'
+          and e.event_time >= :since
+        group by e.normalized_wallet
+        having totalEvents >= :minEvents
+           and distinctMarkets >= :minDistinctMarkets
+           and buyEvents >= :minBuyEvents
+           and sellEvents >= :minSellEvents
+           and safePriceEvents / nullif(totalEvents, 0) >= :minSafePriceRatio
+           and tailPriceEvents / nullif(totalEvents, 0) <= :maxTailPriceRatio
+        order by
+          sellEvents desc,
+          safePriceEvents desc,
+          distinctMarkets desc,
+          totalAmount desc
+        limit :limit
+        """,
+        nativeQuery = true
+    )
+    fun discoverWalletsFromMarketPeerSource(
+        @Param("since") since: Long,
+        @Param("marketPattern") marketPattern: String,
+        @Param("hotMarketLimit") hotMarketLimit: Int,
+        @Param("minMarketEvents") minMarketEvents: Int,
+        @Param("minMarketWallets") minMarketWallets: Int,
+        @Param("minEvents") minEvents: Int,
+        @Param("minDistinctMarkets") minDistinctMarkets: Int,
+        @Param("minBuyEvents") minBuyEvents: Int,
+        @Param("minSellEvents") minSellEvents: Int,
+        @Param("minSafePriceRatio") minSafePriceRatio: BigDecimal,
+        @Param("maxTailPriceRatio") maxTailPriceRatio: BigDecimal,
+        @Param("limit") limit: Int
+    ): List<LeaderResearchMarketPeerSourceProjection>
 
     @Query(
         """

@@ -10,18 +10,22 @@ import com.wrbug.polymarketbot.enums.LeaderCandidateProvenance
 import com.wrbug.polymarketbot.enums.LeaderResearchEventType
 import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.repository.LeaderRepository
+import com.wrbug.polymarketbot.repository.LeaderActivityEventRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import com.wrbug.polymarketbot.repository.LeaderScannerCandidatePoolRepository
 import com.wrbug.polymarketbot.util.CategoryValidator
 import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import java.math.BigDecimal
+import java.math.RoundingMode
 
 @Service
 class LeaderResearchScannerPoolImportService(
     private val scannerPoolRepository: LeaderScannerCandidatePoolRepository,
     private val candidateRepository: LeaderResearchCandidateRepository,
     private val leaderRepository: LeaderRepository,
+    private val activityEventRepository: LeaderActivityEventRepository,
     private val eventService: LeaderResearchEventService
 ) {
     @Transactional
@@ -197,8 +201,41 @@ class LeaderResearchScannerPoolImportService(
             .filter { it.normalizedWallet.matches(WALLET_REGEX) }
             .filter { request.minDiscoveryScore == null || it.discoveryScore >= request.minDiscoveryScore }
             .distinctBy { it.normalizedWallet.lowercase() }
+            .let { candidates ->
+                if (request.requireActivityQuality) {
+                    applyActivityQualityFilter(candidates.toList(), request).asSequence()
+                } else {
+                    candidates
+                }
+            }
             .take(limit)
             .toList()
+    }
+
+    private fun applyActivityQualityFilter(
+        candidates: List<LeaderScannerCandidatePool>,
+        request: LeaderResearchScannerPoolImportRequest
+    ): List<LeaderScannerCandidatePool> {
+        if (candidates.isEmpty()) return emptyList()
+        val wallets = candidates.map { it.normalizedWallet.lowercase() }.distinct()
+        val metricsByWallet = activityEventRepository.aggregateDiscoveryMetricsForWallets(wallets)
+            .associateBy { it.getNormalizedWallet().lowercase() }
+        val minSafePriceRatio = request.minActivitySafePriceRatio.toBigDecimalOrNull() ?: BigDecimal("0.30")
+        val maxTailPriceRatio = request.maxActivityTailPriceRatio.toBigDecimalOrNull() ?: BigDecimal("0.45")
+        return candidates.filter { candidate ->
+            val metrics = metricsByWallet[candidate.normalizedWallet.lowercase()] ?: return@filter false
+            metrics.getTotalEvents() >= request.minActivityEvents &&
+                metrics.getDistinctMarkets() >= request.minActivityDistinctMarkets &&
+                metrics.getBuyEvents() >= request.minActivityBuyEvents &&
+                metrics.getSellEvents() >= request.minActivitySellEvents &&
+                ratio(metrics.getSafePriceEvents(), metrics.getTotalEvents()) >= minSafePriceRatio &&
+                ratio(metrics.getTailPriceEvents(), metrics.getTotalEvents()) <= maxTailPriceRatio
+        }
+    }
+
+    private fun ratio(numerator: Long, denominator: Long): BigDecimal {
+        if (denominator <= 0) return BigDecimal.ZERO
+        return BigDecimal(numerator).divide(BigDecimal(denominator), 8, RoundingMode.HALF_UP)
     }
 
     private fun sourceEvidence(poolCandidate: LeaderScannerCandidatePool): String {

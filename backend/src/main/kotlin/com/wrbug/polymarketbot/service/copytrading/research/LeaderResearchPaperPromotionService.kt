@@ -19,6 +19,7 @@ class LeaderResearchPaperPromotionService(
     @Transactional
     fun promote(request: LeaderResearchPaperPromotionRequest): LeaderResearchPaperPromotionResponse {
         val minScore = request.minScore.toBigDecimalOrNull() ?: BigDecimal("80")
+        val now = System.currentTimeMillis()
         val candidates = candidateRepository.findByResearchStateIn(
             listOf(LeaderResearchState.DISCOVERED, LeaderResearchState.CANDIDATE)
         )
@@ -49,6 +50,7 @@ class LeaderResearchPaperPromotionService(
                 .filter { inferCategory(it) == category }
                 .filter { (it.score ?: BigDecimal.ZERO) >= minScore }
                 .filter { it.scoreVersion == LeaderResearchActivityScoringService.SCORE_VERSION }
+                .filter { isStateMachineReadyForPaperPromotion(it, now) }
                 .sortedWith(
                     compareByDescending<LeaderResearchCandidate> { it.score ?: BigDecimal.ZERO }
                         .thenByDescending { it.lastScoredAt ?: 0L }
@@ -91,7 +93,7 @@ class LeaderResearchPaperPromotionService(
                     category = category,
                     score = (candidate.score ?: BigDecimal.ZERO).toPlainString(),
                     previousState = previousState.name,
-                    nextState = if (request.dryRun) expectedNextState(candidate).name else next.researchState.name,
+                    nextState = if (request.dryRun) expectedNextState(candidate, now).name else next.researchState.name,
                     riskFlags = candidate.riskFlagsList()
                 )
             }
@@ -120,12 +122,27 @@ class LeaderResearchPaperPromotionService(
         )
     }
 
-    private fun expectedNextState(candidate: LeaderResearchCandidate): LeaderResearchState {
+    private fun expectedNextState(candidate: LeaderResearchCandidate, now: Long): LeaderResearchState {
         return when (candidate.researchState) {
             LeaderResearchState.DISCOVERED,
-            LeaderResearchState.CANDIDATE -> LeaderResearchState.PAPER
+            LeaderResearchState.CANDIDATE -> if (isStateMachineReadyForPaperPromotion(candidate, now)) {
+                LeaderResearchState.PAPER
+            } else {
+                candidate.researchState
+            }
             else -> candidate.researchState
         }
+    }
+
+    private fun isStateMachineReadyForPaperPromotion(candidate: LeaderResearchCandidate, now: Long): Boolean {
+        if (candidate.locked) return false
+        val sourceFresh48h = candidate.lastSourceSeenAt?.let { now - it <= SOURCE_FRESH_48H_MS } == true
+        val score = candidate.score ?: BigDecimal.ZERO
+        return sourceFresh48h && (score >= BigDecimal("60") || canBootstrapPaperObservation(candidate))
+    }
+
+    private fun canBootstrapPaperObservation(candidate: LeaderResearchCandidate): Boolean {
+        return candidate.agentOwned || candidate.leaderId != null || candidate.poolId != null
     }
 
     private fun isPromotableRisk(flags: List<String>): Boolean {
@@ -148,6 +165,7 @@ class LeaderResearchPaperPromotionService(
         private const val MAX_PROMOTE_PER_CATEGORY = 100
         private const val LIVE_PROMOTE_BATCH_LIMIT = 8
         private const val PREVIEW_LIMIT = 100
+        private const val SOURCE_FRESH_48H_MS = 48L * 60 * 60 * 1000
         private val HARD_EXCLUDE_FLAGS = setOf(
             "tail_price_spray",
             "buy_only_no_exit",

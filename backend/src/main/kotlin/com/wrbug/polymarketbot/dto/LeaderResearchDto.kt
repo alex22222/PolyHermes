@@ -12,7 +12,14 @@ data class LeaderResearchScannerPoolImportRequest(
     val sportsLimit: Int = 150,
     val cryptoLimit: Int = 150,
     val onlyPending: Boolean = true,
-    val minDiscoveryScore: Int? = null
+    val minDiscoveryScore: Int? = null,
+    val requireActivityQuality: Boolean = false,
+    val minActivityEvents: Int = 20,
+    val minActivityDistinctMarkets: Int = 5,
+    val minActivityBuyEvents: Int = 3,
+    val minActivitySellEvents: Int = 2,
+    val minActivitySafePriceRatio: String = "0.30",
+    val maxActivityTailPriceRatio: String = "0.45"
 )
 
 data class LeaderResearchScannerPoolImportCategoryDto(
@@ -108,6 +115,226 @@ data class LeaderResearchActivitySourceImportResponse(
     val skippedLockedTotal: Int,
     val categories: List<LeaderResearchActivitySourceCategoryDto>,
     val previewItems: List<LeaderResearchActivitySourcePreviewItemDto>
+)
+
+data class LeaderResearchMarketPeerSourceImportRequest(
+    val dryRun: Boolean = true,
+    val categories: List<String> = listOf("politics", "finance"),
+    val limitPerCategory: Int = 50,
+    val lookbackDays: Int = 60,
+    val hotMarketLimit: Int = 40,
+    val minMarketEvents: Int = 25,
+    val minMarketWallets: Int = 20,
+    val minEvents: Int = 8,
+    val minDistinctMarkets: Int = 2,
+    val minBuyEvents: Int = 2,
+    val minSellEvents: Int = 1,
+    val minSafePriceRatio: String = "0.20",
+    val maxTailPriceRatio: String = "0.50"
+)
+
+data class LeaderResearchMarketPeerSourceCategoryDto(
+    val category: String,
+    val selectedCount: Int,
+    val createdCount: Int,
+    val updatedCount: Int,
+    val skippedExistingCount: Int,
+    val skippedLockedCount: Int
+)
+
+data class LeaderResearchMarketPeerSourcePreviewItemDto(
+    val category: String,
+    val wallet: String,
+    val action: String,
+    val totalEvents: Long,
+    val distinctMarkets: Long,
+    val buyEvents: Long,
+    val sellEvents: Long,
+    val safePriceEvents: Long,
+    val tailPriceEvents: Long,
+    val avgAmount: String,
+    val totalAmount: String,
+    val lastEventTime: Long?,
+    val topMarkets: List<String>,
+    val sourceEvidence: String
+)
+
+data class LeaderResearchMarketPeerSourceImportResponse(
+    val dryRun: Boolean,
+    val requestedCategories: List<String>,
+    val selectedTotal: Int,
+    val createdTotal: Int,
+    val updatedTotal: Int,
+    val skippedExistingTotal: Int,
+    val skippedLockedTotal: Int,
+    val categories: List<LeaderResearchMarketPeerSourceCategoryDto>,
+    val previewItems: List<LeaderResearchMarketPeerSourcePreviewItemDto>
+)
+
+data class LeaderResearchExternalAnalyticsImportItemDto(
+    val wallet: String,
+    val category: String,
+    val sourceName: String = "",
+    val externalRank: Int? = null,
+    val externalScore: String? = null,
+    val note: String? = null
+)
+
+data class LeaderResearchExternalAnalyticsImportRequest(
+    val dryRun: Boolean = true,
+    val items: List<LeaderResearchExternalAnalyticsImportItemDto> = emptyList(),
+    val defaultCategory: String = "finance",
+    val defaultSourceName: String = "external_analytics",
+    val maxItems: Int = 500
+)
+
+data class LeaderResearchExternalAnalyticsImportPreviewItemDto(
+    val wallet: String,
+    val category: String,
+    val sourceName: String,
+    val action: String,
+    val externalRank: Int?,
+    val externalScore: String?,
+    val sourceEvidence: String
+)
+
+data class LeaderResearchExternalAnalyticsImportResponse(
+    val dryRun: Boolean,
+    val requestedTotal: Int,
+    val selectedTotal: Int,
+    val createdTotal: Int,
+    val updatedTotal: Int,
+    val skippedInvalidTotal: Int,
+    val skippedExistingTotal: Int,
+    val skippedLockedTotal: Int,
+    val previewItems: List<LeaderResearchExternalAnalyticsImportPreviewItemDto>
+)
+
+data class LeaderResearchOfficialLeaderboardImportRequest(
+    val dryRun: Boolean = true,
+    val categories: List<String> = listOf("politics", "finance"),
+    val timePeriods: List<String> = listOf("MONTH"),
+    val orderBys: List<String> = listOf("PNL"),
+    val limitPerPage: Int = 50,
+    val maxPagesPerQuery: Int = 2,
+    val maxItems: Int = 500
+)
+
+data class LeaderResearchOfficialLeaderboardFetchDto(
+    val category: String,
+    val timePeriod: String,
+    val orderBy: String,
+    val requestedPages: Int,
+    val fetchedItems: Int,
+    val error: String? = null
+)
+
+data class LeaderResearchOfficialLeaderboardImportResponse(
+    val dryRun: Boolean,
+    val sourceName: String,
+    val fetchedTotal: Int,
+    val dedupedTotal: Int,
+    val fetches: List<LeaderResearchOfficialLeaderboardFetchDto>,
+    val importResult: LeaderResearchExternalAnalyticsImportResponse
+)
+
+data class LeaderResearchOfficialLeaderboardDiagnoseRequest(
+    val sampleLimit: Int = 12,
+    val staleHours: Int = 48
+)
+
+data class LeaderResearchOfficialLeaderboardBucketDto(
+    val bucket: String,
+    val count: Int,
+    val description: String
+)
+
+data class LeaderResearchOfficialLeaderboardCategoryDto(
+    val category: String,
+    val total: Int,
+    val paper: Int,
+    val cleanHigh: Int,
+    val fastWatch: Int,
+    val readyForPaper: Int,
+    val noActivitySample: Int,
+    val staleActivity: Int
+)
+
+data class LeaderResearchOfficialLeaderboardSampleDto(
+    val candidateId: Long,
+    val wallet: String,
+    val category: String,
+    val bucket: String,
+    val researchState: String,
+    val score: String?,
+    val riskFlags: List<String>,
+    val lastSourceAgeHours: Long?,
+    val paperTrades: Int?,
+    val filteredRatio: String?,
+    val copyablePnl: String?,
+    val sourceEvidence: String?
+)
+
+data class LeaderResearchOfficialLeaderboardDiagnoseResponse(
+    val total: Int,
+    val paperTotal: Int,
+    val cleanHighTotal: Int,
+    val fastWatchTotal: Int,
+    val readyForPaperTotal: Int,
+    val buckets: List<LeaderResearchOfficialLeaderboardBucketDto>,
+    val categories: List<LeaderResearchOfficialLeaderboardCategoryDto>,
+    val riskFlagCounts: Map<String, Int>,
+    val samples: List<LeaderResearchOfficialLeaderboardSampleDto>,
+    val generatedAt: Long
+)
+
+data class LeaderResearchPoliticsSourceDiagnoseRequest(
+    val lookbackDays: Int = 60,
+    val minEvents: Int = 8,
+    val minDistinctMarkets: Int = 2,
+    val minBuyEvents: Int = 2,
+    val minSellEvents: Int = 1,
+    val minSafePriceRatio: String = "0.20",
+    val maxTailPriceRatio: String = "0.50",
+    val limit: Int = 500
+)
+
+data class LeaderResearchPoliticsSourceBucketDto(
+    val bucket: String,
+    val count: Int,
+    val description: String
+)
+
+data class LeaderResearchPoliticsSourceSampleDto(
+    val wallet: String,
+    val action: String,
+    val totalEvents: Long,
+    val distinctMarkets: Long,
+    val buyEvents: Long,
+    val sellEvents: Long,
+    val safePriceRatio: String,
+    val tailPriceRatio: String,
+    val avgAmount: String,
+    val totalAmount: String,
+    val currentState: String?,
+    val currentScore: String?,
+    val riskFlags: List<String>,
+    val blockers: List<String>
+)
+
+data class LeaderResearchPoliticsSourceDiagnoseResponse(
+    val category: String,
+    val lookbackDays: Int,
+    val scannedWallets: Int,
+    val passImportCriteria: Int,
+    val unknownWallets: Int,
+    val existingWallets: Int,
+    val paperWallets: Int,
+    val cleanHighWallets: Int,
+    val eligibleForPaperNow: Int,
+    val buckets: List<LeaderResearchPoliticsSourceBucketDto>,
+    val samples: List<LeaderResearchPoliticsSourceSampleDto>,
+    val generatedAt: Long
 )
 
 data class LeaderResearchPaperProcessRequest(
@@ -218,7 +445,33 @@ data class LeaderResearchFunnelCandidateDto(
     val filteredRatio: String,
     val copyablePnl: String,
     val maxDrawdown: String,
-    val researchState: String
+    val researchState: String,
+    val trialReadiness: LeaderResearchTrialReadinessDto
+)
+
+data class LeaderResearchTrialReadinessDto(
+    val eligible: Boolean,
+    val level: String,
+    val label: String,
+    val blockers: List<String>,
+    val fastWatchBlockers: List<String>,
+    val ageHours: Long,
+    val stableHighScoreCount: Int,
+    val requiredStableHighScoreCount: Int
+)
+
+data class LeaderResearchAllocationHealthDto(
+    val primaryCategories: List<String>,
+    val secondaryCategories: List<String>,
+    val primaryTargetPercent: String,
+    val secondaryTargetPercent: String,
+    val primaryActualPercent: String,
+    val secondaryActualPercent: String,
+    val primaryCleanHighCount: Int,
+    val secondaryCleanHighCount: Int,
+    val primaryDeficitCount: Int,
+    val status: String,
+    val message: String
 )
 
 data class LeaderResearchFunnelResponse(
@@ -230,6 +483,7 @@ data class LeaderResearchFunnelResponse(
     val cleanHighScoreTotal: Int,
     val criteria: String,
     val categories: List<LeaderResearchFunnelCategoryDto>,
+    val allocationHealth: LeaderResearchAllocationHealthDto,
     val priorityCandidates: List<LeaderResearchFunnelCandidateDto>,
     val generatedAt: Long
 )

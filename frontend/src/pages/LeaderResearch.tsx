@@ -38,7 +38,13 @@ import type {
   LeaderResearchCandidate,
   LeaderResearchCandidateDetail,
   LeaderResearchCandidateListResponse,
+  LeaderResearchExternalAnalyticsImportItem,
+  LeaderResearchExternalAnalyticsImportResponse,
   LeaderResearchFunnel,
+  LeaderResearchMarketPeerSourceImportResponse,
+  LeaderResearchOfficialLeaderboardDiagnoseResponse,
+  LeaderResearchOfficialLeaderboardImportResponse,
+  LeaderResearchPoliticsSourceDiagnose,
   LeaderResearchSourceState,
   LeaderResearchState,
   LeaderResearchSummary
@@ -61,6 +67,19 @@ const VALUATION_COLORS: Record<string, string> = {
   UNKNOWN: 'orange',
   UNAVAILABLE: 'red',
   NO_MATCH: 'volcano'
+}
+
+const allocationStatusColor = (status: string) => {
+  if (status === 'HEALTHY') return 'green'
+  if (status === 'WATCH') return 'gold'
+  if (status === 'DEFICIT') return 'red'
+  return 'default'
+}
+
+const readinessColor = (level: string) => {
+  if (level === 'TRIAL_READY') return 'green'
+  if (level === 'FAST_WATCH') return 'blue'
+  return 'gold'
 }
 
 const formatDate = (timestamp?: number) => {
@@ -89,6 +108,12 @@ const LeaderResearch: React.FC = () => {
   const { t } = useTranslation()
   const [summary, setSummary] = useState<LeaderResearchSummary | null>(null)
   const [funnel, setFunnel] = useState<LeaderResearchFunnel | null>(null)
+  const [politicsDiagnose, setPoliticsDiagnose] = useState<LeaderResearchPoliticsSourceDiagnose | null>(null)
+  const [marketPeerStrict, setMarketPeerStrict] = useState<LeaderResearchMarketPeerSourceImportResponse | null>(null)
+  const [marketPeerRelaxed, setMarketPeerRelaxed] = useState<LeaderResearchMarketPeerSourceImportResponse | null>(null)
+  const [externalImportResult, setExternalImportResult] = useState<LeaderResearchExternalAnalyticsImportResponse | null>(null)
+  const [officialLeaderboardResult, setOfficialLeaderboardResult] = useState<LeaderResearchOfficialLeaderboardImportResponse | null>(null)
+  const [officialLeaderboardDiagnose, setOfficialLeaderboardDiagnose] = useState<LeaderResearchOfficialLeaderboardDiagnoseResponse | null>(null)
   const [candidates, setCandidates] = useState<LeaderResearchCandidateListResponse>({ list: [], total: 0, summary: summaryFallback })
   const [sourceHealth, setSourceHealth] = useState<LeaderResearchSourceState[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
@@ -97,19 +122,39 @@ const LeaderResearch: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [marketPeerLoading, setMarketPeerLoading] = useState(false)
+  const [externalImportOpen, setExternalImportOpen] = useState(false)
+  const [externalImportLoading, setExternalImportLoading] = useState(false)
   const [detail, setDetail] = useState<LeaderResearchCandidateDetail | null>(null)
   const [approvalCandidate, setApprovalCandidate] = useState<LeaderResearchCandidate | null>(null)
   const [approvalLoading, setApprovalLoading] = useState(false)
   const [approvalForm] = Form.useForm()
+  const [externalImportForm] = Form.useForm()
 
   const loadAll = async (showLoading = true) => {
     if (showLoading) setLoading(true)
     try {
-      const [candidateResp, summaryResp, funnelResp, sourceResp, accountResp] = await Promise.all([
+      const [candidateResp, summaryResp, funnelResp, sourceResp, politicsDiagnoseResp, marketPeerResp, accountResp] = await Promise.all([
         apiService.leaderResearch.listCandidates({ page: 0, size: 50, state: stateFilter, query: query || undefined }),
         apiService.leaderResearch.summary(),
         apiService.leaderResearch.funnel(),
         apiService.leaderResearch.sourceHealth(),
+        apiService.leaderResearch.diagnosePoliticsSource({ limit: 500 }),
+        apiService.leaderResearch.importMarketPeerSource({
+          dryRun: true,
+          categories: ['politics', 'finance'],
+          limitPerCategory: 20,
+          lookbackDays: 60,
+          hotMarketLimit: 50,
+          minMarketEvents: 25,
+          minMarketWallets: 20,
+          minEvents: 8,
+          minDistinctMarkets: 2,
+          minBuyEvents: 2,
+          minSellEvents: 1,
+          minSafePriceRatio: '0.20',
+          maxTailPriceRatio: '0.50'
+        }),
         apiService.accounts.list()
       ])
       if (candidateResp.data.code === 0 && candidateResp.data.data) {
@@ -125,6 +170,12 @@ const LeaderResearch: React.FC = () => {
       }
       if (sourceResp.data.code === 0 && sourceResp.data.data) {
         setSourceHealth(sourceResp.data.data)
+      }
+      if (politicsDiagnoseResp.data.code === 0 && politicsDiagnoseResp.data.data) {
+        setPoliticsDiagnose(politicsDiagnoseResp.data.data)
+      }
+      if (marketPeerResp.data.code === 0 && marketPeerResp.data.data) {
+        setMarketPeerStrict(marketPeerResp.data.data)
       }
       if (accountResp.data.code === 0 && accountResp.data.data) {
         setAccounts(accountResp.data.data.list || [])
@@ -178,6 +229,158 @@ const LeaderResearch: React.FC = () => {
       }
     } finally {
       setDetailLoading(false)
+    }
+  }
+
+  const runMarketPeerRelaxed = async () => {
+    setMarketPeerLoading(true)
+    try {
+      const response = await apiService.leaderResearch.importMarketPeerSource({
+        dryRun: true,
+        categories: ['finance'],
+        limitPerCategory: 20,
+        lookbackDays: 60,
+        hotMarketLimit: 80,
+        minMarketEvents: 10,
+        minMarketWallets: 5,
+        minEvents: 5,
+        minDistinctMarkets: 2,
+        minBuyEvents: 1,
+        minSellEvents: 1,
+        minSafePriceRatio: '0.20',
+        maxTailPriceRatio: '0.50'
+      })
+      if (response.data.code === 0 && response.data.data) {
+        setMarketPeerRelaxed(response.data.data)
+        message.success('已刷新放宽金融来源')
+      } else {
+        message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+      }
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setMarketPeerLoading(false)
+    }
+  }
+
+  const parseExternalWalletLines = (
+    raw: string,
+    defaultCategory: string,
+    defaultSourceName: string
+  ): LeaderResearchExternalAnalyticsImportItem[] => {
+    const walletRegex = /0x[a-fA-F0-9]{40}/
+    const categoryRegex = /\b(politics|finance|sports|crypto)\b/i
+    const scoreRegex = /^\d+(\.\d+)?%?$/
+
+    return raw
+      .split(/\r?\n/)
+      .map((line, index) => {
+        const trimmed = line.trim()
+        if (!trimmed) return null
+        const wallet = trimmed.match(walletRegex)?.[0]
+        if (!wallet) return null
+
+        const parts = trimmed.split(/[,\t ]+/).map(part => part.trim()).filter(Boolean)
+        const category = trimmed.match(categoryRegex)?.[1] || defaultCategory
+        const score = parts
+          .map(part => part.replace(/[%$,]/g, ''))
+          .find(part => scoreRegex.test(part) && part !== wallet)
+
+        return {
+          wallet,
+          category,
+          sourceName: defaultSourceName,
+          externalRank: index + 1,
+          externalScore: score,
+          note: trimmed
+        }
+      })
+      .filter(Boolean) as LeaderResearchExternalAnalyticsImportItem[]
+  }
+
+  const submitExternalImport = async (dryRun: boolean) => {
+    const values = await externalImportForm.validateFields()
+    const items = parseExternalWalletLines(
+      values.walletLines || '',
+      values.defaultCategory || 'finance',
+      values.defaultSourceName || 'external_analytics'
+    )
+    if (items.length === 0) {
+      message.warning('请输入至少 1 个 wallet')
+      return
+    }
+    setExternalImportLoading(true)
+    try {
+      const response = await apiService.leaderResearch.importExternalAnalytics({
+        dryRun,
+        items,
+        defaultCategory: values.defaultCategory || 'finance',
+        defaultSourceName: values.defaultSourceName || 'external_analytics',
+        maxItems: 500
+      })
+      if (response.data.code === 0 && response.data.data) {
+        setExternalImportResult(response.data.data)
+        message.success(dryRun ? '外部名单 dry-run 完成' : '外部名单已导入')
+        if (!dryRun) await loadAll(false)
+      } else {
+        message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+      }
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setExternalImportLoading(false)
+    }
+  }
+
+  const submitOfficialLeaderboardImport = async (dryRun: boolean) => {
+    setExternalImportLoading(true)
+    try {
+      const response = await apiService.leaderResearch.importOfficialLeaderboard({
+        dryRun,
+        categories: ['politics', 'finance'],
+        timePeriods: ['MONTH'],
+        orderBys: ['PNL'],
+        limitPerPage: 50,
+        maxPagesPerQuery: 2,
+        maxItems: 500
+      })
+      if (response.data.code === 0 && response.data.data) {
+        setOfficialLeaderboardResult(response.data.data)
+        setExternalImportResult(response.data.data.importResult)
+        const failedFetches = response.data.data.fetches.filter(item => item.error).length
+        if (failedFetches > 0) {
+          message.warning(`官方榜单返回 ${failedFetches} 个抓取错误，请查看结果`)
+        } else {
+          message.success(dryRun ? '官方榜单 dry-run 完成' : '官方榜单已导入')
+        }
+        if (!dryRun) await loadAll(false)
+      } else {
+        message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+      }
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setExternalImportLoading(false)
+    }
+  }
+
+  const runOfficialLeaderboardDiagnose = async () => {
+    setExternalImportLoading(true)
+    try {
+      const response = await apiService.leaderResearch.diagnoseOfficialLeaderboard({
+        sampleLimit: 15,
+        staleHours: 48
+      })
+      if (response.data.code === 0 && response.data.data) {
+        setOfficialLeaderboardDiagnose(response.data.data)
+        message.success('官方榜单诊断完成')
+      } else {
+        message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+      }
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setExternalImportLoading(false)
     }
   }
 
@@ -309,6 +512,7 @@ const LeaderResearch: React.FC = () => {
             </div>
             <Space>
               <Button icon={<ReloadOutlined />} onClick={() => loadAll()}>{t('common.refresh')}</Button>
+              <Button onClick={() => setExternalImportOpen(true)}>导入外部名单</Button>
               <Button type="primary" icon={<PlayCircleOutlined />} loading={running || lastRun?.status === 'RUNNING'} onClick={runAgent}>
                 {t('leaderResearch.runNow')}
               </Button>
@@ -352,6 +556,22 @@ const LeaderResearch: React.FC = () => {
                 <Statistic title="Leader 池" value={funnel.leaderPoolTotal} />
                 <Statistic title="高质量可观察" value={funnel.cleanHighScoreTotal} />
                 <Text type="secondary">{funnel.criteria}</Text>
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                    <Text strong>主类别配比</Text>
+                    <Tag color={allocationStatusColor(funnel.allocationHealth.status)}>
+                      {funnel.allocationHealth.primaryActualPercent}%
+                    </Tag>
+                  </Space>
+                  <Progress
+                    percent={Math.min(100, Number(funnel.allocationHealth.primaryActualPercent))}
+                    status={funnel.allocationHealth.status === 'DEFICIT' ? 'exception' : 'normal'}
+                  />
+                  <Text type="secondary">
+                    politics/finance {funnel.allocationHealth.primaryCleanHighCount} · sports/crypto {funnel.allocationHealth.secondaryCleanHighCount}
+                  </Text>
+                  <Text type="secondary">{funnel.allocationHealth.message}</Text>
+                </Space>
               </Space>
             </Card>
           </Col>
@@ -379,14 +599,182 @@ const LeaderResearch: React.FC = () => {
                       <Space direction="vertical" size={0}>
                         <Text strong>#{candidate.candidateId} {candidate.wallet.slice(0, 10)}...</Text>
                         <Text type="secondary">{candidate.category} · {candidate.tradeCount} trades · PnL {candidate.copyablePnl}</Text>
+                        <Text type="secondary">
+                          {candidate.trialReadiness.level === 'FAST_WATCH'
+                            ? '快速观察 · 未放开正式试跟'
+                            : candidate.trialReadiness.eligible
+                              ? candidate.trialReadiness.label
+                              : `${candidate.trialReadiness.label} · ${candidate.trialReadiness.blockers[0] || candidate.trialReadiness.fastWatchBlockers[0] || '等待更多样本'}`}
+                        </Text>
                       </Space>
-                      <Tag color="green">{candidate.score}</Tag>
+                      <Space direction="vertical" size={0} align="end">
+                        <Tag color="green">{candidate.score}</Tag>
+                        <Tag color={readinessColor(candidate.trialReadiness.level)}>
+                          {candidate.trialReadiness.label}
+                        </Tag>
+                        <Tag color={candidate.trialReadiness.eligible ? 'green' : 'gold'}>
+                          {candidate.trialReadiness.stableHighScoreCount}/{candidate.trialReadiness.requiredStableHighScoreCount}
+                        </Tag>
+                      </Space>
                     </Space>
                   ))}
                 </Space>
               ) : (
                 <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无高质量候选" />
               )}
+            </Card>
+          </Col>
+        </Row>
+      )}
+
+      {politicsDiagnose && (
+        <Row gutter={[16, 16]}>
+          <Col xs={24} lg={12}>
+            <Card title="政治来源诊断">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Row gutter={[12, 12]}>
+                  <Col xs={12} sm={8}><Statistic title="扫描钱包" value={politicsDiagnose.scannedWallets} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="通过阈值" value={politicsDiagnose.passImportCriteria} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="可新增 PAPER" value={politicsDiagnose.eligibleForPaperNow} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="未知钱包" value={politicsDiagnose.unknownWallets} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="已在池中" value={politicsDiagnose.existingWallets} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="已 PAPER" value={politicsDiagnose.paperWallets} /></Col>
+                </Row>
+                <Progress
+                  percent={politicsDiagnose.scannedWallets > 0 ? Number(((politicsDiagnose.passImportCriteria / politicsDiagnose.scannedWallets) * 100).toFixed(2)) : 0}
+                  status={politicsDiagnose.eligibleForPaperNow > 0 ? 'active' : 'normal'}
+                />
+                <Text type="secondary">
+                  lookback {politicsDiagnose.lookbackDays} 天 · clean high {politicsDiagnose.cleanHighWallets}
+                </Text>
+                <Alert
+                  type={politicsDiagnose.eligibleForPaperNow > 0 ? 'success' : 'info'}
+                  showIcon
+                  message={politicsDiagnose.eligibleForPaperNow > 0
+                    ? `发现 ${politicsDiagnose.eligibleForPaperNow} 个可新增政治 PAPER 候选`
+                    : '当前 activity-source 暂无可新增政治 PAPER 候选，优先寻找新来源'}
+                />
+              </Space>
+            </Card>
+          </Col>
+          <Col xs={24} lg={12}>
+            <Card title="政治来源阻塞">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                {politicsDiagnose.buckets.slice(0, 6).map(bucket => (
+                  <Space key={bucket.bucket} style={{ justifyContent: 'space-between', width: '100%' }}>
+                    <Space direction="vertical" size={0}>
+                      <Text strong>{bucket.bucket}</Text>
+                      <Text type="secondary">{bucket.description}</Text>
+                    </Space>
+                    <Tag color={bucket.bucket === 'pass_import_criteria' ? 'green' : 'orange'}>{bucket.count}</Tag>
+                  </Space>
+                ))}
+              </Space>
+            </Card>
+          </Col>
+          <Col xs={24}>
+            <Card title="政治来源样本">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                {politicsDiagnose.samples.slice(0, 5).map(sample => (
+                  <Space key={sample.wallet} style={{ justifyContent: 'space-between', width: '100%' }}>
+                    <Space direction="vertical" size={0}>
+                      <Text strong>{sample.wallet.slice(0, 12)}...</Text>
+                      <Text type="secondary">
+                        {sample.totalEvents} events · {sample.distinctMarkets} markets · buy/sell {sample.buyEvents}/{sample.sellEvents}
+                      </Text>
+                      <Text type="secondary">
+                        safe {sample.safePriceRatio} · tail {sample.tailPriceRatio} · {sample.blockers[0] || '通过当前阈值'}
+                      </Text>
+                    </Space>
+                    <Space direction="vertical" size={0} align="end">
+                      <Tag color={sample.action === 'UNKNOWN_ELIGIBLE' ? 'green' : sample.currentState === 'PAPER' ? 'blue' : 'default'}>
+                        {sample.action}
+                      </Tag>
+                      <Tag color={sample.currentScore ? 'geekblue' : 'default'}>{sample.currentScore || '-'}</Tag>
+                    </Space>
+                  </Space>
+                ))}
+              </Space>
+            </Card>
+          </Col>
+        </Row>
+      )}
+
+      {(marketPeerStrict || marketPeerRelaxed) && (
+        <Row gutter={[16, 16]}>
+          <Col xs={24} lg={12}>
+            <Card
+              title="热门市场对手方来源"
+              extra={
+                <Space>
+                  <Button size="small" icon={<ReloadOutlined />} onClick={() => loadAll(false)}>
+                    strict
+                  </Button>
+                  <Button size="small" loading={marketPeerLoading} onClick={runMarketPeerRelaxed}>
+                    relaxed finance
+                  </Button>
+                </Space>
+              }
+            >
+              {marketPeerStrict ? (
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Row gutter={[12, 12]}>
+                    <Col xs={12} sm={8}><Statistic title="选中钱包" value={marketPeerStrict.selectedTotal} /></Col>
+                    <Col xs={12} sm={8}><Statistic title="可新建" value={marketPeerStrict.createdTotal} /></Col>
+                    <Col xs={12} sm={8}><Statistic title="可更新" value={marketPeerStrict.updatedTotal} /></Col>
+                  </Row>
+                  <Space wrap>
+                    {marketPeerStrict.categories.map(category => (
+                      <Tag key={category.category} color={category.createdCount > 0 ? 'green' : category.selectedCount > 0 ? 'blue' : 'default'}>
+                        {category.category}: {category.selectedCount} / 新 {category.createdCount}
+                      </Tag>
+                    ))}
+                  </Space>
+                  <Alert
+                    type={marketPeerStrict.createdTotal > 0 ? 'success' : 'info'}
+                    showIcon
+                    message={marketPeerStrict.createdTotal > 0
+                      ? `strict 来源发现 ${marketPeerStrict.createdTotal} 个可新增候选`
+                      : 'strict 来源暂无可新增候选，当前更多是刷新已有 evidence'}
+                  />
+                </Space>
+              ) : (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 strict 来源结果" />
+              )}
+            </Card>
+          </Col>
+          <Col xs={24} lg={12}>
+            <Card title="第二来源样本">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                {(marketPeerRelaxed || marketPeerStrict)?.previewItems.slice(0, 5).map(sample => (
+                  <Space key={`${sample.category}-${sample.wallet}-${sample.action}`} style={{ justifyContent: 'space-between', width: '100%' }}>
+                    <Space direction="vertical" size={0}>
+                      <Text strong>{sample.wallet.slice(0, 12)}...</Text>
+                      <Text type="secondary">
+                        {sample.category} · {sample.totalEvents} events · {sample.distinctMarkets} markets · buy/sell {sample.buyEvents}/{sample.sellEvents}
+                      </Text>
+                      <Text type="secondary">
+                        {sample.topMarkets.slice(0, 2).join(' · ') || 'no market sample'}
+                      </Text>
+                    </Space>
+                    <Space direction="vertical" size={0} align="end">
+                      <Tag color={sample.action === 'CREATE' ? 'green' : sample.action === 'UPDATE' ? 'blue' : 'default'}>
+                        {sample.action}
+                      </Tag>
+                      <Text type="secondary">{sample.totalAmount} USDC</Text>
+                    </Space>
+                  </Space>
+                )) || (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无第二来源样本" />
+                )}
+                {marketPeerRelaxed && (
+                  <Alert
+                    type={marketPeerRelaxed.createdTotal > 0 ? 'success' : 'warning'}
+                    showIcon
+                    message={`relaxed finance: 选中 ${marketPeerRelaxed.selectedTotal}，新建 ${marketPeerRelaxed.createdTotal}，更新 ${marketPeerRelaxed.updatedTotal}`}
+                  />
+                )}
+              </Space>
             </Card>
           </Col>
         </Row>
@@ -588,6 +976,155 @@ const LeaderResearch: React.FC = () => {
               />
             </Form.Item>
           </Form>
+        </Space>
+      </Modal>
+
+      <Modal
+        width={860}
+        open={externalImportOpen}
+        title="导入外部 Analytics 钱包"
+        onCancel={() => setExternalImportOpen(false)}
+        footer={[
+          <Button key="cancel" onClick={() => setExternalImportOpen(false)}>关闭</Button>,
+          <Button key="officialDiagnose" loading={externalImportLoading} onClick={runOfficialLeaderboardDiagnose}>官方榜单诊断</Button>,
+          <Button key="officialDryRun" loading={externalImportLoading} onClick={() => submitOfficialLeaderboardImport(true)}>官方榜单 Dry-run</Button>,
+          <Button key="officialImport" loading={externalImportLoading} onClick={() => submitOfficialLeaderboardImport(false)}>官方榜单导入</Button>,
+          <Button key="dryRun" loading={externalImportLoading} onClick={() => submitExternalImport(true)}>Dry-run</Button>,
+          <Button key="import" type="primary" loading={externalImportLoading} onClick={() => submitExternalImport(false)}>正式导入</Button>
+        ]}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="支持从 Polymarket Analytics / Dune / Polyburg 手工榜单直接粘贴"
+            description="从榜单页面复制行或表格后粘贴即可；也可以先点官方榜单 Dry-run 自动尝试抓取 politics/finance 月榜。正式导入后仍会走系统评分、PAPER 和风控过滤。"
+          />
+          <Form
+            form={externalImportForm}
+            layout="vertical"
+            initialValues={{
+              defaultCategory: 'finance',
+              defaultSourceName: 'polymarket_analytics_page_copy'
+            }}
+          >
+            <Row gutter={12}>
+              <Col xs={24} md={12}>
+                <Form.Item label="默认分类" name="defaultCategory">
+                  <Select
+                    options={[
+                      { value: 'finance', label: 'finance' },
+                      { value: 'politics', label: 'politics' },
+                      { value: 'sports', label: 'sports' },
+                      { value: 'crypto', label: 'crypto' }
+                    ]}
+                  />
+                </Form.Item>
+              </Col>
+              <Col xs={24} md={12}>
+                <Form.Item label="来源名称" name="defaultSourceName">
+                  <Input placeholder="polymarket_analytics_page_copy / dune / polyburg" />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Form.Item
+              label="钱包列表"
+              name="walletLines"
+              rules={[{ required: true, message: '请输入钱包列表' }]}
+            >
+              <Input.TextArea
+                rows={8}
+                placeholder={'1  trader  0x9703676286b93c2eca71ca96e8757104519a69c2  politics  92\n2  trader  0x1111111111111111111111111111111111111111  finance  88'}
+              />
+            </Form.Item>
+          </Form>
+          {officialLeaderboardResult && (
+            <Card size="small" title="官方榜单抓取结果">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Row gutter={[12, 12]}>
+                  <Col xs={12} sm={8}><Statistic title="抓取" value={officialLeaderboardResult.fetchedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="去重" value={officialLeaderboardResult.dedupedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="错误" value={officialLeaderboardResult.fetches.filter(item => item.error).length} /></Col>
+                </Row>
+                {officialLeaderboardResult.fetches.map(item => (
+                  <Text key={`${item.category}-${item.timePeriod}-${item.orderBy}`} type={item.error ? 'danger' : 'secondary'}>
+                    {item.category} · {item.timePeriod} · {item.orderBy}: {item.fetchedItems} {item.error ? `· ${item.error}` : ''}
+                  </Text>
+                ))}
+              </Space>
+            </Card>
+          )}
+          {officialLeaderboardDiagnose && (
+            <Card size="small" title="官方榜单质量诊断">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Row gutter={[12, 12]}>
+                  <Col xs={12} sm={8}><Statistic title="总数" value={officialLeaderboardDiagnose.total} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="PAPER" value={officialLeaderboardDiagnose.paperTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="干净高分" value={officialLeaderboardDiagnose.cleanHighTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="快速观察" value={officialLeaderboardDiagnose.fastWatchTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="可进 PAPER" value={officialLeaderboardDiagnose.readyForPaperTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="无活动样本" value={officialLeaderboardDiagnose.buckets.find(item => item.bucket === 'NO_ACTIVITY_SAMPLE')?.count || 0} /></Col>
+                </Row>
+                <Space wrap>
+                  {officialLeaderboardDiagnose.buckets.slice(0, 8).map(item => (
+                    <Tag key={item.bucket} color={item.bucket === 'CLEAN_HIGH' || item.bucket === 'READY_FOR_PAPER' ? 'green' : item.bucket.includes('RISK') || item.bucket === 'HIGH_FILTERED_RATIO' ? 'red' : 'default'}>
+                      {item.bucket}: {item.count}
+                    </Tag>
+                  ))}
+                </Space>
+                <Row gutter={[12, 12]}>
+                  {officialLeaderboardDiagnose.categories.filter(item => item.total > 0).map(item => (
+                    <Col xs={24} md={12} key={item.category}>
+                      <Card size="small" title={item.category}>
+                        <Space direction="vertical" size={0}>
+                          <Text>总数 {item.total} · PAPER {item.paper} · 干净高分 {item.cleanHigh}</Text>
+                          <Text type="secondary">可进 PAPER {item.readyForPaper} · 无活动 {item.noActivitySample} · 过期 {item.staleActivity}</Text>
+                        </Space>
+                      </Card>
+                    </Col>
+                  ))}
+                </Row>
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {officialLeaderboardDiagnose.samples.slice(0, 5).map(item => (
+                    <Space key={item.candidateId} style={{ justifyContent: 'space-between', width: '100%' }}>
+                      <Space direction="vertical" size={0}>
+                        <Text strong>{item.wallet.slice(0, 12)}... · {item.category}</Text>
+                        <Text type="secondary">{item.bucket} · score {item.score || '-'} · age {item.lastSourceAgeHours ?? '-'}h</Text>
+                      </Space>
+                      <Tag>{item.researchState}</Tag>
+                    </Space>
+                  ))}
+                </Space>
+              </Space>
+            </Card>
+          )}
+          {externalImportResult && (
+            <Card size="small" title="最近导入结果">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Row gutter={[12, 12]}>
+                  <Col xs={12} sm={8}><Statistic title="请求" value={externalImportResult.requestedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="选中" value={externalImportResult.selectedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="新建" value={externalImportResult.createdTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="更新" value={externalImportResult.updatedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="无效" value={externalImportResult.skippedInvalidTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="重复/锁定" value={externalImportResult.skippedExistingTotal + externalImportResult.skippedLockedTotal} /></Col>
+                </Row>
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {externalImportResult.previewItems.slice(0, 6).map(item => (
+                    <Space key={`${item.wallet}-${item.action}`} style={{ justifyContent: 'space-between', width: '100%' }}>
+                      <Space direction="vertical" size={0}>
+                        <Text strong>{item.wallet.slice(0, 12)}...</Text>
+                        <Text type="secondary">{item.category} · {item.sourceName} · score {item.externalScore || '-'}</Text>
+                      </Space>
+                      <Tag color={item.action === 'CREATE' ? 'green' : item.action === 'UPDATE' ? 'blue' : item.action === 'SKIP_INVALID' ? 'red' : 'default'}>
+                        {item.action}
+                      </Tag>
+                    </Space>
+                  ))}
+                </Space>
+              </Space>
+            </Card>
+          )}
         </Space>
       </Modal>
     </Space>

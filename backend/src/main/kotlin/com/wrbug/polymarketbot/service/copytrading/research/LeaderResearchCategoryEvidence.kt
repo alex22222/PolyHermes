@@ -52,5 +52,5 @@ object LeaderResearchCategoryEvidenceClassifier {
         }
     }
 
-    private const val MIXED_DOMINANCE_THRESHOLD = 0.70
+    private const val MIXED_DOMINANCE_THRESHOLD = 0.80
 }

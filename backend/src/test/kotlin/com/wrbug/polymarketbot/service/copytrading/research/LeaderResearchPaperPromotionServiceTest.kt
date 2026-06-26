@@ -70,18 +70,47 @@ class LeaderResearchPaperPromotionServiceTest {
         Mockito.verify(stateMachine, Mockito.times(16)).advance(anyCandidate(), Mockito.any())
     }
 
+    @Test
+    fun `stale source candidate is not selected for paper promotion dry run`() {
+        val fresh = financeCandidate(1, System.currentTimeMillis())
+        val stale = financeCandidate(2, System.currentTimeMillis() - 50L * 60 * 60 * 1000)
+        Mockito.`when`(candidateRepository.findByResearchStateIn(anyStates()))
+            .thenReturn(listOf(fresh, stale))
+
+        val response = service.promote(
+            LeaderResearchPaperPromotionRequest(
+                minScore = "80",
+                politicsLimit = 0,
+                financeLimit = 20,
+                sportsLimit = 0,
+                cryptoLimit = 0,
+                dryRun = true
+            )
+        )
+
+        assertEquals(1, response.selectedTotal)
+        assertEquals(fresh.id, response.items.single().candidateId)
+        assertEquals("PAPER", response.items.single().nextState)
+    }
+
     private fun financeCandidates(count: Int): List<LeaderResearchCandidate> {
         return (1..count).map { index ->
-            LeaderResearchCandidate(
-                id = index.toLong(),
-                normalizedWallet = "0x${index.toString().padStart(40, '0')}",
-                researchState = LeaderResearchState.DISCOVERED,
-                source = "ACTIVITY_SOURCE",
-                sourceEvidence = "activity_source:finance | category:finance",
-                score = BigDecimal("90"),
-                scoreVersion = LeaderResearchActivityScoringService.SCORE_VERSION
-            )
+            financeCandidate(index, System.currentTimeMillis())
         }
+    }
+
+    private fun financeCandidate(index: Int, lastSourceSeenAt: Long): LeaderResearchCandidate {
+        return LeaderResearchCandidate(
+            id = index.toLong(),
+            normalizedWallet = "0x${index.toString().padStart(40, '0')}",
+            researchState = LeaderResearchState.DISCOVERED,
+            source = "ACTIVITY_SOURCE",
+            sourceEvidence = "activity_source:finance | category:finance",
+            score = BigDecimal("90"),
+            scoreVersion = LeaderResearchActivityScoringService.SCORE_VERSION,
+            lastSourceSeenAt = lastSourceSeenAt,
+            agentOwned = true
+        )
     }
 
     private fun anyStates(): Collection<LeaderResearchState> {
