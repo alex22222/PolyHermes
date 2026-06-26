@@ -18,7 +18,8 @@ import java.time.Duration
 @Component
 class BridgePortfolioClient(
     @Value("\${bridge.portfolio.url:http://localhost:8080/portfolio}") private val portfolioUrl: String,
-    @Value("\${bridge.balance.url:http://localhost:8080/balance}") private val balanceUrl: String
+    @Value("\${bridge.balance.url:http://localhost:8080/balance}") private val balanceUrl: String,
+    @Value("\${bridge.account.cache-ttl-ms:30000}") private val accountCacheTtlMs: Long = 30000
 ) {
 
     private val logger = LoggerFactory.getLogger(BridgePortfolioClient::class.java)
@@ -30,6 +31,12 @@ class BridgePortfolioClient(
             .connectTimeout(Duration.ofSeconds(5))
             .build()
     }
+
+    @Volatile
+    private var cachedAccount: BridgeAccountResponse? = null
+
+    @Volatile
+    private var cachedAccountAt: Long = 0
 
     /**
      * 从 Bridge 拉取当前持仓列表
@@ -88,7 +95,13 @@ class BridgePortfolioClient(
         }
     }
 
-    fun fetchAccount(): BridgeAccountResponse? {
+    fun fetchAccount(useCache: Boolean = true): BridgeAccountResponse? {
+        val now = System.currentTimeMillis()
+        val cached = cachedAccount
+        if (useCache && cached != null && now - cachedAccountAt < accountCacheTtlMs) {
+            return cached
+        }
+
         return try {
             val base = URI.create(balanceUrl)
             val accountUri = URI(base.scheme, base.authority, "/account", null, null)
@@ -102,7 +115,10 @@ class BridgePortfolioClient(
             if (response.statusCode() in 200..299) {
                 val body = response.body()
                 try {
-                    gson.fromJson(body, BridgeAccountResponse::class.java)
+                    gson.fromJson(body, BridgeAccountResponse::class.java).also {
+                        cachedAccount = it
+                        cachedAccountAt = now
+                    }
                 } catch (e: Exception) {
                     logger.warn("解析 Bridge /account 响应失败: ${e.message}, body=$body")
                     null

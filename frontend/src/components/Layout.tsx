@@ -178,23 +178,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       ]
     },
     {
-      key: '/crypto-tail-management',
-      icon: <LineChartOutlined />,
-      label: t('menu.cryptoSpreadStrategy'),
-      children: [
-        {
-          key: '/crypto-tail-strategy',
-          icon: <RocketOutlined />,
-          label: t('menu.cryptoTailStrategy')
-        },
-        {
-          key: '/crypto-tail-monitor',
-          icon: <DashboardOutlined />,
-          label: t('menu.cryptoTailMonitor')
-        }
-      ]
-    },
-    {
       key: '/positions',
       icon: <UnorderedListOutlined />,
       label: t('menu.positions')
@@ -213,6 +196,23 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       key: '/bridge-trade-records',
       icon: <SwapOutlined />,
       label: t('menu.bridgeTradeRecords') || '桥接交易记录'
+    },
+    {
+      key: '/crypto-tail-management',
+      icon: <LineChartOutlined />,
+      label: t('menu.cryptoSpreadStrategy'),
+      children: [
+        {
+          key: '/crypto-tail-strategy',
+          icon: <RocketOutlined />,
+          label: t('menu.cryptoTailStrategy')
+        },
+        {
+          key: '/crypto-tail-monitor',
+          icon: <DashboardOutlined />,
+          label: t('menu.cryptoTailMonitor')
+        }
+      ]
     },
     {
       key: '/users',

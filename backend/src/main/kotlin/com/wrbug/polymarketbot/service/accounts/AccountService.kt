@@ -798,7 +798,7 @@ class AccountService(
     fun getBridgeCurrentAccountStatus(): Result<BridgeCurrentAccountStatusResponse> {
         return try {
             val status = bridgePortfolioClient.fetchStatus()
-            val runtimeAccount = bridgePortfolioClient.fetchAccount()
+            val runtimeAccount = bridgePortfolioClient.fetchAccount(useCache = false)
             val walletAddress = runtimeAccount?.walletAddress
             val matchedAccount = walletAddress?.let { wallet ->
                 findAccountByRuntimeWallet(wallet)
@@ -832,7 +832,7 @@ class AccountService(
                 return Result.failure(IllegalArgumentException("只有 Magic 或 Bridge 只读账户支持设为 Bridge 当前账户"))
             }
 
-            val runtimeAccount = bridgePortfolioClient.fetchAccount()
+            val runtimeAccount = bridgePortfolioClient.fetchAccount(useCache = false)
                 ?: return Result.failure(IllegalStateException("Bridge 未登录或无法读取当前浏览器钱包，请先在 Bridge 浏览器中登录/切换到该 Magic 钱包"))
             val runtimeWallet = runtimeAccount.walletAddress
                 ?: return Result.failure(IllegalStateException("Bridge 当前钱包地址为空，请刷新 Bridge 登录状态后重试"))
@@ -894,7 +894,7 @@ class AccountService(
 
     private fun isCurrentBridgeRuntimeAccount(account: Account): Boolean {
         if (!account.isReadOnly) return false
-        val runtimeAccount = bridgePortfolioClient.fetchAccount() ?: return false
+        val runtimeAccount = bridgePortfolioClient.fetchAccount(useCache = false) ?: return false
         return isRuntimeWalletMatched(account, runtimeAccount.walletAddress)
     }
 

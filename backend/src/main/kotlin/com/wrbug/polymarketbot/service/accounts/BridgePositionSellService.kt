@@ -44,7 +44,7 @@ class BridgePositionSellService(
                 return Result.failure(IllegalStateException("该账户不是 Bridge 只读账户或 Magic 钱包，请使用普通卖出接口"))
             }
 
-            val runtimeWallet = bridgePortfolioClient.fetchAccount()?.walletAddress
+            val runtimeWallet = bridgePortfolioClient.fetchAccount(useCache = false)?.walletAddress
                 ?: return Result.failure(IllegalStateException("Bridge 未登录或无法读取当前浏览器钱包，不能执行 Bridge 卖出"))
             val walletMatches = runtimeWallet.equals(account.walletAddress, ignoreCase = true) ||
                 runtimeWallet.equals(account.proxyAddress, ignoreCase = true)
