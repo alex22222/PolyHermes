@@ -131,11 +131,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   
   const menuItems: MenuProps['items'] = [
     {
-      key: '/announcements',
-      icon: <NotificationOutlined />,
-      label: t('menu.announcements') || '公告'
-    },
-    {
       key: '/accounts',
       icon: <WalletOutlined />,
       label: t('menu.accounts')
@@ -245,6 +240,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           label: t('menu.apiHealth') || 'API健康'
         }
       ]
+    },
+    {
+      key: '/announcements',
+      icon: <NotificationOutlined />,
+      label: t('menu.announcements') || '公告'
     },
     {
       key: 'logout',
