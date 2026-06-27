@@ -1226,17 +1226,24 @@ class AccountService(
     }
 
     /**
-     * 解密账户私钥
+     * 解密账户私钥。
+     * 失败时自动将账户标记为 credentials_valid=false，并只记录一行 warn，避免堆栈刷屏。
      */
     fun decryptPrivateKey(account: Account): String {
         val privateKey = account.privateKey
             ?: throw IllegalStateException("账户未配置私钥: accountId=${account.id}")
-        return try {
-            cryptoUtils.decrypt(privateKey)
-        } catch (e: Exception) {
-            logger.error("解密私钥失败: accountId=${account.id}", e)
-            throw RuntimeException("解密私钥失败: ${e.message}", e)
+        return cryptoUtils.safeDecrypt(privateKey, "privateKey accountId=${account.id}")
+            ?: markCredentialsInvalid(account, "privateKey")
+    }
+
+    private fun markCredentialsInvalid(account: Account, field: String): Nothing {
+        if (account.credentialsValid) {
+            account.credentialsValid = false
+            account.updatedAt = System.currentTimeMillis()
+            accountRepository.save(account)
+            logger.warn("账户凭证解密失败，已标记为失效: accountId=${account.id}, field=$field")
         }
+        throw IllegalStateException("账户 $field 解密失败，凭证可能已失效: accountId=${account.id}")
     }
 
     /**
@@ -1274,28 +1281,18 @@ class AccountService(
      * 解密账户 API Secret
      */
     private fun decryptApiSecret(account: Account): String {
-        return account.apiSecret?.let { secret ->
-            try {
-                cryptoUtils.decrypt(secret)
-            } catch (e: Exception) {
-                logger.error("解密 API Secret 失败: accountId=${account.id}", e)
-                throw RuntimeException("解密 API Secret 失败: ${e.message}", e)
-            }
-        } ?: throw IllegalStateException("账户未配置 API Secret")
+        val secret = account.apiSecret ?: throw IllegalStateException("账户未配置 API Secret")
+        return cryptoUtils.safeDecrypt(secret, "apiSecret accountId=${account.id}")
+            ?: markCredentialsInvalid(account, "apiSecret")
     }
-    
+
     /**
      * 解密账户 API Passphrase
      */
     private fun decryptApiPassphrase(account: Account): String {
-        return account.apiPassphrase?.let { passphrase ->
-            try {
-                cryptoUtils.decrypt(passphrase)
-            } catch (e: Exception) {
-                logger.error("解密 API Passphrase 失败: accountId=${account.id}", e)
-                throw RuntimeException("解密 API Passphrase 失败: ${e.message}", e)
-            }
-        } ?: throw IllegalStateException("账户未配置 API Passphrase")
+        val passphrase = account.apiPassphrase ?: throw IllegalStateException("账户未配置 API Passphrase")
+        return cryptoUtils.safeDecrypt(passphrase, "apiPassphrase accountId=${account.id}")
+            ?: markCredentialsInvalid(account, "apiPassphrase")
     }
 
     /**
@@ -1319,11 +1316,21 @@ class AccountService(
                 if (account.proxyAddress.isNotBlank()) {
                     try {
                         // Bridge 只读账户没有私钥，且 Polymtrade 的 Magic 钱包实际代理地址
-                        // 与 PolyHermes 计算的代理地址可能不一致，因此通过 Bridge 交易记录计算净仓位
-                        if (account.isReadOnly && isBridgePositionSourceAccount(account, runtimeWallet, bridgeRuntimeAccountId)) {
-                            val bridgePositions = bridgePositionService.getPositionsForAccount(account)
-                            currentPositions.addAll(bridgePositions)
-                            return@forEach
+                        // 与 PolyHermes 计算的代理地址可能不一致，因此优先按 wallet_address
+                        // 读取该钱包自己的 Bridge 快照。只有当前 Bridge 会话账户才允许回退到
+                        // 全局 bridge_trade_record，避免把当前钱包仓位误挂到其他 Magic 账户。
+                        if (account.isReadOnly) {
+                            val snapshotPositions = bridgePositionService.getSnapshotPositionsForAccount(account)
+                            if (snapshotPositions.isNotEmpty()) {
+                                currentPositions.addAll(snapshotPositions)
+                                return@forEach
+                            }
+
+                            if (isBridgePositionSourceAccount(account, runtimeWallet, bridgeRuntimeAccountId)) {
+                                val bridgePositions = bridgePositionService.getPositionsForAccount(account)
+                                currentPositions.addAll(bridgePositions)
+                                return@forEach
+                            }
                         }
 
                         // 查询所有仓位（不限制 sortBy，获取当前和历史仓位）

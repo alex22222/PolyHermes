@@ -36,17 +36,9 @@ class BridgePositionService(
      */
     suspend fun getPositionsForAccount(account: Account): List<AccountPositionDto> {
         return try {
-            val normalizedWallet = account.walletAddress.lowercase().takeIf { it.isNotBlank() }
-            val snapshots = if (normalizedWallet != null) {
-                bridgePositionSnapshotRepository.findByBridgeIdAndWalletAddress(bridgeId, normalizedWallet)
-            } else {
-                emptyList()
-            }
-            if (snapshots.isNotEmpty()) {
-                snapshots.map { snapshot ->
-                    val market = snapshot.marketId?.let { marketRepository.findByMarketId(it) }
-                    snapshotToPositionDto(account, snapshot, market)
-                }
+            val snapshotPositions = getSnapshotPositionsForAccount(account)
+            if (snapshotPositions.isNotEmpty()) {
+                snapshotPositions
             } else {
                 logger.info("Bridge 持仓快照为空，回退到 trade record 计算: accountId=${account.id}")
                 calculateFromTradeRecords(account)
@@ -54,6 +46,22 @@ class BridgePositionService(
         } catch (e: Exception) {
             logger.error("计算 Bridge 仓位失败: accountId=${account.id}", e)
             emptyList()
+        }
+    }
+
+    /**
+     * 只从 Bridge 持仓快照读取指定钱包仓位，不回退到全局 bridge_trade_record。
+     *
+     * 仓位管理页会遍历多个 Magic/Bridge 账户；如果某个钱包没有快照，
+     * 不能把当前 Bridge 浏览器账户的交易记录错误归属给它。
+     */
+    suspend fun getSnapshotPositionsForAccount(account: Account): List<AccountPositionDto> {
+        val normalizedWallet = account.walletAddress.lowercase().takeIf { it.isNotBlank() }
+            ?: return emptyList()
+        val snapshots = bridgePositionSnapshotRepository.findByBridgeIdAndWalletAddress(bridgeId, normalizedWallet)
+        return snapshots.map { snapshot ->
+            val market = snapshot.marketId?.let { marketRepository.findByMarketId(it) }
+            snapshotToPositionDto(account, snapshot, market)
         }
     }
 
