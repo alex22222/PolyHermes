@@ -1,5 +1,6 @@
 package com.wrbug.polymarketbot.util
 
+import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
 import java.nio.charset.StandardCharsets
@@ -16,102 +17,140 @@ import javax.crypto.spec.SecretKeySpec
  */
 @Component
 class CryptoUtils {
-    
+
+    private val logger = LoggerFactory.getLogger(CryptoUtils::class.java)
+
     @Value("\${encryption.key:\${jwt.secret}}")
     private lateinit var encryptionKey: String
-    
+
+    /**
+     * 历史密钥（用于兼容旧数据）。
+     * 当主密钥无法解密时，会尝试用 legacy key 解密。
+     */
+    @Value("\${encryption.key.legacy:}")
+    private lateinit var legacyEncryptionKey: String
+
     private val ALGORITHM = "AES"
     // 使用 AES/CBC/PKCS5Padding 模式，明确支持 AES-256
     // 注意：如果 JVM 不支持 256 位密钥，可能需要安装 JCE 无限强度策略文件
     private val TRANSFORMATION = "AES/CBC/PKCS5Padding"
-    
+
     /**
-     * 获取加密密钥（从配置的密钥派生 32 字节密钥）
-     * 
-     * 支持任意长度的密钥：
-     * - 如果密钥是十六进制字符串（64 字符或更长），会解析为字节数组
-     * - 如果是普通字符串，会使用 UTF-8 编码转换为字节数组
-     * - 无论输入多长，都会通过 SHA-256 哈希成固定的 32 字节（256 位）
-     * 
-     * 这样设计的好处：
-     * 1. 支持任意长度的密钥（短密钥、长密钥都可以）
-     * 2. 确保密钥长度固定为 32 字节，满足 AES-256 要求
-     * 3. 即使密钥很短，通过哈希后也能提供足够的安全性
+     * 从任意字符串派生 32 字节 AES 密钥。
+     * 支持十六进制字符串或普通 UTF-8 字符串，最终都经 SHA-256 哈希。
      */
-    private fun getSecretKey(): SecretKeySpec {
-        val keyBytes = if (encryptionKey.length >= 64 && encryptionKey.matches(Regex("^[0-9a-fA-F]+$"))) {
+    private fun getSecretKey(rawKey: String): SecretKeySpec {
+        val keyBytes = if (rawKey.length >= 64 && rawKey.matches(Regex("^[0-9a-fA-F]+$"))) {
             // 十六进制字符串，解析为字节数组
-            encryptionKey.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            rawKey.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         } else {
             // 普通字符串，使用 UTF-8 编码
-            encryptionKey.toByteArray(StandardCharsets.UTF_8)
+            rawKey.toByteArray(StandardCharsets.UTF_8)
         }
-        
+
         // 使用 SHA-256 哈希确保密钥长度为 32 字节（256 位）
-        // 无论输入密钥多长，都会哈希成固定的 32 字节
         val messageDigest = MessageDigest.getInstance("SHA-256")
         messageDigest.update(keyBytes)
         val hash = messageDigest.digest()
-        
+
         return SecretKeySpec(hash, ALGORITHM)
     }
-    
+
+    /**
+     * 用指定原始密钥解密。
+     */
+    private fun decryptWithKey(encryptedText: String, rawKey: String): String {
+        val combined = Base64.getDecoder().decode(encryptedText)
+
+        // 提取 IV（前 16 字节）和加密数据
+        val iv = ByteArray(16)
+        System.arraycopy(combined, 0, iv, 0, 16)
+        val encryptedBytes = ByteArray(combined.size - 16)
+        System.arraycopy(combined, 16, encryptedBytes, 0, encryptedBytes.size)
+
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        val secretKey = getSecretKey(rawKey)
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, IvParameterSpec(iv))
+        val decryptedBytes = cipher.doFinal(encryptedBytes)
+
+        return String(decryptedBytes, StandardCharsets.UTF_8)
+    }
+
     /**
      * 加密数据
      * 使用 AES-256/CBC/PKCS5Padding 模式
-     * 
+     *
      * @param plainText 明文
      * @return Base64 编码的密文（包含 IV）
      */
     fun encrypt(plainText: String): String {
         return try {
             val cipher = Cipher.getInstance(TRANSFORMATION)
-            val secretKey = getSecretKey()
+            val secretKey = getSecretKey(encryptionKey)
             cipher.init(Cipher.ENCRYPT_MODE, secretKey)
-            
+
             // 获取 IV（初始化向量）
             val iv = cipher.iv
             val encryptedBytes = cipher.doFinal(plainText.toByteArray(StandardCharsets.UTF_8))
-            
+
             // 将 IV 和加密数据组合：IV (16 字节) + 加密数据
             val combined = ByteArray(iv.size + encryptedBytes.size)
             System.arraycopy(iv, 0, combined, 0, iv.size)
             System.arraycopy(encryptedBytes, 0, combined, iv.size, encryptedBytes.size)
-            
+
             Base64.getEncoder().encodeToString(combined)
         } catch (e: Exception) {
             throw RuntimeException("加密失败: ${e.message}", e)
         }
     }
-    
+
     /**
-     * 解密数据
-     * 使用 AES-256/CBC/PKCS5Padding 模式
-     * 
+     * 解密数据。
+     * 优先使用当前主密钥；失败后如配置了 legacy key，则尝试用 legacy key 解密。
+     *
      * @param encryptedText Base64 编码的密文（包含 IV）
      * @return 明文
+     * @throws RuntimeException 主密钥和 legacy key 均无法解密
      */
     fun decrypt(encryptedText: String): String {
         return try {
-            val combined = Base64.getDecoder().decode(encryptedText)
-            
-            // 提取 IV（前 16 字节）和加密数据
-            val iv = ByteArray(16)
-            System.arraycopy(combined, 0, iv, 0, 16)
-            val encryptedBytes = ByteArray(combined.size - 16)
-            System.arraycopy(combined, 16, encryptedBytes, 0, encryptedBytes.size)
-            
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            val secretKey = getSecretKey()
-            cipher.init(Cipher.DECRYPT_MODE, secretKey, IvParameterSpec(iv))
-            val decryptedBytes = cipher.doFinal(encryptedBytes)
-            
-            String(decryptedBytes, StandardCharsets.UTF_8)
+            decryptWithKey(encryptedText, encryptionKey)
         } catch (e: Exception) {
+            if (legacyEncryptionKey.isNotBlank()) {
+                try {
+                    return decryptWithKey(encryptedText, legacyEncryptionKey).also {
+                        logger.info("使用 legacy key 成功解密数据")
+                    }
+                } catch (legacyEx: Exception) {
+                    // fall through to throw original exception
+                }
+            }
             throw RuntimeException("解密失败: ${e.message}", e)
         }
     }
-    
+
+    /**
+     * 安全解密：尝试当前 key 和 legacy key，失败返回 null 并只记录一行 warn（无堆栈）。
+     * 用于周期性轮询等高频调用，避免密钥不一致时刷爆日志。
+     *
+     * @param encryptedText 密文，null/blank 时返回 null
+     * @param context 日志上下文，例如 "privateKey accountId=1"
+     * @return 明文或 null
+     */
+    fun safeDecrypt(encryptedText: String?, context: String = ""): String? {
+        if (encryptedText.isNullOrBlank()) return null
+        return try {
+            decrypt(encryptedText)
+        } catch (e: Exception) {
+            if (context.isNotBlank()) {
+                logger.warn("解密失败，跳过处理 [{}]: {}", context, e.message)
+            } else {
+                logger.warn("解密失败，跳过处理: {}", e.message)
+            }
+            null
+        }
+    }
+
     /**
      * 检查字符串是否为加密后的数据（Base64 格式）
      * 注意：这不是完全可靠的检测方法，仅用于向后兼容
@@ -127,4 +166,3 @@ class CryptoUtils {
         }
     }
 }
-

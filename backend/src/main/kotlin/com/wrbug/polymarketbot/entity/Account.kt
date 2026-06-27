@@ -45,10 +45,13 @@ data class Account(
     
     @Column(name = "wallet_type", nullable = false, length = 20)
     val walletType: String = "magic",  // 钱包类型：magic（邮箱/OAuth登录）或 safe（MetaMask浏览器钱包）
-    
+
+    @Column(name = "credentials_valid", nullable = false)
+    var credentialsValid: Boolean = true,  // 加密凭证是否可用（解密失败时自动标记为 false）
+
     @Column(name = "created_at", nullable = false)
     val createdAt: Long = System.currentTimeMillis(),
-    
+
     @Column(name = "updated_at", nullable = false)
     var updatedAt: Long = System.currentTimeMillis()
 )

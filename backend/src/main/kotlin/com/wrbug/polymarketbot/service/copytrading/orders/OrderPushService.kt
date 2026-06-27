@@ -170,31 +170,19 @@ class OrderPushService(
     }
     
     /**
-     * 解密账户 API Secret
+     * 解密账户 API Secret。失败不抛堆栈，只返回 null。
      */
-    private fun decryptApiSecret(account: Account): String {
-        return account.apiSecret?.let { secret ->
-            try {
-                cryptoUtils.decrypt(secret)
-            } catch (e: Exception) {
-                logger.error("解密 API Secret 失败: accountId=${account.id}", e)
-                throw RuntimeException("解密 API Secret 失败: ${e.message}", e)
-            }
-        } ?: throw IllegalStateException("账户未配置 API Secret")
+    private fun decryptApiSecret(account: Account): String? {
+        val secret = account.apiSecret ?: return null
+        return cryptoUtils.safeDecrypt(secret, "apiSecret accountId=${account.id}")
     }
-    
+
     /**
-     * 解密账户 API Passphrase
+     * 解密账户 API Passphrase。失败不抛堆栈，只返回 null。
      */
-    private fun decryptApiPassphrase(account: Account): String {
-        return account.apiPassphrase?.let { passphrase ->
-            try {
-                cryptoUtils.decrypt(passphrase)
-            } catch (e: Exception) {
-                logger.error("解密 API Passphrase 失败: accountId=${account.id}", e)
-                throw RuntimeException("解密 API Passphrase 失败: ${e.message}", e)
-            }
-        } ?: throw IllegalStateException("账户未配置 API Passphrase")
+    private fun decryptApiPassphrase(account: Account): String? {
+        val passphrase = account.apiPassphrase ?: return null
+        return cryptoUtils.safeDecrypt(passphrase, "apiPassphrase accountId=${account.id}")
     }
 
     /**
@@ -281,19 +269,13 @@ class OrderPushService(
     private fun sendSubscribeMessage(client: PolymarketWebSocketClient, account: Account) {
         try {
             // 解密 API 凭证
-            val apiSecret = try {
-                decryptApiSecret(account)
-            } catch (e: Exception) {
-                logger.error("解密 API 凭证失败，无法发送订阅消息: accountId=${account.id}, error=${e.message}")
+            val apiSecret = decryptApiSecret(account)
+            val apiPassphrase = decryptApiPassphrase(account)
+            if (apiSecret == null || apiPassphrase == null) {
+                logger.warn("API 凭证解密失败，跳过订阅消息: accountId=${account.id}")
                 return
             }
-            val apiPassphrase = try {
-                decryptApiPassphrase(account)
-            } catch (e: Exception) {
-                logger.error("解密 API 凭证失败，无法发送订阅消息: accountId=${account.id}, error=${e.message}")
-                return
-            }
-            
+
             val subscribeMessage = mapOf(
                 "auth" to mapOf(
                     "apiKey" to account.apiKey,
@@ -405,19 +387,13 @@ class OrderPushService(
             
             // 通过 com.wrbug.polymarketbot.service.common.PolymarketClobService 获取订单详情（需要 L2 认证）
             // 解密 API 凭证
-            val apiSecret = try {
-                decryptApiSecret(account)
-            } catch (e: Exception) {
-                logger.error("解密 API 凭证失败，无法获取订单详情: accountId=${account.id}, error=${e.message}")
+            val apiSecret = decryptApiSecret(account)
+            val apiPassphrase = decryptApiPassphrase(account)
+            if (apiSecret == null || apiPassphrase == null) {
+                logger.warn("解密 API 凭证失败，无法获取订单详情: accountId=${account.id}")
                 return null
             }
-            val apiPassphrase = try {
-                decryptApiPassphrase(account)
-            } catch (e: Exception) {
-                logger.error("解密 API 凭证失败，无法获取订单详情: accountId=${account.id}, error=${e.message}")
-                return null
-            }
-            
+
             val result = clobService.getOrder(
                 orderId = orderId,
                 apiKey = account.apiKey!!,
