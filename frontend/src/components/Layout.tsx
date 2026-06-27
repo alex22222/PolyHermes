@@ -178,6 +178,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       label: t('menu.positions')
     },
     {
+      key: '/bridge-trade-records',
+      icon: <SwapOutlined />,
+      label: t('menu.bridgeTradeRecords') || '桥接交易记录'
+    },
+    {
       key: '/statistics',
       icon: <BarChartOutlined />,
       label: t('menu.statistics')
@@ -186,11 +191,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       key: '/optimization-daily',
       icon: <DashboardOutlined />,
       label: t('menu.optimizationDaily') || '优化点日报'
-    },
-    {
-      key: '/bridge-trade-records',
-      icon: <SwapOutlined />,
-      label: t('menu.bridgeTradeRecords') || '桥接交易记录'
     },
     {
       key: '/crypto-tail-management',
