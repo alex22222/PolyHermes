@@ -5,6 +5,7 @@ import com.wrbug.polymarketbot.entity.LeaderScannerCandidatePool
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.repository.LeaderScannerCandidatePoolRepository
 import com.wrbug.polymarketbot.service.copytrading.leaders.LeaderResearchScoreAdapterService
+import com.wrbug.polymarketbot.service.copytrading.leaders.LeaderScannerAsyncService
 import com.wrbug.polymarketbot.service.copytrading.leaders.LeaderScannerService
 import com.wrbug.polymarketbot.util.CategoryValidator
 import org.slf4j.LoggerFactory
@@ -22,6 +23,7 @@ import org.springframework.web.bind.annotation.*
 @RequestMapping("/api/copy-trading/leaders/scan")
 class LeaderScannerController(
     private val leaderScannerService: LeaderScannerService,
+    private val leaderScannerAsyncService: LeaderScannerAsyncService,
     private val candidatePoolRepository: LeaderScannerCandidatePoolRepository,
     private val researchScoreAdapterService: LeaderResearchScoreAdapterService,
     private val messageSource: MessageSource
@@ -38,7 +40,8 @@ class LeaderScannerController(
     }
 
     /**
-     * 触发手动扫描（发现 + 分析 + 持久化 + 研究评分）
+     * 触发手动扫描（发现 + 分析 + 持久化 + 研究评分）。
+     * 扫描是长耗时任务，改为后台异步执行，接口立即返回“已提交”。
      */
     @PostMapping("/run")
     fun runScan(@RequestBody request: LeaderScanTriggerRequest): ResponseEntity<ApiResponse<LeaderScanBatchResponse>> {
@@ -47,28 +50,30 @@ class LeaderScannerController(
                 return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, msg, messageSource))
             }
 
-            val result = leaderScannerService.scan(
+            val (running, _, _) = leaderScannerService.getStatus()
+            if (running) {
+                return ResponseEntity.ok(ApiResponse.success(
+                    LeaderScanBatchResponse(
+                        success = true,
+                        message = "扫描任务正在运行中，请稍后再试"
+                    )
+                ))
+            }
+
+            // 提交到后台线程池，不阻塞 HTTP 响应
+            leaderScannerAsyncService.submitScan(
                 targetCategory = request.category,
                 dryRun = request.dryRun
             )
 
-            // 非 dryRun 时，为所有 Leader 计算研究模块评分
-            if (result.success && !request.dryRun) {
-                try {
-                    val scoredCount = researchScoreAdapterService.scoreAllLeaders()
-                    logger.info("扫描完成后为 {} 个 Leader 计算研究评分", scoredCount)
-                } catch (e: Exception) {
-                    logger.warn("扫描完成后研究评分失败: {}", e.message)
-                }
-            }
-
-            if (result.success) {
-                ResponseEntity.ok(ApiResponse.success(result))
-            } else {
-                ResponseEntity.ok(ApiResponse.error(ErrorCode.BUSINESS_ERROR, result.message, messageSource))
-            }
+            ResponseEntity.ok(ApiResponse.success(
+                LeaderScanBatchResponse(
+                    success = true,
+                    message = "扫描任务已提交，将在后台执行，请通过 /status 查询进度"
+                )
+            ))
         } catch (e: Exception) {
-            logger.error("扫描任务异常: ${e.message}", e)
+            logger.error("提交扫描任务异常: ${e.message}", e)
             ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
         }
     }
