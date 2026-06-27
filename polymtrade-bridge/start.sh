@@ -17,10 +17,28 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
 fi
 
 export BROWSER_PROXY="${BROWSER_PROXY:-http://127.0.0.1:7890}"
+export BRIDGE_PORT="${BRIDGE_PORT:-8080}"
 
 source "$VENV/bin/activate"
 cd "$SCRIPT_DIR"
 mkdir -p "$LOG_DIR"
+
+# Port ownership check: fail fast if BRIDGE_PORT is held by a non-Bridge process.
+# This prevents a silent mis-routing where backend calls /portfolio hit the wrong service.
+PORT_PIDS=$(lsof -i ":$BRIDGE_PORT" -t 2>/dev/null || true)
+if [[ -n "$PORT_PIDS" ]]; then
+    for PID in $PORT_PIDS; do
+        CMD=$(ps -p "$PID" -o command= 2>/dev/null || true)
+        if echo "$CMD" | grep -qE "polymtrade-bridge|main\.py|uvicorn"; then
+            echo "Port $BRIDGE_PORT is held by a stale Bridge process (pid $PID); stopping it..."
+            kill -9 "$PID" 2>/dev/null || true
+        else
+            echo "ERROR: Port $BRIDGE_PORT is already used by a non-Bridge process (pid $PID): $CMD"
+            echo "Refusing to start Polymtrade Bridge. Free the port or set BRIDGE_PORT to another value."
+            exit 1
+        fi
+    done
+fi
 
 stop_children() {
     if [[ -f "$LOG_DIR/polymtrade-bridge.pid" ]]; then

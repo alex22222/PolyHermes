@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -1462,6 +1463,72 @@ def _short_cycle_duplicate_buy_reason(
     return None
 
 
+def _get_pids_listening_on_port(port: int) -> list[int]:
+    """Return PIDs that currently listen on the given TCP port."""
+    try:
+        output = subprocess.check_output(
+            ["lsof", "-i", f":{port}", "-t"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return [int(p.strip()) for p in output.strip().split("\n") if p.strip().isdigit()]
+    except Exception:
+        return []
+
+
+def _is_bridge_process(pid: int) -> bool:
+    """Heuristic: is this PID a Bridge (or uvicorn serving main.py)?"""
+    try:
+        cmd = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "command="],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return any(keyword in cmd for keyword in ("polymtrade-bridge", "main.py", "uvicorn"))
+    except Exception:
+        return False
+
+
+def enforce_unique_bridge_port() -> int:
+    """
+    Before binding, ensure the configured port is not stolen by a non-Bridge service.
+    If a stale Bridge instance holds the port, kill it. If a foreign service holds it,
+    fail loudly and refuse to start.
+    """
+    port = int(os.environ.get("BRIDGE_PORT", "8080"))
+    my_pid = os.getpid()
+    for pid in _get_pids_listening_on_port(port):
+        if pid == my_pid:
+            continue
+        if _is_bridge_process(pid):
+            logger.warning(
+                "Port %s is held by a stale Bridge process (pid %s); killing it.",
+                port,
+                pid,
+            )
+            try:
+                os.kill(pid, 9)
+            except Exception as e:
+                logger.error("Failed to kill stale Bridge pid %s: %s", pid, e)
+        else:
+            foreign_cmd = subprocess.check_output(
+                ["ps", "-p", str(pid), "-o", "command="],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            logger.error(
+                "FATAL: Port %s is already used by a non-Bridge process (pid %s): %s",
+                port,
+                pid,
+                foreign_cmd,
+            )
+            sys.exit(1)
+    return port
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+
+    BRIDGE_PORT = enforce_unique_bridge_port()
+    logger.info("Starting PolyHermes → Polymtrade Bridge on port %s", BRIDGE_PORT)
+    uvicorn.run(app, host="0.0.0.0", port=BRIDGE_PORT)
