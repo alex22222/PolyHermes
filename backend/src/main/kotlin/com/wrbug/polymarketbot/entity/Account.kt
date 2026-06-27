@@ -49,6 +49,9 @@ data class Account(
     @Column(name = "credentials_valid", nullable = false)
     var credentialsValid: Boolean = true,  // 加密凭证是否可用（解密失败时自动标记为 false）
 
+    @Column(name = "last_bridge_sync_at", nullable = false)
+    var lastBridgeSyncAt: Long = 0,  // 该钱包最后一次被 Bridge 同步持仓的时间戳（毫秒）
+
     @Column(name = "created_at", nullable = false)
     val createdAt: Long = System.currentTimeMillis(),
 

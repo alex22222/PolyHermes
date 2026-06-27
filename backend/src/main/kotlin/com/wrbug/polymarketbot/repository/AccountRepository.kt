@@ -18,6 +18,16 @@ interface AccountRepository : JpaRepository<Account, Long> {
      * 根据钱包地址查找账户
      */
     fun findByWalletAddress(walletAddress: String): Account?
+
+    /**
+     * 根据钱包地址查找账户（忽略大小写）
+     */
+    fun findByWalletAddressIgnoreCase(walletAddress: String): Account?
+
+    /**
+     * 根据代理地址查找账户（忽略大小写）
+     */
+    fun findByProxyAddressIgnoreCase(proxyAddress: String): Account?
     
     /**
      * 查找默认账户

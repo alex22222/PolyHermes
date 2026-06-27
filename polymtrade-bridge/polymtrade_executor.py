@@ -31,6 +31,12 @@ class PolymtradeExecutor:
         self.last_error: Optional[str] = None
         self._ready = False
         self._logged_in = False
+        self._last_portfolio_synced_at: int = 0
+        self._cached_wallet_address: Optional[str] = None
+        self._cached_wallet_at: int = 0
+        # Wallet address changes rarely; cache aggressively to keep /account fast
+        # and avoid blocking behind /portfolio scrapes.
+        self._wallet_cache_ttl_ms: int = 300000
 
     async def start(self):
         """Start browser and load Polymtrade."""
@@ -112,6 +118,21 @@ class PolymtradeExecutor:
     def is_logged_in(self) -> bool:
         return self._logged_in
 
+    @property
+    def last_portfolio_synced_at(self) -> int:
+        return self._last_portfolio_synced_at
+
+    @property
+    def cached_wallet_address(self) -> Optional[str]:
+        """Return the last known wallet address without navigating.
+
+        Suitable for callers that need a quick snapshot and should not block on
+        page navigation (e.g. the /account endpoint while /portfolio is scraping).
+        """
+        if self._cached_wallet_address and (time.time() * 1000 - self._cached_wallet_at) < self._wallet_cache_ttl_ms:
+            return self._cached_wallet_address
+        return None
+
     async def _detect_login_state(self, timeout: int = 5000) -> bool:
         """Detect if user is logged in by looking for wallet/balance elements."""
         try:
@@ -177,9 +198,17 @@ class PolymtradeExecutor:
             text = await self.page.inner_text("body", timeout=5000)
             ref_match = re.search(r'[?&]ref=(0x[a-fA-F0-9]{40})', text)
             if ref_match:
-                return ref_match.group(1).lower()
+                address = ref_match.group(1).lower()
+                self._cached_wallet_address = address
+                self._cached_wallet_at = int(time.time() * 1000)
+                return address
             addresses = re.findall(r'0x[a-fA-F0-9]{40}', text)
-            return addresses[0].lower() if addresses else None
+            if addresses:
+                address = addresses[0].lower()
+                self._cached_wallet_address = address
+                self._cached_wallet_at = int(time.time() * 1000)
+                return address
+            return None
         except Exception as e:
             logger.warning(f"Failed to extract wallet address: {e}")
             return None
@@ -414,9 +443,17 @@ class PolymtradeExecutor:
                     continue
                 pos.update(meta)
 
+            # Filter out positions with missing critical fields to avoid phantom holdings.
+            valid_positions = [pos for pos in positions if validate_portfolio_position(pos)]
+
+            synced_at = int(time.time() * 1000)
+            self._last_portfolio_synced_at = synced_at
+            wallet_address = await self.get_wallet_address()
+
             return {
-                "positions": positions,
-                "synced_at": int(time.time() * 1000),
+                "positions": valid_positions,
+                "synced_at": synced_at,
+                "wallet_address": wallet_address,
             }
         except Exception as e:
             logger.exception(f"Failed to fetch portfolio positions: {e}")
@@ -3937,3 +3974,24 @@ class PolymtradeExecutor:
         except Exception as e:
             logger.warning(f"SELL verification failed with exception: {e}")
             return False
+
+
+def validate_portfolio_position(position: dict) -> bool:
+    """Return True only if a scraped position has the critical fields needed by the backend.
+
+    Bridge scrapes frequently return null/missing values. Passing incomplete rows to the
+    backend creates phantom zero-quantity holdings, so we drop them here and log a warning.
+    """
+    title = position.get("marketTitle")
+    side = position.get("side")
+    quantity = position.get("quantity")
+    if not title or not isinstance(title, str) or not title.strip():
+        logger.warning(f"Dropping invalid portfolio position (missing title): {position}")
+        return False
+    if not side or not isinstance(side, str) or not side.strip():
+        logger.warning(f"Dropping invalid portfolio position (missing side): {position}")
+        return False
+    if not isinstance(quantity, (int, float)) or quantity <= 0:
+        logger.warning(f"Dropping invalid portfolio position (bad quantity): {position}")
+        return False
+    return True

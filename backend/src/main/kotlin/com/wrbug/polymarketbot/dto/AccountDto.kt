@@ -117,6 +117,7 @@ data class BridgeCurrentAccountStatusResponse(
     val matched: Boolean = false,
     val copyTradingAccountId: Long? = null,
     val copyTradingConfigCount: Int = 0,
+    val syncedAt: Long? = null,
     val lastError: String? = null
 )
 
@@ -141,6 +142,7 @@ data class AccountDto(
     val apiKeyConfigured: Boolean,  // API Key 是否已配置（不返回实际 Key）
     val apiSecretConfigured: Boolean,  // API Secret 是否已配置
     val apiPassphraseConfigured: Boolean,  // API Passphrase 是否已配置
+    val lastBridgeSyncAt: Long? = null,  // 该钱包最后一次被 Bridge 同步持仓的时间戳（毫秒）
     val balance: String? = null,  // 账户余额（可选）
     val totalOrders: Long? = null,  // 总订单数（可选）
     val totalPnl: String? = null,  // 总盈亏（可选）

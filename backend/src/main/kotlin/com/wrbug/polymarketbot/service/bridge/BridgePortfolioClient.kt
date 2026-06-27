@@ -264,7 +264,8 @@ class BridgePortfolioClient(
         @SerializedName("logged_in") val loggedIn: Boolean = false,
         @SerializedName("last_error") val lastError: String? = null,
         @SerializedName("copy_trading_account_id") val copyTradingAccountId: Long? = null,
-        @SerializedName("copy_trading_config_count") val copyTradingConfigCount: Int = 0
+        @SerializedName("copy_trading_config_count") val copyTradingConfigCount: Int = 0,
+        @SerializedName("synced_at") val syncedAt: Long? = null
     )
 
     data class BridgeSelectAccountResponse(

@@ -162,6 +162,7 @@ def bridge_runtime_status() -> dict[str, Any]:
         "last_error": executor.last_error if executor else "executor not initialized",
         "copy_trading_account_id": rule_engine.active_account_id if rule_engine else None,
         "copy_trading_config_count": rule_engine.config_count if rule_engine else 0,
+        "synced_at": executor.last_portfolio_synced_at if executor else None,
     }
 
 
@@ -377,6 +378,11 @@ async def account_info():
 
     Used by PolyHermes backend to link this Bridge account as a read-only
     position-management account.
+
+    This endpoint is called very frequently (account list, positions list,
+    balance queries). To avoid blocking behind /portfolio scrapes, it first
+    returns a cached wallet address if available; only if missing/stale does it
+    navigate to /portfolio to refresh.
     """
     if not executor or not executor.is_ready():
         raise HTTPException(status_code=503, detail="Executor not ready")
@@ -384,6 +390,16 @@ async def account_info():
         raise HTTPException(status_code=401, detail="Not logged in")
 
     try:
+        # Fast path: return cached address without touching the page.
+        cached = executor.cached_wallet_address
+        if cached:
+            return {
+                "wallet_address": cached,
+                "wallet_type": "magic",  # cached path cannot reliably infer wallet type
+                "source": "cache",
+            }
+
+        # Slow path: navigate to portfolio and refresh cache.
         async with _trade_lock:
             async with _portfolio_lock:
                 address = await executor.get_wallet_address()

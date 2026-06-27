@@ -1,6 +1,8 @@
 package com.wrbug.polymarketbot.service.accounts
 
+import com.wrbug.polymarketbot.entity.Account
 import com.wrbug.polymarketbot.entity.BridgePositionSnapshot
+import com.wrbug.polymarketbot.repository.AccountRepository
 import com.wrbug.polymarketbot.repository.BridgePositionSnapshotRepository
 import com.wrbug.polymarketbot.repository.MarketRepository
 import com.wrbug.polymarketbot.service.bridge.BridgePortfolioClient
@@ -21,7 +23,8 @@ import java.math.RoundingMode
 class BridgePortfolioSyncService(
     private val bridgePortfolioClient: BridgePortfolioClient,
     private val bridgePositionSnapshotRepository: BridgePositionSnapshotRepository,
-    private val marketRepository: MarketRepository
+    private val marketRepository: MarketRepository,
+    private val accountRepository: AccountRepository
 ) {
 
     private val logger = LoggerFactory.getLogger(BridgePortfolioSyncService::class.java)
@@ -46,6 +49,15 @@ class BridgePortfolioSyncService(
             return
         }
 
+        val validPositions = positions.filter { isValidPosition(it) }
+        if (validPositions.size < positions.size) {
+            logger.warn("Bridge /portfolio 返回 ${positions.size} 条持仓，过滤掉 ${positions.size - validPositions.size} 条非法数据")
+        }
+        if (validPositions.isEmpty()) {
+            logger.debug("Bridge /portfolio 无有效持仓，跳过同步")
+            return
+        }
+
         val syncedAt = response.syncedAt ?: System.currentTimeMillis()
         val existing = bridgePositionSnapshotRepository.findByBridgeIdAndWalletAddress(bridgeId, walletAddress)
             .associateBy { it.marketTitle to it.side.uppercase() }
@@ -53,13 +65,13 @@ class BridgePortfolioSyncService(
 
         val availableBalance = bridgePortfolioClient.fetchBalance()?.availableBalance
 
-        val incomingTitles = positions.map { it.marketTitle }.distinct()
+        val incomingTitles = validPositions.map { it.marketTitle }.distinct()
         val markets = marketRepository.findByTitleIn(incomingTitles)
             .associateBy { it.title }
 
         val now = System.currentTimeMillis()
 
-        for (position in positions) {
+        for (position in validPositions) {
             val side = position.side.uppercase()
             val market = markets[position.marketTitle]
             val snapshot = existing.remove(position.marketTitle to side)
@@ -92,6 +104,44 @@ class BridgePortfolioSyncService(
             logger.info("清理已平仓快照: count=${existing.size}")
         }
 
-        logger.info("Bridge 持仓同步完成: count=${positions.size}, syncedAt=$syncedAt")
+        // 更新该钱包对应账户的最后同步时间
+        updateAccountLastBridgeSyncAt(walletAddress, syncedAt, now)
+
+        logger.info("Bridge 持仓同步完成: count=${validPositions.size}, syncedAt=$syncedAt, wallet=$walletAddress")
+    }
+
+    /**
+     * 校验 Bridge 持仓字段是否合法。
+     * Bridge 抓页面数据经常有 null，必须过滤掉关键字段缺失的数据，避免误报持仓。
+     */
+    private fun isValidPosition(position: BridgePortfolioClient.BridgePortfolioPosition): Boolean {
+        if (position.marketTitle.isBlank()) {
+            logger.warn("Bridge 持仓缺失 marketTitle，丢弃: $position")
+            return false
+        }
+        if (position.side.isBlank()) {
+            logger.warn("Bridge 持仓缺失 side，丢弃: marketTitle=${position.marketTitle}")
+            return false
+        }
+        if (position.quantity.isNaN() || position.quantity <= 0) {
+            logger.warn("Bridge 持仓 quantity 非法，丢弃: marketTitle=${position.marketTitle}, quantity=${position.quantity}")
+            return false
+        }
+        return true
+    }
+
+    private fun updateAccountLastBridgeSyncAt(walletAddress: String, syncedAt: Long, now: Long) {
+        try {
+            val account = accountRepository.findByWalletAddressIgnoreCase(walletAddress)
+                ?: accountRepository.findByProxyAddressIgnoreCase(walletAddress)
+            if (account != null) {
+                account.lastBridgeSyncAt = syncedAt
+                account.updatedAt = now
+                accountRepository.save(account)
+                logger.debug("更新账户最后 Bridge 同步时间: accountId=${account.id}, syncedAt=$syncedAt")
+            }
+        } catch (e: Exception) {
+            logger.warn("更新账户最后 Bridge 同步时间失败: wallet=$walletAddress", e)
+        }
     }
 }

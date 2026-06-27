@@ -73,6 +73,7 @@ export interface Account {
   apiKeyConfigured: boolean
   apiSecretConfigured: boolean
   apiPassphraseConfigured: boolean
+  lastBridgeSyncAt?: number
   balance?: string
   totalOrders?: number
   totalPnl?: string

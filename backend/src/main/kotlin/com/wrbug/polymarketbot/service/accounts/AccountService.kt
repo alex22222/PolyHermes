@@ -823,6 +823,7 @@ class AccountService(
                     matched = matchedAccount != null,
                     copyTradingAccountId = status?.copyTradingAccountId,
                     copyTradingConfigCount = status?.copyTradingConfigCount ?: 0,
+                    syncedAt = status?.syncedAt,
                     lastError = status?.lastError
                 )
             )
@@ -1020,6 +1021,7 @@ class AccountService(
             apiKeyConfigured = account.apiKey != null,
             apiSecretConfigured = account.apiSecret != null,
             apiPassphraseConfigured = account.apiPassphrase != null,
+            lastBridgeSyncAt = account.lastBridgeSyncAt.takeIf { it > 0 },
             totalOrders = null,
             totalPnl = null,
             activeOrders = null,
@@ -1046,6 +1048,7 @@ class AccountService(
                 apiKeyConfigured = account.apiKey != null,
                 apiSecretConfigured = account.apiSecret != null,
                 apiPassphraseConfigured = account.apiPassphrase != null,
+                lastBridgeSyncAt = account.lastBridgeSyncAt.takeIf { it > 0 },
                 totalOrders = statistics.totalOrders,
                 totalPnl = statistics.totalPnl,
                 activeOrders = statistics.activeOrders,

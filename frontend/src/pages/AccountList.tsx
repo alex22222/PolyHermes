@@ -101,6 +101,54 @@ const AccountList: React.FC = () => {
     return wallet === account.walletAddress?.toLowerCase() || wallet === account.proxyAddress?.toLowerCase()
   }
 
+  const formatLastSyncTime = (ts?: number) => {
+    if (!ts || ts <= 0) return '未同步'
+    const date = new Date(ts)
+    const now = Date.now()
+    const diff = Math.max(0, now - ts)
+    const minutes = Math.floor(diff / 60000)
+    const hours = Math.floor(diff / 3600000)
+    if (minutes < 1) return '刚刚'
+    if (minutes < 60) return `${minutes} 分钟前`
+    if (hours < 24) return `${hours} 小时前`
+    return date.toLocaleString()
+  }
+
+  const renderBridgeStatus = (account: Account) => {
+    const isCurrent = isBridgeCurrentAccount(account)
+    if (isCurrent) {
+      return (
+        <div style={{ lineHeight: 1.4 }}>
+          <Tag color="success">当前登录</Tag>
+          <div style={{ fontSize: 12, color: '#8c8c8c', marginTop: 2 }}>
+            同步于 {formatLastSyncTime(bridgeStatus?.syncedAt)}
+          </div>
+        </div>
+      )
+    }
+    if (account.readOnly) {
+      return (
+        <div style={{ lineHeight: 1.4 }}>
+          <Tag color="default">未登录</Tag>
+          <div style={{ fontSize: 12, color: '#8c8c8c', marginTop: 2 }}>
+            上次快照: {formatLastSyncTime(account.lastBridgeSyncAt)}
+          </div>
+        </div>
+      )
+    }
+    if (account.lastBridgeSyncAt && account.lastBridgeSyncAt > 0) {
+      return (
+        <div style={{ lineHeight: 1.4 }}>
+          <Tag color="processing">已同步</Tag>
+          <div style={{ fontSize: 12, color: '#8c8c8c', marginTop: 2 }}>
+            {formatLastSyncTime(account.lastBridgeSyncAt)}
+          </div>
+        </div>
+      )
+    }
+    return <span style={{ color: '#8c8c8c' }}>-</span>
+  }
+
   const canSelectBridgeAccount = (account: Account) => {
     return account.walletType?.toLowerCase() === 'magic' || account.readOnly === true
   }
@@ -418,6 +466,12 @@ const AccountList: React.FC = () => {
       }
     },
     {
+      title: 'Bridge 状态',
+      key: 'bridgeStatus',
+      width: 160,
+      render: (_: any, record: Account) => renderBridgeStatus(record)
+    },
+    {
       title: '资产',
       dataIndex: 'balance',
       key: 'balance',
@@ -667,7 +721,7 @@ const AccountList: React.FC = () => {
         }
         description={
           bridgeStatus?.walletAddress
-            ? `跟单执行账户 ID：${bridgeStatus.copyTradingAccountId || '-'}，有效跟单配置：${bridgeStatus.copyTradingConfigCount || 0} 个。切换 Magic 钱包后，请在对应账户行点击钱包图标设为当前 Bridge 操作账户。`
+            ? `跟单执行账户 ID：${bridgeStatus.copyTradingAccountId || '-'}，有效跟单配置：${bridgeStatus.copyTradingConfigCount || 0} 个。Bridge 最后同步：${formatLastSyncTime(bridgeStatus?.syncedAt)}。切换 Magic 钱包后，请在对应账户行点击钱包图标设为当前 Bridge 操作账户。`
             : 'Bridge 是单浏览器会话，多 Magic 钱包需要先在 Bridge 浏览器中切换登录的钱包，再回到账户管理确认当前账户。'
         }
         type={bridgeStatus?.matched ? 'success' : 'warning'}
@@ -762,6 +816,9 @@ const AccountList: React.FC = () => {
                                 {account.walletType.toLowerCase() === 'magic' ? 'Magic' : 'Safe'}
                               </Tag>
                             ) : '-'}
+                          </div>
+                          <div style={{ marginTop: 4 }}>
+                            {renderBridgeStatus(account)}
                           </div>
                         </div>
                       </div>
