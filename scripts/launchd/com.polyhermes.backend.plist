@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polyhermes.backend</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin/java</string>
+        <string>-jar</string>
+        <string>-Dserver.port=8000</string>
+        <string>/Users/henry/projects/polyhermes/backend/build/libs/polyhermes-backend-1.0.0.jar</string>
+        <string>--spring.profiles.active=prod</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- 这些值应从 ~/.zshenv 或 launchctl 环境注入，生产部署时务必修改 -->
+        <key>DB_URL</key>
+        <string>jdbc:mysql://localhost:3307/polyhermes?useSSL=false&amp;serverTimezone=UTC&amp;characterEncoding=utf8&amp;allowPublicKeyRetrieval=true</string>
+        <key>DB_USERNAME</key>
+        <string>root</string>
+        <key>DB_PASSWORD</key>
+        <string>SET_FROM_ENVIRONMENT</string>
+        <key>JWT_SECRET</key>
+        <string>SET_FROM_ENVIRONMENT</string>
+        <key>ENCRYPTION_KEY</key>
+        <string>SET_FROM_ENVIRONMENT</string>
+        <key>CRYPTO_SECRET_KEY</key>
+        <string>SET_FROM_ENVIRONMENT</string>
+        <key>ADMIN_RESET_PASSWORD_KEY</key>
+        <string>SET_FROM_ENVIRONMENT</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/henry/projects/polyhermes/backend</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/henry/projects/polyhermes/logs/backend.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/henry/projects/polyhermes/logs/backend.log</string>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

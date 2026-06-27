@@ -1,0 +1,25 @@
+[Unit]
+Description=PolyHermes Backend
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=polyhermes
+Group=polyhermes
+WorkingDirectory=/opt/polyhermes/backend
+Environment="JAVA_HOME=/opt/polyhermes/jdk17"
+Environment="DB_URL=jdbc:mysql://localhost:3307/polyhermes?useSSL=false&serverTimezone=UTC&characterEncoding=utf8&allowPublicKeyRetrieval=true"
+Environment="DB_USERNAME=root"
+# 通过 systemd drop-in 或 EnvironmentFile 注入真实密码
+Environment="DB_PASSWORD=SET_FROM_ENVIRONMENT_FILE"
+Environment="SPRING_PROFILES_ACTIVE=prod"
+Environment="SERVER_PORT=8000"
+EnvironmentFile=-/etc/polyhermes/backend.env
+ExecStart=/opt/polyhermes/jdk17/bin/java -jar -Dserver.port=8000 /opt/polyhermes/backend/build/libs/polyhermes-backend-1.0.0.jar --spring.profiles.active=prod
+ExecStop=/bin/kill -SIGTERM $MAINPID
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
