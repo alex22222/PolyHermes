@@ -12,6 +12,7 @@ import AccountList from './pages/AccountList'
 import UserList from './pages/UserList'
 import AccountImport from './pages/AccountImport'
 import AccountDetail from './pages/AccountDetail'
+import AccountOrders from './pages/AccountOrders'
 import AccountEdit from './pages/AccountEdit'
 import LeaderList from './pages/LeaderList'
 import LeaderPool from './pages/LeaderPool'
@@ -268,6 +269,7 @@ function App() {
           <Route path="/accounts/import" element={<ProtectedRoute><AccountImport /></ProtectedRoute>} />
           <Route path="/accounts/detail" element={<ProtectedRoute><AccountDetail /></ProtectedRoute>} />
           <Route path="/accounts/edit" element={<ProtectedRoute><AccountEdit /></ProtectedRoute>} />
+          <Route path="/accounts/orders" element={<ProtectedRoute><AccountOrders /></ProtectedRoute>} />
           <Route path="/leaders" element={<ProtectedRoute><LeaderList /></ProtectedRoute>} />
           <Route path="/leader-pool" element={<ProtectedRoute><LeaderPool /></ProtectedRoute>} />
           <Route path="/leader-research" element={<ProtectedRoute><LeaderResearch /></ProtectedRoute>} />

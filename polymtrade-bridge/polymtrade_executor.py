@@ -324,6 +324,11 @@ class PolymtradeExecutor:
             if not rendered:
                 logger.warning("Portfolio rows did not render before scrape; continuing with best effort")
 
+            # 多次滚动页面到底部，触发 Polymtrade 的懒加载/分页，确保所有持仓都被渲染
+            for _ in range(5):
+                await self.page.evaluate("() => { window.scrollTo(0, document.body.scrollHeight); }")
+                await asyncio.sleep(0.8)
+
             js = r"""
             () => {
                 const parseMoney = (s) => {

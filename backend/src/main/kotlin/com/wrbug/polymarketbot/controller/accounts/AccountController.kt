@@ -4,6 +4,7 @@ import com.wrbug.polymarketbot.dto.*
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.accounts.AccountService
 import com.wrbug.polymarketbot.service.accounts.BridgePositionSellService
+import com.wrbug.polymarketbot.service.copytrading.statistics.CopyTradingStatisticsService
 import com.wrbug.polymarketbot.util.toSafeBigDecimal
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -20,7 +21,8 @@ import java.math.BigDecimal
 class AccountController(
     private val accountService: AccountService,
     private val messageSource: MessageSource,
-    private val bridgePositionSellService: BridgePositionSellService
+    private val bridgePositionSellService: BridgePositionSellService,
+    private val statisticsService: CopyTradingStatisticsService
 ) {
 
     private val logger = LoggerFactory.getLogger(AccountController::class.java)
@@ -719,6 +721,44 @@ class AccountController(
         } catch (e: Exception) {
             logger.error("USDC.e → pUSD wrap 异常: ${e.message}", e)
             ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
+        }
+    }
+
+    /**
+     * 查询账户历史订单列表（买入/卖出/匹配）
+     */
+    @PostMapping("/orders")
+    fun getAccountOrders(@RequestBody request: AccountOrderTrackingRequest): ResponseEntity<ApiResponse<OrderListResponse>> {
+        return try {
+            if (request.accountId <= 0) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ACCOUNT_ID_INVALID, messageSource = messageSource))
+            }
+            
+            if (request.type.isBlank()) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_EMPTY, "订单类型不能为空", messageSource))
+            }
+            
+            val validTypes = listOf("buy", "sell", "matched")
+            if (!validTypes.contains(request.type.lowercase())) {
+                return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ORDER_TYPE_INVALID_FOR_TRACKING, messageSource = messageSource))
+            }
+            
+            val result = statisticsService.getAccountOrderList(request)
+            result.fold(
+                onSuccess = { response ->
+                    ResponseEntity.ok(ApiResponse.success(response))
+                },
+                onFailure = { e ->
+                    logger.error("查询账户历史订单失败: accountId=${request.accountId}, type=${request.type}", e)
+                    when (e) {
+                        is IllegalArgumentException -> ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, e.message, messageSource))
+                        else -> ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ORDER_TRACKING_LIST_FETCH_FAILED, e.message, messageSource))
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            logger.error("查询账户历史订单异常: accountId=${request.accountId}, type=${request.type}", e)
+            ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ORDER_TRACKING_LIST_FETCH_FAILED, e.message, messageSource))
         }
     }
 

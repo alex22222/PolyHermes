@@ -249,10 +249,12 @@ export interface LeaderUpdateRequest {
 /**
  * 跟单模板
  */
+export type CopyMode = 'RATIO' | 'FIXED' | 'PROPORTIONAL_RISK'
+
 export interface CopyTradingTemplate {
   id: number
   templateName: string
-  copyMode: 'RATIO' | 'FIXED'
+  copyMode: CopyMode
   copyRatio: string
   fixedAmount?: string
   maxOrderSize?: string
@@ -283,7 +285,7 @@ export interface TemplateListResponse {
  */
 export interface TemplateCreateRequest {
   templateName: string
-  copyMode?: 'RATIO' | 'FIXED'
+  copyMode?: CopyMode
   copyRatio?: string
   fixedAmount?: string
   maxOrderSize?: string
@@ -299,7 +301,7 @@ export interface TemplateCreateRequest {
 export interface TemplateUpdateRequest {
   templateId: number
   templateName?: string
-  copyMode?: 'RATIO' | 'FIXED'
+  copyMode?: CopyMode
   copyRatio?: string
   fixedAmount?: string
   maxOrderSize?: string
@@ -315,7 +317,7 @@ export interface TemplateUpdateRequest {
 export interface TemplateCopyRequest {
   templateId: number
   templateName: string
-  copyMode?: 'RATIO' | 'FIXED'
+  copyMode?: CopyMode
   copyRatio?: string
   fixedAmount?: string
   maxOrderSize?: string
@@ -338,7 +340,7 @@ export interface CopyTrading {
   leaderAddress: string
   enabled: boolean
   // 跟单配置参数
-  copyMode: 'RATIO' | 'FIXED'
+  copyMode: CopyMode
   copyRatio: string
   fixedAmount?: string
   maxOrderSize: string
@@ -1003,7 +1005,7 @@ export interface CopyTradingCreateRequest {
   leaderId: number
   enabled?: boolean
   // 跟单配置参数
-  copyMode?: 'RATIO' | 'FIXED'
+  copyMode?: CopyMode
   copyRatio?: string
   fixedAmount?: string
   maxOrderSize?: string
@@ -1041,7 +1043,7 @@ export interface CopyTradingUpdateRequest {
   copyTradingId: number
   enabled?: boolean
   // 跟单配置参数（可选，只更新提供的字段）
-  copyMode?: 'RATIO' | 'FIXED'
+  copyMode?: CopyMode
   copyRatio?: string
   fixedAmount?: string
   maxOrderSize?: string
@@ -1559,6 +1561,21 @@ export interface OrderTrackingListResponse {
  */
 export interface OrderTrackingRequest {
   copyTradingId: number
+  type: 'buy' | 'sell' | 'matched'
+  page?: number
+  limit?: number
+  marketId?: string
+  marketTitle?: string
+  status?: string
+  sellOrderId?: string
+  buyOrderId?: string
+}
+
+/**
+ * 账户历史订单查询请求
+ */
+export interface AccountOrderTrackingRequest {
+  accountId: number
   type: 'buy' | 'sell' | 'matched'
   page?: number
   limit?: number

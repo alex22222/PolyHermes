@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Card, Table, Button, Space, Tag, Popconfirm, message, Typography, Spin, Modal, Descriptions, Divider, Form, Input, Alert, Tooltip, List, Empty } from 'antd'
-import { PlusOutlined, ReloadOutlined, EditOutlined, CopyOutlined, EyeOutlined, DeleteOutlined, WalletOutlined, SwapOutlined } from '@ant-design/icons'
+import { PlusOutlined, ReloadOutlined, EditOutlined, CopyOutlined, EyeOutlined, DeleteOutlined, WalletOutlined, SwapOutlined, OrderedListOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
+import { useNavigate } from 'react-router-dom'
 import { useAccountStore } from '../store/accountStore'
 import type { Account } from '../types'
 import { useMediaQuery } from 'react-responsive'
@@ -14,6 +15,7 @@ const { Title } = Typography
 
 const AccountList: React.FC = () => {
   const { t } = useTranslation()
+  const navigate = useNavigate()
   const isMobile = useMediaQuery({ maxWidth: 768 })
   const { accounts, loading, fetchAccounts, deleteAccount, fetchAccountBalance, fetchAccountDetail, updateAccount } = useAccountStore()
   const [balanceMap, setBalanceMap] = useState<Record<number, { total: string; available: string; position: string }>>({})
@@ -291,6 +293,10 @@ const AccountList: React.FC = () => {
     }
   }
 
+  const handleShowOrders = (account: Account) => {
+    navigate(`/accounts/orders?id=${account.id}`)
+  }
+
   const handleShowEdit = async (account: Account) => {
     try {
       setEditModalVisible(true)
@@ -463,6 +469,26 @@ const AccountList: React.FC = () => {
               onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
             >
               <EyeOutlined style={{ fontSize: '16px', color: '#1890ff' }} />
+            </div>
+          </Tooltip>
+
+          <Tooltip title={t('accountList.historyOrders') || '历史订单'}>
+            <div
+              onClick={() => handleShowOrders(record)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '32px',
+                height: '32px',
+                cursor: 'pointer',
+                borderRadius: '6px',
+                transition: 'background-color 0.2s'
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#e6f7ff'}
+              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+            >
+              <OrderedListOutlined style={{ fontSize: '16px', color: '#13c2c2' }} />
             </div>
           </Tooltip>
 
@@ -774,6 +800,16 @@ const AccountList: React.FC = () => {
                         >
                           <EyeOutlined style={{ fontSize: '18px', color: '#1890ff' }} />
                           <span style={{ fontSize: '10px', color: '#8c8c8c', marginTop: '2px' }}>{t('accountList.detail')}</span>
+                        </div>
+                      </Tooltip>
+
+                      <Tooltip title={t('accountList.historyOrders') || '历史订单'}>
+                        <div
+                          onClick={() => handleShowOrders(account)}
+                          style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer', padding: '4px 8px' }}
+                        >
+                          <OrderedListOutlined style={{ fontSize: '18px', color: '#13c2c2' }} />
+                          <span style={{ fontSize: '10px', color: '#8c8c8c', marginTop: '2px' }}>{t('accountList.historyOrders') || '历史订单'}</span>
                         </div>
                       </Tooltip>
 

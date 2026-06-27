@@ -18,6 +18,11 @@ interface SellMatchRecordRepository : JpaRepository<SellMatchRecord, Long> {
     fun findByCopyTradingId(copyTradingId: Long): List<SellMatchRecord>
     
     /**
+     * 根据跟单关系ID列表查询所有卖出记录
+     */
+    fun findByCopyTradingIdIn(copyTradingIds: Collection<Long>): List<SellMatchRecord>
+    
+    /**
      * 根据卖出订单ID查询记录
      */
     fun findBySellOrderId(sellOrderId: String): SellMatchRecord?

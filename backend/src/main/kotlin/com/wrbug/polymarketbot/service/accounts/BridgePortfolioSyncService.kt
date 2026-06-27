@@ -40,10 +40,18 @@ class BridgePortfolioSyncService(
             return
         }
 
+        val runtimeAccount = bridgePortfolioClient.fetchAccount()
+        val walletAddress = runtimeAccount?.walletAddress?.lowercase()?.takeIf { it.isNotBlank() } ?: run {
+            logger.warn("Bridge 持仓同步跳过：无法获取当前登录钱包地址")
+            return
+        }
+
         val syncedAt = response.syncedAt ?: System.currentTimeMillis()
-        val existing = bridgePositionSnapshotRepository.findByBridgeId(bridgeId)
+        val existing = bridgePositionSnapshotRepository.findByBridgeIdAndWalletAddress(bridgeId, walletAddress)
             .associateBy { it.marketTitle to it.side.uppercase() }
             .toMutableMap()
+
+        val availableBalance = bridgePortfolioClient.fetchBalance()?.availableBalance
 
         val incomingTitles = positions.map { it.marketTitle }.distinct()
         val markets = marketRepository.findByTitleIn(incomingTitles)
@@ -62,11 +70,13 @@ class BridgePortfolioSyncService(
                     quantity = BigDecimal.ZERO
                 )
 
+            snapshot.walletAddress = walletAddress
             snapshot.marketId = position.conditionId ?: market?.marketId ?: snapshot.marketId
             snapshot.quantity = BigDecimal.valueOf(position.quantity).setScale(8, RoundingMode.HALF_UP)
             snapshot.currentValue = position.currentValue?.let { BigDecimal.valueOf(it).setScale(8, RoundingMode.HALF_UP) }
             snapshot.pnl = position.pnl?.let { BigDecimal.valueOf(it).setScale(8, RoundingMode.HALF_UP) }
             snapshot.percentPnl = position.percentPnl?.let { BigDecimal.valueOf(it).setScale(4, RoundingMode.HALF_UP) }
+            snapshot.availableBalance = availableBalance?.let { BigDecimal.valueOf(it).setScale(8, RoundingMode.HALF_UP) }
             snapshot.marketIcon = position.marketIcon ?: market?.icon ?: snapshot.marketIcon
             snapshot.marketSlug = position.marketSlug ?: market?.slug ?: snapshot.marketSlug
             snapshot.eventSlug = position.eventSlug ?: market?.eventSlug ?: snapshot.eventSlug

@@ -36,7 +36,12 @@ class BridgePositionService(
      */
     suspend fun getPositionsForAccount(account: Account): List<AccountPositionDto> {
         return try {
-            val snapshots = bridgePositionSnapshotRepository.findByBridgeId(bridgeId)
+            val normalizedWallet = account.walletAddress.lowercase().takeIf { it.isNotBlank() }
+            val snapshots = if (normalizedWallet != null) {
+                bridgePositionSnapshotRepository.findByBridgeIdAndWalletAddress(bridgeId, normalizedWallet)
+            } else {
+                emptyList()
+            }
             if (snapshots.isNotEmpty()) {
                 snapshots.map { snapshot ->
                     val market = snapshot.marketId?.let { marketRepository.findByMarketId(it) }

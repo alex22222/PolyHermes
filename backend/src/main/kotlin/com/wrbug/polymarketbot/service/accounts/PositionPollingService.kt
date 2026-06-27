@@ -24,8 +24,8 @@ class PositionPollingService(
 
     private val logger = LoggerFactory.getLogger(PositionPollingService::class.java)
 
-    @Value("\${position.polling.interval:2000}")
-    private var pollingInterval: Long = 2000  // 轮训间隔（毫秒），默认2秒
+    @Value("\${position.polling.interval:10000}")
+    private var pollingInterval: Long = 10000  // 轮训间隔（毫秒），默认10秒
 
     // 订阅者列表（支持多个订阅者）
     private val subscribers = CopyOnWriteArrayList<(PositionListResponse) -> Unit>()

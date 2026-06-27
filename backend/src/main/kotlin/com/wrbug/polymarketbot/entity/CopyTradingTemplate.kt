@@ -17,8 +17,8 @@ data class CopyTradingTemplate(
     @Column(name = "template_name", unique = true, nullable = false, length = 100)
     val templateName: String,  // 模板名称
     
-    @Column(name = "copy_mode", nullable = false, length = 10)
-    val copyMode: String = "RATIO",  // "RATIO" 或 "FIXED"
+    @Column(name = "copy_mode", nullable = false, length = 32)
+    val copyMode: String = "RATIO",  // "RATIO", "FIXED" 或 "PROPORTIONAL_RISK"
     
     @Column(name = "copy_ratio", nullable = false, precision = 20, scale = 8)
     val copyRatio: BigDecimal = BigDecimal.ONE,  // 仅在 copyMode="RATIO" 时生效
@@ -81,4 +81,3 @@ data class CopyTradingTemplate(
     @Column(name = "updated_at", nullable = false)
     var updatedAt: Long = System.currentTimeMillis()
 )
-

@@ -12,6 +12,11 @@ interface BridgePositionSnapshotRepository : JpaRepository<BridgePositionSnapsho
 
     fun findByBridgeId(bridgeId: String): List<BridgePositionSnapshot>
 
+    fun findByBridgeIdAndWalletAddress(
+        bridgeId: String,
+        walletAddress: String
+    ): List<BridgePositionSnapshot>
+
     fun findByBridgeIdAndMarketTitleAndSide(
         bridgeId: String,
         marketTitle: String,

@@ -3,7 +3,7 @@ import { Modal, Form, Button, Switch, message, Space, Radio, InputNumber, Table,
 import { SaveOutlined, FileTextOutlined, PlusOutlined } from '@ant-design/icons'
 import { apiService } from '../../services/api'
 import { useAccountStore } from '../../store/accountStore'
-import type { Leader, CopyTradingTemplate, CopyTradingCreateRequest } from '../../types'
+import type { Leader, CopyTradingTemplate, CopyTradingCreateRequest, CopyMode } from '../../types'
 import { formatUSDC } from '../../utils'
 import { useTranslation } from 'react-i18next'
 import { useMediaQuery } from 'react-responsive'
@@ -19,7 +19,7 @@ interface AddModalProps {
   onSuccess?: () => void
   preFilledConfig?: {
     leaderId?: number
-    copyMode?: 'RATIO' | 'FIXED'
+    copyMode?: CopyMode
     copyRatio?: number
     fixedAmount?: string
     maxOrderSize?: number
@@ -48,7 +48,7 @@ const AddModal: React.FC<AddModalProps> = ({
   const [leaders, setLeaders] = useState<Leader[]>([])
   const [templates, setTemplates] = useState<CopyTradingTemplate[]>([])
   const [templateModalVisible, setTemplateModalVisible] = useState(false)
-  const [copyMode, setCopyMode] = useState<'RATIO' | 'FIXED'>('RATIO')
+  const [copyMode, setCopyMode] = useState<CopyMode>('RATIO')
   const [keywords, setKeywords] = useState<string[]>([])
   const keywordInputRef = useRef<InputRef>(null)
   const [maxMarketEndDateValue, setMaxMarketEndDateValue] = useState<number | undefined>()
@@ -234,7 +234,9 @@ const AddModal: React.FC<AddModalProps> = ({
     message.success(t('copyTradingAdd.templateFilled') || '模板内容已填充，您可以修改')
   }
   
-  const handleCopyModeChange = (mode: 'RATIO' | 'FIXED') => {
+  const isRatioLikeMode = (mode?: CopyMode) => mode === 'RATIO' || mode === 'PROPORTIONAL_RISK'
+
+  const handleCopyModeChange = (mode: CopyMode) => {
     setCopyMode(mode)
   }
   
@@ -316,7 +318,7 @@ const AddModal: React.FC<AddModalProps> = ({
       }
     }
     
-    if (values.copyMode === 'RATIO' && values.minOrderSize !== undefined && values.minOrderSize !== null && Number(values.minOrderSize) < 1) {
+    if (isRatioLikeMode(values.copyMode) && values.minOrderSize !== undefined && values.minOrderSize !== null && Number(values.minOrderSize) < 1) {
       message.error(t('copyTradingAdd.minOrderSizeMin') || '最小金额必须 >= 1')
       return
     }
@@ -337,7 +339,7 @@ const AddModal: React.FC<AddModalProps> = ({
         leaderId: values.leaderId,
         enabled: true, // 默认启用
         copyMode: values.copyMode || 'RATIO',
-        copyRatio: values.copyMode === 'RATIO' && values.copyRatio ? (values.copyRatio / 100).toString() : undefined,
+        copyRatio: isRatioLikeMode(values.copyMode) && values.copyRatio ? (values.copyRatio / 100).toString() : undefined,
         fixedAmount: values.copyMode === 'FIXED' ? values.fixedAmount?.toString() : undefined,
         maxOrderSize: values.maxOrderSize?.toString(),
         minOrderSize: values.minOrderSize?.toString(),
@@ -566,13 +568,14 @@ const AddModal: React.FC<AddModalProps> = ({
             tooltip={t('copyTradingAdd.copyModeTooltip') || '选择跟单金额的计算方式。比例模式：跟单金额随 Leader 订单大小按比例变化；固定金额模式：无论 Leader 订单大小如何，跟单金额都固定不变。'}
             rules={[{ required: true }]}
           >
-            <Radio.Group onChange={(e) => handleCopyModeChange(e.target.value)}>
-              <Radio value="RATIO">{t('copyTradingAdd.ratioMode') || '比例模式'}</Radio>
-              <Radio value="FIXED">{t('copyTradingAdd.fixedAmountMode') || '固定金额模式'}</Radio>
-            </Radio.Group>
-          </Form.Item>
-          
-          {copyMode === 'RATIO' && (
+	            <Radio.Group onChange={(e) => handleCopyModeChange(e.target.value)}>
+	              <Radio value="RATIO">{t('copyTradingAdd.ratioMode') || '比例模式'}</Radio>
+	              <Radio value="FIXED">{t('copyTradingAdd.fixedAmountMode') || '固定金额模式'}</Radio>
+	              <Radio value="PROPORTIONAL_RISK">{t('copyTradingAdd.proportionalRiskMode') || '比例风控模式'}</Radio>
+	            </Radio.Group>
+	          </Form.Item>
+	          
+	          {isRatioLikeMode(copyMode) && (
             <Form.Item
               label={t('copyTradingAdd.copyRatio') || '跟单比例'}
               name="copyRatio"
@@ -642,7 +645,7 @@ const AddModal: React.FC<AddModalProps> = ({
             </Form.Item>
           )}
           
-          {copyMode === 'RATIO' && (
+	          {isRatioLikeMode(copyMode) && (
             <>
               <Form.Item
                 label={t('copyTradingAdd.maxOrderSize') || '单笔订单最大金额 ($)'}
@@ -1080,10 +1083,10 @@ const AddModal: React.FC<AddModalProps> = ({
               key: 'copyMode',
               render: (_: any, record: CopyTradingTemplate) => (
                 <span>
-                  {record.copyMode === 'RATIO' 
-                    ? `${t('copyTradingAdd.ratioMode') || '比例'} ${record.copyRatio}x`
-                    : `${t('copyTradingAdd.fixedAmountMode') || '固定'} $${formatUSDC(record.fixedAmount || '0')}`
-                  }
+	                  {record.copyMode === 'FIXED'
+	                    ? `${t('copyTradingAdd.fixedAmountMode') || '固定'} $${formatUSDC(record.fixedAmount || '0')}`
+	                    : `${record.copyMode === 'PROPORTIONAL_RISK' ? (t('copyTradingAdd.proportionalRiskMode') || '比例风控') : (t('copyTradingAdd.ratioMode') || '比例')} ${record.copyRatio}x`
+	                  }
                 </span>
               )
             },
@@ -1154,4 +1157,3 @@ const AddModal: React.FC<AddModalProps> = ({
 }
 
 export default AddModal
-

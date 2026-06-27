@@ -135,6 +135,7 @@
     "activeOrders": "Active Orders",
     "action": "Actions",
     "detail": "Detail",
+    "historyOrders": "Order History",
     "edit": "Edit",
     "delete": "Delete",
     "viewDetail": "View Detail",

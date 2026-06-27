@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from pydantic import BaseModel, Field, ConfigDict
 
 from polymtrade_executor import PolymtradeExecutor
-from copy_trading_config import CopyTradingRuleEngine
+from copy_trading_config import COPY_MODE_PROPORTIONAL_RISK, CopyTradingRuleEngine
 from bridge_recorder import BridgeTradeRecorder
 from position_ledger import PositionLedger
 from bridge_reliability_audit import (
@@ -40,6 +40,12 @@ BTC_UPDOWN_5M_SECONDS = 300
 BTC_UPDOWN_5M_MIN_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MIN_BUY_PRICE", "0.20"))
 BTC_UPDOWN_5M_MAX_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MAX_BUY_PRICE", "0.65"))
 BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS = int(os.getenv("BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS", "50"))
+PROPORTIONAL_RISK_BUYBACK_WINDOW_SECONDS = int(
+    os.getenv("PROPORTIONAL_RISK_BUYBACK_WINDOW_SECONDS", "600")
+)
+PROPORTIONAL_RISK_SMALL_BUYBACK_RATIO = Decimal(
+    os.getenv("PROPORTIONAL_RISK_SMALL_BUYBACK_RATIO", "0.25")
+)
 
 # Singleton PID lock to prevent multiple bridge instances from competing for the
 # same browser profile and opening multiple Chrome windows.
@@ -834,6 +840,76 @@ async def _execute_and_record(record_id: int, request: ExecuteRequest, external_
         recorder.update_status(record_id, "FAILED", error_message=str(e))
 
 
+def _record_failed_signal(
+    signal: LeaderTradeSignal,
+    side: str,
+    quantity: Optional[Decimal],
+    price: Decimal,
+    amount: Optional[Decimal],
+    reason: str,
+):
+    """Persist a skipped/filtered signal so the UI can explain why it did not trade."""
+    if not recorder:
+        return
+    try:
+        skip_id = recorder.record_pending(
+            external_trade_id=signal.transaction_hash,
+            market_id=signal.condition_id or signal.market_slug or "",
+            market_title=signal.title,
+            side=side,
+            outcome=signal.outcome,
+            outcome_index=signal.outcome_index,
+            quantity=quantity or Decimal("0"),
+            price=price,
+            amount=amount or Decimal("0"),
+            raw_payload=signal.model_dump(by_alias=True),
+        )
+        recorder.update_status(skip_id, "FAILED", reason)
+    except Exception as rec_err:
+        logger.warning(f"Failed to record skipped signal: {rec_err}")
+
+
+def _proportional_risk_small_buyback_reason(
+    cfg,
+    signal: LeaderTradeSignal,
+    side: str,
+    leader_size: Decimal,
+    now_ms: Optional[int] = None,
+) -> Optional[str]:
+    """Skip tiny same-outcome BUY backs shortly after a leader-side SELL."""
+    if cfg.copy_mode != COPY_MODE_PROPORTIONAL_RISK or side.upper() != "BUY" or not recorder:
+        return None
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    since_ms = now - PROPORTIONAL_RISK_BUYBACK_WINDOW_SECONDS * 1000
+    recent_sell_size = recorder.recent_leader_sell_size(
+        market_id=signal.condition_id or signal.market_slug or "",
+        market_slug=signal.market_slug,
+        outcome=signal.outcome,
+        outcome_index=signal.outcome_index,
+        leader_address=signal.leader_address,
+        since_ms=since_ms,
+    )
+    if recent_sell_size <= 0:
+        recent_sell_size = recorder.recent_success_sell_size(
+            market_id=signal.condition_id or signal.market_slug or "",
+            market_slug=signal.market_slug,
+            outcome=signal.outcome,
+            outcome_index=signal.outcome_index,
+            leader_address=signal.leader_address,
+            since_ms=since_ms,
+        )
+    if recent_sell_size <= 0:
+        return None
+    buyback_ratio = leader_size / recent_sell_size
+    if buyback_ratio < PROPORTIONAL_RISK_SMALL_BUYBACK_RATIO:
+        return (
+            "Small buyback after recent SELL, skipped "
+            f"(buy_size={leader_size}, recent_sell_size={recent_sell_size}, "
+            f"ratio={buyback_ratio:.4f}, threshold={PROPORTIONAL_RISK_SMALL_BUYBACK_RATIO})"
+        )
+    return None
+
+
 async def handle_signal(signal: LeaderTradeSignal):
     try:
         if not signal.market_slug:
@@ -880,15 +956,25 @@ async def handle_signal(signal: LeaderTradeSignal):
             await rule_engine.sleep_delay(cfg)
 
             price_dec = Decimal(str(signal.price))
+            leader_size_dec = Decimal(str(signal.size))
             quantity: Optional[Decimal] = None
             amount: Optional[Decimal] = None
 
             if side_upper == "BUY":
                 amount = rule_engine.compute_buy_quantity(
-                    cfg, price_dec, Decimal(str(signal.size))
+                    cfg, price_dec, leader_size_dec
                 )
                 if amount is None:
-                    logger.info(f"Config {cfg.id}: BUY quantity filtered")
+                    reason = rule_engine.buy_skip_reason(cfg, price_dec, leader_size_dec) or "BUY quantity filtered"
+                    logger.info(f"Config {cfg.id}: {reason}")
+                    _record_failed_signal(
+                        signal=signal,
+                        side=side_upper,
+                        quantity=Decimal("0"),
+                        price=price_dec,
+                        amount=Decimal("0"),
+                        reason=reason,
+                    )
                     continue
                 quantity = amount / price_dec
                 price_band_reason = _short_cycle_price_band_buy_reason(
@@ -1002,21 +1088,76 @@ async def handle_signal(signal: LeaderTradeSignal):
                         except Exception as rec_err:
                             logger.warning(f"Failed to record duplicate BUY skip: {rec_err}")
                     continue
+                buyback_reason = _proportional_risk_small_buyback_reason(
+                    cfg=cfg,
+                    signal=signal,
+                    side=side_upper,
+                    leader_size=leader_size_dec,
+                )
+                if buyback_reason:
+                    logger.info(
+                        f"Config {cfg.id}: BUY skipped for {signal.transaction_hash}: "
+                        f"{buyback_reason}"
+                    )
+                    _record_failed_signal(
+                        signal=signal,
+                        side=side_upper,
+                        quantity=quantity,
+                        price=price_dec,
+                        amount=amount,
+                        reason=buyback_reason,
+                    )
+                    continue
             else:
                 quantity = rule_engine.compute_sell_shares(
-                    cfg, price_dec, Decimal(str(signal.size))
+                    cfg, price_dec, leader_size_dec
                 )
                 if quantity is None:
-                    logger.info(f"Config {cfg.id}: SELL quantity filtered")
+                    reason = rule_engine.sell_skip_reason(cfg, price_dec, leader_size_dec) or "SELL quantity filtered"
+                    logger.info(f"Config {cfg.id}: {reason}")
+                    _record_failed_signal(
+                        signal=signal,
+                        side=side_upper,
+                        quantity=Decimal("0"),
+                        price=price_dec,
+                        amount=Decimal("0"),
+                        reason=reason,
+                    )
                     continue
                 amount = quantity * price_dec
+                is_proportional_risk = cfg.copy_mode == COPY_MODE_PROPORTIONAL_RISK
+                ledger_miss_live_fallback = False
+
+                if is_proportional_risk and position_ledger:
+                    local_quantity = position_ledger.get_net_quantity(
+                        market_id=signal.condition_id or signal.market_slug or "",
+                        outcome=signal.outcome,
+                        outcome_index=signal.outcome_index,
+                    )
+                    if local_quantity <= 0:
+                        ledger_miss_live_fallback = True
+                        logger.warning(
+                            f"Config {cfg.id}: local ledger has no proportional-risk SELL position "
+                            f"for {signal.transaction_hash}; checking live portfolio before skipping"
+                        )
+                    elif local_quantity < quantity:
+                        logger.info(
+                            f"Config {cfg.id}: capping proportional-risk SELL to local ledger "
+                            f"position, desired={quantity}, available={local_quantity}"
+                        )
+                        quantity = local_quantity
+                        amount = quantity * price_dec
 
                 # SELL pre-check: ensure we have a corresponding position
-                if position_ledger and not position_ledger.has_sufficient_position(
-                    market_id=signal.condition_id or signal.market_slug or "",
-                    outcome=signal.outcome,
-                    outcome_index=signal.outcome_index,
-                    sell_quantity=quantity,
+                if (
+                    not is_proportional_risk
+                    and position_ledger
+                    and not position_ledger.has_sufficient_position(
+                        market_id=signal.condition_id or signal.market_slug or "",
+                        outcome=signal.outcome,
+                        outcome_index=signal.outcome_index,
+                        sell_quantity=quantity,
+                    )
                 ):
                     logger.info(
                         f"Config {cfg.id}: SELL skipped for {signal.transaction_hash} "
@@ -1088,6 +1229,12 @@ async def handle_signal(signal: LeaderTradeSignal):
                     )
                     quantity = live_quantity
                     amount = quantity * price_dec
+                elif ledger_miss_live_fallback:
+                    logger.warning(
+                        f"Config {cfg.id}: allowing proportional-risk SELL from live portfolio "
+                        f"fallback despite missing local ledger, live_available={live_quantity}, "
+                        f"sell_quantity={quantity}"
+                    )
 
             record_id = None
             if recorder:

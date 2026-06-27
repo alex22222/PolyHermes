@@ -19,7 +19,8 @@ import java.time.Duration
 class BridgePortfolioClient(
     @Value("\${bridge.portfolio.url:http://localhost:8080/portfolio}") private val portfolioUrl: String,
     @Value("\${bridge.balance.url:http://localhost:8080/balance}") private val balanceUrl: String,
-    @Value("\${bridge.account.cache-ttl-ms:30000}") private val accountCacheTtlMs: Long = 30000
+    @Value("\${bridge.account.cache-ttl-ms:30000}") private val accountCacheTtlMs: Long = 30000,
+    @Value("\${bridge.status.cache-ttl-ms:30000}") private val statusCacheTtlMs: Long = 30000
 ) {
 
     private val logger = LoggerFactory.getLogger(BridgePortfolioClient::class.java)
@@ -37,6 +38,15 @@ class BridgePortfolioClient(
 
     @Volatile
     private var cachedAccountAt: Long = 0
+
+    @Volatile
+    private var cachedAccountFailureAt: Long = 0
+
+    @Volatile
+    private var cachedStatus: BridgeRuntimeStatusResponse? = null
+
+    @Volatile
+    private var cachedStatusAt: Long = 0
 
     /**
      * 从 Bridge 拉取当前持仓列表
@@ -101,6 +111,9 @@ class BridgePortfolioClient(
         if (useCache && cached != null && now - cachedAccountAt < accountCacheTtlMs) {
             return cached
         }
+        if (useCache && cached == null && now - cachedAccountFailureAt < accountCacheTtlMs) {
+            return null
+        }
 
         return try {
             val base = URI.create(balanceUrl)
@@ -118,22 +131,32 @@ class BridgePortfolioClient(
                     gson.fromJson(body, BridgeAccountResponse::class.java).also {
                         cachedAccount = it
                         cachedAccountAt = now
+                        cachedAccountFailureAt = 0
                     }
                 } catch (e: Exception) {
                     logger.warn("解析 Bridge /account 响应失败: ${e.message}, body=$body")
+                    cachedAccountFailureAt = now
                     null
                 }
             } else {
                 logger.warn("Bridge /account 返回非 2xx: status=${response.statusCode()}, body=${response.body()}")
+                cachedAccountFailureAt = now
                 null
             }
         } catch (e: Exception) {
             logger.error("调用 Bridge /account 失败: ${e.message}", e)
+            cachedAccountFailureAt = now
             null
         }
     }
 
-    fun fetchStatus(): BridgeRuntimeStatusResponse? {
+    fun fetchStatus(useCache: Boolean = true): BridgeRuntimeStatusResponse? {
+        val now = System.currentTimeMillis()
+        val cached = cachedStatus
+        if (useCache && cached != null && now - cachedStatusAt < statusCacheTtlMs) {
+            return cached
+        }
+
         return try {
             val base = URI.create(balanceUrl)
             val statusUri = URI(base.scheme, base.authority, "/status", null, null)
@@ -147,7 +170,10 @@ class BridgePortfolioClient(
             if (response.statusCode() in 200..299) {
                 val body = response.body()
                 try {
-                    gson.fromJson(body, BridgeRuntimeStatusResponse::class.java)
+                    gson.fromJson(body, BridgeRuntimeStatusResponse::class.java).also {
+                        cachedStatus = it
+                        cachedStatusAt = now
+                    }
                 } catch (e: Exception) {
                     logger.warn("解析 Bridge /status 响应失败: ${e.message}, body=$body")
                     null

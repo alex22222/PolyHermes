@@ -93,32 +93,45 @@ class BridgeTradeRecordService(
                 ?: return Result.failure(IllegalArgumentException("Leader 不存在: ${copyTrading.leaderId}"))
 
             val leaderAddress = leader.leaderAddress
-            val conditionIds = bridgeWebhookLogRepository
-                .findDistinctConditionIdsByLeaderAddress(leaderAddress)
-                .filter { !it.isNullOrBlank() }
-
-            if (conditionIds.isEmpty()) {
-                return Result.success(
-                    BridgeTradeRecordListResponse(
-                        list = emptyList(),
-                        total = 0,
-                        page = request.page,
-                        size = request.size
-                    )
-                )
-            }
-
             val pageRequest = PageRequest.of(
                 (request.page - 1).coerceAtLeast(0),
                 request.size.coerceIn(1, 100),
                 Sort.by(Sort.Order.desc("createdAt"))
             )
-
-            val page = bridgeTradeRecordRepository.findByBridgeIdAndMarketIdIn(
-                "polymtrade-bridge",
-                conditionIds,
-                pageRequest
+            val nativePageRequest = PageRequest.of(
+                (request.page - 1).coerceAtLeast(0),
+                request.size.coerceIn(1, 100)
             )
+
+            val rawPayloadPage = bridgeTradeRecordRepository.findByBridgeIdAndLeaderAddressInRawPayload(
+                bridgeId = "polymtrade-bridge",
+                leaderAddress = leaderAddress,
+                pageable = nativePageRequest
+            )
+            val page = if (rawPayloadPage.totalElements > 0) {
+                rawPayloadPage
+            } else {
+                val conditionIds = bridgeWebhookLogRepository
+                    .findDistinctConditionIdsByLeaderAddress(leaderAddress)
+                    .filter { !it.isNullOrBlank() }
+
+                if (conditionIds.isEmpty()) {
+                    return Result.success(
+                        BridgeTradeRecordListResponse(
+                            list = emptyList(),
+                            total = 0,
+                            page = request.page,
+                            size = request.size
+                        )
+                    )
+                }
+
+                bridgeTradeRecordRepository.findByBridgeIdAndMarketIdIn(
+                    "polymtrade-bridge",
+                    conditionIds,
+                    pageRequest
+                )
+            }
 
             val positionViews = buildPositionViews(page.content)
             val list = page.content.map { it.toDto(positionViews[it.positionKey()]) }

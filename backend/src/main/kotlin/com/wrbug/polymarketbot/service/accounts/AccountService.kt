@@ -49,6 +49,7 @@ class AccountService(
     private val relayClientService: RelayClientService,
     private val jsonUtils: JsonUtils,
     private val bridgePositionService: BridgePositionService,
+    private val bridgePositionSnapshotRepository: com.wrbug.polymarketbot.repository.BridgePositionSnapshotRepository,
     private val bridgePortfolioClient: BridgePortfolioClient,
     private val accountExecutionModeService: AccountExecutionModeService
 ) {
@@ -771,6 +772,13 @@ class AccountService(
                 return Result.success(bridgeBalance)
             }
 
+            // Bridge 只读账户的真实资产由 Bridge 浏览器钱包持有，链上 proxyAddress 通常无法反映。
+            // 当 Bridge 当前未登录该账户时，尝试使用上次同步的 Bridge 持仓快照展示资产，避免显示 0。
+            if (account.isReadOnly) {
+                val fallbackBalance = runBlocking { getBridgeFallbackAccountBalance(account) }
+                return Result.success(fallbackBalance)
+            }
+
             // 使用通用方法查询余额
             val balanceResult = runBlocking {
                 blockchainService.getWalletBalance(account.proxyAddress)
@@ -797,7 +805,7 @@ class AccountService(
 
     fun getBridgeCurrentAccountStatus(): Result<BridgeCurrentAccountStatusResponse> {
         return try {
-            val status = bridgePortfolioClient.fetchStatus()
+            val status = bridgePortfolioClient.fetchStatus(useCache = false)
             val runtimeAccount = bridgePortfolioClient.fetchAccount(useCache = false)
             val walletAddress = runtimeAccount?.walletAddress
             val matchedAccount = walletAddress?.let { wallet ->
@@ -892,15 +900,65 @@ class AccountService(
         )
     }
 
+    /**
+     * Bridge 只读账户在 Bridge 当前未登录该账户时的兜底余额。
+     * 使用上次同步的持仓快照和可用余额，避免链上 proxyAddress 查询返回 0 造成误导。
+     */
+    private suspend fun getBridgeFallbackAccountBalance(account: Account): AccountBalanceResponse {
+        val normalizedWallet = account.walletAddress.lowercase().takeIf { it.isNotBlank() }
+        val snapshots = if (normalizedWallet != null) {
+            bridgePositionSnapshotRepository.findByBridgeIdAndWalletAddress("polymtrade-bridge", normalizedWallet)
+        } else {
+            emptyList()
+        }
+
+        val availableBalance = snapshots.firstOrNull()?.availableBalance ?: BigDecimal.ZERO
+        val positionDtos = snapshots.map { snapshot ->
+            PositionDto(
+                marketId = snapshot.marketId ?: "",
+                title = snapshot.marketTitle,
+                side = snapshot.side,
+                quantity = snapshot.quantity.toString(),
+                avgPrice = "0",
+                currentValue = snapshot.currentValue?.toString() ?: "0",
+                pnl = snapshot.pnl?.toString()
+            )
+        }
+        val positionBalance = snapshots.fold(BigDecimal.ZERO) { acc, snapshot ->
+            acc + (snapshot.currentValue ?: BigDecimal.ZERO)
+        }
+
+        return AccountBalanceResponse(
+            availableBalance = formatBalance(availableBalance),
+            positionBalance = formatBalance(positionBalance),
+            totalBalance = formatBalance(availableBalance + positionBalance),
+            positions = positionDtos,
+            walletBalance = formatBalance(availableBalance),
+            currentPositionValue = formatBalance(positionBalance),
+            totalAssetValue = formatBalance(availableBalance + positionBalance),
+            balanceSource = "bridge-snapshot",
+            sourceAccountWallet = account.walletAddress
+        )
+    }
+
     private fun isCurrentBridgeRuntimeAccount(account: Account): Boolean {
         if (!account.isReadOnly) return false
-        val runtimeAccount = bridgePortfolioClient.fetchAccount(useCache = false) ?: return false
+        val runtimeAccount = bridgePortfolioClient.fetchAccount() ?: return false
         return isRuntimeWalletMatched(account, runtimeAccount.walletAddress)
     }
 
     private fun isRuntimeWalletMatched(account: Account, runtimeWalletAddress: String?): Boolean {
         return runtimeWalletAddress?.equals(account.walletAddress, ignoreCase = true) == true ||
             runtimeWalletAddress?.equals(account.proxyAddress, ignoreCase = true) == true
+    }
+
+    private fun isBridgePositionSourceAccount(
+        account: Account,
+        runtimeWalletAddress: String?,
+        bridgeRuntimeAccountId: Long?
+    ): Boolean {
+        if (isRuntimeWalletMatched(account, runtimeWalletAddress)) return true
+        return bridgeRuntimeAccountId != null && account.id == bridgeRuntimeAccountId
     }
 
     private fun dedupePositions(positions: List<AccountPositionDto>): List<AccountPositionDto> {
@@ -1250,6 +1308,11 @@ class AccountService(
             val currentPositions = mutableListOf<AccountPositionDto>()
             val historyPositions = mutableListOf<AccountPositionDto>()
             val runtimeWallet = bridgePortfolioClient.fetchAccount()?.walletAddress
+            val bridgeRuntimeAccountId = if (runtimeWallet == null) {
+                bridgePortfolioClient.fetchStatus()?.copyTradingAccountId
+            } else {
+                null
+            }
 
             // 遍历所有账户，查询每个账户的仓位
             accounts.forEach { account ->
@@ -1257,7 +1320,7 @@ class AccountService(
                     try {
                         // Bridge 只读账户没有私钥，且 Polymtrade 的 Magic 钱包实际代理地址
                         // 与 PolyHermes 计算的代理地址可能不一致，因此通过 Bridge 交易记录计算净仓位
-                        if (account.isReadOnly && isRuntimeWalletMatched(account, runtimeWallet)) {
+                        if (account.isReadOnly && isBridgePositionSourceAccount(account, runtimeWallet, bridgeRuntimeAccountId)) {
                             val bridgePositions = bridgePositionService.getPositionsForAccount(account)
                             currentPositions.addAll(bridgePositions)
                             return@forEach

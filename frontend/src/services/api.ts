@@ -54,7 +54,9 @@ import type {
   BridgePositionSellResponse,
   LeaderScanBatchResponse,
   LeaderScanPreviewResponse,
-  LeaderScanStatus
+  LeaderScanStatus,
+  AccountOrderTrackingRequest,
+  OrderTrackingListResponse
 } from '../types'
 import { getToken, setToken, removeToken } from '../utils'
 import { wsManager } from './websocket'
@@ -372,6 +374,12 @@ export const apiService = {
      */
     getUsdceBalance: (accountId: number) =>
       apiClient.post<ApiResponse<{ balance: string }>>('/accounts/usdce-balance', { accountId }),
+
+    /**
+     * 查询账户历史订单列表（买入/卖出/匹配）
+     */
+    orders: (data: AccountOrderTrackingRequest) =>
+      apiClient.post<ApiResponse<OrderTrackingListResponse>>('/accounts/orders', data),
 
   },
   
@@ -1138,7 +1146,7 @@ export const backtestService = {
     leaderId: number
     initialBalance: string
     backtestDays: number
-    copyMode?: 'RATIO' | 'FIXED'
+    copyMode?: 'RATIO' | 'FIXED' | 'PROPORTIONAL_RISK'
     copyRatio?: string
     fixedAmount?: string
     maxOrderSize?: string

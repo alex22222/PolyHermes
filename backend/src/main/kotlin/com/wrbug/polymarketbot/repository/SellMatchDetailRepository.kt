@@ -37,5 +37,11 @@ interface SellMatchDetailRepository : JpaRepository<SellMatchDetail, Long> {
      */
     @Query("SELECT d FROM SellMatchDetail d JOIN SellMatchRecord r ON d.matchRecordId = r.id WHERE r.copyTradingId = :copyTradingId")
     fun findByCopyTradingId(copyTradingId: Long): List<SellMatchDetail>
+    
+    /**
+     * 根据跟单关系ID列表查询所有明细（通过匹配记录关联）
+     */
+    @Query("SELECT d FROM SellMatchDetail d JOIN SellMatchRecord r ON d.matchRecordId = r.id WHERE r.copyTradingId IN :copyTradingIds")
+    fun findByCopyTradingIdIn(copyTradingIds: Collection<Long>): List<SellMatchDetail>
 }
 

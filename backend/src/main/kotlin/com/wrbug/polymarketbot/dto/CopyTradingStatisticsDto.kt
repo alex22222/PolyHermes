@@ -122,6 +122,7 @@ data class SellOrderInfo(
     val price: String,
     val amount: String,
     val realizedPnl: String,
+    val status: String = "filled",  // filled, failed
     val createdAt: Long
 )
 
@@ -158,6 +159,21 @@ data class OrderListResponse(
  */
 data class OrderTrackingRequest(
     val copyTradingId: Long,
+    val type: String,  // buy, sell, matched
+    val page: Int? = 1,
+    val limit: Int? = 20,
+    val marketId: String? = null,
+    val marketTitle: String? = null,  // 市场标题关键字筛选
+    val status: String? = null,
+    val sellOrderId: String? = null,
+    val buyOrderId: String? = null
+)
+
+/**
+ * 账户历史订单查询请求
+ */
+data class AccountOrderTrackingRequest(
+    val accountId: Long,
     val type: String,  // buy, sell, matched
     val page: Int? = 1,
     val limit: Int? = 20,

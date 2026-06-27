@@ -105,3 +105,25 @@ class PositionLedger:
                 f"net={net}, required={sell_quantity}"
             )
         return sufficient
+
+    def cap_to_available_position(
+        self,
+        market_id: str,
+        outcome: Optional[str],
+        outcome_index: Optional[int],
+        desired_quantity: Decimal,
+    ) -> Decimal:
+        """Return the sell quantity capped by the local Bridge ledger."""
+        if desired_quantity <= 0:
+            return Decimal("0")
+        net = self.get_net_quantity(market_id, outcome, outcome_index)
+        if net <= 0:
+            logger.info(f"No local position for {market_id} {outcome}: net={net}")
+            return Decimal("0")
+        if desired_quantity > net:
+            logger.info(
+                f"Capping sell quantity to local position for {market_id} {outcome}: "
+                f"desired={desired_quantity}, available={net}"
+            )
+            return net
+        return desired_quantity

@@ -208,6 +208,126 @@ class BridgeTradeRecorder:
             logger.warning(f"Failed to check BTC 5M daily BUY usage: {e}")
             return 0, Decimal("0")
 
+    def recent_success_sell_size(
+        self,
+        market_id: str,
+        market_slug: Optional[str],
+        outcome: Optional[str],
+        outcome_index: Optional[int],
+        leader_address: Optional[str],
+        since_ms: int,
+    ) -> Decimal:
+        """Return summed leader SELL size for the same leader/market/outcome since a timestamp."""
+        if not leader_address:
+            return Decimal("0")
+        leader = leader_address.lower()
+        sql = """
+        SELECT COALESCE(SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.size')) AS DECIMAL(20,8))), 0) AS leader_size
+        FROM bridge_trade_record
+        WHERE bridge_id = %s
+          AND side = 'SELL'
+          AND status = 'SUCCESS'
+          AND created_at >= %s
+          AND (
+            market_id = %s
+            OR (%s IS NOT NULL AND raw_payload LIKE %s)
+          )
+          AND (%s IS NULL OR outcome = %s)
+          AND (%s IS NULL OR outcome_index = %s)
+          AND LOWER(raw_payload) LIKE %s
+        """
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            self.bridge_id,
+                            since_ms,
+                            market_id,
+                            market_slug,
+                            f'%"{market_slug}"%' if market_slug else None,
+                            outcome,
+                            outcome,
+                            outcome_index,
+                            outcome_index,
+                            f"%{leader}%",
+                        ),
+                    )
+                    row = cur.fetchone() or {}
+                    return Decimal(str(row.get("leader_size") or "0"))
+        except Exception as e:
+            logger.warning(f"Failed to query recent sell size: {e}")
+            return Decimal("0")
+
+    def recent_leader_sell_size(
+        self,
+        market_id: str,
+        market_slug: Optional[str],
+        outcome: Optional[str],
+        outcome_index: Optional[int],
+        leader_address: Optional[str],
+        since_ms: int,
+    ) -> Decimal:
+        """Return summed leader-side SELL size from webhook logs since a timestamp.
+
+        This uses the signal source of truth instead of local execution results,
+        so a failed/skipped local SELL can still protect a later tiny BUY-back.
+        """
+        if not leader_address:
+            return Decimal("0")
+        leader = leader_address.lower()
+        sql = """
+        SELECT COALESCE(SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(request_body, '$.size')) AS DECIMAL(20,8))), 0) AS leader_size
+        FROM bridge_webhook_log
+        WHERE bridge_id = %s
+          AND side = 'SELL'
+          AND created_at >= %s
+          AND LOWER(leader_address) = %s
+          AND (
+            condition_id = %s
+            OR (%s IS NOT NULL AND market_slug = %s)
+            OR (%s IS NOT NULL AND request_body LIKE %s)
+          )
+          AND (%s IS NULL OR outcome = %s)
+          AND (
+            %s IS NULL
+            OR (
+              request_body IS NOT NULL
+              AND JSON_VALID(request_body) = 1
+              AND CAST(JSON_UNQUOTE(JSON_EXTRACT(request_body, '$.outcomeIndex')) AS SIGNED) = %s
+            )
+          )
+          AND request_body IS NOT NULL
+          AND JSON_VALID(request_body) = 1
+          AND COALESCE(status, '') <> 'SKIPPED'
+        """
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            self.bridge_id,
+                            since_ms,
+                            leader,
+                            market_id,
+                            market_slug,
+                            market_slug,
+                            market_slug,
+                            f'%"{market_slug}"%' if market_slug else None,
+                            outcome,
+                            outcome,
+                            outcome_index,
+                            outcome_index,
+                        ),
+                    )
+                    row = cur.fetchone() or {}
+                    return Decimal(str(row.get("leader_size") or "0"))
+        except Exception as e:
+            logger.warning(f"Failed to query recent leader sell size: {e}")
+            return Decimal("0")
+
     def record_result(
         self,
         external_trade_id: Optional[str],

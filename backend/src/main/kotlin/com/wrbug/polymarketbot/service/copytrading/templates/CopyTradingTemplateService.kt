@@ -20,6 +20,7 @@ class CopyTradingTemplateService(
 ) {
     
     private val logger = LoggerFactory.getLogger(CopyTradingTemplateService::class.java)
+    private val allowedCopyModes = setOf("RATIO", "FIXED", "PROPORTIONAL_RISK")
     
     /**
      * 创建模板
@@ -38,8 +39,8 @@ class CopyTradingTemplateService(
             }
             
             // 3. 验证 copyMode
-            if (request.copyMode !in listOf("RATIO", "FIXED")) {
-                return Result.failure(IllegalArgumentException("copyMode 必须是 RATIO 或 FIXED"))
+            if (request.copyMode !in allowedCopyModes) {
+                return Result.failure(IllegalArgumentException("copyMode 必须是 RATIO、FIXED 或 PROPORTIONAL_RISK"))
             }
             
             // 4. 创建模板
@@ -98,8 +99,8 @@ class CopyTradingTemplateService(
             }
             
             // 验证 copyMode
-            if (request.copyMode != null && request.copyMode !in listOf("RATIO", "FIXED")) {
-                return Result.failure(IllegalArgumentException("copyMode 必须是 RATIO 或 FIXED"))
+            if (request.copyMode != null && request.copyMode !in allowedCopyModes) {
+                return Result.failure(IllegalArgumentException("copyMode 必须是 RATIO、FIXED 或 PROPORTIONAL_RISK"))
             }
             
             val updated = template.copy(
@@ -269,4 +270,3 @@ class CopyTradingTemplateService(
         )
     }
 }
-

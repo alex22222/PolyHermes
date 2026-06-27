@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Card, Form, Input, Button, Radio, InputNumber, Switch, message, Typography, Space, Divider } from 'antd'
 import { ArrowLeftOutlined, SaveOutlined } from '@ant-design/icons'
 import { apiService } from '../services/api'
+import type { CopyMode } from '../types'
 import { useTranslation } from 'react-i18next'
 
 const { Title } = Typography
@@ -12,11 +13,12 @@ const TemplateAdd: React.FC = () => {
   const navigate = useNavigate()
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
-  const [copyMode, setCopyMode] = useState<'RATIO' | 'FIXED'>('RATIO')
+  const [copyMode, setCopyMode] = useState<CopyMode>('RATIO')
+  const isRatioLikeMode = (mode?: CopyMode) => mode === 'RATIO' || mode === 'PROPORTIONAL_RISK'
   
   const handleSubmit = async (values: any) => {
     // 前端校验：如果填写了 minOrderSize，必须 >= 1
-    if (values.copyMode === 'RATIO' && values.minOrderSize !== undefined && values.minOrderSize !== null && values.minOrderSize !== '' && Number(values.minOrderSize) < 1) {
+    if (isRatioLikeMode(values.copyMode) && values.minOrderSize !== undefined && values.minOrderSize !== null && values.minOrderSize !== '' && Number(values.minOrderSize) < 1) {
       message.error(t('templateAdd.minOrderSizeError') || '最小金额必须 >= 1')
       return
     }
@@ -45,10 +47,10 @@ const TemplateAdd: React.FC = () => {
         templateName: values.templateName,
         copyMode: values.copyMode || 'RATIO',
         // 将百分比转换为小数：100% -> 1.0
-        copyRatio: values.copyMode === 'RATIO' && values.copyRatio ? (values.copyRatio / 100).toString() : undefined,
+        copyRatio: isRatioLikeMode(values.copyMode) && values.copyRatio ? (values.copyRatio / 100).toString() : undefined,
         fixedAmount: values.copyMode === 'FIXED' ? values.fixedAmount?.toString() : undefined,
-        maxOrderSize: values.copyMode === 'RATIO' ? values.maxOrderSize?.toString() : undefined,
-        minOrderSize: values.copyMode === 'RATIO' ? values.minOrderSize?.toString() : undefined,
+        maxOrderSize: isRatioLikeMode(values.copyMode) ? values.maxOrderSize?.toString() : undefined,
+        minOrderSize: isRatioLikeMode(values.copyMode) ? values.minOrderSize?.toString() : undefined,
         maxDailyOrders: values.maxDailyOrders,
         priceTolerance: values.priceTolerance?.toString(),
         supportSell: values.supportSell !== false,
@@ -116,13 +118,14 @@ const TemplateAdd: React.FC = () => {
             tooltip={t('templateAdd.copyModeTooltip') || '选择跟单金额的计算方式。比例模式：跟单金额随 Leader 订单大小按比例变化；固定金额模式：无论 Leader 订单大小如何，跟单金额都固定不变。'}
             rules={[{ required: true }]}
           >
-            <Radio.Group onChange={(e) => setCopyMode(e.target.value)}>
-              <Radio value="RATIO">{t('templateAdd.ratioMode') || '比例模式'}</Radio>
-              <Radio value="FIXED">{t('templateAdd.fixedAmountMode') || '固定金额模式'}</Radio>
-            </Radio.Group>
+	            <Radio.Group onChange={(e) => setCopyMode(e.target.value)}>
+	              <Radio value="RATIO">{t('templateAdd.ratioMode') || '比例模式'}</Radio>
+	              <Radio value="FIXED">{t('templateAdd.fixedAmountMode') || '固定金额模式'}</Radio>
+	              <Radio value="PROPORTIONAL_RISK">{t('templateAdd.proportionalRiskMode') || '比例风控模式'}</Radio>
+	            </Radio.Group>
           </Form.Item>
           
-          {copyMode === 'RATIO' && (
+          {isRatioLikeMode(copyMode) && (
             <Form.Item
               label={t('templateAdd.copyRatio') || '跟单比例'}
               name="copyRatio"
@@ -190,7 +193,7 @@ const TemplateAdd: React.FC = () => {
             </Form.Item>
           )}
           
-          {copyMode === 'RATIO' && (
+          {isRatioLikeMode(copyMode) && (
             <>
               <Form.Item
                 label={t('templateAdd.maxOrderSize') || '单笔订单最大金额 ($)'}
@@ -413,4 +416,3 @@ const TemplateAdd: React.FC = () => {
 }
 
 export default TemplateAdd
-

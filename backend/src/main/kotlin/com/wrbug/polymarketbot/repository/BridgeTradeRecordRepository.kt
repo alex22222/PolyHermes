@@ -54,6 +54,36 @@ interface BridgeTradeRecordRepository : JpaRepository<BridgeTradeRecord, Long> {
     ): Page<BridgeTradeRecord>
 
     /**
+     * 通过 raw_payload.leaderAddress 查询某个 Leader 的 Bridge 执行记录。
+     * Bridge 账本不直接保存 copy_trading_id，因此跟单详情页需要用 Leader 地址关联执行记录。
+     */
+    @Query(
+        value = """
+            SELECT *
+            FROM bridge_trade_record
+            WHERE bridge_id = :bridgeId
+              AND raw_payload IS NOT NULL
+              AND JSON_VALID(raw_payload) = 1
+              AND LOWER(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.leaderAddress'))) = LOWER(:leaderAddress)
+            ORDER BY created_at DESC
+        """,
+        countQuery = """
+            SELECT COUNT(*)
+            FROM bridge_trade_record
+            WHERE bridge_id = :bridgeId
+              AND raw_payload IS NOT NULL
+              AND JSON_VALID(raw_payload) = 1
+              AND LOWER(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.leaderAddress'))) = LOWER(:leaderAddress)
+        """,
+        nativeQuery = true
+    )
+    fun findByBridgeIdAndLeaderAddressInRawPayload(
+        @Param("bridgeId") bridgeId: String,
+        @Param("leaderAddress") leaderAddress: String,
+        pageable: Pageable
+    ): Page<BridgeTradeRecord>
+
+    /**
      * 通过 Bridge raw_payload.leaderAddress 统计某个 Leader 的真实执行结果。
      */
     @Query(

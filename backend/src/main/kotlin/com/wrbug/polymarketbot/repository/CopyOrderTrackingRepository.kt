@@ -19,6 +19,11 @@ interface CopyOrderTrackingRepository : JpaRepository<CopyOrderTracking, Long> {
     fun findByCopyTradingId(copyTradingId: Long): List<CopyOrderTracking>
     
     /**
+     * 根据账户ID查询所有买入订单
+     */
+    fun findByAccountId(accountId: Long): List<CopyOrderTracking>
+    
+    /**
      * 根据跟单关系ID、市场ID和方向查询未匹配的买入订单（FIFO顺序）
      * @deprecated 使用 findUnmatchedBuyOrdersByOutcomeIndex 替代
      */

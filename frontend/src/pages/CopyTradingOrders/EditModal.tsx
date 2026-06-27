@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react'
 import { Modal, Form, Button, message, Radio, InputNumber, Divider, Spin, Select, Input, Space, Switch, Tag, InputRef, Card, Row, Col, Statistic } from 'antd'
 import { SaveOutlined } from '@ant-design/icons'
 import { apiService } from '../../services/api'
-import type { CopyTrading, CopyTradingUpdateRequest } from '../../types'
+import type { CopyTrading, CopyTradingUpdateRequest, CopyMode } from '../../types'
 import { useTranslation } from 'react-i18next'
 import { formatUSDC } from '../../utils'
 
@@ -26,7 +26,7 @@ const EditModal: React.FC<EditModalProps> = ({
   const [loading, setLoading] = useState(false)
   const [fetching, setFetching] = useState(true)
   const [copyTrading, setCopyTrading] = useState<CopyTrading | null>(null)
-  const [copyMode, setCopyMode] = useState<'RATIO' | 'FIXED'>('RATIO')
+  const [copyMode, setCopyMode] = useState<CopyMode>('RATIO')
     const [originalEnabled, setOriginalEnabled] = useState<boolean>(true)
     const [keywords, setKeywords] = useState<string[]>([])
     const keywordInputRef = useRef<InputRef>(null)
@@ -117,7 +117,9 @@ const EditModal: React.FC<EditModalProps> = ({
     }
   }
   
-  const handleCopyModeChange = (mode: 'RATIO' | 'FIXED') => {
+  const isRatioLikeMode = (mode?: CopyMode) => mode === 'RATIO' || mode === 'PROPORTIONAL_RISK'
+
+  const handleCopyModeChange = (mode: CopyMode) => {
     setCopyMode(mode)
   }
   
@@ -187,7 +189,7 @@ const EditModal: React.FC<EditModalProps> = ({
       }
     }
     
-    if (values.copyMode === 'RATIO' && values.minOrderSize !== undefined && values.minOrderSize !== null && Number(values.minOrderSize) < 1) {
+    if (isRatioLikeMode(values.copyMode) && values.minOrderSize !== undefined && values.minOrderSize !== null && Number(values.minOrderSize) < 1) {
       message.error('最小金额必须 >= 1')
       return
     }
@@ -217,7 +219,7 @@ const EditModal: React.FC<EditModalProps> = ({
         copyTradingId: parseInt(copyTradingId),
         enabled: originalEnabled,
         copyMode: values.copyMode,
-        copyRatio: values.copyMode === 'RATIO' && values.copyRatio ? (values.copyRatio / 100).toString() : undefined,
+        copyRatio: isRatioLikeMode(values.copyMode) && values.copyRatio ? (values.copyRatio / 100).toString() : undefined,
         fixedAmount: values.copyMode === 'FIXED' ? values.fixedAmount?.toString() : undefined,
         maxOrderSize: values.maxOrderSize?.toString(),
         minOrderSize: values.minOrderSize?.toString(),
@@ -392,13 +394,14 @@ const EditModal: React.FC<EditModalProps> = ({
             tooltip={t('copyTradingEdit.copyModeTooltip') || '选择跟单金额的计算方式'}
             rules={[{ required: true }]}
           >
-            <Radio.Group onChange={(e) => handleCopyModeChange(e.target.value)}>
-              <Radio value="RATIO">{t('copyTradingEdit.ratioMode') || '比例模式'}</Radio>
-              <Radio value="FIXED">{t('copyTradingEdit.fixedAmountMode') || '固定金额模式'}</Radio>
-            </Radio.Group>
-          </Form.Item>
-          
-          {copyMode === 'RATIO' && (
+	            <Radio.Group onChange={(e) => handleCopyModeChange(e.target.value)}>
+	              <Radio value="RATIO">{t('copyTradingEdit.ratioMode') || '比例模式'}</Radio>
+	              <Radio value="FIXED">{t('copyTradingEdit.fixedAmountMode') || '固定金额模式'}</Radio>
+	              <Radio value="PROPORTIONAL_RISK">{t('copyTradingEdit.proportionalRiskMode') || '比例风控模式'}</Radio>
+	            </Radio.Group>
+	          </Form.Item>
+	          
+	          {isRatioLikeMode(copyMode) && (
             <Form.Item
               label={t('copyTradingEdit.copyRatio') || '跟单比例'}
               name="copyRatio"
@@ -492,7 +495,7 @@ const EditModal: React.FC<EditModalProps> = ({
             </Form.Item>
           )}
           
-          {copyMode === 'RATIO' && (
+	          {isRatioLikeMode(copyMode) && (
             <>
               <Form.Item
                 label={t('copyTradingEdit.maxOrderSize') || '单笔订单最大金额 ($)'}
@@ -905,4 +908,3 @@ const EditModal: React.FC<EditModalProps> = ({
 }
 
 export default EditModal
-

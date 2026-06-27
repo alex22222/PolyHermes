@@ -218,6 +218,45 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
         self.assertIsNotNone(reason)
         self.assertIn("signal delay", reason)
 
+    def test_proportional_risk_buy_uses_leader_value_and_caps_max_order(self):
+        cfg = self._base_config(
+            copy_mode="PROPORTIONAL_RISK",
+            copy_ratio=Decimal("0.50"),
+            min_order_size=Decimal("1"),
+            max_order_size=Decimal("2"),
+        )
+        amount = self.engine.compute_buy_quantity(
+            cfg, leader_price=Decimal("0.50"), leader_size=Decimal("10")
+        )
+        self.assertEqual(amount, Decimal("2.00"))
+
+    def test_proportional_risk_buy_below_min_records_reason(self):
+        cfg = self._base_config(
+            copy_mode="PROPORTIONAL_RISK",
+            copy_ratio=Decimal("0.10"),
+            min_order_size=Decimal("1"),
+        )
+        amount = self.engine.compute_buy_quantity(
+            cfg, leader_price=Decimal("0.50"), leader_size=Decimal("10")
+        )
+        reason = self.engine.buy_skip_reason(
+            cfg, leader_price=Decimal("0.50"), leader_size=Decimal("10")
+        )
+        self.assertIsNone(amount)
+        self.assertIn("Below min_order_size", reason)
+
+    def test_proportional_risk_sell_uses_leader_size_ratio(self):
+        cfg = self._base_config(
+            copy_mode="PROPORTIONAL_RISK",
+            copy_ratio=Decimal("0.25"),
+            min_order_size=Decimal("1"),
+            max_order_size=Decimal("100"),
+        )
+        shares = self.engine.compute_sell_shares(
+            cfg, leader_price=Decimal("0.50"), leader_size=Decimal("20")
+        )
+        self.assertEqual(shares, Decimal("5.0000"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,10 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+COPY_MODE_RATIO = "RATIO"
+COPY_MODE_FIXED = "FIXED"
+COPY_MODE_PROPORTIONAL_RISK = "PROPORTIONAL_RISK"
+
 
 @dataclass
 class CopyTradingConfig:
@@ -304,12 +308,8 @@ class CopyTradingRuleEngine:
         self, cfg: CopyTradingConfig, leader_price: Decimal, leader_size: Decimal
     ) -> Optional[Decimal]:
         """Return USDC amount to buy. None if filtered by min/max size."""
-        if cfg.copy_mode == "RATIO":
-            leader_value = leader_price * leader_size
-            value = leader_value * cfg.copy_ratio
-        elif cfg.copy_mode == "FIXED" and cfg.fixed_amount is not None:
-            value = cfg.fixed_amount
-        else:
+        value = self._raw_buy_value(cfg, leader_price, leader_size)
+        if value is None:
             return None
 
         if cfg.min_order_size and value < cfg.min_order_size:
@@ -320,15 +320,33 @@ class CopyTradingRuleEngine:
 
         return value.quantize(Decimal("0.01"))
 
+    def buy_skip_reason(
+        self, cfg: CopyTradingConfig, leader_price: Decimal, leader_size: Decimal
+    ) -> Optional[str]:
+        """Explain why a BUY would be skipped by amount sizing."""
+        value = self._raw_buy_value(cfg, leader_price, leader_size)
+        if value is None:
+            return f"Unsupported copy mode for BUY: {cfg.copy_mode}"
+        if cfg.min_order_size and value < cfg.min_order_size:
+            return f"Below min_order_size, skipped (value={value}, min={cfg.min_order_size})"
+        return None
+
+    def _raw_buy_value(
+        self, cfg: CopyTradingConfig, leader_price: Decimal, leader_size: Decimal
+    ) -> Optional[Decimal]:
+        if cfg.copy_mode in {COPY_MODE_RATIO, COPY_MODE_PROPORTIONAL_RISK}:
+            leader_value = leader_price * leader_size
+            return leader_value * cfg.copy_ratio
+        elif cfg.copy_mode == COPY_MODE_FIXED and cfg.fixed_amount is not None:
+            return cfg.fixed_amount
+        return None
+
     def compute_sell_shares(
         self, cfg: CopyTradingConfig, leader_price: Decimal, leader_size: Decimal
     ) -> Optional[Decimal]:
         """Return number of shares to sell. None if filtered by min/max size."""
-        if cfg.copy_mode == "RATIO":
-            shares = leader_size * cfg.copy_ratio
-        elif cfg.copy_mode == "FIXED" and cfg.fixed_amount is not None:
-            shares = cfg.fixed_amount / leader_price
-        else:
+        shares = self._raw_sell_shares(cfg, leader_price, leader_size)
+        if shares is None:
             return None
 
         value = shares * leader_price
@@ -339,6 +357,27 @@ class CopyTradingRuleEngine:
             shares = cfg.max_order_size / leader_price
 
         return shares.quantize(Decimal("0.0001"))
+
+    def sell_skip_reason(
+        self, cfg: CopyTradingConfig, leader_price: Decimal, leader_size: Decimal
+    ) -> Optional[str]:
+        """Explain why a SELL would be skipped by amount sizing."""
+        shares = self._raw_sell_shares(cfg, leader_price, leader_size)
+        if shares is None:
+            return f"Unsupported copy mode for SELL: {cfg.copy_mode}"
+        value = shares * leader_price
+        if cfg.min_order_size and value < cfg.min_order_size:
+            return f"Below min_order_size, skipped (value={value}, min={cfg.min_order_size})"
+        return None
+
+    def _raw_sell_shares(
+        self, cfg: CopyTradingConfig, leader_price: Decimal, leader_size: Decimal
+    ) -> Optional[Decimal]:
+        if cfg.copy_mode in {COPY_MODE_RATIO, COPY_MODE_PROPORTIONAL_RISK}:
+            return leader_size * cfg.copy_ratio
+        elif cfg.copy_mode == COPY_MODE_FIXED and cfg.fixed_amount is not None:
+            return cfg.fixed_amount / leader_price
+        return None
 
     async def sleep_delay(self, cfg: CopyTradingConfig):
         if cfg.delay_seconds > 0:

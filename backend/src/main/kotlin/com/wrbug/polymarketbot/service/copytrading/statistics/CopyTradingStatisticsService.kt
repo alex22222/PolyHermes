@@ -11,7 +11,6 @@ import com.wrbug.polymarketbot.util.lte
 import org.slf4j.LoggerFactory
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Pageable
-import org.springframework.data.domain.Sort
 import com.wrbug.polymarketbot.service.common.BlockchainService
 import org.springframework.stereotype.Service
 import java.math.BigDecimal
@@ -605,6 +604,426 @@ class CopyTradingStatisticsService(
                 marketTitle = market?.title,
                 marketSlug = market?.slug,  // 显示用的 slug
                 eventSlug = market?.eventSlug,  // 跳转用的 slug（从数据库读取）
+                marketCategory = market?.category,
+                matchedQuantity = detail.matchedQuantity.toString(),
+                buyPrice = detail.buyPrice.toString(),
+                sellPrice = detail.sellPrice.toString(),
+                realizedPnl = detail.realizedPnl.toString(),
+                matchedAt = detail.createdAt
+            )
+        }
+        
+        return Pair(list, total)
+    }
+    
+    /**
+     * 查询账户历史订单列表
+     */
+    fun getAccountOrderList(request: AccountOrderTrackingRequest): Result<OrderListResponse> {
+        return try {
+            // 1. 验证账户
+            accountRepository.findById(request.accountId).orElse(null)
+                ?: return Result.failure(IllegalArgumentException("账户不存在: ${request.accountId}"))
+            
+            // 2. 获取账户下所有跟单配置及 Leader 地址（用于间接查询卖出/匹配订单和 Bridge 执行记录）
+            val copyTradings = copyTradingRepository.findByAccountId(request.accountId)
+            val copyTradingIds = copyTradings.mapNotNull { it.id }
+            val leaderIds = copyTradings.map { it.leaderId }.distinct()
+            val leaderAddresses = leaderRepository.findAllById(leaderIds)
+                .mapNotNull { it.leaderAddress }
+                .filter { it.isNotBlank() }
+                .map { it.lowercase() }
+                .distinct()
+            
+            // 3. 根据类型查询
+            val (list, total) = when (request.type.lowercase()) {
+                "buy" -> getAccountBuyOrderList(request, leaderAddresses)
+                "sell" -> getAccountSellOrderList(request, copyTradingIds, leaderAddresses)
+                "matched" -> getAccountMatchedOrderList(request, copyTradingIds)
+                else -> return Result.failure(IllegalArgumentException("不支持的订单类型: ${request.type}"))
+            }
+            
+            // 4. 构建响应
+            val response = OrderListResponse(
+                list = list,
+                total = total,
+                page = request.page ?: 1,
+                limit = request.limit ?: 20
+            )
+            
+            Result.success(response)
+        } catch (e: Exception) {
+            logger.error("查询账户订单列表失败: accountId=${request.accountId}, type=${request.type}", e)
+            Result.failure(e)
+        }
+    }
+    
+    /**
+     * 获取账户买入订单列表
+     */
+    private fun getAccountBuyOrderList(
+        request: AccountOrderTrackingRequest,
+        leaderAddresses: List<String>
+    ): Pair<List<BuyOrderInfo>, Long> {
+        var orders = copyOrderTrackingRepository.findByAccountId(request.accountId)
+        
+        // 批量获取市场信息（用于筛选）
+        val allMarketIds = orders.map { it.marketId }.distinct()
+        val markets = marketService.getMarkets(allMarketIds)
+        
+        // 筛选
+        if (!request.marketId.isNullOrBlank()) {
+            orders = orders.filter { it.marketId.contains(request.marketId!!, ignoreCase = true) }
+        }
+        if (!request.marketTitle.isNullOrBlank()) {
+            orders = orders.filter { order ->
+                val market = markets[order.marketId]
+                market?.title?.contains(request.marketTitle!!, ignoreCase = true) == true
+            }
+        }
+        // 统一状态语义：空表示只查询成功交易
+        val effectiveStatus = request.status?.trim()?.takeIf { it.isNotBlank() }?.lowercase() ?: "filled"
+        orders = orders.filter { it.status.equals(effectiveStatus, ignoreCase = true) }
+        
+        // 转换为DTO
+        val buyOrderInfos = orders.map { order ->
+            val amount = order.quantity.toSafeBigDecimal().multi(order.price)
+            val market = markets[order.marketId]
+            BuyOrderInfo(
+                orderId = order.buyOrderId,
+                leaderTradeId = order.leaderBuyTradeId,
+                marketId = order.marketId,
+                marketTitle = market?.title,
+                marketSlug = market?.slug,
+                eventSlug = market?.eventSlug,
+                marketCategory = market?.category,
+                side = order.side,
+                quantity = order.quantity.toString(),
+                price = order.price.toString(),
+                amount = amount.toString(),
+                matchedQuantity = order.matchedQuantity.toString(),
+                remainingQuantity = order.remainingQuantity.toString(),
+                status = order.status,
+                createdAt = order.createdAt
+            )
+        }.toMutableList()
+        
+        // 补充 Bridge 执行记录（买入），解决 copy_order_tracking 为空时历史订单无数据的问题
+        if (effectiveStatus == "filled" || effectiveStatus == "failed") {
+            val bridgeBuyRecords = fetchAccountBridgeBuyRecords(request, leaderAddresses, effectiveStatus)
+            buyOrderInfos.addAll(bridgeBuyRecords)
+        }
+        
+        val total = buyOrderInfos.size.toLong()
+        
+        // 排序（按创建时间倒序）
+        val sorted = buyOrderInfos.sortedByDescending { it.createdAt }
+        
+        // 分页
+        val page = (request.page ?: 1) - 1
+        val limit = request.limit ?: 20
+        val start = page * limit
+        val end = minOf(start + limit, sorted.size)
+        val pagedList = if (start < sorted.size) sorted.subList(start, end) else emptyList()
+        
+        return Pair(pagedList, total)
+    }
+    
+    /**
+     * 获取账户在 Bridge 中的买入执行记录
+     */
+    private fun fetchAccountBridgeBuyRecords(
+        request: AccountOrderTrackingRequest,
+        leaderAddresses: List<String>,
+        effectiveStatus: String = request.status?.trim()?.takeIf { it.isNotBlank() }?.lowercase() ?: "filled"
+    ): List<BuyOrderInfo> {
+        if (leaderAddresses.isEmpty()) return emptyList()
+        
+        return try {
+            val pageRequest = PageRequest.of(0, 1000)
+            val bridgeRecords = leaderAddresses.flatMap { leaderAddress ->
+                bridgeTradeRecordRepository.findByBridgeIdAndLeaderAddressInRawPayload(
+                    bridgeId = "polymtrade-bridge",
+                    leaderAddress = leaderAddress,
+                    pageable = pageRequest
+                ).content
+            }.filter { it.side == "BUY" }
+            
+            // 去重（同一个 externalTradeId 可能对应多个 leaderAddress 查询结果）
+            val distinctRecords = bridgeRecords.distinctBy { it.id }
+            
+            // 批量获取市场信息
+            val bridgeMarketIds = distinctRecords.map { it.marketId }.distinct()
+            val bridgeMarkets = marketService.getMarkets(bridgeMarketIds)
+            
+            var result = distinctRecords.map { record ->
+                val market = bridgeMarkets[record.marketId]
+                val recordStatus = when {
+                    record.status.equals("SUCCESS", ignoreCase = true) -> "filled"
+                    record.status.equals("FAILED", ignoreCase = true) -> "failed"
+                    else -> record.status.lowercase()
+                }
+                BuyOrderInfo(
+                    orderId = record.externalTradeId ?: "bridge-${record.id}",
+                    leaderTradeId = record.externalTradeId ?: "",
+                    marketId = record.marketId,
+                    marketTitle = record.marketTitle ?: market?.title,
+                    marketSlug = market?.slug,
+                    eventSlug = market?.eventSlug,
+                    marketCategory = market?.category,
+                    side = record.outcome ?: record.side,
+                    quantity = record.quantity.toString(),
+                    price = record.price.toString(),
+                    amount = record.amount.toString(),
+                    matchedQuantity = if (record.status.equals("SUCCESS", ignoreCase = true)) record.quantity.toString() else "0",
+                    remainingQuantity = if (record.status.equals("SUCCESS", ignoreCase = true)) "0" else record.quantity.toString(),
+                    status = recordStatus,
+                    createdAt = record.createdAt
+                )
+            }
+            
+            // 应用状态筛选（空状态默认只展示成功交易）
+            result = result.filter { it.status.equals(effectiveStatus, ignoreCase = true) }
+            
+            // 应用其他筛选
+            if (!request.marketId.isNullOrBlank()) {
+                result = result.filter { it.marketId.contains(request.marketId!!, ignoreCase = true) }
+            }
+            if (!request.marketTitle.isNullOrBlank()) {
+                result = result.filter { it.marketTitle?.contains(request.marketTitle!!, ignoreCase = true) == true }
+            }
+            
+            result
+        } catch (e: Exception) {
+            logger.warn("获取账户 Bridge 买入记录失败: accountId=${request.accountId}", e)
+            emptyList()
+        }
+    }
+    
+    /**
+     * 获取账户卖出订单列表
+     */
+    private fun getAccountSellOrderList(
+        request: AccountOrderTrackingRequest,
+        copyTradingIds: List<Long>,
+        leaderAddresses: List<String>
+    ): Pair<List<SellOrderInfo>, Long> {
+        var records = if (copyTradingIds.isEmpty()) {
+            emptyList<SellMatchRecord>()
+        } else {
+            sellMatchRecordRepository.findByCopyTradingIdIn(copyTradingIds)
+        }
+        
+        // 批量获取市场信息（用于筛选）
+        val allMarketIds = records.map { it.marketId }.distinct()
+        val markets = marketService.getMarkets(allMarketIds)
+        
+        // 筛选
+        if (!request.marketId.isNullOrBlank()) {
+            records = records.filter { it.marketId.contains(request.marketId!!, ignoreCase = true) }
+        }
+        if (!request.marketTitle.isNullOrBlank()) {
+            records = records.filter { record ->
+                val market = markets[record.marketId]
+                market?.title?.contains(request.marketTitle!!, ignoreCase = true) == true
+            }
+        }
+        
+        // 统一状态语义：空表示只查询成功交易
+        val effectiveStatus = request.status?.trim()?.takeIf { it.isNotBlank() }?.lowercase() ?: "filled"
+        
+        // 转换为DTO
+        val sellOrderInfos = if (effectiveStatus == "filled") {
+            records.map { record ->
+                val amount = record.totalMatchedQuantity.toSafeBigDecimal().multi(record.sellPrice)
+                val market = markets[record.marketId]
+                SellOrderInfo(
+                    orderId = record.sellOrderId,
+                    leaderTradeId = record.leaderSellTradeId,
+                    marketId = record.marketId,
+                    marketTitle = market?.title,
+                    marketSlug = market?.slug,
+                    eventSlug = market?.eventSlug,
+                    marketCategory = market?.category,
+                    side = record.side,
+                    quantity = record.totalMatchedQuantity.toString(),
+                    price = record.sellPrice.toString(),
+                    amount = amount.toString(),
+                    realizedPnl = record.totalRealizedPnl.toString(),
+                    createdAt = record.createdAt,
+                    status = "filled"
+                )
+            }.toMutableList()
+        } else {
+            mutableListOf()
+        }
+        
+        // 补充 Bridge 执行记录（卖出），解决 sell_match_record 为空时历史订单无数据的问题
+        if (effectiveStatus == "filled" || effectiveStatus == "failed") {
+            sellOrderInfos.addAll(fetchAccountBridgeSellRecords(request, leaderAddresses, effectiveStatus))
+        }
+        
+        val total = sellOrderInfos.size.toLong()
+        
+        // 排序（按创建时间倒序）
+        val sorted = sellOrderInfos.sortedByDescending { it.createdAt }
+        
+        // 分页
+        val page = (request.page ?: 1) - 1
+        val limit = request.limit ?: 20
+        val start = page * limit
+        val end = minOf(start + limit, sorted.size)
+        val pagedList = if (start < sorted.size) sorted.subList(start, end) else emptyList()
+        
+        return Pair(pagedList, total)
+    }
+    
+    /**
+     * 获取账户在 Bridge 中的卖出执行记录
+     */
+    private fun fetchAccountBridgeSellRecords(
+        request: AccountOrderTrackingRequest,
+        leaderAddresses: List<String>,
+        effectiveStatus: String = request.status?.trim()?.takeIf { it.isNotBlank() }?.lowercase() ?: "filled"
+    ): List<SellOrderInfo> {
+        if (leaderAddresses.isEmpty()) return emptyList()
+        
+        return try {
+            val pageRequest = PageRequest.of(0, 1000)
+            val bridgeRecords = leaderAddresses.flatMap { leaderAddress ->
+                bridgeTradeRecordRepository.findByBridgeIdAndLeaderAddressInRawPayload(
+                    bridgeId = "polymtrade-bridge",
+                    leaderAddress = leaderAddress,
+                    pageable = pageRequest
+                ).content
+            }.filter { it.side == "SELL" }
+            
+            // 去重
+            val distinctRecords = bridgeRecords.distinctBy { it.id }
+            
+            // 批量获取市场信息
+            val bridgeMarketIds = distinctRecords.map { it.marketId }.distinct()
+            val bridgeMarkets = marketService.getMarkets(bridgeMarketIds)
+            
+            var result = distinctRecords.map { record ->
+                val market = bridgeMarkets[record.marketId]
+                val recordStatus = when {
+                    record.status.equals("SUCCESS", ignoreCase = true) -> "filled"
+                    record.status.equals("FAILED", ignoreCase = true) -> "failed"
+                    else -> record.status.lowercase()
+                }
+                SellOrderInfo(
+                    orderId = record.externalTradeId ?: "bridge-${record.id}",
+                    leaderTradeId = record.externalTradeId ?: "",
+                    marketId = record.marketId,
+                    marketTitle = record.marketTitle ?: market?.title,
+                    marketSlug = market?.slug,
+                    eventSlug = market?.eventSlug,
+                    marketCategory = market?.category,
+                    side = record.outcome ?: record.side,
+                    quantity = record.quantity.toString(),
+                    price = record.price.toString(),
+                    amount = record.amount.toString(),
+                    realizedPnl = if (record.status.equals("SUCCESS", ignoreCase = true)) "0" else "-",
+                    createdAt = record.createdAt,
+                    status = recordStatus
+                )
+            }
+            
+            // 应用状态筛选（空状态默认只展示成功交易）
+            result = result.filter { it.status.equals(effectiveStatus, ignoreCase = true) }
+            
+            // 应用其他筛选
+            if (!request.marketId.isNullOrBlank()) {
+                result = result.filter { it.marketId.contains(request.marketId!!, ignoreCase = true) }
+            }
+            if (!request.marketTitle.isNullOrBlank()) {
+                result = result.filter { it.marketTitle?.contains(request.marketTitle!!, ignoreCase = true) == true }
+            }
+            
+            result
+        } catch (e: Exception) {
+            logger.warn("获取账户 Bridge 卖出记录失败: accountId=${request.accountId}", e)
+            emptyList()
+        }
+    }
+    
+    /**
+     * 获取账户匹配订单列表
+     */
+    private fun getAccountMatchedOrderList(request: AccountOrderTrackingRequest, copyTradingIds: List<Long>): Pair<List<MatchedOrderInfo>, Long> {
+        val matchDetails = if (copyTradingIds.isEmpty()) {
+            emptyList<SellMatchDetail>()
+        } else {
+            sellMatchDetailRepository.findByCopyTradingIdIn(copyTradingIds)
+        }
+        
+        // 获取所有相关的卖出记录（用于筛选）
+        val matchRecordIds = matchDetails.map { it.matchRecordId }.distinct()
+        val matchRecords = matchRecordIds.mapNotNull { id ->
+            sellMatchRecordRepository.findById(id).orElse(null)
+        }
+        val marketIds = matchRecords.map { it.marketId }.distinct()
+        val markets = marketService.getMarkets(marketIds)
+        
+        // 筛选
+        var filtered = matchDetails
+        if (!request.sellOrderId.isNullOrBlank()) {
+            val sellRecord = sellMatchRecordRepository.findBySellOrderId(request.sellOrderId)
+            if (sellRecord != null) {
+                filtered = filtered.filter { it.matchRecordId == sellRecord.id }
+            } else {
+                filtered = emptyList()
+            }
+        }
+        if (!request.buyOrderId.isNullOrBlank()) {
+            filtered = filtered.filter { it.buyOrderId == request.buyOrderId }
+        }
+        if (!request.marketId.isNullOrBlank()) {
+            filtered = filtered.filter { detail ->
+                val matchRecord = matchRecords.find { it.id == detail.matchRecordId }
+                matchRecord?.marketId?.contains(request.marketId!!, ignoreCase = true) == true
+            }
+        }
+        if (!request.marketTitle.isNullOrBlank()) {
+            filtered = filtered.filter { detail ->
+                val matchRecord = matchRecords.find { it.id == detail.matchRecordId }
+                val market = matchRecord?.let { markets[it.marketId] }
+                market?.title?.contains(request.marketTitle!!, ignoreCase = true) == true
+            }
+        }
+        
+        val total = filtered.size.toLong()
+        
+        // 排序（按创建时间倒序）
+        filtered = filtered.sortedByDescending { it.createdAt }
+        
+        // 分页
+        val page = (request.page ?: 1) - 1
+        val limit = request.limit ?: 20
+        val start = page * limit
+        val end = minOf(start + limit, filtered.size)
+        val pagedDetails = if (start < filtered.size) filtered.subList(start, end) else emptyList()
+        
+        // 获取匹配记录以获取市场ID
+        val pagedMatchRecordIds = pagedDetails.map { it.matchRecordId }.distinct()
+        val pagedMatchRecords = pagedMatchRecordIds.mapNotNull { id ->
+            sellMatchRecordRepository.findById(id).orElse(null)
+        }
+        val pagedMarketIds = pagedMatchRecords.map { it.marketId }.distinct()
+        val pagedMarkets = marketService.getMarkets(pagedMarketIds)
+        
+        // 转换为DTO
+        val list = pagedDetails.map { detail ->
+            val matchRecord = pagedMatchRecords.find { it.id == detail.matchRecordId }
+            val market = matchRecord?.let { pagedMarkets[it.marketId] }
+            MatchedOrderInfo(
+                sellOrderId = matchRecord?.sellOrderId ?: "",
+                buyOrderId = detail.buyOrderId,
+                marketId = matchRecord?.marketId,
+                marketTitle = market?.title,
+                marketSlug = market?.slug,
+                eventSlug = market?.eventSlug,
                 marketCategory = market?.category,
                 matchedQuantity = detail.matchedQuantity.toString(),
                 buyPrice = detail.buyPrice.toString(),

@@ -13,7 +13,7 @@ import java.math.BigDecimal
 @Table(
     name = "bridge_position_snapshot",
     uniqueConstraints = [
-        UniqueConstraint(columnNames = ["bridge_id", "market_title", "side"])
+        UniqueConstraint(columnNames = ["bridge_id", "wallet_address", "market_title", "side"])
     ]
 )
 data class BridgePositionSnapshot(
@@ -23,6 +23,9 @@ data class BridgePositionSnapshot(
 
     @Column(name = "bridge_id", nullable = false, length = 100)
     var bridgeId: String,
+
+    @Column(name = "wallet_address", nullable = false, length = 42)
+    var walletAddress: String = "",
 
     @Column(name = "market_id", length = 100)
     var marketId: String? = null,
@@ -53,6 +56,9 @@ data class BridgePositionSnapshot(
 
     @Column(name = "event_slug", length = 200)
     var eventSlug: String? = null,
+
+    @Column(name = "available_balance", precision = 20, scale = 8)
+    var availableBalance: BigDecimal? = null,
 
     @Column(name = "synced_at", nullable = false)
     var syncedAt: Long = System.currentTimeMillis(),
