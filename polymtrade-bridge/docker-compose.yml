@@ -7,12 +7,11 @@ services:
       dockerfile: Dockerfile
     container_name: polymtrade-bridge
     ports:
-      - "8080:8080"
+      - "${BRIDGE_PORT:-8080}:8080"
+    env_file:
+      - ../.env
     environment:
       - POLYMTRADE_URL=https://polym.trade
-      # Set your proxy here if needed, e.g. http://host.docker.internal:7890
-      - BROWSER_PROXY=${BROWSER_PROXY:-}
-      - HEADLESS=${HEADLESS:-false}
       - BROWSER_PROFILE_DIR=/app/browser_profile
       - PYTHONUNBUFFERED=1
     volumes:
@@ -29,3 +28,4 @@ volumes:
 networks:
   polyhermes-network:
     external: true
+

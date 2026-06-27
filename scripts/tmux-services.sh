@@ -16,33 +16,32 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR="${LOG_DIR:-$PROJECT_ROOT/logs}"
 mkdir -p "$LOG_DIR"
 
-# 加载项目 .env（如有），用于获取共享密钥
-if [[ -f "$PROJECT_ROOT/.env" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "$PROJECT_ROOT/.env"
-    set +a
+if [[ ! -f "$PROJECT_ROOT/.env" ]]; then
+    echo "ERROR: $PROJECT_ROOT/.env not found. Please copy .env.example to .env and fill in the values." >&2
+    exit 1
 fi
+
+# 加载项目 .env
+set -a
+# shellcheck source=/dev/null
+source "$PROJECT_ROOT/.env"
+set +a
+
+# 运行必要环境变量检查
+"$PROJECT_ROOT/scripts/check-env.sh"
 
 export JAVA_HOME="${JAVA_HOME:-$PROJECT_ROOT/jdk17/Contents/Home}"
 export PATH="$JAVA_HOME/bin:$PATH"
 
-# 本地开发固定配置
-export SERVER_PORT="${SERVER_PORT:-8000}"
-export DB_URL="${DB_URL:-jdbc:mysql://localhost:3307/polyhermes?useSSL=false&serverTimezone=UTC&characterEncoding=utf8&allowPublicKeyRetrieval=true}"
-export DB_USERNAME="${DB_USERNAME:-root}"
-# DB_PASSWORD 优先从 .env 读取；如未设置，必须手工提供
-export DB_PASSWORD="${DB_PASSWORD:?DB_PASSWORD is required, set it in .env or environment}"
-export SPRING_PROFILES_ACTIVE="${SPRING_PROFILES_ACTIVE:-prod}"
-export BRIDGE_PORT="${BRIDGE_PORT:-8080}"
+# 本地开发固定使用 8000 端口和本地 MySQL 3307（覆盖 Docker 生产配置）
+export SERVER_PORT=8000
+export DB_URL="jdbc:mysql://localhost:3307/polyhermes?useSSL=false&serverTimezone=UTC&characterEncoding=utf8&allowPublicKeyRetrieval=true"
 
-# 加密/密钥兼容：历史数据用 JWT_SECRET 作为 encryption.key
-export ENCRYPTION_KEY="${ENCRYPTION_KEY:-${JWT_SECRET:-}}"
-# 本地开发 JWT 密钥，如未设置则使用固定值（仅限本地）
-export JWT_SECRET="${JWT_SECRET:-aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899}"
-export ADMIN_RESET_PASSWORD_KEY="${ADMIN_RESET_PASSWORD_KEY:-00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677}"
-export CRYPTO_SECRET_KEY="${CRYPTO_SECRET_KEY:-234b95c565ef698d0de3f5878a391d7ccc473cb0c6ad1584fb550b75c8f36a48}"
-export LOG_LEVEL_APP="${LOG_LEVEL_APP:-INFO}"
+# 历史加密数据默认使用 JWT_SECRET 作为加密密钥
+export ENCRYPTION_KEY="${ENCRYPTION_KEY:-${JWT_SECRET}}"
+
+# 本地开发默认 Bridge webhook
+export BRIDGE_WEBHOOK_URL="${BRIDGE_WEBHOOK_URL:-http://localhost:8080/signal}"
 
 backend_log="$LOG_DIR/backend.log"
 frontend_log="$LOG_DIR/frontend.log"
@@ -59,7 +58,7 @@ cmd_start() {
 
     # 1) backend window
     tmux new-session -d -s "$SESSION_NAME" -n backend \
-        "cd '$PROJECT_ROOT/backend' && exec java -jar -Dserver.port=$SERVER_PORT build/libs/polyhermes-backend-1.0.0.jar --spring.profiles.active=$SPRING_PROFILES_ACTIVE 2>&1 | tee '$backend_log'"
+        "cd '$PROJECT_ROOT/backend' && exec java -jar -Dserver.port=${SERVER_PORT:-8000} build/libs/polyhermes-backend-1.0.0.jar --spring.profiles.active=${SPRING_PROFILES_ACTIVE:-prod} 2>&1 | tee '$backend_log'"
 
     # 2) frontend window
     tmux new-window -t "$SESSION_NAME" -n frontend \
@@ -103,12 +102,12 @@ cmd_status() {
     # backend
     backend_pid=$(pgrep -f "polyhermes-backend-1.0.0.jar" | head -1 || true)
     if [[ -n "$backend_pid" ]]; then
-        health=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$SERVER_PORT/actuator/health" || echo "ERR")
+        health=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${SERVER_PORT:-8000}/actuator/health" || echo "ERR")
         if [[ "$health" == "200" ]]; then
-            status=$(curl -s "http://localhost:$SERVER_PORT/actuator/health" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','?'))" 2>/dev/null || echo "?")
-            printf "%-15s %-10s %-30s\n" "backend" "$backend_pid:$SERVER_PORT" "UP ($status)"
+            status=$(curl -s "http://localhost:${SERVER_PORT:-8000}/actuator/health" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','?'))" 2>/dev/null || echo "?")
+            printf "%-15s %-10s %-30s\n" "backend" "$backend_pid:${SERVER_PORT:-8000}" "UP ($status)"
         else
-            printf "%-15s %-10s %-30s\n" "backend" "$backend_pid:$SERVER_PORT" "HTTP $health"
+            printf "%-15s %-10s %-30s\n" "backend" "$backend_pid:${SERVER_PORT:-8000}" "HTTP $health"
         fi
     else
         printf "%-15s %-10s %-30s\n" "backend" "-" "NOT RUNNING"
@@ -125,7 +124,7 @@ cmd_status() {
     # bridge
     bridge_pid=$(pgrep -f "python .*polymtrade-bridge/main.py" | head -1 || true)
     if [[ -n "$bridge_pid" ]]; then
-        printf "%-15s %-10s %-30s\n" "bridge" "$bridge_pid:$BRIDGE_PORT" "RUNNING"
+        printf "%-15s %-10s %-30s\n" "bridge" "$bridge_pid:${BRIDGE_PORT:-8080}" "RUNNING"
     else
         printf "%-15s %-10s %-30s\n" "bridge" "-" "NOT RUNNING"
     fi

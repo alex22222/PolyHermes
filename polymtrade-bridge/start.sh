@@ -6,10 +6,16 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV="$SCRIPT_DIR/.venv"
 LOG_DIR="${LOG_DIR:-/tmp}"
 
-# Load optional local environment overrides (not committed to git).
+# Load project-wide .env first, then bridge-local .env (local wins).
+if [[ -f "$PROJECT_ROOT/.env" ]]; then
+    set -a
+    source "$PROJECT_ROOT/.env"
+    set +a
+fi
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
     set -a
     source "$SCRIPT_DIR/.env"
