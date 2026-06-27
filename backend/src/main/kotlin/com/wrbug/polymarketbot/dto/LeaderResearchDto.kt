@@ -238,6 +238,37 @@ data class LeaderResearchOfficialLeaderboardImportResponse(
     val importResult: LeaderResearchExternalAnalyticsImportResponse
 )
 
+data class LeaderResearchFalconLeaderboardImportRequest(
+    val dryRun: Boolean = true,
+    val sortBys: List<String> = listOf("h_score", "sharpe", "pnl"),
+    val minWinRate15d: String = "0.45",
+    val maxWinRate15d: String = "0.95",
+    val minRoi15d: String = "0",
+    val minTotalTrades15d: String = "50",
+    val maxTotalTrades15d: String = "100000",
+    val minPnl15d: String = "0",
+    val limitPerPage: Int = 50,
+    val maxPagesPerSort: Int = 1,
+    val maxItems: Int = 500,
+    val defaultCategory: String = "finance"
+)
+
+data class LeaderResearchFalconLeaderboardFetchDto(
+    val sortBy: String,
+    val requestedPages: Int,
+    val fetchedItems: Int,
+    val error: String? = null
+)
+
+data class LeaderResearchFalconLeaderboardImportResponse(
+    val dryRun: Boolean,
+    val sourceName: String,
+    val fetchedTotal: Int,
+    val dedupedTotal: Int,
+    val fetches: List<LeaderResearchFalconLeaderboardFetchDto>,
+    val importResult: LeaderResearchExternalAnalyticsImportResponse
+)
+
 data class LeaderResearchOfficialLeaderboardDiagnoseRequest(
     val sampleLimit: Int = 12,
     val staleHours: Int = 48

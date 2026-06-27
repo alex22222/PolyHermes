@@ -79,7 +79,7 @@ data class LeaderResearchCandidate(
     @Column(name = "research_state", nullable = false, length = 30, columnDefinition = "VARCHAR(30)")
     val researchState: LeaderResearchState = LeaderResearchState.DISCOVERED,
 
-    @Column(name = "source", nullable = false, length = 50)
+    @Column(name = "source", nullable = false, length = 255)
     val source: String = LeaderResearchSourceType.ACTIVITY_DERIVED.name,
 
     @Column(name = "source_rank")

@@ -23,6 +23,7 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivi
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivitySourceImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateLockedException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchExternalAnalyticsImportService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchFalconLeaderboardImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchJobService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMapper
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMarketPeerSourceImportService
@@ -47,6 +48,7 @@ class LeaderResearchControllerTest {
     private val activitySourceImportService: LeaderResearchActivitySourceImportService = mock()
     private val marketPeerSourceImportService: LeaderResearchMarketPeerSourceImportService = mock()
     private val externalAnalyticsImportService: LeaderResearchExternalAnalyticsImportService = mock()
+    private val falconLeaderboardImportService: LeaderResearchFalconLeaderboardImportService = mock()
     private val officialLeaderboardImportService: LeaderResearchOfficialLeaderboardImportService = mock()
     private val officialLeaderboardDiagnoseService: LeaderResearchOfficialLeaderboardDiagnoseService = mock()
     private val politicsSourceDiagnoseService: LeaderResearchPoliticsSourceDiagnoseService = mock()
@@ -63,6 +65,7 @@ class LeaderResearchControllerTest {
         activitySourceImportService = activitySourceImportService,
         marketPeerSourceImportService = marketPeerSourceImportService,
         externalAnalyticsImportService = externalAnalyticsImportService,
+        falconLeaderboardImportService = falconLeaderboardImportService,
         officialLeaderboardImportService = officialLeaderboardImportService,
         officialLeaderboardDiagnoseService = officialLeaderboardDiagnoseService,
         politicsSourceDiagnoseService = politicsSourceDiagnoseService,

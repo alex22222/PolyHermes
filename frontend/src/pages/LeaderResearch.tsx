@@ -40,6 +40,7 @@ import type {
   LeaderResearchCandidateListResponse,
   LeaderResearchExternalAnalyticsImportItem,
   LeaderResearchExternalAnalyticsImportResponse,
+  LeaderResearchFalconLeaderboardImportResponse,
   LeaderResearchFunnel,
   LeaderResearchMarketPeerSourceImportResponse,
   LeaderResearchOfficialLeaderboardDiagnoseResponse,
@@ -113,6 +114,7 @@ const LeaderResearch: React.FC = () => {
   const [marketPeerRelaxed, setMarketPeerRelaxed] = useState<LeaderResearchMarketPeerSourceImportResponse | null>(null)
   const [externalImportResult, setExternalImportResult] = useState<LeaderResearchExternalAnalyticsImportResponse | null>(null)
   const [officialLeaderboardResult, setOfficialLeaderboardResult] = useState<LeaderResearchOfficialLeaderboardImportResponse | null>(null)
+  const [falconLeaderboardResult, setFalconLeaderboardResult] = useState<LeaderResearchFalconLeaderboardImportResponse | null>(null)
   const [officialLeaderboardDiagnose, setOfficialLeaderboardDiagnose] = useState<LeaderResearchOfficialLeaderboardDiagnoseResponse | null>(null)
   const [candidates, setCandidates] = useState<LeaderResearchCandidateListResponse>({ list: [], total: 0, summary: summaryFallback })
   const [sourceHealth, setSourceHealth] = useState<LeaderResearchSourceState[]>([])
@@ -352,6 +354,43 @@ const LeaderResearch: React.FC = () => {
           message.warning(`官方榜单返回 ${failedFetches} 个抓取错误，请查看结果`)
         } else {
           message.success(dryRun ? '官方榜单 dry-run 完成' : '官方榜单已导入')
+        }
+        if (!dryRun) await loadAll(false)
+      } else {
+        message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+      }
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setExternalImportLoading(false)
+    }
+  }
+
+  const submitFalconLeaderboardImport = async (dryRun: boolean) => {
+    setExternalImportLoading(true)
+    try {
+      const response = await apiService.leaderResearch.importFalconLeaderboard({
+        dryRun,
+        sortBys: ['h_score', 'sharpe', 'pnl'],
+        minWinRate15d: '0.45',
+        maxWinRate15d: '0.95',
+        minRoi15d: '0',
+        minTotalTrades15d: '50',
+        maxTotalTrades15d: '100000',
+        minPnl15d: '0',
+        limitPerPage: 50,
+        maxPagesPerSort: 1,
+        maxItems: 500,
+        defaultCategory: 'finance'
+      })
+      if (response.data.code === 0 && response.data.data) {
+        setFalconLeaderboardResult(response.data.data)
+        setExternalImportResult(response.data.data.importResult)
+        const failedFetches = response.data.data.fetches.filter(item => item.error).length
+        if (failedFetches > 0) {
+          message.warning(`Falcon 返回 ${failedFetches} 个抓取错误，请查看结果`)
+        } else {
+          message.success(dryRun ? 'Falcon 榜单 dry-run 完成' : 'Falcon 榜单已导入')
         }
         if (!dryRun) await loadAll(false)
       } else {
@@ -989,6 +1028,8 @@ const LeaderResearch: React.FC = () => {
           <Button key="officialDiagnose" loading={externalImportLoading} onClick={runOfficialLeaderboardDiagnose}>官方榜单诊断</Button>,
           <Button key="officialDryRun" loading={externalImportLoading} onClick={() => submitOfficialLeaderboardImport(true)}>官方榜单 Dry-run</Button>,
           <Button key="officialImport" loading={externalImportLoading} onClick={() => submitOfficialLeaderboardImport(false)}>官方榜单导入</Button>,
+          <Button key="falconDryRun" loading={externalImportLoading} onClick={() => submitFalconLeaderboardImport(true)}>Falcon Dry-run</Button>,
+          <Button key="falconImport" loading={externalImportLoading} onClick={() => submitFalconLeaderboardImport(false)}>Falcon 导入</Button>,
           <Button key="dryRun" loading={externalImportLoading} onClick={() => submitExternalImport(true)}>Dry-run</Button>,
           <Button key="import" type="primary" loading={externalImportLoading} onClick={() => submitExternalImport(false)}>正式导入</Button>
         ]}
@@ -998,7 +1039,7 @@ const LeaderResearch: React.FC = () => {
             type="info"
             showIcon
             message="支持从 Polymarket Analytics / Dune / Polyburg 手工榜单直接粘贴"
-            description="从榜单页面复制行或表格后粘贴即可；也可以先点官方榜单 Dry-run 自动尝试抓取 politics/finance 月榜。正式导入后仍会走系统评分、PAPER 和风控过滤。"
+            description="从榜单页面复制行或表格后粘贴即可；也可以用官方榜单或 Falcon 自动拉取候选。正式导入后仍会走系统评分、PAPER 和风控过滤。"
           />
           <Form
             form={externalImportForm}
@@ -1049,6 +1090,22 @@ const LeaderResearch: React.FC = () => {
                 {officialLeaderboardResult.fetches.map(item => (
                   <Text key={`${item.category}-${item.timePeriod}-${item.orderBy}`} type={item.error ? 'danger' : 'secondary'}>
                     {item.category} · {item.timePeriod} · {item.orderBy}: {item.fetchedItems} {item.error ? `· ${item.error}` : ''}
+                  </Text>
+                ))}
+              </Space>
+            </Card>
+          )}
+          {falconLeaderboardResult && (
+            <Card size="small" title="Falcon 榜单抓取结果">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Row gutter={[12, 12]}>
+                  <Col xs={12} sm={8}><Statistic title="抓取" value={falconLeaderboardResult.fetchedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="去重" value={falconLeaderboardResult.dedupedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="错误" value={falconLeaderboardResult.fetches.filter(item => item.error).length} /></Col>
+                </Row>
+                {falconLeaderboardResult.fetches.map(item => (
+                  <Text key={item.sortBy} type={item.error ? 'danger' : 'secondary'}>
+                    {item.sortBy}: {item.fetchedItems} {item.error ? `· ${item.error}` : ''}
                   </Text>
                 ))}
               </Space>

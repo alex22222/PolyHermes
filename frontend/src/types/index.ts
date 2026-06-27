@@ -757,6 +757,37 @@ export interface LeaderResearchOfficialLeaderboardImportResponse {
   importResult: LeaderResearchExternalAnalyticsImportResponse
 }
 
+export interface LeaderResearchFalconLeaderboardImportRequest {
+  dryRun?: boolean
+  sortBys?: string[]
+  minWinRate15d?: string
+  maxWinRate15d?: string
+  minRoi15d?: string
+  minTotalTrades15d?: string
+  maxTotalTrades15d?: string
+  minPnl15d?: string
+  limitPerPage?: number
+  maxPagesPerSort?: number
+  maxItems?: number
+  defaultCategory?: string
+}
+
+export interface LeaderResearchFalconLeaderboardFetch {
+  sortBy: string
+  requestedPages: number
+  fetchedItems: number
+  error?: string
+}
+
+export interface LeaderResearchFalconLeaderboardImportResponse {
+  dryRun: boolean
+  sourceName: string
+  fetchedTotal: number
+  dedupedTotal: number
+  fetches: LeaderResearchFalconLeaderboardFetch[]
+  importResult: LeaderResearchExternalAnalyticsImportResponse
+}
+
 export interface LeaderResearchOfficialLeaderboardDiagnoseRequest {
   sampleLimit?: number
   staleHours?: number

@@ -29,6 +29,8 @@ import type {
   LeaderResearchEvent,
   LeaderResearchExternalAnalyticsImportRequest,
   LeaderResearchExternalAnalyticsImportResponse,
+  LeaderResearchFalconLeaderboardImportRequest,
+  LeaderResearchFalconLeaderboardImportResponse,
   LeaderResearchFunnel,
   LeaderResearchMarketPeerSourceImportRequest,
   LeaderResearchMarketPeerSourceImportResponse,
@@ -523,6 +525,9 @@ export const apiService = {
 
     importOfficialLeaderboard: (data: LeaderResearchOfficialLeaderboardImportRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchOfficialLeaderboardImportResponse>>('/copy-trading/leader-research/official-leaderboard/import', data, { timeout: 120000 }),
+
+    importFalconLeaderboard: (data: LeaderResearchFalconLeaderboardImportRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchFalconLeaderboardImportResponse>>('/copy-trading/leader-research/falcon-leaderboard/import', data, { timeout: 120000 }),
 
     diagnoseOfficialLeaderboard: (data: LeaderResearchOfficialLeaderboardDiagnoseRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchOfficialLeaderboardDiagnoseResponse>>('/copy-trading/leader-research/official-leaderboard/diagnose', data, { timeout: 120000 }),

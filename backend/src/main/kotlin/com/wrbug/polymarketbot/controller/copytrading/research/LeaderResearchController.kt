@@ -9,6 +9,8 @@ import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchEventDto
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchFalconLeaderboardImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchFalconLeaderboardImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchFunnelResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportResponse
@@ -45,6 +47,7 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandid
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateLockedException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchDuplicateTrialConfigException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchExternalAnalyticsImportService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchFalconLeaderboardImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchJobService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMapper
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMarketPeerSourceImportService
@@ -79,6 +82,7 @@ class LeaderResearchController(
     private val activitySourceImportService: LeaderResearchActivitySourceImportService,
     private val marketPeerSourceImportService: LeaderResearchMarketPeerSourceImportService,
     private val externalAnalyticsImportService: LeaderResearchExternalAnalyticsImportService,
+    private val falconLeaderboardImportService: LeaderResearchFalconLeaderboardImportService,
     private val officialLeaderboardImportService: LeaderResearchOfficialLeaderboardImportService,
     private val officialLeaderboardDiagnoseService: LeaderResearchOfficialLeaderboardDiagnoseService,
     private val politicsSourceDiagnoseService: LeaderResearchPoliticsSourceDiagnoseService,
@@ -200,6 +204,15 @@ class LeaderResearchController(
     ): ResponseEntity<ApiResponse<LeaderResearchOfficialLeaderboardImportResponse>> {
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
             officialLeaderboardImportService.importFromOfficialLeaderboard(request)
+        }
+    }
+
+    @PostMapping("/falcon-leaderboard/import")
+    fun importFalconLeaderboard(
+        @RequestBody request: LeaderResearchFalconLeaderboardImportRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchFalconLeaderboardImportResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            falconLeaderboardImportService.importFromFalconLeaderboard(request)
         }
     }
 
