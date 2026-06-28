@@ -12,6 +12,10 @@ import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardDiagnoseResp
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPolymarketAnalyticsCopyTradeImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPolymarketAnalyticsCopyTradeImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPolyburgTelegramImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPolyburgTelegramImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchRunRequest
 import com.wrbug.polymarketbot.entity.LeaderResearchRun
 import com.wrbug.polymarketbot.enums.LeaderResearchTriggerType
@@ -30,6 +34,8 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMarket
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardDiagnoseService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPoliticsSourceDiagnoseService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPolymarketAnalyticsCopyTradeImportService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPolyburgTelegramImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScannerPoolImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScoringService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchService
@@ -49,6 +55,8 @@ class LeaderResearchControllerTest {
     private val marketPeerSourceImportService: LeaderResearchMarketPeerSourceImportService = mock()
     private val externalAnalyticsImportService: LeaderResearchExternalAnalyticsImportService = mock()
     private val falconLeaderboardImportService: LeaderResearchFalconLeaderboardImportService = mock()
+    private val polymarketAnalyticsCopyTradeImportService: LeaderResearchPolymarketAnalyticsCopyTradeImportService = mock()
+    private val polyburgTelegramImportService: LeaderResearchPolyburgTelegramImportService = mock()
     private val officialLeaderboardImportService: LeaderResearchOfficialLeaderboardImportService = mock()
     private val officialLeaderboardDiagnoseService: LeaderResearchOfficialLeaderboardDiagnoseService = mock()
     private val politicsSourceDiagnoseService: LeaderResearchPoliticsSourceDiagnoseService = mock()
@@ -66,6 +74,8 @@ class LeaderResearchControllerTest {
         marketPeerSourceImportService = marketPeerSourceImportService,
         externalAnalyticsImportService = externalAnalyticsImportService,
         falconLeaderboardImportService = falconLeaderboardImportService,
+        polymarketAnalyticsCopyTradeImportService = polymarketAnalyticsCopyTradeImportService,
+        polyburgTelegramImportService = polyburgTelegramImportService,
         officialLeaderboardImportService = officialLeaderboardImportService,
         officialLeaderboardDiagnoseService = officialLeaderboardDiagnoseService,
         politicsSourceDiagnoseService = politicsSourceDiagnoseService,
@@ -278,6 +288,69 @@ class LeaderResearchControllerTest {
         assertEquals(0, response.body!!.code)
         assertEquals(2, response.body!!.data!!.dedupedTotal)
         Mockito.verify(officialLeaderboardImportService).importFromOfficialLeaderboard(request)
+    }
+
+    @Test
+    fun `polyburg telegram import delegates to service`() {
+        val request = LeaderResearchPolyburgTelegramImportRequest(dryRun = true, rawText = "0x1111111111111111111111111111111111111111")
+        val importResult = LeaderResearchExternalAnalyticsImportResponse(
+            dryRun = true,
+            requestedTotal = 1,
+            selectedTotal = 1,
+            createdTotal = 1,
+            updatedTotal = 0,
+            skippedInvalidTotal = 0,
+            skippedExistingTotal = 0,
+            skippedLockedTotal = 0,
+            previewItems = emptyList()
+        )
+        val result = LeaderResearchPolyburgTelegramImportResponse(
+            dryRun = true,
+            sourceName = "polyburg_telegram",
+            parsedTotal = 1,
+            dedupedTotal = 1,
+            importResult = importResult
+        )
+        Mockito.`when`(polyburgTelegramImportService.importFromPolyburgTelegram(request)).thenReturn(result)
+
+        val response = controller.importPolyburgTelegram(request)
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(1, response.body!!.data!!.dedupedTotal)
+        Mockito.verify(polyburgTelegramImportService).importFromPolyburgTelegram(request)
+    }
+
+    @Test
+    fun `polymarket analytics copy trade import delegates to service`() {
+        val request = LeaderResearchPolymarketAnalyticsCopyTradeImportRequest(
+            dryRun = true,
+            rawText = "0x1111111111111111111111111111111111111111"
+        )
+        val importResult = LeaderResearchExternalAnalyticsImportResponse(
+            dryRun = true,
+            requestedTotal = 1,
+            selectedTotal = 1,
+            createdTotal = 1,
+            updatedTotal = 0,
+            skippedInvalidTotal = 0,
+            skippedExistingTotal = 0,
+            skippedLockedTotal = 0,
+            previewItems = emptyList()
+        )
+        val result = LeaderResearchPolymarketAnalyticsCopyTradeImportResponse(
+            dryRun = true,
+            sourceName = "polymarket_analytics_copy_trade",
+            parsedTotal = 1,
+            dedupedTotal = 1,
+            importResult = importResult
+        )
+        Mockito.`when`(polymarketAnalyticsCopyTradeImportService.importFromCopyTradePage(request)).thenReturn(result)
+
+        val response = controller.importPolymarketAnalyticsCopyTrade(request)
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(1, response.body!!.data!!.dedupedTotal)
+        Mockito.verify(polymarketAnalyticsCopyTradeImportService).importFromCopyTradePage(request)
     }
 
     @Test

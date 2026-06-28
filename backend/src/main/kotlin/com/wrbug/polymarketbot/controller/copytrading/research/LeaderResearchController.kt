@@ -30,6 +30,10 @@ import com.wrbug.polymarketbot.dto.LeaderResearchPaperPromotionResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperScoreResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPolymarketAnalyticsCopyTradeImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPolymarketAnalyticsCopyTradeImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPolyburgTelegramImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPolyburgTelegramImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchRunDto
 import com.wrbug.polymarketbot.dto.LeaderResearchRunRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchScannerPoolImportRequest
@@ -60,6 +64,8 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScorin
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPaperPromotionService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperTradingService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPolymarketAnalyticsCopyTradeImportService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPolyburgTelegramImportService
 import org.slf4j.LoggerFactory
 import org.springframework.context.MessageSource
 import org.springframework.http.ResponseEntity
@@ -83,6 +89,8 @@ class LeaderResearchController(
     private val marketPeerSourceImportService: LeaderResearchMarketPeerSourceImportService,
     private val externalAnalyticsImportService: LeaderResearchExternalAnalyticsImportService,
     private val falconLeaderboardImportService: LeaderResearchFalconLeaderboardImportService,
+    private val polymarketAnalyticsCopyTradeImportService: LeaderResearchPolymarketAnalyticsCopyTradeImportService,
+    private val polyburgTelegramImportService: LeaderResearchPolyburgTelegramImportService,
     private val officialLeaderboardImportService: LeaderResearchOfficialLeaderboardImportService,
     private val officialLeaderboardDiagnoseService: LeaderResearchOfficialLeaderboardDiagnoseService,
     private val politicsSourceDiagnoseService: LeaderResearchPoliticsSourceDiagnoseService,
@@ -213,6 +221,24 @@ class LeaderResearchController(
     ): ResponseEntity<ApiResponse<LeaderResearchFalconLeaderboardImportResponse>> {
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
             falconLeaderboardImportService.importFromFalconLeaderboard(request)
+        }
+    }
+
+    @PostMapping("/polyburg-telegram/import")
+    fun importPolyburgTelegram(
+        @RequestBody request: LeaderResearchPolyburgTelegramImportRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchPolyburgTelegramImportResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            polyburgTelegramImportService.importFromPolyburgTelegram(request)
+        }
+    }
+
+    @PostMapping("/polymarket-analytics-copy-trade/import")
+    fun importPolymarketAnalyticsCopyTrade(
+        @RequestBody request: LeaderResearchPolymarketAnalyticsCopyTradeImportRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchPolymarketAnalyticsCopyTradeImportResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            polymarketAnalyticsCopyTradeImportService.importFromCopyTradePage(request)
         }
     }
 

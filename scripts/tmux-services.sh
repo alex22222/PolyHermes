@@ -30,8 +30,9 @@ set +a
 # 运行必要环境变量检查
 "$PROJECT_ROOT/scripts/check-env.sh"
 
-export JAVA_HOME="${JAVA_HOME:-$PROJECT_ROOT/jdk17/Contents/Home}"
-export PATH="$JAVA_HOME/bin:$PATH"
+# 加载项目固定 Java Runtime。优先使用 ~/.jdk17，其次使用仓库内 jdk17。
+# shellcheck source=/dev/null
+source "$PROJECT_ROOT/scripts/java-env.sh"
 
 # 本地开发固定使用 8000 端口和本地 MySQL 3307（覆盖 Docker 生产配置）
 export SERVER_PORT=8000

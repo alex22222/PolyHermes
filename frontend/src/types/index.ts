@@ -789,6 +789,38 @@ export interface LeaderResearchFalconLeaderboardImportResponse {
   importResult: LeaderResearchExternalAnalyticsImportResponse
 }
 
+export interface LeaderResearchPolyburgTelegramImportRequest {
+  dryRun?: boolean
+  rawText?: string
+  defaultCategory?: string
+  sourceUrl?: string
+  maxItems?: number
+}
+
+export interface LeaderResearchPolyburgTelegramImportResponse {
+  dryRun: boolean
+  sourceName: string
+  parsedTotal: number
+  dedupedTotal: number
+  importResult: LeaderResearchExternalAnalyticsImportResponse
+}
+
+export interface LeaderResearchPolymarketAnalyticsCopyTradeImportRequest {
+  dryRun?: boolean
+  rawText?: string
+  defaultCategory?: string
+  sourceUrl?: string
+  maxItems?: number
+}
+
+export interface LeaderResearchPolymarketAnalyticsCopyTradeImportResponse {
+  dryRun: boolean
+  sourceName: string
+  parsedTotal: number
+  dedupedTotal: number
+  importResult: LeaderResearchExternalAnalyticsImportResponse
+}
+
 export interface LeaderResearchOfficialLeaderboardDiagnoseRequest {
   sampleLimit?: number
   staleHours?: number

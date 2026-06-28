@@ -269,6 +269,38 @@ data class LeaderResearchFalconLeaderboardImportResponse(
     val importResult: LeaderResearchExternalAnalyticsImportResponse
 )
 
+data class LeaderResearchPolyburgTelegramImportRequest(
+    val dryRun: Boolean = true,
+    val rawText: String = "",
+    val defaultCategory: String = "finance",
+    val sourceUrl: String = "https://web.telegram.org/a/#7698624735",
+    val maxItems: Int = 500
+)
+
+data class LeaderResearchPolyburgTelegramImportResponse(
+    val dryRun: Boolean,
+    val sourceName: String,
+    val parsedTotal: Int,
+    val dedupedTotal: Int,
+    val importResult: LeaderResearchExternalAnalyticsImportResponse
+)
+
+data class LeaderResearchPolymarketAnalyticsCopyTradeImportRequest(
+    val dryRun: Boolean = true,
+    val rawText: String = "",
+    val defaultCategory: String = "finance",
+    val sourceUrl: String = "https://polymarketanalytics.com/copy-trade",
+    val maxItems: Int = 500
+)
+
+data class LeaderResearchPolymarketAnalyticsCopyTradeImportResponse(
+    val dryRun: Boolean,
+    val sourceName: String,
+    val parsedTotal: Int,
+    val dedupedTotal: Int,
+    val importResult: LeaderResearchExternalAnalyticsImportResponse
+)
+
 data class LeaderResearchOfficialLeaderboardDiagnoseRequest(
     val sampleLimit: Int = 12,
     val staleHours: Int = 48

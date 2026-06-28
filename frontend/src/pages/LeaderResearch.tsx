@@ -46,6 +46,8 @@ import type {
   LeaderResearchOfficialLeaderboardDiagnoseResponse,
   LeaderResearchOfficialLeaderboardImportResponse,
   LeaderResearchPoliticsSourceDiagnose,
+  LeaderResearchPolymarketAnalyticsCopyTradeImportResponse,
+  LeaderResearchPolyburgTelegramImportResponse,
   LeaderResearchSourceState,
   LeaderResearchState,
   LeaderResearchSummary
@@ -115,6 +117,8 @@ const LeaderResearch: React.FC = () => {
   const [externalImportResult, setExternalImportResult] = useState<LeaderResearchExternalAnalyticsImportResponse | null>(null)
   const [officialLeaderboardResult, setOfficialLeaderboardResult] = useState<LeaderResearchOfficialLeaderboardImportResponse | null>(null)
   const [falconLeaderboardResult, setFalconLeaderboardResult] = useState<LeaderResearchFalconLeaderboardImportResponse | null>(null)
+  const [polymarketAnalyticsCopyTradeResult, setPolymarketAnalyticsCopyTradeResult] = useState<LeaderResearchPolymarketAnalyticsCopyTradeImportResponse | null>(null)
+  const [polyburgTelegramResult, setPolyburgTelegramResult] = useState<LeaderResearchPolyburgTelegramImportResponse | null>(null)
   const [officialLeaderboardDiagnose, setOfficialLeaderboardDiagnose] = useState<LeaderResearchOfficialLeaderboardDiagnoseResponse | null>(null)
   const [candidates, setCandidates] = useState<LeaderResearchCandidateListResponse>({ list: [], total: 0, summary: summaryFallback })
   const [sourceHealth, setSourceHealth] = useState<LeaderResearchSourceState[]>([])
@@ -392,6 +396,58 @@ const LeaderResearch: React.FC = () => {
         } else {
           message.success(dryRun ? 'Falcon 榜单 dry-run 完成' : 'Falcon 榜单已导入')
         }
+        if (!dryRun) await loadAll(false)
+      } else {
+        message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+      }
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setExternalImportLoading(false)
+    }
+  }
+
+  const submitPolyburgTelegramImport = async (dryRun: boolean) => {
+    const values = await externalImportForm.validateFields(['walletLines', 'defaultCategory'])
+    setExternalImportLoading(true)
+    try {
+      const response = await apiService.leaderResearch.importPolyburgTelegram({
+        dryRun,
+        rawText: values.walletLines || '',
+        defaultCategory: values.defaultCategory || 'finance',
+        sourceUrl: 'https://web.telegram.org/a/#7698624735',
+        maxItems: 500
+      })
+      if (response.data.code === 0 && response.data.data) {
+        setPolyburgTelegramResult(response.data.data)
+        setExternalImportResult(response.data.data.importResult)
+        message.success(dryRun ? 'Polyburg dry-run 完成' : 'Polyburg leader 已导入')
+        if (!dryRun) await loadAll(false)
+      } else {
+        message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+      }
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setExternalImportLoading(false)
+    }
+  }
+
+  const submitPolymarketAnalyticsCopyTradeImport = async (dryRun: boolean) => {
+    const values = await externalImportForm.validateFields(['walletLines', 'defaultCategory'])
+    setExternalImportLoading(true)
+    try {
+      const response = await apiService.leaderResearch.importPolymarketAnalyticsCopyTrade({
+        dryRun,
+        rawText: values.walletLines || '',
+        defaultCategory: values.defaultCategory || 'finance',
+        sourceUrl: 'https://polymarketanalytics.com/copy-trade',
+        maxItems: 500
+      })
+      if (response.data.code === 0 && response.data.data) {
+        setPolymarketAnalyticsCopyTradeResult(response.data.data)
+        setExternalImportResult(response.data.data.importResult)
+        message.success(dryRun ? 'Polymarket Analytics dry-run 完成' : 'Polymarket Analytics leader 已导入')
         if (!dryRun) await loadAll(false)
       } else {
         message.error(response.data.msg || t('leaderResearch.fetchFailed'))
@@ -1030,6 +1086,10 @@ const LeaderResearch: React.FC = () => {
           <Button key="officialImport" loading={externalImportLoading} onClick={() => submitOfficialLeaderboardImport(false)}>官方榜单导入</Button>,
           <Button key="falconDryRun" loading={externalImportLoading} onClick={() => submitFalconLeaderboardImport(true)}>Falcon Dry-run</Button>,
           <Button key="falconImport" loading={externalImportLoading} onClick={() => submitFalconLeaderboardImport(false)}>Falcon 导入</Button>,
+          <Button key="polymarketAnalyticsDryRun" loading={externalImportLoading} onClick={() => submitPolymarketAnalyticsCopyTradeImport(true)}>PolymarketAnalytics Dry-run</Button>,
+          <Button key="polymarketAnalyticsImport" loading={externalImportLoading} onClick={() => submitPolymarketAnalyticsCopyTradeImport(false)}>PolymarketAnalytics 导入</Button>,
+          <Button key="polyburgDryRun" loading={externalImportLoading} onClick={() => submitPolyburgTelegramImport(true)}>Polyburg Dry-run</Button>,
+          <Button key="polyburgImport" loading={externalImportLoading} onClick={() => submitPolyburgTelegramImport(false)}>Polyburg 导入</Button>,
           <Button key="dryRun" loading={externalImportLoading} onClick={() => submitExternalImport(true)}>Dry-run</Button>,
           <Button key="import" type="primary" loading={externalImportLoading} onClick={() => submitExternalImport(false)}>正式导入</Button>
         ]}
@@ -1039,7 +1099,7 @@ const LeaderResearch: React.FC = () => {
             type="info"
             showIcon
             message="支持从 Polymarket Analytics / Dune / Polyburg 手工榜单直接粘贴"
-            description="从榜单页面复制行或表格后粘贴即可；也可以用官方榜单或 Falcon 自动拉取候选。正式导入后仍会走系统评分、PAPER 和风控过滤。"
+            description="从 PolymarketAnalytics copy-trade 页面、榜单页面或 Polyburg Telegram bot 复制文本后粘贴即可；也可以用官方榜单或 Falcon 自动拉取候选。正式导入后仍会走系统评分、PAPER 和风控过滤。"
           />
           <Form
             form={externalImportForm}
@@ -1075,10 +1135,34 @@ const LeaderResearch: React.FC = () => {
             >
               <Input.TextArea
                 rows={8}
-                placeholder={'1  trader  0x9703676286b93c2eca71ca96e8757104519a69c2  politics  92\n2  trader  0x1111111111111111111111111111111111111111  finance  88'}
+                placeholder={'PolymarketAnalytics / Polyburg bot 消息或表格均可：\nSmart Wallet #1 copied 42 pnl $532 roi 18% finance\n0x9703676286b93c2eca71ca96e8757104519a69c2\n2 trader 0x1111111111111111111111111111111111111111 sports copied 9'}
               />
             </Form.Item>
           </Form>
+          {polymarketAnalyticsCopyTradeResult && (
+            <Card size="small" title="Polymarket Analytics copy-trade 解析结果">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Row gutter={[12, 12]}>
+                  <Col xs={12} sm={8}><Statistic title="解析" value={polymarketAnalyticsCopyTradeResult.parsedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="去重" value={polymarketAnalyticsCopyTradeResult.dedupedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="来源" value={polymarketAnalyticsCopyTradeResult.sourceName} /></Col>
+                </Row>
+                <Text type="secondary">当前采用粘贴导入。网页直连会遇到 Vercel Security Checkpoint，不建议作为后端定时抓取源。</Text>
+              </Space>
+            </Card>
+          )}
+          {polyburgTelegramResult && (
+            <Card size="small" title="Polyburg Telegram 解析结果">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Row gutter={[12, 12]}>
+                  <Col xs={12} sm={8}><Statistic title="解析" value={polyburgTelegramResult.parsedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="去重" value={polyburgTelegramResult.dedupedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title="来源" value={polyburgTelegramResult.sourceName} /></Col>
+                </Row>
+                <Text type="secondary">正式导入后会进入候选池，不会自动开启真钱跟单。</Text>
+              </Space>
+            </Card>
+          )}
           {officialLeaderboardResult && (
             <Card size="small" title="官方榜单抓取结果">
               <Space direction="vertical" style={{ width: '100%' }}>

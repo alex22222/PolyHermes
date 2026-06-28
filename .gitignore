@@ -129,3 +129,8 @@ env/
 # Polymtrade bridge local state
 polymtrade-bridge/.last_leader_event_id
 polymtrade-bridge/.polymtrade-bridge.pid
+
+# Polyburg Telegram sync local auth/state
+.polyburg_telegram*
+.polyburg_web_profile/
+.polyburg_web_sync_state.json

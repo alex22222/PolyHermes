@@ -44,4 +44,16 @@ if [[ "$fail" -ne 0 ]]; then
     exit 1
 fi
 
+if [[ -z "${JAVA_HOME:-}" ]]; then
+    home_jdk="$HOME/.jdk17/Contents/Home"
+    repo_jdk="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/jdk17/Contents/Home"
+    if [[ -x "$home_jdk/bin/java" ]]; then
+        echo "Java runtime available at $home_jdk. Run: source scripts/java-env.sh"
+    elif [[ -x "$repo_jdk/bin/java" ]]; then
+        echo "Java runtime available at $repo_jdk. Run: source scripts/java-env.sh"
+    else
+        echo "WARNING: Java runtime not found at $home_jdk or $repo_jdk." >&2
+    fi
+fi
+
 echo "Environment validation passed."

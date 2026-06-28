@@ -40,6 +40,10 @@ import type {
   LeaderResearchOfficialLeaderboardImportResponse,
   LeaderResearchPoliticsSourceDiagnose,
   LeaderResearchPoliticsSourceDiagnoseRequest,
+  LeaderResearchPolymarketAnalyticsCopyTradeImportRequest,
+  LeaderResearchPolymarketAnalyticsCopyTradeImportResponse,
+  LeaderResearchPolyburgTelegramImportRequest,
+  LeaderResearchPolyburgTelegramImportResponse,
   LeaderResearchRun,
   LeaderResearchRunRequest,
   LeaderResearchSourceState,
@@ -528,6 +532,12 @@ export const apiService = {
 
     importFalconLeaderboard: (data: LeaderResearchFalconLeaderboardImportRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchFalconLeaderboardImportResponse>>('/copy-trading/leader-research/falcon-leaderboard/import', data, { timeout: 120000 }),
+
+    importPolyburgTelegram: (data: LeaderResearchPolyburgTelegramImportRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchPolyburgTelegramImportResponse>>('/copy-trading/leader-research/polyburg-telegram/import', data, { timeout: 120000 }),
+
+    importPolymarketAnalyticsCopyTrade: (data: LeaderResearchPolymarketAnalyticsCopyTradeImportRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchPolymarketAnalyticsCopyTradeImportResponse>>('/copy-trading/leader-research/polymarket-analytics-copy-trade/import', data, { timeout: 120000 }),
 
     diagnoseOfficialLeaderboard: (data: LeaderResearchOfficialLeaderboardDiagnoseRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchOfficialLeaderboardDiagnoseResponse>>('/copy-trading/leader-research/official-leaderboard/diagnose', data, { timeout: 120000 }),
