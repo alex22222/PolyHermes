@@ -2,6 +2,7 @@ package com.wrbug.polymarketbot.service.copytrading.research
 
 import com.wrbug.polymarketbot.entity.LeaderActivityEvent
 import com.wrbug.polymarketbot.entity.LeaderResearchRun
+import com.wrbug.polymarketbot.enums.LeaderResearchEventType
 import com.wrbug.polymarketbot.enums.LeaderResearchRunStatus
 import com.wrbug.polymarketbot.enums.LeaderResearchSourceStatus
 import com.wrbug.polymarketbot.enums.LeaderResearchSourceType
@@ -173,7 +174,32 @@ class LeaderResearchJobServiceTest {
         assertEquals("another_run_in_progress", savedRuns.first { it.status == LeaderResearchRunStatus.SKIPPED }.skippedReason)
     }
 
-    private fun service() = LeaderResearchJobService(
+    @Test
+    fun `new run recovers stale running records before start`() {
+        val savedRuns = mutableListOf<LeaderResearchRun>()
+        val staleRun = LeaderResearchRun(
+            id = 99L,
+            status = LeaderResearchRunStatus.RUNNING,
+            startedAt = System.currentTimeMillis() - 7L * 60 * 60 * 1000
+        )
+        stubRunSaves(savedRuns)
+        Mockito.`when`(sourceService.discoverCandidates(1L)).thenReturn(emptyList())
+
+        val run = service(staleRunningRuns = listOf(staleRun)).runOnce(dryRun = false, triggerType = LeaderResearchTriggerType.MANUAL)
+
+        assertEquals(LeaderResearchRunStatus.SUCCESS, run.status)
+        val recovered = savedRuns.first { it.id == staleRun.id }
+        assertEquals(LeaderResearchRunStatus.FAILED, recovered.status)
+        assertEquals("StaleLeaderResearchRun", recovered.errorClass)
+        Mockito.verify(eventService).record(
+            type = LeaderResearchEventType.RUN_FAILED,
+            runId = staleRun.id,
+            reason = "Recovered stale RUNNING leader research run",
+            payloadSummary = "timeoutMs=21600000"
+        )
+    }
+
+    private fun service(staleRunningRuns: List<LeaderResearchRun> = emptyList()) = LeaderResearchJobService(
         runRepository = runRepository,
         activityEventRepository = activityEventRepository,
         candidateRepository = candidateRepository,
@@ -183,8 +209,16 @@ class LeaderResearchJobServiceTest {
         stateMachine = stateMachine,
         eventService = eventService,
         loopGoalControlService = loopGoalControlService,
-        scheduledEnabled = false
-    )
+        scheduledEnabled = false,
+        runningTimeoutMs = 21_600_000
+    ).also {
+        Mockito.`when`(
+            runRepository.findByStatusAndStartedAtLessThan(
+                anyRunStatus(),
+                anyLongValue()
+            )
+        ).thenReturn(staleRunningRuns)
+    }
 
     private fun stubRunSaves(savedRuns: MutableList<LeaderResearchRun> = mutableListOf()) {
         var nextId = 1L
@@ -197,6 +231,16 @@ class LeaderResearchJobServiceTest {
     private fun anyRun(): LeaderResearchRun {
         Mockito.any(LeaderResearchRun::class.java)
         return LeaderResearchRun()
+    }
+
+    private fun anyRunStatus(): LeaderResearchRunStatus {
+        Mockito.any(LeaderResearchRunStatus::class.java)
+        return LeaderResearchRunStatus.RUNNING
+    }
+
+    private fun anyLongValue(): Long {
+        Mockito.anyLong()
+        return 0L
     }
 
     @Suppress("UNCHECKED_CAST")

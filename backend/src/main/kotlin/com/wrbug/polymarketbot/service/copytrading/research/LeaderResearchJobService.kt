@@ -30,7 +30,8 @@ class LeaderResearchJobService(
     private val stateMachine: LeaderResearchStateMachine,
     private val eventService: LeaderResearchEventService,
     private val loopGoalControlService: LoopGoalControlService,
-    @Value("\${leader.research.enabled:false}") private val scheduledEnabled: Boolean
+    @Value("\${leader.research.enabled:false}") private val scheduledEnabled: Boolean,
+    @Value("\${leader.research.running-timeout-ms:21600000}") private val runningTimeoutMs: Long
 ) {
     private val logger = LoggerFactory.getLogger(LeaderResearchJobService::class.java)
     private val running = AtomicBoolean(false)
@@ -104,6 +105,7 @@ class LeaderResearchJobService(
 
         val startedAt = System.currentTimeMillis()
         return try {
+            recoverStaleRunningRuns()
             val run = runRepository.save(
                 LeaderResearchRun(
                     status = LeaderResearchRunStatus.RUNNING,
@@ -123,6 +125,40 @@ class LeaderResearchJobService(
         } catch (e: RuntimeException) {
             running.set(false)
             throw e
+        }
+    }
+
+    private fun recoverStaleRunningRuns() {
+        if (runningTimeoutMs <= 0) return
+
+        val now = System.currentTimeMillis()
+        val staleBefore = now - runningTimeoutMs
+        val staleRuns = runRepository.findByStatusAndStartedAtLessThan(LeaderResearchRunStatus.RUNNING, staleBefore)
+        if (staleRuns.isEmpty()) return
+
+        staleRuns.forEach { stale ->
+            val recovered = runRepository.save(
+                stale.copy(
+                    status = LeaderResearchRunStatus.FAILED,
+                    finishedAt = now,
+                    durationMs = now - stale.startedAt,
+                    errorClass = "StaleLeaderResearchRun",
+                    errorMessage = "Leader research run exceeded running timeout ${runningTimeoutMs}ms and was marked failed before starting a new run",
+                    updatedAt = now
+                )
+            )
+            logger.warn(
+                "Recovered stale leader research run: runId={}, startedAt={}, timeoutMs={}",
+                recovered.id,
+                recovered.startedAt,
+                runningTimeoutMs
+            )
+            eventService.record(
+                type = LeaderResearchEventType.RUN_FAILED,
+                runId = recovered.id,
+                reason = "Recovered stale RUNNING leader research run",
+                payloadSummary = "timeoutMs=$runningTimeoutMs"
+            )
         }
     }
 

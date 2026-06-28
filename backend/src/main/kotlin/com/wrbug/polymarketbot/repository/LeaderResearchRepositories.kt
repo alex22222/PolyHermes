@@ -46,6 +46,7 @@ interface LeaderResearchMarketPeerSourceProjection : LeaderResearchActivitySourc
 interface LeaderResearchRunRepository : JpaRepository<LeaderResearchRun, Long> {
     fun findTopByOrderByStartedAtDesc(): LeaderResearchRun?
     fun findByStatus(status: LeaderResearchRunStatus): List<LeaderResearchRun>
+    fun findByStatusAndStartedAtLessThan(status: LeaderResearchRunStatus, startedAt: Long): List<LeaderResearchRun>
     fun findTopByStatusOrderByStartedAtDesc(status: LeaderResearchRunStatus): LeaderResearchRun?
 }
 
