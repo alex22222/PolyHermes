@@ -25,7 +25,8 @@ import {
   RocketOutlined,
   DashboardOutlined,
   ExperimentOutlined,
-  SwapOutlined
+  SwapOutlined,
+  ApartmentOutlined
 } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 import type { ReactNode } from 'react'
@@ -191,6 +192,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       key: '/optimization-daily',
       icon: <DashboardOutlined />,
       label: t('menu.optimizationDaily') || '优化点日报'
+    },
+    {
+      key: '/system-flow',
+      icon: <ApartmentOutlined />,
+      label: t('menu.systemFlow') || '系统流程'
     },
     {
       key: '/crypto-tail-management',

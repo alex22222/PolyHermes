@@ -23,6 +23,7 @@ import ConfigPage from './pages/ConfigPage'
 import PositionList from './pages/PositionList'
 import Statistics from './pages/Statistics'
 import OptimizationDaily from './pages/OptimizationDaily'
+import SystemFlow from './pages/SystemFlow'
 import TemplateList from './pages/TemplateList'
 import TemplateAdd from './pages/TemplateAdd'
 import TemplateEdit from './pages/TemplateEdit'
@@ -294,6 +295,7 @@ function App() {
           <Route path="/positions" element={<ProtectedRoute><PositionList /></ProtectedRoute>} />
           <Route path="/statistics" element={<ProtectedRoute><Statistics /></ProtectedRoute>} />
           <Route path="/optimization-daily" element={<ProtectedRoute><OptimizationDaily /></ProtectedRoute>} />
+          <Route path="/system-flow" element={<ProtectedRoute><SystemFlow /></ProtectedRoute>} />
           <Route path="/users" element={<ProtectedRoute><UserList /></ProtectedRoute>} />
           <Route path="/announcements" element={<ProtectedRoute><Announcements /></ProtectedRoute>} />
           <Route path="/system-settings" element={<ProtectedRoute><SystemSettings /></ProtectedRoute>} />
