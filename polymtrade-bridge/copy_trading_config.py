@@ -16,6 +16,15 @@ logger = logging.getLogger(__name__)
 COPY_MODE_RATIO = "RATIO"
 COPY_MODE_FIXED = "FIXED"
 COPY_MODE_PROPORTIONAL_RISK = "PROPORTIONAL_RISK"
+PRIMARY_CATEGORIES = {"politics", "finance"}
+
+
+def is_category_allowed(leader_category: Optional[str], market_category: Optional[str]) -> bool:
+    if leader_category is None or market_category is None:
+        return True
+    if leader_category == market_category:
+        return True
+    return leader_category in PRIMARY_CATEGORIES and market_category in PRIMARY_CATEGORIES
 
 
 @dataclass
@@ -250,9 +259,9 @@ class CopyTradingRuleEngine:
         if side == "SELL" and not cfg.support_sell:
             return "support_sell=false"
 
-        # 分类匹配检查：Leader 只能跟单其擅长领域的市场
+        # 分类匹配检查：主类别 politics/finance 允许互通，sports/crypto 仍保持隔离。
         if cfg.leader_category is not None and market_category is not None:
-            if cfg.leader_category != market_category:
+            if not is_category_allowed(cfg.leader_category, market_category):
                 return f"category mismatch: leader={cfg.leader_category}, market={market_category}"
 
         if cfg.min_price is not None and price < cfg.min_price:

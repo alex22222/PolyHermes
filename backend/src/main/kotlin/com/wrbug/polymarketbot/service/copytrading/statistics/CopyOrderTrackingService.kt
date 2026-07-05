@@ -1837,6 +1837,6 @@ open class CopyOrderTrackingService(
             return false
         }
 
-        return leaderCategory == marketCategory
+        return CategoryValidator.isCategoryAllowedForLeader(leaderCategory, marketCategory)
     }
 }

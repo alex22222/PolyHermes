@@ -149,6 +149,33 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
         self.assertIsNotNone(reason)
         self.assertIn("category mismatch", reason)
 
+    def test_primary_category_cross_match_passes(self):
+        cfg = self._base_config(leader_category="politics")
+        reason = self.engine._check_filters(
+            cfg,
+            side="BUY",
+            title="Fed interest rate decision",
+            price=Decimal("0.5"),
+            market_end_date_ms=None,
+            signal_timestamp_ms=None,
+            market_category="finance",
+        )
+        self.assertIsNone(reason)
+
+    def test_primary_category_does_not_allow_crypto(self):
+        cfg = self._base_config(leader_category="politics")
+        reason = self.engine._check_filters(
+            cfg,
+            side="BUY",
+            title="Bitcoin ETF approval",
+            price=Decimal("0.5"),
+            market_end_date_ms=None,
+            signal_timestamp_ms=None,
+            market_category="crypto",
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("category mismatch", reason)
+
     def test_sports_title_with_token_inferred_as_sports(self):
         # The leader is configured for sports; the market title contains "token" but is clearly sports
         matches = self.engine.get_matching_configs(

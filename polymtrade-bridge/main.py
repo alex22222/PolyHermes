@@ -944,11 +944,12 @@ async def handle_signal(signal: LeaderTradeSignal):
 
         from decimal import Decimal
 
+        price_dec = Decimal(str(signal.price))
         matching = rule_engine.get_matching_configs(
             trader_address=signal.leader_address,
             side=signal.side,
             title=signal.title or "",
-            price=Decimal(str(signal.price)),
+            price=price_dec,
             signal_timestamp_ms=signal.timestamp,
         )
 
@@ -957,11 +958,23 @@ async def handle_signal(signal: LeaderTradeSignal):
             return
 
         side_upper = signal.side.upper()
+        has_executable_config = any(reason is None for _, reason in matching)
+        filtered_signal_recorded = False
 
         for cfg, reason in matching:
             if reason:
                 metrics.signals_filtered += 1
                 logger.info(f"Config {cfg.id} filtered for {signal.transaction_hash}: {reason}")
+                if not has_executable_config and not filtered_signal_recorded:
+                    _record_failed_signal(
+                        signal=signal,
+                        side=side_upper,
+                        quantity=Decimal("0"),
+                        price=price_dec,
+                        amount=Decimal("0"),
+                        reason=reason,
+                    )
+                    filtered_signal_recorded = True
                 continue
 
             metrics.signals_executed += 1
@@ -972,7 +985,6 @@ async def handle_signal(signal: LeaderTradeSignal):
 
             await rule_engine.sleep_delay(cfg)
 
-            price_dec = Decimal(str(signal.price))
             leader_size_dec = Decimal(str(signal.size))
             quantity: Optional[Decimal] = None
             amount: Optional[Decimal] = None

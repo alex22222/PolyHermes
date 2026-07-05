@@ -107,6 +107,19 @@ class CategoryValidatorTest {
     }
 
     @Test
+    fun `allows politics and finance primary category crossover`() {
+        assertEquals(true, CategoryValidator.isCategoryAllowedForLeader("politics", "finance"))
+        assertEquals(true, CategoryValidator.isCategoryAllowedForLeader("finance", "politics"))
+    }
+
+    @Test
+    fun `keeps sports and crypto isolated from primary categories`() {
+        assertEquals(false, CategoryValidator.isCategoryAllowedForLeader("politics", "crypto"))
+        assertEquals(false, CategoryValidator.isCategoryAllowedForLeader("finance", "sports"))
+        assertEquals(false, CategoryValidator.isCategoryAllowedForLeader("sports", "finance"))
+    }
+
+    @Test
     fun `returns null for unrecognizable text`() {
         val category = CategoryValidator.inferMarketCategory("random unknown market")
 

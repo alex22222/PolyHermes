@@ -234,6 +234,15 @@ object CategoryValidator {
 
         return null
     }
+
+    fun isCategoryAllowedForLeader(leaderCategory: String?, marketCategory: String?): Boolean {
+        val normalizedLeaderCategory = normalizeCategory(leaderCategory) ?: return true
+        val normalizedMarketCategory = normalizeCategory(marketCategory) ?: return true
+        if (normalizedLeaderCategory == normalizedMarketCategory) {
+            return true
+        }
+        return normalizedLeaderCategory in PRIMARY_CATEGORIES && normalizedMarketCategory in PRIMARY_CATEGORIES
+    }
     
     /**
      * 验证分类，如果无效则抛出异常
@@ -253,4 +262,6 @@ object CategoryValidator {
     fun getSupportedCategories(): Set<String> {
         return SUPPORTED_CATEGORIES
     }
+
+    private val PRIMARY_CATEGORIES = setOf("politics", "finance")
 }
