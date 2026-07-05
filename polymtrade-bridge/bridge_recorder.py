@@ -208,6 +208,36 @@ class BridgeTradeRecorder:
             logger.warning(f"Failed to check BTC 5M daily BUY usage: {e}")
             return 0, Decimal("0")
 
+    def recent_leader_records_since(
+        self,
+        leader_address: Optional[str],
+        since_ms: int,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Return recent bridge records for one leader, including skipped rows."""
+        if not leader_address:
+            return []
+        leader = leader_address.lower()
+        sql = """
+        SELECT id, market_id, market_title, side, outcome, outcome_index, price, amount,
+               status, error_message, raw_payload, created_at
+        FROM bridge_trade_record
+        WHERE bridge_id = %s
+          AND created_at >= %s
+          AND raw_payload IS NOT NULL
+          AND LOWER(raw_payload) LIKE %s
+        ORDER BY created_at DESC
+        LIMIT %s
+        """
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (self.bridge_id, since_ms, f"%{leader}%", int(limit)))
+                    return list(cur.fetchall() or [])
+        except Exception as e:
+            logger.warning(f"Failed to query recent leader bridge records: {e}")
+            return []
+
     def recent_success_sell_size(
         self,
         market_id: str,

@@ -127,6 +127,55 @@ class TestProportionalRiskBridge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["size_shares"], 2.0)
         self.assertEqual(recorder.updates[-1][1], "SUCCESS")
 
+    async def test_live_position_quantity_does_not_match_other_yes_position(self):
+        executor = SimpleNamespace(
+            is_ready=MagicMock(return_value=True),
+            is_logged_in=MagicMock(return_value=True),
+            fetch_portfolio_positions=AsyncMock(return_value={
+                "positions": [
+                    {
+                        "marketTitle": "Will MrBeast hit 508 million subscribers by July 31?",
+                        "side": "Yes",
+                        "quantity": 1.02,
+                    },
+                ],
+            }),
+        )
+
+        with patch.object(main, "executor", executor):
+            quantity = await main._get_live_position_quantity(
+                market_id="0xaf08e614fbd4b5b7d8b5b1f2a0c7d9e1f4a6b8c0",
+                market_title="Will there be no change in Fed interest rates after the July 2026 meeting?",
+                outcome="Yes",
+            )
+
+        self.assertEqual(quantity, Decimal("0"))
+
+    async def test_live_position_quantity_rejects_mismatched_condition_id_even_with_same_title(self):
+        executor = SimpleNamespace(
+            is_ready=MagicMock(return_value=True),
+            is_logged_in=MagicMock(return_value=True),
+            fetch_portfolio_positions=AsyncMock(return_value={
+                "positions": [
+                    {
+                        "conditionId": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        "marketTitle": "Will there be no change in Fed interest rates after the July 2026 meeting?",
+                        "side": "Yes",
+                        "quantity": 1.02,
+                    },
+                ],
+            }),
+        )
+
+        with patch.object(main, "executor", executor):
+            quantity = await main._get_live_position_quantity(
+                market_id="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                market_title="Will there be no change in Fed interest rates after the July 2026 meeting?",
+                outcome="Yes",
+            )
+
+        self.assertEqual(quantity, Decimal("0"))
+
 
 if __name__ == "__main__":
     unittest.main()

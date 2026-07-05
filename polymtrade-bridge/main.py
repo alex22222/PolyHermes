@@ -41,6 +41,12 @@ BTC_UPDOWN_5M_SECONDS = 300
 BTC_UPDOWN_5M_MIN_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MIN_BUY_PRICE", "0.20"))
 BTC_UPDOWN_5M_MAX_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MAX_BUY_PRICE", "0.65"))
 BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS = int(os.getenv("BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS", "50"))
+TAIL_RISK_MIN_BUY_PRICE = Decimal(os.getenv("TAIL_RISK_MIN_BUY_PRICE", "0.02"))
+LEADER_EVENT_ACTIVITY_WINDOW_SECONDS = int(
+    os.getenv("LEADER_EVENT_ACTIVITY_WINDOW_SECONDS", "1800")
+)
+LEADER_EVENT_ACTIVITY_MAX_RECORDS = int(os.getenv("LEADER_EVENT_ACTIVITY_MAX_RECORDS", "5"))
+LEADER_EVENT_COMBO_MIN_MARKETS = int(os.getenv("LEADER_EVENT_COMBO_MIN_MARKETS", "2"))
 PROPORTIONAL_RISK_BUYBACK_WINDOW_SECONDS = int(
     os.getenv("PROPORTIONAL_RISK_BUYBACK_WINDOW_SECONDS", "600")
 )
@@ -166,6 +172,24 @@ def bridge_runtime_status() -> dict[str, Any]:
     }
 
 
+async def ensure_login_state() -> bool:
+    """Refresh stale login state when the browser page already has a session."""
+    if not executor or not executor.is_ready():
+        return False
+    if executor.is_logged_in():
+        return True
+    try:
+        return await executor.refresh_login_state()
+    except Exception as e:
+        logger.warning(f"Login state refresh failed: {e}")
+        return False
+
+
+async def require_logged_in():
+    if not await ensure_login_state():
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+
 def runtime_block_reasons(runtime_status: dict[str, Any]) -> list[str]:
     reasons = []
     if not runtime_status.get("ready"):
@@ -279,6 +303,7 @@ async def health():
 
 @app.get("/status")
 async def status():
+    await ensure_login_state()
     return bridge_runtime_status()
 
 
@@ -386,8 +411,7 @@ async def account_info():
     """
     if not executor or not executor.is_ready():
         raise HTTPException(status_code=503, detail="Executor not ready")
-    if not executor.is_logged_in():
-        raise HTTPException(status_code=401, detail="Not logged in")
+    await require_logged_in()
 
     try:
         # Fast path: return cached address without touching the page.
@@ -398,6 +422,19 @@ async def account_info():
                 "wallet_type": "magic",  # cached path cannot reliably infer wallet type
                 "source": "cache",
             }
+
+        active_account_id = rule_engine.active_account_id if rule_engine else None
+        if active_account_id and rule_engine:
+            db_wallet = await asyncio.to_thread(
+                rule_engine.resolve_wallet_address_by_account_id,
+                active_account_id,
+            )
+            if db_wallet:
+                return {
+                    "wallet_address": db_wallet,
+                    "wallet_type": "magic",
+                    "source": "account_db",
+                }
 
         # Slow path: navigate to portfolio and refresh cache.
         async with _trade_lock:
@@ -452,8 +489,7 @@ async def select_account(request: AccountSelectRequest):
     """
     if not executor or not executor.is_ready():
         raise HTTPException(status_code=503, detail="Executor not ready")
-    if not executor.is_logged_in():
-        raise HTTPException(status_code=401, detail="Not logged in")
+    await require_logged_in()
     if not rule_engine:
         raise HTTPException(status_code=503, detail="Rule engine not initialized")
     if request.account_id <= 0:
@@ -493,8 +529,7 @@ async def portfolio_positions():
     """
     if not executor or not executor.is_ready():
         raise HTTPException(status_code=503, detail="Executor not ready")
-    if not executor.is_logged_in():
-        raise HTTPException(status_code=401, detail="Not logged in")
+    await require_logged_in()
 
     metrics.portfolio_requests += 1
     # Serialize with trades as well as other portfolio scrapes. The executor has
@@ -514,8 +549,7 @@ async def account_balance():
     """Return the current pUSD/USDC balance scraped from the logged-in page."""
     if not executor or not executor.is_ready():
         raise HTTPException(status_code=503, detail="Executor not ready")
-    if not executor.is_logged_in():
-        raise HTTPException(status_code=401, detail="Not logged in")
+    await require_logged_in()
 
     async with _trade_lock:
         async with _portfolio_lock:
@@ -630,7 +664,13 @@ def _normalize_market_id(value: Any) -> str:
 
 
 def _normalize_market_title(value: Any) -> str:
-    return str(value or "").strip().lower()
+    text = str(value or "").strip().lower().replace("&", " and ")
+    text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _is_condition_id(value: str) -> bool:
+    return bool(re.fullmatch(r"0x[0-9a-f]{16,}|[0-9a-f]{32,}", value or ""))
 
 
 def _normalize_outcome(value: Any) -> str:
@@ -660,7 +700,7 @@ async def _get_live_position_quantity(
     outcome: Optional[str],
 ) -> Decimal:
     """Return current live portfolio quantity for a market/outcome."""
-    if not executor or not executor.is_ready() or not executor.is_logged_in():
+    if not executor or not executor.is_ready() or not await ensure_login_state():
         logger.warning("Live portfolio check skipped because executor is not ready/logged in")
         return Decimal("0")
 
@@ -682,20 +722,21 @@ async def _get_live_position_quantity(
         pos_outcome = _normalize_outcome(pos.get("side"))
 
         market_matches = False
-        if target_market_id and (
-            pos_market_id == target_market_id
-            or target_market_id in pos_market_slug
-            or target_market_id in pos_event_slug
-            or pos_market_id in target_market_id
-            or pos_market_slug in target_market_id
-        ):
-            market_matches = True
-        if not market_matches and target_title and (
-            pos_title == target_title
-            or target_title in pos_title
-            or pos_title in target_title
-        ):
-            market_matches = True
+        allow_title_fallback = True
+        if target_market_id and _is_condition_id(target_market_id):
+            allow_title_fallback = not pos_market_id
+            if pos_market_id:
+                market_matches = pos_market_id == target_market_id
+            elif target_title and pos_title:
+                market_matches = pos_title == target_title
+        elif target_market_id:
+            market_matches = (
+                pos_market_id == target_market_id
+                or pos_market_slug == target_market_id
+                or pos_event_slug == target_market_id
+            )
+        if not market_matches and allow_title_fallback and target_title and pos_title:
+            market_matches = pos_title == target_title
 
         if market_matches and pos_outcome == target_outcome:
             total += _decimal_from_any(pos.get("quantity"))
@@ -753,8 +794,7 @@ async def receive_signal(signal: LeaderTradeSignal, background_tasks: Background
 async def execute_trade(request: ExecuteRequest, background_tasks: BackgroundTasks):
     if not executor or not executor.is_ready():
         raise HTTPException(status_code=503, detail="Executor not ready")
-    if not executor.is_logged_in():
-        raise HTTPException(status_code=401, detail="Not logged in")
+    await require_logged_in()
 
     side_upper = request.side.upper()
     if side_upper not in ("BUY", "SELL"):
@@ -1006,6 +1046,39 @@ async def handle_signal(signal: LeaderTradeSignal):
                     )
                     continue
                 quantity = amount / price_dec
+                tail_risk_reason = _tail_risk_low_price_buy_reason(side_upper, price_dec)
+                if tail_risk_reason:
+                    logger.info(
+                        f"Config {cfg.id}: BUY skipped for {signal.transaction_hash}: "
+                        f"{tail_risk_reason}"
+                    )
+                    _record_failed_signal(
+                        signal=signal,
+                        side=side_upper,
+                        quantity=quantity,
+                        price=price_dec,
+                        amount=amount,
+                        reason=tail_risk_reason,
+                    )
+                    continue
+                event_activity_reason = _leader_event_activity_buy_reason(
+                    signal=signal,
+                    side=side_upper,
+                )
+                if event_activity_reason:
+                    logger.info(
+                        f"Config {cfg.id}: BUY skipped for {signal.transaction_hash}: "
+                        f"{event_activity_reason}"
+                    )
+                    _record_failed_signal(
+                        signal=signal,
+                        side=side_upper,
+                        quantity=quantity,
+                        price=price_dec,
+                        amount=amount,
+                        reason=event_activity_reason,
+                    )
+                    continue
                 price_band_reason = _short_cycle_price_band_buy_reason(
                     market_slug=signal.market_slug,
                     side=side_upper,
@@ -1383,6 +1456,125 @@ def _short_cycle_market_stale_reason(
         return (
             "Short-cycle market stale or closing soon, skipped "
             f"(seconds_to_close={seconds_to_close:.1f}, buffer={BTC_UPDOWN_STALE_BUFFER_SECONDS}s)"
+        )
+    return None
+
+
+def _tail_risk_low_price_buy_reason(side: str, price: Decimal) -> Optional[str]:
+    """Return a skip reason for low-price tail-risk BUYs."""
+    if side.upper() != "BUY":
+        return None
+    if price < TAIL_RISK_MIN_BUY_PRICE:
+        return (
+            "Low-price tail-risk BUY skipped: "
+            f"price={price}, min={TAIL_RISK_MIN_BUY_PRICE}"
+        )
+    return None
+
+
+def _normalized_token_text(value: Optional[str]) -> str:
+    text = str(value or "").strip().lower().replace("&", " and ")
+    text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _leader_event_key(market_slug: Optional[str], market_title: Optional[str]) -> str:
+    """Group related outcome markets into one event for copy-trading risk guards."""
+    slug_text = _normalized_token_text(market_slug)
+    title_text = _normalized_token_text(market_title)
+    combined = f"{slug_text} {title_text}".strip()
+    if "fed" in combined and "july 2026 meeting" in combined:
+        return "fed-july-2026-meeting"
+
+    fed_after_match = re.search(r"fed .* after the ([a-z]+ \d{4}) meeting", combined)
+    if fed_after_match:
+        return f"fed-{fed_after_match.group(1).replace(' ', '-')}-meeting"
+
+    return slug_text or title_text
+
+
+def _record_market_key(record: dict) -> str:
+    raw_payload = record.get("raw_payload")
+    raw = {}
+    if raw_payload:
+        try:
+            raw = json.loads(raw_payload)
+        except Exception:
+            raw = {}
+    slug = raw.get("marketSlug") or raw.get("market_slug")
+    title = record.get("market_title") or raw.get("title")
+    outcome = record.get("outcome") or raw.get("outcome")
+    return "|".join(
+        part
+        for part in (
+            _normalized_token_text(slug) or _normalized_token_text(title),
+            _normalize_outcome(outcome),
+        )
+        if part
+    )
+
+
+def _leader_event_activity_buy_reason(
+    signal: LeaderTradeSignal,
+    side: str,
+    now_ms: Optional[int] = None,
+) -> Optional[str]:
+    """Skip BUYs when a leader is rapidly trading multiple markets in one event."""
+    if side.upper() != "BUY" or not recorder:
+        return None
+    event_key = _leader_event_key(signal.market_slug, signal.title)
+    if not event_key:
+        return None
+
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    since_ms = now - LEADER_EVENT_ACTIVITY_WINDOW_SECONDS * 1000
+    records = recorder.recent_leader_records_since(
+        leader_address=signal.leader_address,
+        since_ms=since_ms,
+    )
+
+    event_records = []
+    market_keys = {
+        "|".join(
+            part
+            for part in (
+                _normalized_token_text(signal.market_slug) or _normalized_token_text(signal.title),
+                _normalize_outcome(signal.outcome),
+            )
+            if part
+        )
+    }
+    for record in records:
+        raw = {}
+        raw_payload = record.get("raw_payload")
+        if raw_payload:
+            try:
+                raw = json.loads(raw_payload)
+            except Exception:
+                raw = {}
+        record_key = _leader_event_key(
+            raw.get("marketSlug") or raw.get("market_slug"),
+            record.get("market_title") or raw.get("title"),
+        )
+        if record_key != event_key:
+            continue
+        event_records.append(record)
+        market_key = _record_market_key(record)
+        if market_key:
+            market_keys.add(market_key)
+
+    if len(event_records) >= LEADER_EVENT_ACTIVITY_MAX_RECORDS:
+        return (
+            "High-frequency same-event leader activity skipped: "
+            f"event={event_key}, records={len(event_records)}, "
+            f"window={LEADER_EVENT_ACTIVITY_WINDOW_SECONDS}s, "
+            f"max={LEADER_EVENT_ACTIVITY_MAX_RECORDS}"
+        )
+    if len(event_records) > 0 and len(market_keys) >= LEADER_EVENT_COMBO_MIN_MARKETS:
+        return (
+            "Multi-outcome same-event leader combo skipped: "
+            f"event={event_key}, distinct_markets={len(market_keys)}, "
+            f"window={LEADER_EVENT_ACTIVITY_WINDOW_SECONDS}s"
         )
     return None
 

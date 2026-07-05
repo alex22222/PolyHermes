@@ -4,26 +4,37 @@
 import sys
 from pathlib import Path
 from decimal import Decimal
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import main as bridge_main  # noqa: E402
 from main import (  # noqa: E402
+    _leader_event_activity_buy_reason,
     _short_cycle_daily_limit_buy_reason,
     _short_cycle_duplicate_buy_reason,
     _short_cycle_global_buy_reason,
     _short_cycle_market_stale_reason,
     _short_cycle_price_band_buy_reason,
+    _tail_risk_low_price_buy_reason,
 )
 
 
 class FakeRecorder:
-    def __init__(self, has_prior=False, has_any_prior=False, daily_usage=(0, Decimal("0"))):
+    def __init__(
+        self,
+        has_prior=False,
+        has_any_prior=False,
+        daily_usage=(0, Decimal("0")),
+        recent_records=None,
+    ):
         self.has_prior = has_prior
         self.has_any_prior = has_any_prior
         self.daily_usage = daily_usage
+        self.recent_records = recent_records or []
         self.calls = []
         self.any_calls = []
         self.daily_calls = []
+        self.recent_calls = []
 
     def has_prior_short_cycle_buy(self, market_id, market_slug, leader_address):
         self.calls.append((market_id, market_slug, leader_address))
@@ -36,6 +47,10 @@ class FakeRecorder:
     def btc_5m_success_buy_usage_since(self, since_ms):
         self.daily_calls.append(since_ms)
         return self.daily_usage
+
+    def recent_leader_records_since(self, leader_address, since_ms, limit=200):
+        self.recent_calls.append((leader_address, since_ms, limit))
+        return self.recent_records
 
 
 def test_btc_updown_5m_buy_is_skipped_near_close():
@@ -107,6 +122,72 @@ def test_btc_updown_5m_price_band_buy_guard():
     assert non_btc is None, non_btc
 
 
+def test_tail_risk_low_price_buy_guard():
+    allowed = _tail_risk_low_price_buy_reason("BUY", Decimal("0.02"))
+    assert allowed is None, allowed
+
+    low_price = _tail_risk_low_price_buy_reason("BUY", Decimal("0.006"))
+    assert low_price is not None, low_price
+    assert "Low-price tail-risk BUY skipped" in low_price
+
+    sell = _tail_risk_low_price_buy_reason("SELL", Decimal("0.006"))
+    assert sell is None, sell
+
+
+def test_same_event_high_frequency_buy_guard():
+    original = bridge_main.recorder
+    try:
+        recent_records = [
+            {
+                "market_title": "Will the Fed decrease interest rates by 25 bps after the July 2026 meeting?",
+                "outcome": "Yes",
+                "raw_payload": '{"marketSlug":"will-the-fed-decrease-interest-rates-by-25-bps-after-the-july-2026-meeting","title":"Will the Fed decrease interest rates by 25 bps after the July 2026 meeting?","outcome":"Yes"}',
+            }
+            for _ in range(5)
+        ]
+        bridge_main.recorder = FakeRecorder(recent_records=recent_records)
+        signal = SimpleNamespace(
+            leader_address="0xLeader",
+            market_slug="will-the-fed-decrease-interest-rates-by-25-bps-after-the-july-2026-meeting",
+            title="Will the Fed decrease interest rates by 25 bps after the July 2026 meeting?",
+            outcome="Yes",
+        )
+
+        reason = _leader_event_activity_buy_reason(signal, "BUY", now_ms=1783234800000)
+        assert reason is not None, reason
+        assert "High-frequency same-event leader activity skipped" in reason
+    finally:
+        bridge_main.recorder = original
+
+
+def test_same_event_multi_outcome_combo_buy_guard():
+    original = bridge_main.recorder
+    try:
+        recent_records = [
+            {
+                "market_title": "Will there be no change in Fed interest rates after the July 2026 meeting?",
+                "outcome": "Yes",
+                "raw_payload": '{"marketSlug":"will-there-be-no-change-in-fed-interest-rates-after-the-july-2026-meeting","title":"Will there be no change in Fed interest rates after the July 2026 meeting?","outcome":"Yes"}',
+            }
+        ]
+        bridge_main.recorder = FakeRecorder(recent_records=recent_records)
+        signal = SimpleNamespace(
+            leader_address="0xLeader",
+            market_slug="will-the-fed-decrease-interest-rates-by-25-bps-after-the-july-2026-meeting",
+            title="Will the Fed decrease interest rates by 25 bps after the July 2026 meeting?",
+            outcome="Yes",
+        )
+
+        reason = _leader_event_activity_buy_reason(signal, "BUY", now_ms=1783234800000)
+        assert reason is not None, reason
+        assert "Multi-outcome same-event leader combo skipped" in reason
+
+        sell = _leader_event_activity_buy_reason(signal, "SELL", now_ms=1783234800000)
+        assert sell is None, sell
+    finally:
+        bridge_main.recorder = original
+
+
 def test_btc_updown_5m_global_buy_guard():
     original = bridge_main.recorder
     try:
@@ -170,6 +251,9 @@ def main() -> int:
     test_btc_updown_5m_buy_is_skipped_near_close()
     test_btc_updown_5m_duplicate_buy_guard()
     test_btc_updown_5m_price_band_buy_guard()
+    test_tail_risk_low_price_buy_guard()
+    test_same_event_high_frequency_buy_guard()
+    test_same_event_multi_outcome_combo_buy_guard()
     test_btc_updown_5m_global_buy_guard()
     test_btc_updown_5m_daily_limit_guard()
     print("short-cycle market guard tests passed")
