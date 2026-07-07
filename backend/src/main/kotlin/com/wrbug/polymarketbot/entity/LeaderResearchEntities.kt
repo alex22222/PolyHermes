@@ -296,6 +296,53 @@ data class LeaderResearchSourceState(
 )
 
 @Entity
+@Table(name = "leader_research_recommendation_execution")
+data class LeaderResearchRecommendationExecution(
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    val id: Long? = null,
+
+    @Column(name = "category", nullable = false, length = 50)
+    val category: String,
+
+    @Column(name = "status", nullable = false, length = 30)
+    val status: String,
+
+    @Column(name = "dry_run", nullable = false)
+    val dryRun: Boolean = true,
+
+    @Column(name = "actions_json", columnDefinition = "TEXT")
+    val actionsJson: String? = null,
+
+    @Column(name = "recommendation_counts_json", columnDefinition = "TEXT")
+    val recommendationCountsJson: String? = null,
+
+    @Column(name = "planned_actions_json", columnDefinition = "TEXT")
+    val plannedActionsJson: String? = null,
+
+    @Column(name = "result_summary_json", columnDefinition = "TEXT")
+    val resultSummaryJson: String? = null,
+
+    @Column(name = "request_json", columnDefinition = "TEXT")
+    val requestJson: String? = null,
+
+    @Column(name = "error_message", columnDefinition = "TEXT")
+    val errorMessage: String? = null,
+
+    @Column(name = "started_at", nullable = false)
+    val startedAt: Long = System.currentTimeMillis(),
+
+    @Column(name = "finished_at")
+    val finishedAt: Long? = null,
+
+    @Column(name = "duration_ms")
+    val durationMs: Long? = null,
+
+    @Column(name = "created_at", nullable = false)
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity
 @Table(name = "leader_activity_event")
 data class LeaderActivityEvent(
     @Id

@@ -81,6 +81,83 @@ open class CopyOrderTrackingService(
             ?: throw IllegalStateException("ApplicationContext not initialized")
     }
 
+    private fun researchRiskBlockReason(leader: Leader): String? {
+        val riskFlags = leader.researchRiskFlags
+            ?.split(",")
+            ?.map { it.trim() }
+            ?.filter { it.isNotBlank() }
+            ?.toSet()
+            .orEmpty()
+        val hardRiskFlags = setOf(
+            "zero_win_negative_pnl",
+            "zero_win_rate",
+            "buy_only_no_exit",
+            "negative_pnl"
+        )
+        val matchedFlags = riskFlags.intersect(hardRiskFlags)
+        return when {
+            leader.researchTag == "RISKY" -> "Leader 研究标签为 RISKY，禁止继续 BUY 跟单"
+            matchedFlags.isNotEmpty() -> "Leader 研究风险标记命中: ${matchedFlags.joinToString(",")}"
+            else -> null
+        }
+    }
+
+    private fun recordResearchRiskFilteredOrder(
+        copyTrading: CopyTrading,
+        account: Account,
+        leader: Leader,
+        trade: TradeResponse,
+        marketId: String,
+        reason: String
+    ) {
+        notificationScope.launch {
+            try {
+                val market = runCatching { marketService.getMarket(marketId) }.getOrNull()
+                val calculatedQuantity = runCatching { calculateBuyQuantity(trade, copyTrading) }.getOrNull()
+                filteredOrderRepository.save(
+                    FilteredOrder(
+                        copyTradingId = copyTrading.id!!,
+                        accountId = copyTrading.accountId,
+                        leaderId = copyTrading.leaderId,
+                        leaderTradeId = trade.id,
+                        marketId = marketId,
+                        marketTitle = market?.title ?: marketId,
+                        marketSlug = market?.slug,
+                        side = "BUY",
+                        outcomeIndex = trade.outcomeIndex,
+                        outcome = trade.outcome,
+                        price = trade.price.toSafeBigDecimal(),
+                        size = trade.size.toSafeBigDecimal(),
+                        calculatedQuantity = calculatedQuantity,
+                        filterReason = reason,
+                        filterType = "LEADER_RESEARCH_RISK"
+                    )
+                )
+                logger.info(
+                    "已记录研究风险过滤订单: copyTradingId=${copyTrading.id}, leaderId=${leader.id}, tradeId=${trade.id}"
+                )
+                if (copyTrading.pushFilteredOrders) {
+                    telegramNotificationService?.sendOrderFilteredNotification(
+                        marketTitle = market?.title ?: marketId,
+                        marketId = marketId,
+                        marketSlug = market?.slug,
+                        side = "BUY",
+                        outcome = trade.outcome,
+                        price = trade.price,
+                        size = trade.size,
+                        filterReason = reason,
+                        filterType = "LEADER_RESEARCH_RISK",
+                        accountName = account.accountName,
+                        walletAddress = account.walletAddress,
+                        locale = java.util.Locale("zh", "CN")
+                    )
+                }
+            } catch (e: Exception) {
+                logger.error("记录研究风险过滤订单失败: ${e.message}", e)
+            }
+        }
+    }
+
     private suspend fun sendBridgeFallback(
         copyTrading: CopyTrading,
         account: Account,
@@ -102,6 +179,14 @@ open class CopyOrderTrackingService(
                 "Bridge fallback 跳过：无法确定市场(conditionId): accountId=${account.id}, " +
                     "copyTradingId=${copyTrading.id}, tradeId=${trade.id}, tokenId=${trade.tokenId}"
             )
+            return true
+        }
+
+        researchRiskBlockReason(leader)?.takeIf { trade.side.equals("BUY", ignoreCase = true) }?.let { reason ->
+            logger.warn(
+                "Bridge fallback 跳过研究高风险 Leader 买入: copyTradingId=${copyTrading.id}, leaderId=${leader.id}, tradeId=${trade.id}, reason=$reason"
+            )
+            recordResearchRiskFilteredOrder(copyTrading, account, leader, trade, marketId, reason)
             return true
         }
 
@@ -384,6 +469,14 @@ open class CopyOrderTrackingService(
                         logger.info(
                             "Leader 分类与市场分类不匹配，跳过跟单: copyTradingId=${copyTrading.id}, leaderId=${leader.id}, leaderCategory=${leader.category}, marketId=$effectiveMarketId"
                         )
+                        continue
+                    }
+                    val researchRiskReason = researchRiskBlockReason(leader)
+                    if (researchRiskReason != null) {
+                        logger.warn(
+                            "跳过研究高风险 Leader 买入: copyTradingId=${copyTrading.id}, leaderId=${leader.id}, tradeId=${trade.id}, reason=$researchRiskReason"
+                        )
+                        recordResearchRiskFilteredOrder(copyTrading, account, leader, trade, effectiveMarketId, researchRiskReason)
                         continue
                     }
 

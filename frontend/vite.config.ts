@@ -7,9 +7,10 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   
   // 从环境变量获取后端地址，用于开发环境代理
-  // 如果未设置，使用默认值 localhost:8000
-  const API_URL = env.VITE_API_URL || 'http://localhost:8000'
-  const WS_URL = env.VITE_WS_URL || 'ws://localhost:8000'
+  // 如果未设置，使用 IPv4 loopback，避免 localhost 被系统代理/IPv6 解析绕走
+  const API_URL = env.VITE_API_URL || 'http://127.0.0.1:8000'
+  const WS_URL = env.VITE_WS_URL || 'ws://127.0.0.1:8000'
+  const BRIDGE_RUNTIME_URL = env.VITE_BRIDGE_RUNTIME_URL || 'http://127.0.0.1:8080'
   
   // 从环境变量获取版本信息（构建时注入）
   const VERSION = env.VERSION || 'dev'
@@ -27,6 +28,7 @@ export default defineConfig(({ mode }) => {
       })
     },
     server: {
+      host: '::',
       port: 3000,
       proxy: {
         '/api': {
@@ -39,7 +41,7 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true
         },
         '/bridge-runtime': {
-          target: 'http://localhost:8080',
+          target: BRIDGE_RUNTIME_URL,
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/bridge-runtime/, '')
         }

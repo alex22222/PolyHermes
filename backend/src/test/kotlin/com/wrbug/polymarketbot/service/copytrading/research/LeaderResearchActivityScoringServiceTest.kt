@@ -1,6 +1,9 @@
 package com.wrbug.polymarketbot.service.copytrading.research
 
+import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreRequest
 import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
+import com.wrbug.polymarketbot.entity.LeaderResearchScore
+import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.repository.LeaderResearchActivityMetricProjection
 import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchScoreRepository
@@ -145,7 +148,54 @@ class LeaderResearchActivityScoringServiceTest {
         assertTrue(result.totalScore <= BigDecimal("60"))
     }
 
+    @Test
+    fun `score activity prescreen can target candidate ids without full state scan`() {
+        val candidateRepository: LeaderResearchCandidateRepository = mock()
+        val scoreRepository: LeaderResearchScoreRepository = mock()
+        val service = LeaderResearchActivityScoringService(candidateRepository, scoreRepository)
+        val candidate = LeaderResearchCandidate(
+            id = 42L,
+            normalizedWallet = "0x4242424242424242424242424242424242424242",
+            researchState = LeaderResearchState.DISCOVERED,
+            source = "ACTIVITY_SOURCE",
+            sourceEvidence = "activity_source:politics | category:politics"
+        )
+        Mockito.`when`(candidateRepository.findAllById(listOf(42L, 404L))).thenReturn(listOf(candidate))
+        Mockito.`when`(candidateRepository.aggregateActivityMetricsForCandidateIds(listOf(42L))).thenReturn(
+            listOf(
+                metric(
+                    candidateId = 42L,
+                    totalEvents = 40,
+                    distinctMarkets = 8,
+                    buyEvents = 25,
+                    sellEvents = 10,
+                    usablePaperEvents = 30,
+                    safePriceEvents = 32,
+                    tailPriceEvents = 1,
+                    avgAmount = BigDecimal("4.00"),
+                    totalAmount = BigDecimal("160"),
+                    lastEventTime = System.currentTimeMillis()
+                )
+            )
+        )
+        Mockito.`when`(scoreRepository.save(anyScore())).thenAnswer { it.arguments[0] }
+        Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer { it.arguments[0] }
+
+        val response = service.scoreActivityPrescreen(
+            LeaderResearchActivityScoreRequest(
+                force = true,
+                candidateIds = listOf(42L, 404L)
+            )
+        )
+
+        assertEquals(1, response.scannedCount)
+        assertEquals(1, response.scoredCount)
+        Mockito.verify(candidateRepository, Mockito.never()).findByResearchStateIn(anyStates())
+        Mockito.verify(candidateRepository).aggregateActivityMetricsForCandidateIds(listOf(42L))
+    }
+
     private fun metric(
+        candidateId: Long = 1L,
         totalEvents: Long,
         distinctMarkets: Long,
         buyEvents: Long,
@@ -158,7 +208,7 @@ class LeaderResearchActivityScoringServiceTest {
         lastEventTime: Long?
     ): LeaderResearchActivityMetricProjection {
         return object : LeaderResearchActivityMetricProjection {
-            override fun getCandidateId(): Long = 1
+            override fun getCandidateId(): Long = candidateId
             override fun getTotalEvents(): Long = totalEvents
             override fun getDistinctMarkets(): Long = distinctMarkets
             override fun getBuyEvents(): Long = buyEvents
@@ -170,6 +220,21 @@ class LeaderResearchActivityScoringServiceTest {
             override fun getTotalAmount(): BigDecimal = totalAmount
             override fun getLastEventTime(): Long? = lastEventTime
         }
+    }
+
+    private fun anyCandidate(): LeaderResearchCandidate {
+        Mockito.any(LeaderResearchCandidate::class.java)
+        return LeaderResearchCandidate(normalizedWallet = "0x1111111111111111111111111111111111111111")
+    }
+
+    private fun anyScore(): LeaderResearchScore {
+        Mockito.any(LeaderResearchScore::class.java)
+        return LeaderResearchScore(candidateId = 1, scoreVersion = LeaderResearchActivityScoringService.SCORE_VERSION)
+    }
+
+    private fun anyStates(): Collection<LeaderResearchState> {
+        Mockito.anyCollection<LeaderResearchState>()
+        return emptyList()
     }
 
     @Suppress("UNCHECKED_CAST")

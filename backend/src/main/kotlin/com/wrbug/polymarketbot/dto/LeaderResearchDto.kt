@@ -55,7 +55,8 @@ data class LeaderResearchScannerPoolImportResponse(
 
 data class LeaderResearchActivityScoreRequest(
     val states: List<String> = listOf("DISCOVERED", "CANDIDATE"),
-    val force: Boolean = false
+    val force: Boolean = false,
+    val candidateIds: List<Long> = emptyList()
 )
 
 data class LeaderResearchActivityScoreResponse(
@@ -70,6 +71,7 @@ data class LeaderResearchActivityScoreResponse(
 data class LeaderResearchActivitySourceImportRequest(
     val dryRun: Boolean = false,
     val categories: List<String> = listOf("politics", "finance"),
+    val wallets: List<String> = emptyList(),
     val limitPerCategory: Int = 100,
     val lookbackDays: Int = 30,
     val minEvents: Int = 12,
@@ -352,6 +354,7 @@ data class LeaderResearchOfficialLeaderboardDiagnoseResponse(
 )
 
 data class LeaderResearchPoliticsSourceDiagnoseRequest(
+    val category: String = "politics",
     val lookbackDays: Int = 60,
     val minEvents: Int = 8,
     val minDistinctMarkets: Int = 2,
@@ -370,6 +373,7 @@ data class LeaderResearchPoliticsSourceBucketDto(
 
 data class LeaderResearchPoliticsSourceSampleDto(
     val wallet: String,
+    val candidateId: Long?,
     val action: String,
     val totalEvents: Long,
     val distinctMarkets: Long,
@@ -381,7 +385,29 @@ data class LeaderResearchPoliticsSourceSampleDto(
     val totalAmount: String,
     val currentState: String?,
     val currentScore: String?,
+    val paperTradeCount: Int?,
+    val copyablePnl: String?,
     val riskFlags: List<String>,
+    val blockers: List<String>
+)
+
+data class LeaderResearchPoliticsSourceRecommendationDto(
+    val wallet: String,
+    val candidateId: Long?,
+    val recommendation: String,
+    val priority: Int,
+    val reason: String,
+    val action: String,
+    val currentState: String?,
+    val currentScore: String?,
+    val totalEvents: Long,
+    val distinctMarkets: Long,
+    val buyEvents: Long,
+    val sellEvents: Long,
+    val safePriceRatio: String,
+    val tailPriceRatio: String,
+    val paperTradeCount: Int?,
+    val copyablePnl: String?,
     val blockers: List<String>
 )
 
@@ -397,7 +423,59 @@ data class LeaderResearchPoliticsSourceDiagnoseResponse(
     val eligibleForPaperNow: Int,
     val buckets: List<LeaderResearchPoliticsSourceBucketDto>,
     val samples: List<LeaderResearchPoliticsSourceSampleDto>,
+    val recommendations: List<LeaderResearchPoliticsSourceRecommendationDto> = emptyList(),
     val generatedAt: Long
+)
+
+data class LeaderResearchPoliticsRecommendationExecuteRequest(
+    val dryRun: Boolean = true,
+    val actions: List<String> = listOf("IMPORT_NOW", "SCORE_REFRESH", "PAPER_PROCESS", "FAST_WATCH_REVIEW"),
+    val diagnose: LeaderResearchPoliticsSourceDiagnoseRequest = LeaderResearchPoliticsSourceDiagnoseRequest(),
+    val maxImport: Int = 20,
+    val maxScoreRefresh: Int = 20,
+    val maxPaperProcess: Int = 20,
+    val paperProcessBatchSize: Int = 20,
+    val promotionMinScore: String = "70"
+)
+
+data class LeaderResearchPoliticsRecommendationActionPlanDto(
+    val action: String,
+    val selectedCount: Int,
+    val candidateIds: List<Long> = emptyList(),
+    val wallets: List<String> = emptyList(),
+    val executed: Boolean = false,
+    val skippedReason: String? = null
+)
+
+data class LeaderResearchPoliticsRecommendationExecuteResponse(
+    val dryRun: Boolean,
+    val generatedAt: Long,
+    val recommendationCounts: Map<String, Int>,
+    val plannedActions: List<LeaderResearchPoliticsRecommendationActionPlanDto>,
+    val recommendations: List<LeaderResearchPoliticsSourceRecommendationDto>,
+    val importResult: LeaderResearchActivitySourceImportResponse? = null,
+    val activityScoreResult: LeaderResearchActivityScoreResponse? = null,
+    val promotionResult: LeaderResearchPaperPromotionResponse? = null,
+    val paperProcessResult: LeaderResearchPaperProcessResponse? = null,
+    val paperScoreResult: LeaderResearchPaperScoreResponse? = null,
+    val fastWatchReviewCandidateIds: List<Long> = emptyList(),
+    val trialReadyCandidateIds: List<Long> = emptyList()
+)
+
+data class LeaderResearchPoliticsRecommendationExecutionSnapshotDto(
+    val id: Long,
+    val category: String,
+    val status: String,
+    val dryRun: Boolean,
+    val actions: List<String>,
+    val recommendationCounts: Map<String, Int>,
+    val plannedActions: List<LeaderResearchPoliticsRecommendationActionPlanDto>,
+    val resultSummary: Map<String, Any?>,
+    val errorMessage: String?,
+    val startedAt: Long,
+    val finishedAt: Long?,
+    val durationMs: Long?,
+    val reviewCandidates: List<LeaderResearchFunnelCandidateDto> = emptyList()
 )
 
 data class LeaderResearchPaperProcessRequest(
@@ -412,13 +490,92 @@ data class LeaderResearchPaperProcessResponse(
     val requestedBatchSize: Int,
     val effectiveBatchSize: Int,
     val maxBatchSize: Int,
-    val truncated: Boolean
+    val truncated: Boolean,
+    val candidateSummaries: List<LeaderResearchPaperProcessCandidateDto> = emptyList()
+)
+
+data class LeaderResearchPaperProcessCandidateDto(
+    val candidateId: Long,
+    val wallet: String,
+    val processed: Int,
+    val filtered: Int,
+    val failed: Int,
+    val beforeTradeCount: Int,
+    val afterTradeCount: Int,
+    val tradeCountDelta: Int,
+    val beforeFilteredCount: Int,
+    val afterFilteredCount: Int,
+    val filteredCountDelta: Int,
+    val beforeCopyablePnl: String,
+    val afterCopyablePnl: String,
+    val copyablePnlDelta: String
+)
+
+data class LeaderResearchPaperScoreRequest(
+    val candidateIds: List<Long> = emptyList(),
+    val maxCandidates: Int = 100
 )
 
 data class LeaderResearchPaperScoreResponse(
     val scoredCount: Int,
     val states: List<String>,
-    val scoreVersion: String
+    val scoreVersion: String,
+    val targeted: Boolean = false,
+    val requestedCandidateIds: List<Long> = emptyList(),
+    val missingCandidateIds: List<Long> = emptyList(),
+    val effectiveCandidateCount: Int = scoredCount,
+    val maxCandidates: Int? = null,
+    val truncated: Boolean = false
+)
+
+data class LeaderResearchFastWatchRequest(
+    val categories: List<String> = listOf("politics", "finance"),
+    val limit: Int = 20,
+    val includeTrialReady: Boolean = true
+)
+
+data class LeaderResearchFastWatchResponse(
+    val total: Int,
+    val fastWatchCount: Int,
+    val trialReadyCount: Int,
+    val categories: List<String>,
+    val criteria: String,
+    val items: List<LeaderResearchFunnelCandidateDto>,
+    val generatedAt: Long
+)
+
+data class LeaderResearchTrialReadyRecheckRequest(
+    val dryRun: Boolean = true,
+    val candidateIds: List<Long> = emptyList(),
+    val maxCandidates: Int = 20
+)
+
+data class LeaderResearchTrialReadyRecheckItemDto(
+    val candidateId: Long,
+    val wallet: String,
+    val beforeState: String,
+    val afterState: String,
+    val score: String,
+    val tradeCount: Int,
+    val filteredCount: Int,
+    val copyablePnl: String,
+    val filteredRatio: String,
+    val ageHours: Long,
+    val hoursUntilTrialReady: Long,
+    val eligible: Boolean,
+    val action: String,
+    val reason: String
+)
+
+data class LeaderResearchTrialReadyRecheckResponse(
+    val dryRun: Boolean,
+    val scannedCount: Int,
+    val selectedCount: Int,
+    val scoredCount: Int,
+    val advancedCount: Int,
+    val trialReadyCandidateIds: List<Long>,
+    val items: List<LeaderResearchTrialReadyRecheckItemDto>,
+    val generatedAt: Long
 )
 
 data class LeaderResearchPaperPromotionRequest(
@@ -427,7 +584,8 @@ data class LeaderResearchPaperPromotionRequest(
     val financeLimit: Int = 20,
     val sportsLimit: Int = 5,
     val cryptoLimit: Int = 5,
-    val dryRun: Boolean = false
+    val dryRun: Boolean = false,
+    val candidateIds: List<Long> = emptyList()
 )
 
 data class LeaderResearchPaperPromotionCategoryDto(
@@ -520,7 +678,10 @@ data class LeaderResearchTrialReadinessDto(
     val fastWatchBlockers: List<String>,
     val ageHours: Long,
     val stableHighScoreCount: Int,
-    val requiredStableHighScoreCount: Int
+    val requiredStableHighScoreCount: Int,
+    val requiredAgeHours: Long = 168,
+    val hoursUntilTrialReady: Long = 0,
+    val trialReadyAt: Long? = null
 )
 
 data class LeaderResearchAllocationHealthDto(

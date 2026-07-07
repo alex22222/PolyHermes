@@ -2,6 +2,8 @@ package com.wrbug.polymarketbot.service.copytrading.research
 
 import com.wrbug.polymarketbot.entity.LeaderActivityEvent
 import com.wrbug.polymarketbot.entity.LeaderResearchRun
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsRecommendationExecuteRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsRecommendationExecuteResponse
 import com.wrbug.polymarketbot.enums.LeaderResearchEventType
 import com.wrbug.polymarketbot.enums.LeaderResearchRunStatus
 import com.wrbug.polymarketbot.enums.LeaderResearchSourceStatus
@@ -30,6 +32,7 @@ class LeaderResearchJobServiceTest {
     private val scoringService: LeaderResearchScoringService = mock()
     private val stateMachine: LeaderResearchStateMachine = mock()
     private val eventService: LeaderResearchEventService = mock()
+    private val politicsRecommendationExecutionService: LeaderResearchPoliticsRecommendationExecutionService = mock()
     private val loopGoalControlService: LoopGoalControlService = mock()
 
     @Test
@@ -199,7 +202,85 @@ class LeaderResearchJobServiceTest {
         )
     }
 
-    private fun service(staleRunningRuns: List<LeaderResearchRun> = emptyList()) = LeaderResearchJobService(
+    @Test
+    fun `scheduled recommendation dry run skips when goal inactive`() {
+        val service = service(scheduledEnabled = true, recommendationDryRunEnabled = true)
+        Mockito.`when`(loopGoalControlService.isLeaderDiscoveryActive()).thenReturn(false)
+
+        service.scheduledRecommendationDryRun()
+
+        Mockito.verify(loopGoalControlService).isLeaderDiscoveryActive()
+        Mockito.verifyNoInteractions(politicsRecommendationExecutionService)
+    }
+
+    @Test
+    fun `scheduled recommendation dry run executes safe dry run when goal active`() {
+        val service = service(scheduledEnabled = true, recommendationDryRunEnabled = true)
+        Mockito.`when`(loopGoalControlService.isLeaderDiscoveryActive()).thenReturn(true)
+        Mockito.`when`(politicsRecommendationExecutionService.executePrimaryCategoryDryRuns())
+            .thenReturn(
+                listOf(
+                    LeaderResearchPoliticsRecommendationExecuteResponse(
+                        dryRun = true,
+                        generatedAt = 123L,
+                        recommendationCounts = mapOf("PAPER_PROCESS" to 1),
+                        plannedActions = emptyList(),
+                        recommendations = emptyList()
+                    ),
+                    LeaderResearchPoliticsRecommendationExecuteResponse(
+                        dryRun = true,
+                        generatedAt = 124L,
+                        recommendationCounts = mapOf("FAST_WATCH_REVIEW" to 1),
+                        plannedActions = emptyList(),
+                        recommendations = emptyList()
+                    )
+                )
+            )
+
+        service.scheduledRecommendationDryRun()
+
+        Mockito.verify(politicsRecommendationExecutionService).executePrimaryCategoryDryRuns()
+    }
+
+    @Test
+    fun `recommendation dry run can execute when full scheduled research is disabled`() {
+        val service = service(scheduledEnabled = false, recommendationDryRunEnabled = true)
+        Mockito.`when`(loopGoalControlService.isLeaderDiscoveryActive()).thenReturn(true)
+        Mockito.`when`(politicsRecommendationExecutionService.executePrimaryCategoryDryRuns())
+            .thenReturn(
+                listOf(
+                    LeaderResearchPoliticsRecommendationExecuteResponse(
+                        dryRun = true,
+                        generatedAt = 123L,
+                        recommendationCounts = mapOf("PAPER_PROCESS" to 0),
+                        plannedActions = emptyList(),
+                        recommendations = emptyList()
+                    )
+                )
+            )
+
+        val executed = service.runRecommendationDryRunIfAllowed("startup")
+
+        assertTrue(executed)
+        Mockito.verify(politicsRecommendationExecutionService).executePrimaryCategoryDryRuns()
+    }
+
+    @Test
+    fun `recommendation dry run helper skips when disabled`() {
+        val service = service(scheduledEnabled = true, recommendationDryRunEnabled = false)
+
+        val executed = service.runRecommendationDryRunIfAllowed("startup")
+
+        assertFalse(executed)
+        Mockito.verifyNoInteractions(loopGoalControlService, politicsRecommendationExecutionService)
+    }
+
+    private fun service(
+        staleRunningRuns: List<LeaderResearchRun> = emptyList(),
+        scheduledEnabled: Boolean = false,
+        recommendationDryRunEnabled: Boolean = true,
+        recommendationDryRunStartupDelayMs: Long = 30_000
+    ) = LeaderResearchJobService(
         runRepository = runRepository,
         activityEventRepository = activityEventRepository,
         candidateRepository = candidateRepository,
@@ -208,8 +289,11 @@ class LeaderResearchJobServiceTest {
         scoringService = scoringService,
         stateMachine = stateMachine,
         eventService = eventService,
+        politicsRecommendationExecutionService = politicsRecommendationExecutionService,
         loopGoalControlService = loopGoalControlService,
-        scheduledEnabled = false,
+        scheduledEnabled = scheduledEnabled,
+        recommendationDryRunEnabled = recommendationDryRunEnabled,
+        recommendationDryRunStartupDelayMs = recommendationDryRunStartupDelayMs,
         runningTimeoutMs = 21_600_000
     ).also {
         Mockito.`when`(
@@ -241,6 +325,11 @@ class LeaderResearchJobServiceTest {
     private fun anyLongValue(): Long {
         Mockito.anyLong()
         return 0L
+    }
+
+    private fun anyRecommendationExecuteRequest(): LeaderResearchPoliticsRecommendationExecuteRequest {
+        Mockito.any(LeaderResearchPoliticsRecommendationExecuteRequest::class.java)
+        return LeaderResearchPoliticsRecommendationExecuteRequest()
     }
 
     @Suppress("UNCHECKED_CAST")

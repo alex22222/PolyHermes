@@ -177,7 +177,11 @@ class LeaderResearchScoreAdapterService(
         val flags = mutableListOf<String>()
         if (trades < MIN_TRADES_FOR_FULL_SCORE) flags += "small_sample"
         if (pnl < BigDecimal.ZERO) flags += "negative_pnl"
+        if (trades >= MIN_TRADES_FOR_FULL_SCORE && winRate <= 0.0) flags += "zero_win_rate"
         if (winRate > 0 && winRate < 40) flags += "low_win_rate"
+        if (trades >= MIN_TRADES_FOR_FULL_SCORE && winRate <= 0.0 && pnl < BigDecimal.ZERO) {
+            flags += "zero_win_negative_pnl"
+        }
         if (!isFresh) flags += "stale_data"
         if (pnlRatio > BigDecimal("0.50")) flags += "high_pnl_volatility"
         appendBacktestRiskFlags(bestCompletedBacktest, flags)
@@ -213,6 +217,8 @@ class LeaderResearchScoreAdapterService(
     private fun computeRiskMultiplier(flags: List<String>): BigDecimal {
         var multiplier = BigDecimal.ONE
         if (flags.contains("negative_pnl")) multiplier = multiplier.multiply(BigDecimal("0.65"))
+        if (flags.contains("zero_win_rate")) multiplier = multiplier.multiply(BigDecimal("0.40"))
+        if (flags.contains("zero_win_negative_pnl")) multiplier = multiplier.multiply(BigDecimal("0.25"))
         if (flags.contains("stale_data")) multiplier = multiplier.multiply(BigDecimal("0.75"))
         if (flags.contains("high_pnl_volatility")) multiplier = multiplier.multiply(BigDecimal("0.85"))
         if (flags.contains("low_win_rate")) multiplier = multiplier.multiply(BigDecimal("0.90"))
@@ -232,6 +238,7 @@ class LeaderResearchScoreAdapterService(
      */
     private fun computeTagCap(flags: List<String>): TagCap {
         return when {
+            flags.contains("zero_win_negative_pnl") -> TagCap.RISKY
             flags.contains("tail_price_spray") -> TagCap.RISKY
             flags.contains("backtest_loss") -> TagCap.WATCH
             flags.contains("backtest_no_simulated_trades") -> TagCap.WATCH

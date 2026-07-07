@@ -93,6 +93,29 @@ class LeaderResearchPaperPromotionServiceTest {
         assertEquals("PAPER", response.items.single().nextState)
     }
 
+    @Test
+    fun `promotion can target candidate ids without full state scan`() {
+        val target = financeCandidate(42, System.currentTimeMillis()).copy(sourceEvidence = "activity_source:politics | category:politics")
+        Mockito.`when`(candidateRepository.findAllById(listOf(42L, 404L))).thenReturn(listOf(target))
+
+        val response = service.promote(
+            LeaderResearchPaperPromotionRequest(
+                minScore = "80",
+                politicsLimit = 5,
+                financeLimit = 0,
+                sportsLimit = 0,
+                cryptoLimit = 0,
+                dryRun = true,
+                candidateIds = listOf(42L, 404L)
+            )
+        )
+
+        assertEquals(1, response.selectedTotal)
+        assertEquals(42L, response.items.single().candidateId)
+        Mockito.verify(candidateRepository, Mockito.never()).findByResearchStateIn(anyStates())
+        Mockito.verify(candidateRepository).findAllById(listOf(42L, 404L))
+    }
+
     private fun financeCandidates(count: Int): List<LeaderResearchCandidate> {
         return (1..count).map { index ->
             financeCandidate(index, System.currentTimeMillis())

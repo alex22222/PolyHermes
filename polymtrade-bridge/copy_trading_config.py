@@ -34,6 +34,8 @@ class CopyTradingConfig:
     leader_id: int
     leader_address: str
     leader_category: Optional[str]
+    leader_research_tag: Optional[str]
+    leader_research_risk_flags: Optional[str]
     copy_mode: str
     copy_ratio: Decimal
     fixed_amount: Optional[Decimal]
@@ -144,6 +146,25 @@ class CopyTradingRuleEngine:
             logger.exception("Failed to resolve account id by wallet address")
             return None
 
+    def resolve_wallet_address_by_account_id(self, account_id) -> Optional[str]:
+        """Look up the wallet address for a wallet_accounts id."""
+        normalized = self.normalize_account_id(account_id)
+        if normalized is None:
+            return None
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT wallet_address FROM wallet_accounts WHERE id = %s LIMIT 1",
+                        (normalized,),
+                    )
+                    row = cur.fetchone()
+                    wallet = row.get("wallet_address") if row else None
+                    return wallet.lower() if wallet else None
+        except Exception:
+            logger.exception("Failed to resolve wallet address by account id")
+            return None
+
     def _load_configs(self):
         account_filter = ""
         params = []
@@ -154,6 +175,8 @@ class CopyTradingRuleEngine:
         sql = f"""
         SELECT
             ct.id, ct.account_id, ct.leader_id, ctl.leader_address, ctl.category AS leader_category,
+            ctl.research_tag AS leader_research_tag,
+            ctl.research_risk_flags AS leader_research_risk_flags,
             ct.copy_mode, ct.copy_ratio, ct.fixed_amount,
             ct.max_order_size, ct.min_order_size, ct.max_daily_loss,
             ct.max_daily_orders, ct.price_tolerance, ct.delay_seconds,
@@ -190,6 +213,8 @@ class CopyTradingRuleEngine:
                     leader_id=row["leader_id"],
                     leader_address=(row["leader_address"] or "").lower(),
                     leader_category=(row["leader_category"] or "").lower() or None,
+                    leader_research_tag=(row["leader_research_tag"] or "").upper() or None,
+                    leader_research_risk_flags=row["leader_research_risk_flags"],
                     copy_mode=(row["copy_mode"] or "RATIO").upper(),
                     copy_ratio=Decimal(row["copy_ratio"] or 1),
                     fixed_amount=Decimal(row["fixed_amount"]) if row["fixed_amount"] is not None else None,
@@ -259,6 +284,11 @@ class CopyTradingRuleEngine:
         if side == "SELL" and not cfg.support_sell:
             return "support_sell=false"
 
+        if side == "BUY":
+            risk_reason = self._leader_research_risk_reason(cfg)
+            if risk_reason:
+                return risk_reason
+
         # 分类匹配检查：主类别 politics/finance 允许互通，sports/crypto 仍保持隔离。
         if cfg.leader_category is not None and market_category is not None:
             if not is_category_allowed(cfg.leader_category, market_category):
@@ -292,6 +322,25 @@ class CopyTradingRuleEngine:
             if today_count >= cfg.max_daily_orders:
                 return f"max_daily_orders reached ({today_count})"
 
+        return None
+
+    def _leader_research_risk_reason(self, cfg: CopyTradingConfig) -> Optional[str]:
+        risk_flags = {
+            flag.strip()
+            for flag in (cfg.leader_research_risk_flags or "").split(",")
+            if flag.strip()
+        }
+        hard_flags = {
+            "zero_win_negative_pnl",
+            "zero_win_rate",
+            "buy_only_no_exit",
+            "negative_pnl",
+        }
+        matched = sorted(risk_flags.intersection(hard_flags))
+        if cfg.leader_research_tag == "RISKY":
+            return "leader research tag RISKY"
+        if matched:
+            return f"leader research risk flags: {','.join(matched)}"
         return None
 
     def _count_today_buy_orders(self, copy_trading_id: int) -> int:

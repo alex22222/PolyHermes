@@ -1,5 +1,6 @@
 package com.wrbug.polymarketbot.service.copytrading.research
 
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsRecommendationExecuteRequest
 import com.wrbug.polymarketbot.entity.LeaderResearchRun
 import com.wrbug.polymarketbot.enums.LeaderResearchEventType
 import com.wrbug.polymarketbot.enums.LeaderResearchRunStatus
@@ -12,7 +13,9 @@ import com.wrbug.polymarketbot.repository.LeaderResearchRunRepository
 import com.wrbug.polymarketbot.service.loop.LoopGoalControlService
 import jakarta.annotation.PreDestroy
 import org.slf4j.LoggerFactory
+import org.springframework.boot.context.event.ApplicationReadyEvent
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.context.event.EventListener
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
 import java.util.concurrent.ExecutorService
@@ -29,8 +32,11 @@ class LeaderResearchJobService(
     private val scoringService: LeaderResearchScoringService,
     private val stateMachine: LeaderResearchStateMachine,
     private val eventService: LeaderResearchEventService,
+    private val politicsRecommendationExecutionService: LeaderResearchPoliticsRecommendationExecutionService,
     private val loopGoalControlService: LoopGoalControlService,
     @Value("\${leader.research.enabled:false}") private val scheduledEnabled: Boolean,
+    @Value("\${leader.research.recommendation-dry-run.enabled:true}") private val recommendationDryRunEnabled: Boolean,
+    @Value("\${leader.research.recommendation-dry-run.startup-delay-ms:30000}") private val recommendationDryRunStartupDelayMs: Long,
     @Value("\${leader.research.running-timeout-ms:21600000}") private val runningTimeoutMs: Long
 ) {
     private val logger = LoggerFactory.getLogger(LeaderResearchJobService::class.java)
@@ -47,6 +53,48 @@ class LeaderResearchJobService(
             return
         }
         runOnce(dryRun = false, triggerType = LeaderResearchTriggerType.SCHEDULED)
+    }
+
+    @Scheduled(fixedDelayString = "\${leader.research.recommendation-dry-run.fixed-delay-ms:3600000}")
+    fun scheduledRecommendationDryRun() {
+        runRecommendationDryRunIfAllowed("scheduled")
+    }
+
+    @EventListener(ApplicationReadyEvent::class)
+    fun scheduleStartupRecommendationDryRun() {
+        if (recommendationDryRunStartupDelayMs < 0) return
+        Thread {
+            if (recommendationDryRunStartupDelayMs > 0) {
+                Thread.sleep(recommendationDryRunStartupDelayMs)
+            }
+            runRecommendationDryRunIfAllowed("startup")
+        }.apply {
+            name = "leader-research-recommendation-startup"
+            isDaemon = true
+            start()
+        }
+    }
+
+    internal fun runRecommendationDryRunIfAllowed(trigger: String): Boolean {
+        if (!recommendationDryRunEnabled) return false
+        if (!loopGoalControlService.isLeaderDiscoveryActive()) {
+            logger.info("Leader research recommendation dry-run skipped because loop goal 2 is not active: trigger={}", trigger)
+            return false
+        }
+        val executed = runCatching {
+            politicsRecommendationExecutionService.executePrimaryCategoryDryRuns()
+        }.onSuccess { responses ->
+            logger.info(
+                "Leader research recommendation dry-run completed: trigger={}, categories={}, counts={}, plannedActions={}",
+                trigger,
+                responses.size,
+                responses.map { it.recommendationCounts },
+                responses.map { response -> response.plannedActions.associate { it.action to it.selectedCount } }
+            )
+        }.onFailure { error ->
+            logger.warn("Leader research recommendation dry-run failed: trigger={}, message={}", trigger, error.message, error)
+        }.isSuccess
+        return executed
     }
 
     fun runOnce(dryRun: Boolean, triggerType: LeaderResearchTriggerType = LeaderResearchTriggerType.MANUAL): LeaderResearchRun {

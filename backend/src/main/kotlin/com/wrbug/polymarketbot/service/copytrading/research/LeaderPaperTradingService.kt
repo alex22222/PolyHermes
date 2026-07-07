@@ -32,7 +32,22 @@ import java.math.RoundingMode
 data class LeaderPaperProcessingResult(
     val processed: Int,
     val filtered: Int,
-    val failed: Int
+    val failed: Int,
+    val candidateSummaries: List<LeaderPaperCandidateProcessingSummary> = emptyList()
+)
+
+data class LeaderPaperCandidateProcessingSummary(
+    val candidateId: Long,
+    val wallet: String,
+    val processed: Int,
+    val filtered: Int,
+    val failed: Int,
+    val beforeTradeCount: Int,
+    val afterTradeCount: Int,
+    val beforeFilteredCount: Int,
+    val afterFilteredCount: Int,
+    val beforeCopyablePnl: BigDecimal,
+    val afterCopyablePnl: BigDecimal
 )
 
 @Service
@@ -135,6 +150,11 @@ class LeaderPaperTradingService(
         }
 
         val candidatesByWallet = paperCandidates.associateBy { it.normalizedWallet }
+        val candidatesById = paperCandidates.mapNotNull { candidate ->
+            candidate.id?.let { it to candidate }
+        }.toMap()
+        val beforeSnapshots = candidatesById.keys.associateWith { paperSessionSnapshot(it) }
+        val perCandidate = linkedMapOf<Long, MutableCandidateProcessingCounts>()
         val processor = if (::transactionalSelf.isInitialized) transactionalSelf else this
 
         val eligibleStatuses = listOf(LeaderPaperProcessingStatus.NEW, LeaderPaperProcessingStatus.RETRYABLE)
@@ -152,16 +172,50 @@ class LeaderPaperTradingService(
         events.forEach { event ->
             val wallet = event.normalizedWallet ?: return@forEach
             val candidate = candidatesByWallet[wallet] ?: return@forEach
+            val candidateId = candidate.id ?: return@forEach
             val eventId = event.id ?: return@forEach
             when (processor.processPaperEventInNewTransaction(candidate, eventId, runId, eligibleStatuses)) {
-                PaperEventProcessResult.PASSED -> processed += 1
-                PaperEventProcessResult.FILTERED -> filtered += 1
-                PaperEventProcessResult.FAILED -> failed += 1
+                PaperEventProcessResult.PASSED -> {
+                    processed += 1
+                    perCandidate.getOrPut(candidateId) { MutableCandidateProcessingCounts() }.processed += 1
+                }
+                PaperEventProcessResult.FILTERED -> {
+                    filtered += 1
+                    perCandidate.getOrPut(candidateId) { MutableCandidateProcessingCounts() }.filtered += 1
+                }
+                PaperEventProcessResult.FAILED -> {
+                    failed += 1
+                    perCandidate.getOrPut(candidateId) { MutableCandidateProcessingCounts() }.failed += 1
+                }
                 PaperEventProcessResult.SKIPPED -> Unit
             }
         }
 
-        return LeaderPaperProcessingResult(processed = processed, filtered = filtered, failed = failed)
+        val summaries = perCandidate.mapNotNull { (candidateId, counts) ->
+            val candidate = candidatesById[candidateId] ?: return@mapNotNull null
+            val before = beforeSnapshots[candidateId] ?: PaperSessionSnapshot.EMPTY
+            val after = paperSessionSnapshot(candidateId)
+            LeaderPaperCandidateProcessingSummary(
+                candidateId = candidateId,
+                wallet = candidate.normalizedWallet,
+                processed = counts.processed,
+                filtered = counts.filtered,
+                failed = counts.failed,
+                beforeTradeCount = before.tradeCount,
+                afterTradeCount = after.tradeCount,
+                beforeFilteredCount = before.filteredCount,
+                afterFilteredCount = after.filteredCount,
+                beforeCopyablePnl = before.copyablePnl,
+                afterCopyablePnl = after.copyablePnl
+            )
+        }
+
+        return LeaderPaperProcessingResult(
+            processed = processed,
+            filtered = filtered,
+            failed = failed,
+            candidateSummaries = summaries
+        )
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -222,9 +276,65 @@ class LeaderPaperTradingService(
         return LeaderPaperProcessingResult(
             processed = processed + other.processed,
             filtered = filtered + other.filtered,
-            failed = failed + other.failed
+            failed = failed + other.failed,
+            candidateSummaries = mergeCandidateSummaries(candidateSummaries, other.candidateSummaries)
         )
     }
+
+    private fun mergeCandidateSummaries(
+        left: List<LeaderPaperCandidateProcessingSummary>,
+        right: List<LeaderPaperCandidateProcessingSummary>
+    ): List<LeaderPaperCandidateProcessingSummary> {
+        val merged = linkedMapOf<Long, LeaderPaperCandidateProcessingSummary>()
+        (left + right).forEach { item ->
+            val existing = merged[item.candidateId]
+            merged[item.candidateId] = if (existing == null) {
+                item
+            } else {
+                existing.copy(
+                    processed = existing.processed + item.processed,
+                    filtered = existing.filtered + item.filtered,
+                    failed = existing.failed + item.failed,
+                    afterTradeCount = item.afterTradeCount,
+                    afterFilteredCount = item.afterFilteredCount,
+                    afterCopyablePnl = item.afterCopyablePnl
+                )
+            }
+        }
+        return merged.values.toList()
+    }
+
+    private fun paperSessionSnapshot(candidateId: Long): PaperSessionSnapshot {
+        val session = paperSessionRepository.findTopByCandidateIdAndStatusOrderByStartedAtDesc(
+            candidateId,
+            LeaderPaperSessionStatus.ACTIVE
+        ) ?: return PaperSessionSnapshot.EMPTY
+        return PaperSessionSnapshot(
+            tradeCount = session.tradeCount,
+            filteredCount = session.filteredCount,
+            copyablePnl = session.copyablePnl
+        )
+    }
+
+    private data class PaperSessionSnapshot(
+        val tradeCount: Int,
+        val filteredCount: Int,
+        val copyablePnl: BigDecimal
+    ) {
+        companion object {
+            val EMPTY = PaperSessionSnapshot(
+                tradeCount = 0,
+                filteredCount = 0,
+                copyablePnl = BigDecimal.ZERO
+            )
+        }
+    }
+
+    private data class MutableCandidateProcessingCounts(
+        var processed: Int = 0,
+        var filtered: Int = 0,
+        var failed: Int = 0
+    )
 
     private fun perWalletLimit(batchSize: Int, walletCount: Int): Int {
         if (walletCount <= 0) return batchSize.coerceAtLeast(1)

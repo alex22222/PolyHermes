@@ -74,6 +74,7 @@ class LeaderResearchSourceService(
     private val eventService: LeaderResearchEventService,
     private val ingestionService: LeaderActivityIngestionService,
     @Value("\${leader.research.data-api-backfill.limit:200}") private val backfillLimit: Int,
+    @Value("\${leader.research.data-api-backfill.existing-leader.enabled:false}") private val existingLeaderBackfillEnabled: Boolean = false,
     @Value("\${leader.research.global-capture.enabled:false}") private val globalCaptureEnabled: Boolean
 ) {
     private val logger = LoggerFactory.getLogger(LeaderResearchSourceService::class.java)
@@ -221,7 +222,11 @@ class LeaderResearchSourceService(
 
     private fun discoverExistingLeaders(runId: Long?): SourceDiscovery {
         val leaders = leaderRepository.findAllByOrderByCreatedAtAsc()
-        val backfill = backfillWalletActivities(leaders.map { it.leaderAddress }, LeaderResearchSourceType.EXISTING_LEADER, runId)
+        val backfill = if (existingLeaderBackfillEnabled) {
+            backfillWalletActivities(leaders.map { it.leaderAddress }, LeaderResearchSourceType.EXISTING_LEADER, runId)
+        } else {
+            BackfillResult(0, emptyList())
+        }
         val candidates = leaders.map { leader ->
             val pool = leader.id?.let { leaderPoolRepository.findByLeaderId(it) }
             upsertCandidate(
@@ -247,15 +252,25 @@ class LeaderResearchSourceService(
         val backfill = backfillWalletActivities(activeResearchWallets(), LeaderResearchSourceType.ACTIVITY_DERIVED, runId)
         val freshAfter = System.currentTimeMillis() - FRESH_ACTIVITY_WINDOW_MS
         val events = activityEventRepository.findByUsableForDiscoveryTrueAndEventTimeGreaterThanEqual(freshAfter)
-        val wallets = events.mapNotNull { it.normalizedWallet }.distinct()
+        val freshCountsByWallet = events
+            .mapNotNull { it.normalizedWallet }
+            .groupingBy { it }
+            .eachCount()
+        val wallets = freshCountsByWallet.keys.toList()
+        val leadersByAddress = if (wallets.isEmpty()) {
+            emptyMap()
+        } else {
+            leaderRepository.findLatestByLeaderAddressIn(wallets)
+                .associateBy { it.leaderAddress.lowercase() }
+        }
         val candidates = wallets.mapIndexed { index, wallet ->
             upsertCandidate(
                 wallet = wallet,
                 sourceType = LeaderResearchSourceType.ACTIVITY_DERIVED,
-                leader = leaderRepository.findByLeaderAddress(wallet),
+                leader = leadersByAddress[wallet],
                 sourceRank = index + 1,
                 provenance = LeaderCandidateProvenance.AGENT_CREATED,
-                sourceEvidence = "leader_activity_event:fresh_count=${events.count { it.normalizedWallet == wallet }}",
+                sourceEvidence = "leader_activity_event:fresh_count=${freshCountsByWallet[wallet] ?: 0}",
                 runId = runId
             )
         }
@@ -364,14 +379,16 @@ class LeaderResearchSourceService(
                 )
             )
         }
-        eventService.record(
-            type = if (existing == null) LeaderResearchEventType.CANDIDATE_DISCOVERED else LeaderResearchEventType.CANDIDATE_UPDATED,
-            candidateId = saved.id,
-            runId = runId,
-            reason = "Candidate seen from ${sourceType.name}",
-            payloadSummary = sourceEvidence,
-            dedupeKey = "candidate:${saved.normalizedWallet}:${sourceType.name}:$runId"
-        )
+        if (existing == null) {
+            eventService.record(
+                type = LeaderResearchEventType.CANDIDATE_DISCOVERED,
+                candidateId = saved.id,
+                runId = runId,
+                reason = "Candidate discovered from ${sourceType.name}",
+                payloadSummary = sourceEvidence,
+                dedupeKey = "candidate:${saved.normalizedWallet}:${sourceType.name}:$runId"
+            )
+        }
         return saved
     }
 

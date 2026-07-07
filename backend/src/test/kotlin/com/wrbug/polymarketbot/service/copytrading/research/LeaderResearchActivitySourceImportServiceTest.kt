@@ -127,6 +127,7 @@ class LeaderResearchActivitySourceImportServiceTest {
     @Test
     fun `import refreshes existing activity source candidate when evidence changes`() {
         val wallet = "0x4444444444444444444444444444444444444444"
+        val lastEventTime = 1782284401000L
         Mockito.`when`(
             activityEventRepository.discoverWalletsFromActivitySource(
                 Mockito.anyLong(),
@@ -139,7 +140,7 @@ class LeaderResearchActivitySourceImportServiceTest {
                 anyBigDecimal(),
                 Mockito.anyInt()
             )
-        ).thenReturn(listOf(activitySource(wallet)))
+        ).thenReturn(listOf(activitySource(wallet, lastEventTime)))
         Mockito.`when`(candidateRepository.findByNormalizedWallet(wallet)).thenReturn(
             LeaderResearchCandidate(
                 id = 40L,
@@ -163,7 +164,45 @@ class LeaderResearchActivitySourceImportServiceTest {
         assertEquals(1, response.updatedTotal)
         assertEquals(0, response.skippedExistingTotal)
         assertEquals("UPDATE", response.previewItems.single().action)
-        Mockito.verify(candidateRepository).save(anyCandidate())
+        val saved = captureSavedCandidates().single()
+        assertEquals(lastEventTime, saved.lastSourceSeenAt)
+    }
+
+    @Test
+    fun `import uses source last event time as freshness marker`() {
+        val wallet = "0x9999999999999999999999999999999999999999"
+        val lastEventTime = 1782400000000L
+        Mockito.`when`(
+            activityEventRepository.discoverWalletsFromActivitySource(
+                Mockito.anyLong(),
+                Mockito.anyString(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                anyBigDecimal(),
+                anyBigDecimal(),
+                Mockito.anyInt()
+            )
+        ).thenReturn(listOf(activitySource(wallet, lastEventTime)))
+        Mockito.`when`(candidateRepository.findByNormalizedWallet(wallet)).thenReturn(null)
+        Mockito.`when`(leaderRepository.findByLeaderAddress(wallet)).thenReturn(null)
+        Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer {
+            val candidate = it.arguments[0] as LeaderResearchCandidate
+            candidate.copy(id = candidate.id ?: 100L)
+        }
+
+        val response = service.importFromActivitySource(
+            LeaderResearchActivitySourceImportRequest(
+                dryRun = false,
+                categories = listOf("politics"),
+                limitPerCategory = 1
+            )
+        )
+
+        assertEquals(1, response.createdTotal)
+        val saved = captureSavedCandidates().single()
+        assertEquals(lastEventTime, saved.lastSourceSeenAt)
     }
 
     @Test
@@ -189,7 +228,8 @@ class LeaderResearchActivitySourceImportServiceTest {
                 id = 50L,
                 normalizedWallet = wallet,
                 source = "ACTIVITY_SOURCE",
-                sourceEvidence = evidence
+                sourceEvidence = evidence,
+                lastSourceSeenAt = source.getLastEventTime()
             )
         )
         Mockito.`when`(leaderRepository.findByLeaderAddress(wallet)).thenReturn(null)
@@ -207,6 +247,50 @@ class LeaderResearchActivitySourceImportServiceTest {
         assertEquals(1, response.skippedExistingTotal)
         assertEquals("SKIP_EXISTING", response.previewItems.single().action)
         Mockito.verify(candidateRepository, Mockito.never()).save(anyCandidate())
+    }
+
+    @Test
+    fun `import refreshes freshness when evidence is unchanged but last source time is wrong`() {
+        val wallet = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val source = activitySource(wallet)
+        val evidence = "activity_source:politics | category:politics | events:24 | markets:6 | buy_events:18 | sell_events:6 | safe_price_ratio:0.5833 | tail_price_ratio:0.0833 | avg_amount:3.2500 | total_amount:78.0000 | last_event_time:1782284401000"
+        Mockito.`when`(
+            activityEventRepository.discoverWalletsFromActivitySource(
+                Mockito.anyLong(),
+                Mockito.anyString(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                anyBigDecimal(),
+                anyBigDecimal(),
+                Mockito.anyInt()
+            )
+        ).thenReturn(listOf(source))
+        Mockito.`when`(candidateRepository.findByNormalizedWallet(wallet)).thenReturn(
+            LeaderResearchCandidate(
+                id = 51L,
+                normalizedWallet = wallet,
+                source = "ACTIVITY_SOURCE",
+                sourceEvidence = evidence,
+                lastSourceSeenAt = System.currentTimeMillis()
+            )
+        )
+        Mockito.`when`(leaderRepository.findByLeaderAddress(wallet)).thenReturn(null)
+        Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer { it.arguments[0] }
+
+        val response = service.importFromActivitySource(
+            LeaderResearchActivitySourceImportRequest(
+                dryRun = false,
+                categories = listOf("politics"),
+                limitPerCategory = 1
+            )
+        )
+
+        assertEquals(1, response.updatedTotal)
+        assertEquals("UPDATE", response.previewItems.single().action)
+        val saved = captureSavedCandidates().single()
+        assertEquals(source.getLastEventTime(), saved.lastSourceSeenAt)
     }
 
     @Test
@@ -254,7 +338,54 @@ class LeaderResearchActivitySourceImportServiceTest {
         assertEquals("CREATE", response.previewItems.single().action)
     }
 
-    private fun activitySource(wallet: String) = object : LeaderResearchActivitySourceProjection {
+    @Test
+    fun `targeted import only scans requested wallets`() {
+        val requestedWallet = "0x8888888888888888888888888888888888888888"
+        Mockito.`when`(
+            activityEventRepository.discoverWalletsFromActivitySourceForWallets(
+                Mockito.eq(listOf(requestedWallet)) ?: emptyList(),
+                Mockito.anyLong(),
+                Mockito.anyString(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                anyBigDecimal(),
+                anyBigDecimal()
+            )
+        ).thenReturn(listOf(activitySource(requestedWallet)))
+        Mockito.`when`(candidateRepository.findByNormalizedWallet(requestedWallet)).thenReturn(null)
+        Mockito.`when`(leaderRepository.findByLeaderAddress(requestedWallet)).thenReturn(null)
+
+        val response = service.importFromActivitySource(
+            LeaderResearchActivitySourceImportRequest(
+                dryRun = true,
+                categories = listOf("politics"),
+                wallets = listOf(requestedWallet, "not-a-wallet"),
+                limitPerCategory = 10
+            )
+        )
+
+        assertEquals(1, response.selectedTotal)
+        assertEquals(1, response.createdTotal)
+        assertEquals(requestedWallet, response.previewItems.single().wallet)
+        Mockito.verify(activityEventRepository, Mockito.never()).discoverWalletsFromActivitySource(
+            Mockito.anyLong(),
+            Mockito.anyString(),
+            Mockito.anyInt(),
+            Mockito.anyInt(),
+            Mockito.anyInt(),
+            Mockito.anyInt(),
+            anyBigDecimal(),
+            anyBigDecimal(),
+            Mockito.anyInt()
+        )
+    }
+
+    private fun activitySource(
+        wallet: String,
+        lastEventTime: Long = 1782284401000
+    ) = object : LeaderResearchActivitySourceProjection {
         override fun getNormalizedWallet(): String = wallet
         override fun getTotalEvents(): Long = 24
         override fun getDistinctMarkets(): Long = 6
@@ -264,7 +395,13 @@ class LeaderResearchActivitySourceImportServiceTest {
         override fun getTailPriceEvents(): Long = 2
         override fun getAvgAmount(): BigDecimal = BigDecimal("3.25")
         override fun getTotalAmount(): BigDecimal = BigDecimal("78.00")
-        override fun getLastEventTime(): Long = 1782284401000
+        override fun getLastEventTime(): Long = lastEventTime
+    }
+
+    private fun captureSavedCandidates(): List<LeaderResearchCandidate> {
+        val captor = org.mockito.ArgumentCaptor.forClass(LeaderResearchCandidate::class.java)
+        Mockito.verify(candidateRepository, Mockito.atLeastOnce()).save(captor.capture())
+        return captor.allValues
     }
 
     private fun anyCandidate(): LeaderResearchCandidate {

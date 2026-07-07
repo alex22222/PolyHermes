@@ -136,6 +136,17 @@ class PolymtradeExecutor:
     async def _detect_login_state(self, timeout: int = 5000) -> bool:
         """Detect if user is logged in by looking for wallet/balance elements."""
         try:
+            # Fast path: reading the body once is cheaper and works across
+            # English/Chinese UI without waiting on one selector at a time.
+            try:
+                body_text = await self.page.inner_text("body", timeout=min(timeout, 3000))
+                markers = ["0x", "pUSD", "USDC", "Balance", "Portfolio", "Deposit", "Withdraw",
+                           "余额", "投资组合", "充值", "提现"]
+                if any(token in body_text for token in markers):
+                    return True
+            except Exception:
+                pass
+
             # Indicators of logged-in state on Polymtrade (English + Chinese UI)
             selectors = [
                 "text=Portfolio",
@@ -153,23 +164,13 @@ class PolymtradeExecutor:
                 ".balance-amount",
                 "button:has-text('0x')",
             ]
+            selector_timeout = min(timeout, 500)
             for selector in selectors:
                 try:
-                    await self.page.wait_for_selector(selector, timeout=timeout, state="visible")
+                    await self.page.wait_for_selector(selector, timeout=selector_timeout, state="visible")
                     return True
                 except Exception:
                     continue
-
-            # Fallback: look for wallet/balance markers in page text.
-            # Polymtrade shows pUSD balance and an Ethereum address once logged in.
-            try:
-                body_text = await self.page.inner_text("body", timeout=timeout)
-                markers = ["0x", "pUSD", "USDC", "Balance", "Portfolio", "Deposit", "Withdraw",
-                           "余额", "投资组合", "充值", "提现"]
-                if any(token in body_text for token in markers):
-                    return True
-            except Exception:
-                pass
 
             return False
         except Exception as e:

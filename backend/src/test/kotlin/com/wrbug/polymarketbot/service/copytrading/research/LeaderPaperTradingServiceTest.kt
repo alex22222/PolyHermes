@@ -100,6 +100,12 @@ class LeaderPaperTradingServiceTest {
         assertEquals(2, result.processed)
         assertEquals(0, result.filtered)
         assertEquals(0, result.failed)
+        assertEquals(1, result.candidateSummaries.size)
+        val summary = result.candidateSummaries.single()
+        assertEquals(candidate.id, summary.candidateId)
+        assertEquals(2, summary.processed)
+        assertEquals(0, summary.beforeTradeCount)
+        assertEquals(2, summary.afterTradeCount)
         assertEquals(listOf("BUY", "SELL"), savedTrades.map { it.side })
         assertEquals(0, BigDecimal("0.20").compareTo(savedTrades.last().realizedPnl))
         assertEquals(LeaderResearchValuationStatus.CONFIRMED_ZERO, savedTrades.last().valuationStatus)
@@ -332,14 +338,14 @@ class LeaderPaperTradingServiceTest {
         Mockito.`when`(candidateRepository.findByResearchStateIn(listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)))
             .thenReturn(listOf(candidate))
         Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer { it.arguments[0] }
-        Mockito.`when`(paperSessionRepository.findTopByCandidateIdAndStatusOrderByStartedAtDesc(candidate.id!!, LeaderPaperSessionStatus.ACTIVE))
-            .thenReturn(null, session, session, session, session)
         Mockito.`when`(paperSessionRepository.save(anySession())).thenAnswer {
             val incoming = it.arguments[0] as LeaderPaperSession
             val saved = if (incoming.id == null) incoming.copy(id = session.id) else incoming
             savedSessions += saved
             saved
         }
+        Mockito.`when`(paperSessionRepository.findTopByCandidateIdAndStatusOrderByStartedAtDesc(candidate.id!!, LeaderPaperSessionStatus.ACTIVE))
+            .thenAnswer { savedSessions.lastOrNull() }
         if (fairBatches == null) {
             Mockito.`when`(
                 activityEventRepository.findPaperProcessableForWalletsFair(

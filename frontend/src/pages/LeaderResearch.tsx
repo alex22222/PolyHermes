@@ -35,19 +35,26 @@ import type {
   Account,
   LeaderPaperPosition,
   LeaderPaperTrade,
+  LeaderResearchActivitySourceImportResponse,
   LeaderResearchCandidate,
   LeaderResearchCandidateDetail,
   LeaderResearchCandidateListResponse,
   LeaderResearchExternalAnalyticsImportItem,
   LeaderResearchExternalAnalyticsImportResponse,
   LeaderResearchFalconLeaderboardImportResponse,
+  LeaderResearchFastWatchResponse,
   LeaderResearchFunnel,
   LeaderResearchMarketPeerSourceImportResponse,
   LeaderResearchOfficialLeaderboardDiagnoseResponse,
   LeaderResearchOfficialLeaderboardImportResponse,
+  LeaderResearchPaperProcessCandidate,
+  LeaderResearchPaperPromotionResponse,
+  LeaderResearchPoliticsRecommendationExecutionSnapshot,
+  LeaderResearchPoliticsRecommendationExecuteResponse,
   LeaderResearchPoliticsSourceDiagnose,
   LeaderResearchPolymarketAnalyticsCopyTradeImportResponse,
   LeaderResearchPolyburgTelegramImportResponse,
+  LeaderResearchTrialReadiness,
   LeaderResearchSourceState,
   LeaderResearchState,
   LeaderResearchSummary
@@ -90,6 +97,13 @@ const formatDate = (timestamp?: number) => {
   return dayjs(timestamp).format('YYYY-MM-DD HH:mm')
 }
 
+const formatTrialEta = (readiness: LeaderResearchTrialReadiness): string => {
+  if (readiness.level === 'TRIAL_READY') return ''
+  if (!readiness.hoursUntilTrialReady || readiness.hoursUntilTrialReady <= 0) return ''
+  const eta = readiness.trialReadyAt ? formatDate(readiness.trialReadyAt) : '-'
+  return `还差 ${readiness.hoursUntilTrialReady}h / ${eta}`
+}
+
 const usdc = (value?: string) => value ? `${value} USDC` : '-'
 
 const approvalPreview = (candidate?: LeaderResearchCandidate | null) => ({
@@ -111,8 +125,10 @@ const LeaderResearch: React.FC = () => {
   const { t } = useTranslation()
   const [summary, setSummary] = useState<LeaderResearchSummary | null>(null)
   const [funnel, setFunnel] = useState<LeaderResearchFunnel | null>(null)
+  const [fastWatch, setFastWatch] = useState<LeaderResearchFastWatchResponse | null>(null)
   const [politicsDiagnose, setPoliticsDiagnose] = useState<LeaderResearchPoliticsSourceDiagnose | null>(null)
-  const [marketPeerStrict, setMarketPeerStrict] = useState<LeaderResearchMarketPeerSourceImportResponse | null>(null)
+  const [financeDiagnose, setFinanceDiagnose] = useState<LeaderResearchPoliticsSourceDiagnose | null>(null)
+  const [marketPeerStrict] = useState<LeaderResearchMarketPeerSourceImportResponse | null>(null)
   const [marketPeerRelaxed, setMarketPeerRelaxed] = useState<LeaderResearchMarketPeerSourceImportResponse | null>(null)
   const [externalImportResult, setExternalImportResult] = useState<LeaderResearchExternalAnalyticsImportResponse | null>(null)
   const [officialLeaderboardResult, setOfficialLeaderboardResult] = useState<LeaderResearchOfficialLeaderboardImportResponse | null>(null)
@@ -127,6 +143,13 @@ const LeaderResearch: React.FC = () => {
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
+  const [fastWatchAction, setFastWatchAction] = useState<'score' | 'process' | null>(null)
+  const [politicsAction, setPoliticsAction] = useState<'process' | 'importPreview' | 'importConfirm' | 'scoreRefresh' | 'executePreview' | null>(null)
+  const [politicsImportResult, setPoliticsImportResult] = useState<LeaderResearchActivitySourceImportResponse | null>(null)
+  const [politicsPromotionResult, setPoliticsPromotionResult] = useState<LeaderResearchPaperPromotionResponse | null>(null)
+  const [politicsExecutionResult, setPoliticsExecutionResult] = useState<LeaderResearchPoliticsRecommendationExecuteResponse | null>(null)
+  const [latestPoliticsExecution, setLatestPoliticsExecution] = useState<LeaderResearchPoliticsRecommendationExecutionSnapshot | null>(null)
+  const [lastPaperProcessSummaries, setLastPaperProcessSummaries] = useState<LeaderResearchPaperProcessCandidate[]>([])
   const [detailLoading, setDetailLoading] = useState(false)
   const [marketPeerLoading, setMarketPeerLoading] = useState(false)
   const [externalImportOpen, setExternalImportOpen] = useState(false)
@@ -140,52 +163,68 @@ const LeaderResearch: React.FC = () => {
   const loadAll = async (showLoading = true) => {
     if (showLoading) setLoading(true)
     try {
-      const [candidateResp, summaryResp, funnelResp, sourceResp, politicsDiagnoseResp, marketPeerResp, accountResp] = await Promise.all([
+      const [candidateResp, summaryResp, funnelResp, fastWatchResp, sourceResp, politicsExecutionResp, accountResp] = await Promise.allSettled([
         apiService.leaderResearch.listCandidates({ page: 0, size: 50, state: stateFilter, query: query || undefined }),
         apiService.leaderResearch.summary(),
         apiService.leaderResearch.funnel(),
+        apiService.leaderResearch.fastWatch({ categories: ['politics', 'finance'], limit: 12, includeTrialReady: true }),
         apiService.leaderResearch.sourceHealth(),
-        apiService.leaderResearch.diagnosePoliticsSource({ limit: 500 }),
-        apiService.leaderResearch.importMarketPeerSource({
-          dryRun: true,
-          categories: ['politics', 'finance'],
-          limitPerCategory: 20,
-          lookbackDays: 60,
-          hotMarketLimit: 50,
-          minMarketEvents: 25,
-          minMarketWallets: 20,
-          minEvents: 8,
-          minDistinctMarkets: 2,
-          minBuyEvents: 2,
-          minSellEvents: 1,
-          minSafePriceRatio: '0.20',
-          maxTailPriceRatio: '0.50'
-        }),
+        apiService.leaderResearch.latestPoliticsRecommendationExecution(),
         apiService.accounts.list()
       ])
-      if (candidateResp.data.code === 0 && candidateResp.data.data) {
-        setCandidates(candidateResp.data.data)
+
+      const readData = <T,>(result: PromiseSettledResult<{ data: { code: number; data?: T | null; msg?: string } }>, label: string): T | null => {
+        if (result.status === 'rejected') {
+          console.warn(`[leader-research] ${label} load failed`, result.reason)
+          return null
+        }
+        if (result.value.data.code !== 0) {
+          console.warn(`[leader-research] ${label} api failed`, result.value.data.msg)
+          return null
+        }
+        return result.value.data.data ?? null
+      }
+
+      const candidateData = readData(candidateResp, 'candidates')
+      if (candidateData) {
+        setCandidates(candidateData)
       } else {
-        message.error(candidateResp.data.msg || t('leaderResearch.fetchFailed'))
+        message.warning(t('leaderResearch.fetchFailed'))
       }
-      if (summaryResp.data.code === 0 && summaryResp.data.data) {
-        setSummary(summaryResp.data.data)
+      const summaryData = readData(summaryResp, 'summary')
+      if (summaryData) {
+        setSummary(summaryData)
       }
-      if (funnelResp.data.code === 0 && funnelResp.data.data) {
-        setFunnel(funnelResp.data.data)
+      const funnelData = readData(funnelResp, 'funnel')
+      if (funnelData) {
+        setFunnel(funnelData)
       }
-      if (sourceResp.data.code === 0 && sourceResp.data.data) {
-        setSourceHealth(sourceResp.data.data)
+      const fastWatchData = readData(fastWatchResp, 'fastWatch')
+      if (fastWatchData) {
+        setFastWatch(fastWatchData)
       }
-      if (politicsDiagnoseResp.data.code === 0 && politicsDiagnoseResp.data.data) {
-        setPoliticsDiagnose(politicsDiagnoseResp.data.data)
+      const sourceData = readData(sourceResp, 'sourceHealth')
+      if (sourceData) {
+        setSourceHealth(sourceData)
       }
-      if (marketPeerResp.data.code === 0 && marketPeerResp.data.data) {
-        setMarketPeerStrict(marketPeerResp.data.data)
+      const politicsExecutionData = readData(politicsExecutionResp, 'latestPoliticsExecution')
+      setLatestPoliticsExecution(politicsExecutionData || null)
+      const accountData = readData(accountResp, 'accounts')
+      if (accountData) {
+        setAccounts(accountData.list || [])
       }
-      if (accountResp.data.code === 0 && accountResp.data.data) {
-        setAccounts(accountResp.data.data.list || [])
-      }
+
+      void Promise.allSettled([
+        apiService.leaderResearch.diagnosePoliticsSource({ limit: 500 }),
+        apiService.leaderResearch.diagnosePoliticsSource({ category: 'finance', limit: 500 })
+      ]).then(([politicsDiagnoseResp, financeDiagnoseResp]) => {
+        if (politicsDiagnoseResp.status === 'fulfilled' && politicsDiagnoseResp.value.data.code === 0 && politicsDiagnoseResp.value.data.data) {
+          setPoliticsDiagnose(politicsDiagnoseResp.value.data.data)
+        }
+        if (financeDiagnoseResp.status === 'fulfilled' && financeDiagnoseResp.value.data.code === 0 && financeDiagnoseResp.value.data.data) {
+          setFinanceDiagnose(financeDiagnoseResp.value.data.data)
+        }
+      })
     } catch (error: any) {
       message.error(error.message || t('leaderResearch.fetchFailed'))
     } finally {
@@ -224,6 +263,283 @@ const LeaderResearch: React.FC = () => {
     }
   }
 
+  const fastWatchCandidateIds = () => fastWatch?.items.map(item => item.candidateId).filter(Boolean) || []
+
+  const politicsPaperProcessCandidateIds = () => politicsDiagnose?.recommendations
+    .filter(item => item.recommendation === 'PAPER_PROCESS' && item.candidateId)
+    .map(item => item.candidateId!)
+    .filter((id, index, ids) => ids.indexOf(id) === index) || []
+
+  const politicsImportWallets = () => politicsDiagnose?.recommendations
+    .filter(item => item.recommendation === 'IMPORT_NOW')
+    .map(item => item.wallet)
+    .filter((wallet, index, wallets) => wallets.indexOf(wallet) === index) || []
+
+  const politicsFastWatchReviewRecommendations = () => politicsDiagnose?.recommendations
+    .filter(item => item.recommendation === 'FAST_WATCH_REVIEW' && item.candidateId)
+    || []
+
+  const politicsScoreRefreshCandidateIds = () => politicsDiagnose?.recommendations
+    .filter(item => item.recommendation === 'SCORE_REFRESH' && item.candidateId)
+    .map(item => item.candidateId!)
+    .filter((id, index, ids) => ids.indexOf(id) === index) || []
+
+  const recommendationCount = (
+    diagnose: LeaderResearchPoliticsSourceDiagnose | null,
+    recommendation: string
+  ) => diagnose?.recommendations.filter(item => item.recommendation === recommendation).length || 0
+
+  const scoreFastWatch = async () => {
+    const candidateIds = fastWatchCandidateIds()
+    if (candidateIds.length === 0) {
+      message.info(t('leaderResearch.noFastWatchCandidatesScore'))
+      return
+    }
+    setFastWatchAction('score')
+    try {
+      const response = await apiService.leaderResearch.scorePaper({
+        candidateIds,
+        maxCandidates: 100
+      })
+      if (response.data.code === 0 && response.data.data) {
+        const data = response.data.data
+        message.success(t('leaderResearch.scoreFastWatchSuccess', {
+          count: data.scoredCount,
+          missing: data.missingCandidateIds.length ? t('leaderResearch.missingCandidates', { count: data.missingCandidateIds.length }) : ''
+        }))
+        await loadAll(false)
+      } else {
+        message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+      }
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setFastWatchAction(null)
+    }
+  }
+
+  const processFastWatch = async () => {
+    const candidateIds = fastWatchCandidateIds()
+    if (candidateIds.length === 0) {
+      message.info(t('leaderResearch.noFastWatchCandidatesProcess'))
+      return
+    }
+    setFastWatchAction('process')
+    try {
+      const processResponse = await apiService.leaderResearch.processPaper({
+        batchSize: 20,
+        candidateIds
+      })
+      if (processResponse.data.code !== 0 || !processResponse.data.data) {
+        message.error(processResponse.data.msg || t('leaderResearch.fetchFailed'))
+        return
+      }
+      const processData = processResponse.data.data
+      setLastPaperProcessSummaries(processData.candidateSummaries || [])
+      const scoreResponse = await apiService.leaderResearch.scorePaper({
+        candidateIds,
+        maxCandidates: 100
+      })
+      const scoredCount = scoreResponse.data.code === 0 ? scoreResponse.data.data?.scoredCount ?? 0 : 0
+      const summaryCount = processData.candidateSummaries?.length ?? 0
+      message.success(t('leaderResearch.processFastWatchSuccess', {
+          processed: processData.processed,
+          filtered: processData.filtered,
+          failed: processData.failed,
+          summaryCount,
+          scoredCount
+        }))
+      await loadAll(false)
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setFastWatchAction(null)
+    }
+  }
+
+  const processPoliticsRecommendations = async () => {
+    const candidateIds = politicsPaperProcessCandidateIds()
+    if (candidateIds.length === 0) {
+      message.info(t('leaderResearch.noPoliticsPaperProcessRecommendations'))
+      return
+    }
+    setPoliticsAction('process')
+    try {
+      const processResponse = await apiService.leaderResearch.processPaper({
+        batchSize: Math.min(20, candidateIds.length * 3),
+        candidateIds
+      })
+      if (processResponse.data.code !== 0 || !processResponse.data.data) {
+        message.error(processResponse.data.msg || t('leaderResearch.fetchFailed'))
+        return
+      }
+      const processData = processResponse.data.data
+      setLastPaperProcessSummaries(processData.candidateSummaries || [])
+      const scoreResponse = await apiService.leaderResearch.scorePaper({
+        candidateIds,
+        maxCandidates: 100
+      })
+      const scoredCount = scoreResponse.data.code === 0 ? scoreResponse.data.data?.scoredCount ?? 0 : 0
+      message.success(t('leaderResearch.politicsProcessSuccess', {
+          candidateCount: candidateIds.length,
+          processed: processData.processed,
+          filtered: processData.filtered,
+          failed: processData.failed,
+          scoredCount
+        }))
+      await loadAll(false)
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setPoliticsAction(null)
+    }
+  }
+
+  const importPoliticsRecommendations = async (dryRun: boolean) => {
+    const wallets = politicsImportWallets()
+    if (wallets.length === 0) {
+      message.info(t('leaderResearch.noPoliticsImportRecommendations'))
+      return
+    }
+    const runImport = async () => {
+      setPoliticsAction(dryRun ? 'importPreview' : 'importConfirm')
+      try {
+        const response = await apiService.leaderResearch.importActivitySource({
+          dryRun,
+          categories: ['politics'],
+          wallets,
+          limitPerCategory: Math.min(100, wallets.length),
+          lookbackDays: 60,
+          minEvents: 8,
+          minDistinctMarkets: 2,
+          minBuyEvents: 2,
+          minSellEvents: 1,
+          minSafePriceRatio: '0.20',
+          maxTailPriceRatio: '0.50'
+        })
+        if (response.data.code !== 0 || !response.data.data) {
+          message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+          return
+        }
+        const data = response.data.data
+        setPoliticsImportResult(data)
+        message.success(dryRun
+            ? t('leaderResearch.politicsImportPreviewSuccess', {
+                selected: data.selectedTotal,
+                created: data.createdTotal,
+                updated: data.updatedTotal
+              })
+            : t('leaderResearch.politicsImportSuccess', {
+                selected: data.selectedTotal,
+                created: data.createdTotal,
+                updated: data.updatedTotal
+              }))
+        await loadAll(false)
+      } catch (error: any) {
+        message.error(error.message || t('leaderResearch.fetchFailed'))
+      } finally {
+        setPoliticsAction(null)
+      }
+    }
+
+    if (dryRun) {
+      await runImport()
+      return
+    }
+
+    Modal.confirm({
+      title: t('leaderResearch.confirmPoliticsImportTitle'),
+      content: t('leaderResearch.confirmPoliticsImportContent', { count: wallets.length }),
+      okText: t('leaderResearch.confirmImport'),
+      cancelText: t('common.cancel'),
+      onOk: runImport
+    })
+  }
+
+  const scoreRefreshPoliticsRecommendations = async () => {
+    const candidateIds = politicsScoreRefreshCandidateIds()
+    if (candidateIds.length === 0) {
+      message.info(t('leaderResearch.noPoliticsScoreRefreshRecommendations'))
+      return
+    }
+    setPoliticsAction('scoreRefresh')
+    try {
+      const scoreResponse = await apiService.leaderResearch.runActivityScore({
+        states: ['DISCOVERED', 'CANDIDATE'],
+        force: true,
+        candidateIds
+      })
+      if (scoreResponse.data.code !== 0 || !scoreResponse.data.data) {
+        message.error(scoreResponse.data.msg || t('leaderResearch.fetchFailed'))
+        return
+      }
+      const promoteResponse = await apiService.leaderResearch.promoteActivityScoreToPaper({
+        minScore: '70',
+        politicsLimit: Math.min(20, candidateIds.length),
+        financeLimit: 0,
+        sportsLimit: 0,
+        cryptoLimit: 0,
+        dryRun: false,
+        candidateIds
+      })
+      if (promoteResponse.data.code !== 0 || !promoteResponse.data.data) {
+        message.error(promoteResponse.data.msg || t('leaderResearch.fetchFailed'))
+        return
+      }
+      setPoliticsPromotionResult(promoteResponse.data.data)
+      message.success(t('leaderResearch.politicsScoreRefreshSuccess', {
+          scored: scoreResponse.data.data.scoredCount,
+          paper: 'PAPER',
+          promoted: promoteResponse.data.data.promotedTotal
+        }))
+      await loadAll(false)
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setPoliticsAction(null)
+    }
+  }
+
+  const previewPoliticsRecommendationLoop = async () => {
+    setPoliticsAction('executePreview')
+    try {
+      const response = await apiService.leaderResearch.executePoliticsRecommendations({
+        dryRun: true,
+        actions: ['IMPORT_NOW', 'SCORE_REFRESH', 'PAPER_PROCESS', 'FAST_WATCH_REVIEW'],
+        diagnose: {
+          limit: 500,
+          lookbackDays: 60,
+          minEvents: 8,
+          minDistinctMarkets: 2,
+          minBuyEvents: 2,
+          minSellEvents: 1,
+          minSafePriceRatio: '0.20',
+          maxTailPriceRatio: '0.50'
+        },
+        maxImport: 20,
+        maxScoreRefresh: 20,
+        maxPaperProcess: 20,
+        paperProcessBatchSize: 20,
+        promotionMinScore: '70'
+      })
+      if (response.data.code !== 0 || !response.data.data) {
+        message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+        return
+      }
+      const data = response.data.data
+      setPoliticsExecutionResult(data)
+      message.success(t('leaderResearch.politicsLoopPreviewSuccess', {
+          recommendations: data.recommendations.length,
+          plannedActions: data.plannedActions.reduce((sum, item) => sum + item.selectedCount, 0)
+        }))
+      await loadAll(false)
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setPoliticsAction(null)
+    }
+  }
+
   const openDetail = async (candidate: LeaderResearchCandidate) => {
     setDetailLoading(true)
     try {
@@ -258,7 +574,7 @@ const LeaderResearch: React.FC = () => {
       })
       if (response.data.code === 0 && response.data.data) {
         setMarketPeerRelaxed(response.data.data)
-        message.success('已刷新放宽金融来源')
+        message.success(t('leaderResearch.marketPeerRelaxedRefreshed'))
       } else {
         message.error(response.data.msg || t('leaderResearch.fetchFailed'))
       }
@@ -312,7 +628,7 @@ const LeaderResearch: React.FC = () => {
       values.defaultSourceName || 'external_analytics'
     )
     if (items.length === 0) {
-      message.warning('请输入至少 1 个 wallet')
+      message.warning(t('leaderResearch.pleaseEnterWallet'))
       return
     }
     setExternalImportLoading(true)
@@ -326,7 +642,7 @@ const LeaderResearch: React.FC = () => {
       })
       if (response.data.code === 0 && response.data.data) {
         setExternalImportResult(response.data.data)
-        message.success(dryRun ? '外部名单 dry-run 完成' : '外部名单已导入')
+        message.success(dryRun ? t('leaderResearch.externalListDryRunSuccess') : t('leaderResearch.externalListImported'))
         if (!dryRun) await loadAll(false)
       } else {
         message.error(response.data.msg || t('leaderResearch.fetchFailed'))
@@ -355,9 +671,9 @@ const LeaderResearch: React.FC = () => {
         setExternalImportResult(response.data.data.importResult)
         const failedFetches = response.data.data.fetches.filter(item => item.error).length
         if (failedFetches > 0) {
-          message.warning(`官方榜单返回 ${failedFetches} 个抓取错误，请查看结果`)
+          message.warning(t('leaderResearch.officialLeaderboardFetchErrors', { count: failedFetches }))
         } else {
-          message.success(dryRun ? '官方榜单 dry-run 完成' : '官方榜单已导入')
+          message.success(dryRun ? t('leaderResearch.officialLeaderboardDryRunSuccess') : t('leaderResearch.officialLeaderboardImported'))
         }
         if (!dryRun) await loadAll(false)
       } else {
@@ -392,9 +708,9 @@ const LeaderResearch: React.FC = () => {
         setExternalImportResult(response.data.data.importResult)
         const failedFetches = response.data.data.fetches.filter(item => item.error).length
         if (failedFetches > 0) {
-          message.warning(`Falcon 返回 ${failedFetches} 个抓取错误，请查看结果`)
+          message.warning(t('leaderResearch.falconFetchErrors', { count: failedFetches }))
         } else {
-          message.success(dryRun ? 'Falcon 榜单 dry-run 完成' : 'Falcon 榜单已导入')
+          message.success(dryRun ? t('leaderResearch.falconDryRunSuccess') : t('leaderResearch.falconImported'))
         }
         if (!dryRun) await loadAll(false)
       } else {
@@ -421,7 +737,7 @@ const LeaderResearch: React.FC = () => {
       if (response.data.code === 0 && response.data.data) {
         setPolyburgTelegramResult(response.data.data)
         setExternalImportResult(response.data.data.importResult)
-        message.success(dryRun ? 'Polyburg dry-run 完成' : 'Polyburg leader 已导入')
+        message.success(dryRun ? t('leaderResearch.polyburgDryRunSuccess') : t('leaderResearch.polyburgImported'))
         if (!dryRun) await loadAll(false)
       } else {
         message.error(response.data.msg || t('leaderResearch.fetchFailed'))
@@ -447,7 +763,7 @@ const LeaderResearch: React.FC = () => {
       if (response.data.code === 0 && response.data.data) {
         setPolymarketAnalyticsCopyTradeResult(response.data.data)
         setExternalImportResult(response.data.data.importResult)
-        message.success(dryRun ? 'Polymarket Analytics dry-run 完成' : 'Polymarket Analytics leader 已导入')
+        message.success(dryRun ? t('leaderResearch.polymarketAnalyticsDryRunSuccess') : t('leaderResearch.polymarketAnalyticsImported'))
         if (!dryRun) await loadAll(false)
       } else {
         message.error(response.data.msg || t('leaderResearch.fetchFailed'))
@@ -468,7 +784,7 @@ const LeaderResearch: React.FC = () => {
       })
       if (response.data.code === 0 && response.data.data) {
         setOfficialLeaderboardDiagnose(response.data.data)
-        message.success('官方榜单诊断完成')
+        message.success(t('leaderResearch.officialLeaderboardDiagnoseComplete'))
       } else {
         message.error(response.data.msg || t('leaderResearch.fetchFailed'))
       }
@@ -482,6 +798,27 @@ const LeaderResearch: React.FC = () => {
   const openApproval = (candidate: LeaderResearchCandidate) => {
     setApprovalCandidate(candidate)
     approvalForm.setFieldsValue({ accountId: accounts[0]?.id })
+  }
+
+  const openApprovalByCandidateId = async (candidateId: number) => {
+    setApprovalLoading(true)
+    try {
+      const response = await apiService.leaderResearch.detail({ candidateId })
+      if (response.data.code !== 0 || !response.data.data) {
+        message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+        return
+      }
+      const candidate = response.data.data.candidate
+      if (candidate.researchState !== 'TRIAL_READY') {
+        message.warning(t('leaderResearch.candidateNotTrialReadyWarning'))
+        return
+      }
+      openApproval(candidate)
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setApprovalLoading(false)
+    }
   }
 
   const submitApproval = async () => {
@@ -607,7 +944,7 @@ const LeaderResearch: React.FC = () => {
             </div>
             <Space>
               <Button icon={<ReloadOutlined />} onClick={() => loadAll()}>{t('common.refresh')}</Button>
-              <Button onClick={() => setExternalImportOpen(true)}>导入外部名单</Button>
+              <Button onClick={() => setExternalImportOpen(true)}>{t('leaderResearch.importExternalList')}</Button>
               <Button type="primary" icon={<PlayCircleOutlined />} loading={running || lastRun?.status === 'RUNNING'} onClick={runAgent}>
                 {t('leaderResearch.runNow')}
               </Button>
@@ -643,17 +980,17 @@ const LeaderResearch: React.FC = () => {
       {funnel && (
         <Row gutter={[16, 16]}>
           <Col xs={24} lg={8}>
-            <Card title="研究候选漏斗">
+            <Card title={t('leaderResearch.researchFunnelTitle')}>
               <Space direction="vertical" style={{ width: '100%' }}>
-                <Statistic title="研究候选目标进度" value={`${funnel.totalCandidates}/${funnel.targetTotal}`} />
+                <Statistic title={t('leaderResearch.funnelTargetProgress')} value={`${funnel.totalCandidates}/${funnel.targetTotal}`} />
                 <Progress percent={Math.min(100, Number(funnel.progressPercent))} />
-                <Statistic title="正式 Leader 管理" value={funnel.managedLeaderTotal} />
-                <Statistic title="Leader 池" value={funnel.leaderPoolTotal} />
-                <Statistic title="高质量可观察" value={funnel.cleanHighScoreTotal} />
+                <Statistic title={t('leaderResearch.managedLeaders')} value={funnel.managedLeaderTotal} />
+                <Statistic title={t('leaderResearch.leaderPool')} value={funnel.leaderPoolTotal} />
+                <Statistic title={t('leaderResearch.cleanHighQualityWatchable')} value={funnel.cleanHighScoreTotal} />
                 <Text type="secondary">{funnel.criteria}</Text>
                 <Space direction="vertical" style={{ width: '100%' }}>
                   <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-                    <Text strong>主类别配比</Text>
+                    <Text strong>{t('leaderResearch.primaryAllocationRatio')}</Text>
                     <Tag color={allocationStatusColor(funnel.allocationHealth.status)}>
                       {funnel.allocationHealth.primaryActualPercent}%
                     </Tag>
@@ -671,12 +1008,18 @@ const LeaderResearch: React.FC = () => {
             </Card>
           </Col>
           <Col xs={24} lg={8}>
-            <Card title="分类转化">
+            <Card title={t('leaderResearch.categoryConversion')}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 {funnel.categories.map(category => (
                   <Space key={category.category} style={{ justifyContent: 'space-between', width: '100%' }}>
                     <Text strong>{category.category}</Text>
-                    <Text>{category.totalCandidates} / PAPER {category.paperCandidates} / 高分 {category.cleanHighScoreCandidates}</Text>
+                    <Text>{t('leaderResearch.categoryConversionItem', {
+                      total: category.totalCandidates,
+                      paperState: t('leaderResearch.states.PAPER'),
+                      paperCount: category.paperCandidates,
+                      highScore: t('leaderResearch.categoryHighScore'),
+                      cleanHighCount: category.cleanHighScoreCandidates
+                    })}</Text>
                     <Tag color={category.cleanHighScoreCandidates > 0 ? 'green' : 'default'}>
                       {category.topScore || '-'}
                     </Tag>
@@ -686,21 +1029,29 @@ const LeaderResearch: React.FC = () => {
             </Card>
           </Col>
           <Col xs={24} lg={8}>
-            <Card title="优先观察候选">
+            <Card title={t('leaderResearch.priorityCandidatesTitle')}>
               {funnel.priorityCandidates.length > 0 ? (
                 <Space direction="vertical" style={{ width: '100%' }}>
                   {funnel.priorityCandidates.slice(0, 5).map(candidate => (
                     <Space key={candidate.candidateId} style={{ justifyContent: 'space-between', width: '100%' }}>
                       <Space direction="vertical" size={0}>
                         <Text strong>#{candidate.candidateId} {candidate.wallet.slice(0, 10)}...</Text>
-                        <Text type="secondary">{candidate.category} · {candidate.tradeCount} trades · PnL {candidate.copyablePnl}</Text>
+                        <Text type="secondary">{t('leaderResearch.priorityCandidateMeta', {
+                          category: candidate.category,
+                          tradeCount: candidate.tradeCount,
+                          trades: t('leaderResearch.trades'),
+                          pnl: candidate.copyablePnl
+                        })}</Text>
                         <Text type="secondary">
                           {candidate.trialReadiness.level === 'FAST_WATCH'
-                            ? '快速观察 · 未放开正式试跟'
+                            ? t('leaderResearch.fastWatchNotReleased')
                             : candidate.trialReadiness.eligible
                               ? candidate.trialReadiness.label
-                              : `${candidate.trialReadiness.label} · ${candidate.trialReadiness.blockers[0] || candidate.trialReadiness.fastWatchBlockers[0] || '等待更多样本'}`}
+                              : `${candidate.trialReadiness.label} · ${candidate.trialReadiness.blockers[0] || candidate.trialReadiness.fastWatchBlockers[0] || t('leaderResearch.waitForMoreSamples')}`}
                         </Text>
+                        {formatTrialEta(candidate.trialReadiness) && (
+                          <Text type="secondary">{formatTrialEta(candidate.trialReadiness)}</Text>
+                        )}
                       </Space>
                       <Space direction="vertical" size={0} align="end">
                         <Tag color="green">{candidate.score}</Tag>
@@ -715,45 +1066,175 @@ const LeaderResearch: React.FC = () => {
                   ))}
                 </Space>
               ) : (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无高质量候选" />
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('leaderResearch.noHighQualityCandidates')} />
               )}
             </Card>
           </Col>
         </Row>
       )}
 
+      {fastWatch && (
+        <Card
+          title={t('leaderResearch.fastWatchCandidatesTitle')}
+          extra={
+            <Space>
+              <Tag color="blue">FAST_WATCH {fastWatch.fastWatchCount}</Tag>
+              <Tag color="green">TRIAL_READY {fastWatch.trialReadyCount}</Tag>
+              <Button
+                size="small"
+                loading={fastWatchAction === 'score'}
+                disabled={fastWatch.items.length === 0 || fastWatchAction !== null}
+                onClick={scoreFastWatch}
+              >
+                {t('leaderResearch.scoreIncrement')}
+              </Button>
+              <Button
+                size="small"
+                type="primary"
+                loading={fastWatchAction === 'process'}
+                disabled={fastWatch.items.length === 0 || fastWatchAction !== null}
+                onClick={processFastWatch}
+              >
+                {t('leaderResearch.advancePaper')}
+              </Button>
+              <Button size="small" icon={<ReloadOutlined />} onClick={() => loadAll(false)}>
+                {t('common.refresh')}
+              </Button>
+            </Space>
+          }
+        >
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <Row gutter={[12, 12]}>
+              <Col xs={12} md={6}><Statistic title={t('common.total')} value={fastWatch.total} /></Col>
+              <Col xs={12} md={6}><Statistic title={t('leaderResearch.fastWatch')} value={fastWatch.fastWatchCount} /></Col>
+              <Col xs={12} md={6}><Statistic title={t('leaderResearch.states.TRIAL_READY')} value={fastWatch.trialReadyCount} /></Col>
+              <Col xs={12} md={6}><Statistic title={t('leaderResearch.coveredCategories')} value={fastWatch.categories.join(' / ')} /></Col>
+            </Row>
+            <Text type="secondary">{fastWatch.criteria}</Text>
+            {fastWatch.items.length > 0 ? (
+              <Row gutter={[12, 12]}>
+                {fastWatch.items.slice(0, 8).map(candidate => (
+                  <Col xs={24} md={12} xl={6} key={candidate.candidateId}>
+                    <Card size="small">
+                      <Space direction="vertical" style={{ width: '100%' }} size={4}>
+                        <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                          <Text strong>#{candidate.candidateId}</Text>
+                          <Tag color={readinessColor(candidate.trialReadiness.level)}>
+                            {candidate.trialReadiness.label}
+                          </Tag>
+                        </Space>
+                        <Text copyable={{ text: candidate.wallet }}>{candidate.wallet.slice(0, 10)}...{candidate.wallet.slice(-6)}</Text>
+                        <Space wrap size={4}>
+                          <Tag color={candidate.category === 'politics' ? 'purple' : 'cyan'}>{candidate.category}</Tag>
+                          <Tag color="green">{candidate.score}</Tag>
+                          <Tag>{t('leaderResearch.tradeCountLabel', { count: candidate.tradeCount, trades: t('leaderResearch.trades') })}</Tag>
+                        </Space>
+                        <Text type="secondary">{t('leaderResearch.fastWatchPnlFiltered', {
+                          pnl: candidate.copyablePnl,
+                          ratio: candidate.filteredRatio,
+                          filterLabel: t('leaderResearch.filtered')
+                        })}</Text>
+                        <Text type="secondary">{t('leaderResearch.fastWatchAgeStable', {
+                          ageLabel: t('leaderResearch.ageLabel'),
+                          ageHours: candidate.trialReadiness.ageHours,
+                          stableLabel: t('leaderResearch.stableLabel'),
+                          stable: candidate.trialReadiness.stableHighScoreCount,
+                          required: candidate.trialReadiness.requiredStableHighScoreCount
+                        })}</Text>
+                        {formatTrialEta(candidate.trialReadiness) && (
+                          <Text type="secondary">{formatTrialEta(candidate.trialReadiness)}</Text>
+                        )}
+                        <Text type="secondary">
+                          {candidate.trialReadiness.blockers[0] || candidate.trialReadiness.fastWatchBlockers[0] || t('leaderResearch.waitForManualReview')}
+                        </Text>
+                      </Space>
+                    </Card>
+                  </Col>
+                ))}
+              </Row>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('leaderResearch.noFastWatchCandidates')} />
+            )}
+            {lastPaperProcessSummaries.length > 0 && (
+              <Card size="small" title={t('leaderResearch.recentAdvanceResults')}>
+                <Row gutter={[12, 12]}>
+                  {lastPaperProcessSummaries.slice(0, 8).map(item => (
+                    <Col xs={24} md={12} xl={6} key={item.candidateId}>
+                      <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                        <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                          <Text strong>#{item.candidateId}</Text>
+                          <Tag color={item.tradeCountDelta > 0 ? 'green' : item.filteredCountDelta > 0 ? 'orange' : 'default'}>
+                            {t('leaderResearch.tradeDelta', { count: item.tradeCountDelta, trades: t('leaderResearch.trades') })}
+                          </Tag>
+                        </Space>
+                        <Text copyable={{ text: item.wallet }}>{item.wallet.slice(0, 10)}...{item.wallet.slice(-6)}</Text>
+                        <Text type="secondary">
+                          {t('leaderResearch.advanceResultTradeFilter', {
+                            beforeTradeCount: item.beforeTradeCount,
+                            afterTradeCount: item.afterTradeCount,
+                            beforeFilteredCount: item.beforeFilteredCount,
+                            afterFilteredCount: item.afterFilteredCount
+                          })}
+                        </Text>
+                        <Text type="secondary">
+                          {t('leaderResearch.advanceResultPnl', {
+                            beforePnl: item.beforeCopyablePnl,
+                            afterPnl: item.afterCopyablePnl,
+                            delta: item.copyablePnlDelta
+                          })}
+                        </Text>
+                        <Space wrap size={4}>
+                          <Tag>{t('leaderResearch.processedCount', { count: item.processed })}</Tag>
+                          <Tag color={item.filtered > 0 ? 'orange' : 'default'}>{t('leaderResearch.filteredCount', { count: item.filtered })}</Tag>
+                          <Tag color={item.failed > 0 ? 'red' : 'default'}>{t('leaderResearch.failedCount', { count: item.failed })}</Tag>
+                        </Space>
+                      </Space>
+                    </Col>
+                  ))}
+                </Row>
+              </Card>
+            )}
+          </Space>
+        </Card>
+      )}
+
       {politicsDiagnose && (
         <Row gutter={[16, 16]}>
           <Col xs={24} lg={12}>
-            <Card title="政治来源诊断">
+            <Card title={t('leaderResearch.politicsSourceDiagnosis')}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Row gutter={[12, 12]}>
-                  <Col xs={12} sm={8}><Statistic title="扫描钱包" value={politicsDiagnose.scannedWallets} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="通过阈值" value={politicsDiagnose.passImportCriteria} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="可新增 PAPER" value={politicsDiagnose.eligibleForPaperNow} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="未知钱包" value={politicsDiagnose.unknownWallets} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="已在池中" value={politicsDiagnose.existingWallets} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="已 PAPER" value={politicsDiagnose.paperWallets} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.politicsScannedWallets')} value={politicsDiagnose.scannedWallets} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.politicsPassedThreshold')} value={politicsDiagnose.passImportCriteria} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.politicsEligibleForPaperNow')} value={politicsDiagnose.eligibleForPaperNow} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.politicsUnknownWallets')} value={politicsDiagnose.unknownWallets} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.politicsExistingWallets')} value={politicsDiagnose.existingWallets} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.politicsPaperWallets')} value={politicsDiagnose.paperWallets} /></Col>
                 </Row>
                 <Progress
                   percent={politicsDiagnose.scannedWallets > 0 ? Number(((politicsDiagnose.passImportCriteria / politicsDiagnose.scannedWallets) * 100).toFixed(2)) : 0}
                   status={politicsDiagnose.eligibleForPaperNow > 0 ? 'active' : 'normal'}
                 />
                 <Text type="secondary">
-                  lookback {politicsDiagnose.lookbackDays} 天 · clean high {politicsDiagnose.cleanHighWallets}
+                  {t('leaderResearch.politicsLookbackCleanHigh', {
+                    lookback: t('leaderResearch.lookbackLabel'),
+                    days: politicsDiagnose.lookbackDays,
+                    cleanHigh: t('leaderResearch.cleanHighLabel'),
+                    count: politicsDiagnose.cleanHighWallets
+                  })}
                 </Text>
                 <Alert
                   type={politicsDiagnose.eligibleForPaperNow > 0 ? 'success' : 'info'}
                   showIcon
                   message={politicsDiagnose.eligibleForPaperNow > 0
-                    ? `发现 ${politicsDiagnose.eligibleForPaperNow} 个可新增政治 PAPER 候选`
-                    : '当前 activity-source 暂无可新增政治 PAPER 候选，优先寻找新来源'}
+                    ? t('leaderResearch.politicsNewPaperCandidatesFound', { count: politicsDiagnose.eligibleForPaperNow })
+                    : t('leaderResearch.politicsNoNewPaperCandidates')}
                 />
               </Space>
             </Card>
           </Col>
           <Col xs={24} lg={12}>
-            <Card title="政治来源阻塞">
+            <Card title={t('leaderResearch.politicsSourceBlockers')}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 {politicsDiagnose.buckets.slice(0, 6).map(bucket => (
                   <Space key={bucket.bucket} style={{ justifyContent: 'space-between', width: '100%' }}>
@@ -767,8 +1248,214 @@ const LeaderResearch: React.FC = () => {
               </Space>
             </Card>
           </Col>
+          {financeDiagnose && (
+            <Col xs={24}>
+              <Card
+                title={t('leaderResearch.financeSourceDiagnosis')}
+                extra={
+                  <Space wrap>
+                    <Tag color="green">IMPORT_NOW {recommendationCount(financeDiagnose, 'IMPORT_NOW')}</Tag>
+                    <Tag color="gold">SCORE_REFRESH {recommendationCount(financeDiagnose, 'SCORE_REFRESH')}</Tag>
+                    <Tag color="blue">PAPER_PROCESS {recommendationCount(financeDiagnose, 'PAPER_PROCESS')}</Tag>
+                    <Tag color="purple">FAST_WATCH_REVIEW {recommendationCount(financeDiagnose, 'FAST_WATCH_REVIEW')}</Tag>
+                  </Space>
+                }
+              >
+                <Row gutter={[16, 16]}>
+                  <Col xs={12} md={6}><Statistic title={t('leaderResearch.financeScannedWallets')} value={financeDiagnose.scannedWallets} /></Col>
+                  <Col xs={12} md={6}><Statistic title={t('leaderResearch.importable')} value={financeDiagnose.eligibleForPaperNow} /></Col>
+                  <Col xs={12} md={6}><Statistic title={t('leaderResearch.states.PAPER')} value={financeDiagnose.paperWallets} /></Col>
+                  <Col xs={12} md={6}><Statistic title={t('leaderResearch.cleanHighScore')} value={financeDiagnose.cleanHighWallets} /></Col>
+                </Row>
+                <Space size={[8, 8]} wrap style={{ marginTop: 12 }}>
+                  {financeDiagnose.buckets.slice(0, 6).map(bucket => (
+                    <Tag key={bucket.bucket} color={bucket.bucket === 'pass_import_criteria' ? 'green' : 'orange'}>
+                      {bucket.bucket}: {bucket.count}
+                    </Tag>
+                  ))}
+                </Space>
+              </Card>
+            </Col>
+          )}
           <Col xs={24}>
-            <Card title="政治来源样本">
+            <Card
+              title={t('leaderResearch.politicsRecommendationActions')}
+              extra={
+                <Space wrap>
+                  <Tag color="green">IMPORT_NOW {politicsImportWallets().length}</Tag>
+                  <Tag color="gold">SCORE_REFRESH {politicsScoreRefreshCandidateIds().length}</Tag>
+                  <Tag color="blue">PAPER_PROCESS {politicsPaperProcessCandidateIds().length}</Tag>
+                  <Tag color="purple">FAST_WATCH_REVIEW {politicsFastWatchReviewRecommendations().length}</Tag>
+                  <Button
+                    size="small"
+                    loading={politicsAction === 'executePreview'}
+                    disabled={politicsAction !== null || fastWatchAction !== null}
+                    onClick={previewPoliticsRecommendationLoop}
+                  >
+                    {t('leaderResearch.backendLoopPreview')}
+                  </Button>
+                  <Button
+                    size="small"
+                    loading={politicsAction === 'importPreview'}
+                    disabled={politicsImportWallets().length === 0 || politicsAction !== null || fastWatchAction !== null}
+                    onClick={() => importPoliticsRecommendations(true)}
+                  >
+                    {t('leaderResearch.previewImport')}
+                  </Button>
+                  <Button
+                    size="small"
+                    danger
+                    loading={politicsAction === 'importConfirm'}
+                    disabled={politicsImportWallets().length === 0 || politicsAction !== null || fastWatchAction !== null}
+                    onClick={() => importPoliticsRecommendations(false)}
+                  >
+                    {t('leaderResearch.confirmImport')}
+                  </Button>
+                  <Button
+                    size="small"
+                    loading={politicsAction === 'scoreRefresh'}
+                    disabled={politicsScoreRefreshCandidateIds().length === 0 || politicsAction !== null || fastWatchAction !== null}
+                    onClick={scoreRefreshPoliticsRecommendations}
+                  >
+                    {t('leaderResearch.refreshScorePromotion')}
+                  </Button>
+                  <Button
+                    size="small"
+                    type="primary"
+                    loading={politicsAction === 'process'}
+                    disabled={politicsPaperProcessCandidateIds().length === 0 || politicsAction !== null || fastWatchAction !== null}
+                    onClick={processPoliticsRecommendations}
+                  >
+                    {t('leaderResearch.executePaperRecommendations')}
+                  </Button>
+                </Space>
+              }
+            >
+              {politicsDiagnose.recommendations.length > 0 ? (
+                <Space direction="vertical" style={{ width: '100%' }} size="middle">
+                  {politicsImportResult && (
+                    <Alert
+                      showIcon
+                      type={politicsImportResult.dryRun ? 'info' : 'success'}
+                      message={politicsImportResult.dryRun
+                        ? t('leaderResearch.importPreviewResultMessage', {
+                            selected: politicsImportResult.selectedTotal,
+                            created: politicsImportResult.createdTotal,
+                            updated: politicsImportResult.updatedTotal,
+                            skipped: politicsImportResult.skippedExistingTotal + politicsImportResult.skippedLockedTotal
+                          })
+                        : t('leaderResearch.importResultMessage', {
+                            selected: politicsImportResult.selectedTotal,
+                            created: politicsImportResult.createdTotal,
+                            updated: politicsImportResult.updatedTotal,
+                            skipped: politicsImportResult.skippedExistingTotal + politicsImportResult.skippedLockedTotal
+                          })}
+                      description={politicsImportResult.previewItems.slice(0, 5).map(item => `${item.action} ${item.wallet.slice(0, 10)}...${item.wallet.slice(-6)}`).join(' · ') || t('leaderResearch.noPreviewItems')}
+                    />
+                  )}
+                  {politicsPromotionResult && (
+                    <Alert
+                      showIcon
+                      type={politicsPromotionResult.promotedTotal > 0 ? 'success' : 'info'}
+                      message={t('leaderResearch.scorePromotionResultMessage', {
+                            selected: politicsPromotionResult.selectedTotal,
+                            paper: 'PAPER',
+                            promoted: politicsPromotionResult.promotedTotal,
+                            skippedRisk: politicsPromotionResult.skippedRiskTotal
+                          })}
+                      description={politicsPromotionResult.items.slice(0, 5).map(item => `#${item.candidateId} ${item.previousState}->${item.nextState}`).join(' · ') || t('leaderResearch.noPromotionItems')}
+                    />
+                  )}
+                  {politicsExecutionResult && (
+                    <Alert
+                      showIcon
+                      type="info"
+                      message={politicsExecutionResult.dryRun
+                          ? t('leaderResearch.backendLoopPreviewMessage', {
+                              importCount: politicsExecutionResult.recommendationCounts.IMPORT_NOW || 0,
+                              scoreCount: politicsExecutionResult.recommendationCounts.SCORE_REFRESH || 0,
+                              paperCount: politicsExecutionResult.recommendationCounts.PAPER_PROCESS || 0,
+                              reviewCount: politicsExecutionResult.recommendationCounts.FAST_WATCH_REVIEW || 0
+                            })
+                          : t('leaderResearch.backendLoopExecutionMessage', {
+                              importCount: politicsExecutionResult.recommendationCounts.IMPORT_NOW || 0,
+                              scoreCount: politicsExecutionResult.recommendationCounts.SCORE_REFRESH || 0,
+                              paperCount: politicsExecutionResult.recommendationCounts.PAPER_PROCESS || 0,
+                              reviewCount: politicsExecutionResult.recommendationCounts.FAST_WATCH_REVIEW || 0
+                            })}
+                      description={politicsExecutionResult.plannedActions.map(item => `${item.action}: ${item.selectedCount}${item.skippedReason ? ` (${item.skippedReason})` : ''}`).join(' · ')}
+                    />
+                  )}
+                  {latestPoliticsExecution && (
+                    <Alert
+                      showIcon
+                      type={latestPoliticsExecution.status === 'SUCCESS' ? 'success' : 'warning'}
+                      message={t('leaderResearch.latestBackendLoopMessage', {
+                            id: latestPoliticsExecution.id,
+                            status: latestPoliticsExecution.status,
+                            mode: latestPoliticsExecution.dryRun ? t('leaderResearch.dryRun') : t('leaderResearch.liveMode'),
+                            date: formatDate(latestPoliticsExecution.startedAt)
+                          })}
+                      description={latestPoliticsExecution.plannedActions.map(item => `${item.action}: ${item.selectedCount}`).join(' · ') || latestPoliticsExecution.errorMessage || t('leaderResearch.noActionDetails')}
+                    />
+                  )}
+                  <Row gutter={[12, 12]}>
+                    {politicsDiagnose.recommendations.slice(0, 8).map(item => (
+                      <Col xs={24} md={12} xl={6} key={`${item.recommendation}-${item.wallet}`}>
+                        <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                          <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                            <Text strong>{item.candidateId ? `#${item.candidateId}` : item.wallet.slice(0, 10)}</Text>
+                            <Tag color={
+                              item.recommendation === 'IMPORT_NOW' ? 'green'
+                                : item.recommendation === 'PAPER_PROCESS' ? 'blue'
+                                  : item.recommendation === 'FAST_WATCH_REVIEW' ? 'purple'
+                                    : 'gold'
+                            }>
+                              {item.recommendation}
+                            </Tag>
+                          </Space>
+                          <Text copyable={{ text: item.wallet }}>{item.wallet.slice(0, 10)}...{item.wallet.slice(-6)}</Text>
+                          <Text type="secondary">{item.reason}</Text>
+                          <Text type="secondary">
+                            {t('leaderResearch.sourceSampleMeta', {
+                              events: item.totalEvents,
+                              eventLabel: t('leaderResearch.eventCountLabel'),
+                              markets: item.distinctMarkets,
+                              marketLabel: t('leaderResearch.marketCountLabel'),
+                              buySellLabel: t('leaderResearch.buySellLabel'),
+                              buy: item.buyEvents,
+                              sell: item.sellEvents
+                            })}
+                          </Text>
+                          <Space wrap size={4}>
+                            <Tag color={item.currentScore ? 'geekblue' : 'default'}>{t('leaderResearch.scoreLabel')} {item.currentScore || '-'}</Tag>
+                            <Tag>{t('leaderResearch.paperTradeCount', { value: item.paperTradeCount ?? '-' })}</Tag>
+                            <Tag color={(Number(item.copyablePnl || 0) > 0) ? 'green' : 'default'}>PnL {item.copyablePnl || '-'}</Tag>
+                            <Tag>{t('leaderResearch.priorityLabel')} {item.priority}</Tag>
+                            {item.recommendation === 'FAST_WATCH_REVIEW' && item.candidateId && (
+                              <Button
+                                size="small"
+                                type="primary"
+                                disabled={item.currentState !== 'TRIAL_READY'}
+                                loading={approvalLoading && approvalCandidate?.id !== item.candidateId}
+                                onClick={() => openApprovalByCandidateId(item.candidateId!)}
+                              >
+                                {item.currentState === 'TRIAL_READY' ? t('leaderResearch.createDisabledTrial') : t('leaderResearch.waitingForTrialReady')}
+                              </Button>
+                            )}
+                          </Space>
+                        </Space>
+                      </Col>
+                    ))}
+                  </Row>
+                </Space>
+              ) : (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('leaderResearch.noPoliticsRecommendations')} />
+              )}
+            </Card>
+          </Col>
+          <Col xs={24}>
+            <Card title={t('leaderResearch.politicsSourceSamples')}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 {politicsDiagnose.samples.slice(0, 5).map(sample => (
                   <Space key={sample.wallet} style={{ justifyContent: 'space-between', width: '100%' }}>
@@ -778,7 +1465,13 @@ const LeaderResearch: React.FC = () => {
                         {sample.totalEvents} events · {sample.distinctMarkets} markets · buy/sell {sample.buyEvents}/{sample.sellEvents}
                       </Text>
                       <Text type="secondary">
-                        safe {sample.safePriceRatio} · tail {sample.tailPriceRatio} · {sample.blockers[0] || '通过当前阈值'}
+                        {t('leaderResearch.sourceSampleThreshold', {
+                          safeLabel: t('leaderResearch.safeLabel'),
+                          safeRatio: sample.safePriceRatio,
+                          tailLabel: t('leaderResearch.tailLabel'),
+                          tailRatio: sample.tailPriceRatio,
+                          result: sample.blockers[0] || t('leaderResearch.passedCurrentThreshold')
+                        })}
                       </Text>
                     </Space>
                     <Space direction="vertical" size={0} align="end">
@@ -786,6 +1479,7 @@ const LeaderResearch: React.FC = () => {
                         {sample.action}
                       </Tag>
                       <Tag color={sample.currentScore ? 'geekblue' : 'default'}>{sample.currentScore || '-'}</Tag>
+                      <Tag>{t('leaderResearch.paperTradeCount', { value: sample.paperTradeCount ?? '-' })}</Tag>
                     </Space>
                   </Space>
                 ))}
@@ -799,7 +1493,7 @@ const LeaderResearch: React.FC = () => {
         <Row gutter={[16, 16]}>
           <Col xs={24} lg={12}>
             <Card
-              title="热门市场对手方来源"
+              title={t('leaderResearch.hotMarketPeerSource')}
               extra={
                 <Space>
                   <Button size="small" icon={<ReloadOutlined />} onClick={() => loadAll(false)}>
@@ -814,14 +1508,14 @@ const LeaderResearch: React.FC = () => {
               {marketPeerStrict ? (
                 <Space direction="vertical" style={{ width: '100%' }}>
                   <Row gutter={[12, 12]}>
-                    <Col xs={12} sm={8}><Statistic title="选中钱包" value={marketPeerStrict.selectedTotal} /></Col>
-                    <Col xs={12} sm={8}><Statistic title="可新建" value={marketPeerStrict.createdTotal} /></Col>
-                    <Col xs={12} sm={8}><Statistic title="可更新" value={marketPeerStrict.updatedTotal} /></Col>
+                    <Col xs={12} sm={8}><Statistic title={t('leaderResearch.selectedWallets')} value={marketPeerStrict.selectedTotal} /></Col>
+                    <Col xs={12} sm={8}><Statistic title={t('leaderResearch.creatable')} value={marketPeerStrict.createdTotal} /></Col>
+                    <Col xs={12} sm={8}><Statistic title={t('leaderResearch.updatable')} value={marketPeerStrict.updatedTotal} /></Col>
                   </Row>
                   <Space wrap>
                     {marketPeerStrict.categories.map(category => (
                       <Tag key={category.category} color={category.createdCount > 0 ? 'green' : category.selectedCount > 0 ? 'blue' : 'default'}>
-                        {category.category}: {category.selectedCount} / 新 {category.createdCount}
+                        {category.category}: {category.selectedCount} / {t('leaderResearch.newCount', { count: category.createdCount })}
                       </Tag>
                     ))}
                   </Space>
@@ -829,27 +1523,35 @@ const LeaderResearch: React.FC = () => {
                     type={marketPeerStrict.createdTotal > 0 ? 'success' : 'info'}
                     showIcon
                     message={marketPeerStrict.createdTotal > 0
-                      ? `strict 来源发现 ${marketPeerStrict.createdTotal} 个可新增候选`
-                      : 'strict 来源暂无可新增候选，当前更多是刷新已有 evidence'}
+                      ? t('leaderResearch.strictSourceNewCandidatesFound', { count: marketPeerStrict.createdTotal })
+                      : t('leaderResearch.strictSourceNoNewCandidates')}
                   />
                 </Space>
               ) : (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 strict 来源结果" />
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('leaderResearch.noStrictSourceResults')} />
               )}
             </Card>
           </Col>
           <Col xs={24} lg={12}>
-            <Card title="第二来源样本">
+            <Card title={t('leaderResearch.secondSourceSamples')}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 {(marketPeerRelaxed || marketPeerStrict)?.previewItems.slice(0, 5).map(sample => (
                   <Space key={`${sample.category}-${sample.wallet}-${sample.action}`} style={{ justifyContent: 'space-between', width: '100%' }}>
                     <Space direction="vertical" size={0}>
                       <Text strong>{sample.wallet.slice(0, 12)}...</Text>
                       <Text type="secondary">
-                        {sample.category} · {sample.totalEvents} events · {sample.distinctMarkets} markets · buy/sell {sample.buyEvents}/{sample.sellEvents}
+                        {sample.category} · {t('leaderResearch.sourceSampleMeta', {
+                          events: sample.totalEvents,
+                          eventLabel: t('leaderResearch.eventCountLabel'),
+                          markets: sample.distinctMarkets,
+                          marketLabel: t('leaderResearch.marketCountLabel'),
+                          buySellLabel: t('leaderResearch.buySellLabel'),
+                          buy: sample.buyEvents,
+                          sell: sample.sellEvents
+                        })}
                       </Text>
                       <Text type="secondary">
-                        {sample.topMarkets.slice(0, 2).join(' · ') || 'no market sample'}
+                        {sample.topMarkets.slice(0, 2).join(' · ') || t('leaderResearch.noMarketSample')}
                       </Text>
                     </Space>
                     <Space direction="vertical" size={0} align="end">
@@ -860,13 +1562,18 @@ const LeaderResearch: React.FC = () => {
                     </Space>
                   </Space>
                 )) || (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无第二来源样本" />
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('leaderResearch.noSecondSourceSamples')} />
                 )}
                 {marketPeerRelaxed && (
                   <Alert
                     type={marketPeerRelaxed.createdTotal > 0 ? 'success' : 'warning'}
                     showIcon
-                    message={`relaxed finance: 选中 ${marketPeerRelaxed.selectedTotal}，新建 ${marketPeerRelaxed.createdTotal}，更新 ${marketPeerRelaxed.updatedTotal}`}
+                    message={t('leaderResearch.relaxedSourceResultMessage', {
+                      category: 'relaxed finance',
+                      selected: marketPeerRelaxed.selectedTotal,
+                      created: marketPeerRelaxed.createdTotal,
+                      updated: marketPeerRelaxed.updatedTotal
+                    })}
                   />
                 )}
               </Space>
@@ -998,12 +1705,12 @@ const LeaderResearch: React.FC = () => {
                     </Descriptions>
                     {detail.latestScore && (
                       <Descriptions bordered size="small" column={2} title={t('leaderResearch.scoreBreakdown')}>
-                        <Descriptions.Item label="profit">{detail.latestScore.profitSignal}</Descriptions.Item>
-                        <Descriptions.Item label="repeatability">{detail.latestScore.repeatability}</Descriptions.Item>
-                        <Descriptions.Item label="liquidity">{detail.latestScore.liquidityFit}</Descriptions.Item>
-                        <Descriptions.Item label="entry">{detail.latestScore.entryPriceFit}</Descriptions.Item>
-                        <Descriptions.Item label="slippage">{detail.latestScore.slippageRisk}</Descriptions.Item>
-                        <Descriptions.Item label="drawdown">{detail.latestScore.drawdownRisk}</Descriptions.Item>
+                        <Descriptions.Item label={t('leaderResearch.scoreProfit')}>{detail.latestScore.profitSignal}</Descriptions.Item>
+                        <Descriptions.Item label={t('leaderResearch.scoreRepeatability')}>{detail.latestScore.repeatability}</Descriptions.Item>
+                        <Descriptions.Item label={t('leaderResearch.scoreLiquidityFit')}>{detail.latestScore.liquidityFit}</Descriptions.Item>
+                        <Descriptions.Item label={t('leaderResearch.scoreEntry')}>{detail.latestScore.entryPriceFit}</Descriptions.Item>
+                        <Descriptions.Item label={t('leaderResearch.scoreSlippage')}>{detail.latestScore.slippageRisk}</Descriptions.Item>
+                        <Descriptions.Item label={t('leaderResearch.scoreDrawdown')}>{detail.latestScore.drawdownRisk}</Descriptions.Item>
                       </Descriptions>
                     )}
                   </Space>
@@ -1077,29 +1784,29 @@ const LeaderResearch: React.FC = () => {
       <Modal
         width={860}
         open={externalImportOpen}
-        title="导入外部 Analytics 钱包"
+        title={t('leaderResearch.importExternalAnalyticsWallets')}
         onCancel={() => setExternalImportOpen(false)}
         footer={[
-          <Button key="cancel" onClick={() => setExternalImportOpen(false)}>关闭</Button>,
-          <Button key="officialDiagnose" loading={externalImportLoading} onClick={runOfficialLeaderboardDiagnose}>官方榜单诊断</Button>,
-          <Button key="officialDryRun" loading={externalImportLoading} onClick={() => submitOfficialLeaderboardImport(true)}>官方榜单 Dry-run</Button>,
-          <Button key="officialImport" loading={externalImportLoading} onClick={() => submitOfficialLeaderboardImport(false)}>官方榜单导入</Button>,
-          <Button key="falconDryRun" loading={externalImportLoading} onClick={() => submitFalconLeaderboardImport(true)}>Falcon Dry-run</Button>,
-          <Button key="falconImport" loading={externalImportLoading} onClick={() => submitFalconLeaderboardImport(false)}>Falcon 导入</Button>,
-          <Button key="polymarketAnalyticsDryRun" loading={externalImportLoading} onClick={() => submitPolymarketAnalyticsCopyTradeImport(true)}>PolymarketAnalytics Dry-run</Button>,
-          <Button key="polymarketAnalyticsImport" loading={externalImportLoading} onClick={() => submitPolymarketAnalyticsCopyTradeImport(false)}>PolymarketAnalytics 导入</Button>,
-          <Button key="polyburgDryRun" loading={externalImportLoading} onClick={() => submitPolyburgTelegramImport(true)}>Polyburg Dry-run</Button>,
-          <Button key="polyburgImport" loading={externalImportLoading} onClick={() => submitPolyburgTelegramImport(false)}>Polyburg 导入</Button>,
-          <Button key="dryRun" loading={externalImportLoading} onClick={() => submitExternalImport(true)}>Dry-run</Button>,
-          <Button key="import" type="primary" loading={externalImportLoading} onClick={() => submitExternalImport(false)}>正式导入</Button>
+          <Button key="cancel" onClick={() => setExternalImportOpen(false)}>{t('common.close')}</Button>,
+          <Button key="officialDiagnose" loading={externalImportLoading} onClick={runOfficialLeaderboardDiagnose}>{t('leaderResearch.officialLeaderboardDiagnose')}</Button>,
+          <Button key="officialDryRun" loading={externalImportLoading} onClick={() => submitOfficialLeaderboardImport(true)}>{t('leaderResearch.officialLeaderboardDryRun')}</Button>,
+          <Button key="officialImport" loading={externalImportLoading} onClick={() => submitOfficialLeaderboardImport(false)}>{t('leaderResearch.officialLeaderboardImport')}</Button>,
+          <Button key="falconDryRun" loading={externalImportLoading} onClick={() => submitFalconLeaderboardImport(true)}>{t('leaderResearch.falconDryRun')}</Button>,
+          <Button key="falconImport" loading={externalImportLoading} onClick={() => submitFalconLeaderboardImport(false)}>{t('leaderResearch.falconImport')}</Button>,
+          <Button key="polymarketAnalyticsDryRun" loading={externalImportLoading} onClick={() => submitPolymarketAnalyticsCopyTradeImport(true)}>{t('leaderResearch.polymarketAnalyticsDryRun')}</Button>,
+          <Button key="polymarketAnalyticsImport" loading={externalImportLoading} onClick={() => submitPolymarketAnalyticsCopyTradeImport(false)}>{t('leaderResearch.polymarketAnalyticsImport')}</Button>,
+          <Button key="polyburgDryRun" loading={externalImportLoading} onClick={() => submitPolyburgTelegramImport(true)}>{t('leaderResearch.polyburgDryRun')}</Button>,
+          <Button key="polyburgImport" loading={externalImportLoading} onClick={() => submitPolyburgTelegramImport(false)}>{t('leaderResearch.polyburgImport')}</Button>,
+          <Button key="dryRun" loading={externalImportLoading} onClick={() => submitExternalImport(true)}>{t('leaderResearch.dryRun')}</Button>,
+          <Button key="import" type="primary" loading={externalImportLoading} onClick={() => submitExternalImport(false)}>{t('leaderResearch.formalImport')}</Button>
         ]}
       >
         <Space direction="vertical" style={{ width: '100%' }}>
           <Alert
             type="info"
             showIcon
-            message="支持从 Polymarket Analytics / Dune / Polyburg 手工榜单直接粘贴"
-            description="从 PolymarketAnalytics copy-trade 页面、榜单页面或 Polyburg Telegram bot 复制文本后粘贴即可；也可以用官方榜单或 Falcon 自动拉取候选。正式导入后仍会走系统评分、PAPER 和风控过滤。"
+            message={t('leaderResearch.externalImportSupport')}
+            description={t('leaderResearch.externalImportDescription')}
           />
           <Form
             form={externalImportForm}
@@ -1111,7 +1818,7 @@ const LeaderResearch: React.FC = () => {
           >
             <Row gutter={12}>
               <Col xs={24} md={12}>
-                <Form.Item label="默认分类" name="defaultCategory">
+                <Form.Item label={t('leaderResearch.defaultCategory')} name="defaultCategory">
                   <Select
                     options={[
                       { value: 'finance', label: 'finance' },
@@ -1123,53 +1830,53 @@ const LeaderResearch: React.FC = () => {
                 </Form.Item>
               </Col>
               <Col xs={24} md={12}>
-                <Form.Item label="来源名称" name="defaultSourceName">
-                  <Input placeholder="polymarket_analytics_page_copy / dune / polyburg" />
+                <Form.Item label={t('leaderResearch.sourceName')} name="defaultSourceName">
+                  <Input placeholder={t('leaderResearch.sourceNamePlaceholder')} />
                 </Form.Item>
               </Col>
             </Row>
             <Form.Item
-              label="钱包列表"
+              label={t('leaderResearch.walletList')}
               name="walletLines"
-              rules={[{ required: true, message: '请输入钱包列表' }]}
+              rules={[{ required: true, message: t('leaderResearch.walletListRequired') }]}
             >
               <Input.TextArea
                 rows={8}
-                placeholder={'PolymarketAnalytics / Polyburg bot 消息或表格均可：\nSmart Wallet #1 copied 42 pnl $532 roi 18% finance\n0x9703676286b93c2eca71ca96e8757104519a69c2\n2 trader 0x1111111111111111111111111111111111111111 sports copied 9'}
+                placeholder={t('leaderResearch.walletListPlaceholder')}
               />
             </Form.Item>
           </Form>
           {polymarketAnalyticsCopyTradeResult && (
-            <Card size="small" title="Polymarket Analytics copy-trade 解析结果">
+            <Card size="small" title={t('leaderResearch.polymarketAnalyticsParseResult')}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Row gutter={[12, 12]}>
-                  <Col xs={12} sm={8}><Statistic title="解析" value={polymarketAnalyticsCopyTradeResult.parsedTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="去重" value={polymarketAnalyticsCopyTradeResult.dedupedTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="来源" value={polymarketAnalyticsCopyTradeResult.sourceName} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.parsed')} value={polymarketAnalyticsCopyTradeResult.parsedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.deduped')} value={polymarketAnalyticsCopyTradeResult.dedupedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.source')} value={polymarketAnalyticsCopyTradeResult.sourceName} /></Col>
                 </Row>
-                <Text type="secondary">当前采用粘贴导入。网页直连会遇到 Vercel Security Checkpoint，不建议作为后端定时抓取源。</Text>
+                <Text type="secondary">{t('leaderResearch.polymarketAnalyticsPasteNote')}</Text>
               </Space>
             </Card>
           )}
           {polyburgTelegramResult && (
-            <Card size="small" title="Polyburg Telegram 解析结果">
+            <Card size="small" title={t('leaderResearch.polyburgParseResult')}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Row gutter={[12, 12]}>
-                  <Col xs={12} sm={8}><Statistic title="解析" value={polyburgTelegramResult.parsedTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="去重" value={polyburgTelegramResult.dedupedTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="来源" value={polyburgTelegramResult.sourceName} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.parsed')} value={polyburgTelegramResult.parsedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.deduped')} value={polyburgTelegramResult.dedupedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.source')} value={polyburgTelegramResult.sourceName} /></Col>
                 </Row>
-                <Text type="secondary">正式导入后会进入候选池，不会自动开启真钱跟单。</Text>
+                <Text type="secondary">{t('leaderResearch.polyburgImportNote')}</Text>
               </Space>
             </Card>
           )}
           {officialLeaderboardResult && (
-            <Card size="small" title="官方榜单抓取结果">
+            <Card size="small" title={t('leaderResearch.officialLeaderboardFetchResult')}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Row gutter={[12, 12]}>
-                  <Col xs={12} sm={8}><Statistic title="抓取" value={officialLeaderboardResult.fetchedTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="去重" value={officialLeaderboardResult.dedupedTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="错误" value={officialLeaderboardResult.fetches.filter(item => item.error).length} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.fetched')} value={officialLeaderboardResult.fetchedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.deduped')} value={officialLeaderboardResult.dedupedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.errors')} value={officialLeaderboardResult.fetches.filter(item => item.error).length} /></Col>
                 </Row>
                 {officialLeaderboardResult.fetches.map(item => (
                   <Text key={`${item.category}-${item.timePeriod}-${item.orderBy}`} type={item.error ? 'danger' : 'secondary'}>
@@ -1180,12 +1887,12 @@ const LeaderResearch: React.FC = () => {
             </Card>
           )}
           {falconLeaderboardResult && (
-            <Card size="small" title="Falcon 榜单抓取结果">
+            <Card size="small" title={t('leaderResearch.falconFetchResult')}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Row gutter={[12, 12]}>
-                  <Col xs={12} sm={8}><Statistic title="抓取" value={falconLeaderboardResult.fetchedTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="去重" value={falconLeaderboardResult.dedupedTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="错误" value={falconLeaderboardResult.fetches.filter(item => item.error).length} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.fetched')} value={falconLeaderboardResult.fetchedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.deduped')} value={falconLeaderboardResult.dedupedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.errors')} value={falconLeaderboardResult.fetches.filter(item => item.error).length} /></Col>
                 </Row>
                 {falconLeaderboardResult.fetches.map(item => (
                   <Text key={item.sortBy} type={item.error ? 'danger' : 'secondary'}>
@@ -1196,15 +1903,15 @@ const LeaderResearch: React.FC = () => {
             </Card>
           )}
           {officialLeaderboardDiagnose && (
-            <Card size="small" title="官方榜单质量诊断">
+            <Card size="small" title={t('leaderResearch.officialLeaderboardQualityDiagnosis')}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Row gutter={[12, 12]}>
-                  <Col xs={12} sm={8}><Statistic title="总数" value={officialLeaderboardDiagnose.total} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="PAPER" value={officialLeaderboardDiagnose.paperTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="干净高分" value={officialLeaderboardDiagnose.cleanHighTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="快速观察" value={officialLeaderboardDiagnose.fastWatchTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="可进 PAPER" value={officialLeaderboardDiagnose.readyForPaperTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="无活动样本" value={officialLeaderboardDiagnose.buckets.find(item => item.bucket === 'NO_ACTIVITY_SAMPLE')?.count || 0} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('common.total')} value={officialLeaderboardDiagnose.total} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.states.PAPER')} value={officialLeaderboardDiagnose.paperTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.cleanHighScore')} value={officialLeaderboardDiagnose.cleanHighTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.fastWatch')} value={officialLeaderboardDiagnose.fastWatchTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.readyForPaper')} value={officialLeaderboardDiagnose.readyForPaperTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.noActivitySample')} value={officialLeaderboardDiagnose.buckets.find(item => item.bucket === 'NO_ACTIVITY_SAMPLE')?.count || 0} /></Col>
                 </Row>
                 <Space wrap>
                   {officialLeaderboardDiagnose.buckets.slice(0, 8).map(item => (
@@ -1218,8 +1925,18 @@ const LeaderResearch: React.FC = () => {
                     <Col xs={24} md={12} key={item.category}>
                       <Card size="small" title={item.category}>
                         <Space direction="vertical" size={0}>
-                          <Text>总数 {item.total} · PAPER {item.paper} · 干净高分 {item.cleanHigh}</Text>
-                          <Text type="secondary">可进 PAPER {item.readyForPaper} · 无活动 {item.noActivitySample} · 过期 {item.staleActivity}</Text>
+                          <Text>{t('leaderResearch.officialDiagnoseCategorySummary', {
+                              total: item.total,
+                              paperState: t('leaderResearch.states.PAPER'),
+                              paper: item.paper,
+                              cleanHigh: item.cleanHigh
+                            })}</Text>
+                          <Text type="secondary">{t('leaderResearch.officialDiagnoseCategoryDetail', {
+                              paperState: t('leaderResearch.states.PAPER'),
+                              readyForPaper: item.readyForPaper,
+                              noActivitySample: item.noActivitySample,
+                              staleActivity: item.staleActivity
+                            })}</Text>
                         </Space>
                       </Card>
                     </Col>
@@ -1230,7 +1947,11 @@ const LeaderResearch: React.FC = () => {
                     <Space key={item.candidateId} style={{ justifyContent: 'space-between', width: '100%' }}>
                       <Space direction="vertical" size={0}>
                         <Text strong>{item.wallet.slice(0, 12)}... · {item.category}</Text>
-                        <Text type="secondary">{item.bucket} · score {item.score || '-'} · age {item.lastSourceAgeHours ?? '-'}h</Text>
+                        <Text type="secondary">{t('leaderResearch.officialDiagnoseSampleMeta', {
+                              bucket: item.bucket,
+                              score: item.score || '-',
+                              age: item.lastSourceAgeHours ?? '-'
+                            })}</Text>
                       </Space>
                       <Tag>{item.researchState}</Tag>
                     </Space>
@@ -1240,22 +1961,26 @@ const LeaderResearch: React.FC = () => {
             </Card>
           )}
           {externalImportResult && (
-            <Card size="small" title="最近导入结果">
+            <Card size="small" title={t('leaderResearch.latestImportResult')}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Row gutter={[12, 12]}>
-                  <Col xs={12} sm={8}><Statistic title="请求" value={externalImportResult.requestedTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="选中" value={externalImportResult.selectedTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="新建" value={externalImportResult.createdTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="更新" value={externalImportResult.updatedTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="无效" value={externalImportResult.skippedInvalidTotal} /></Col>
-                  <Col xs={12} sm={8}><Statistic title="重复/锁定" value={externalImportResult.skippedExistingTotal + externalImportResult.skippedLockedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.requested')} value={externalImportResult.requestedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.selected')} value={externalImportResult.selectedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.created')} value={externalImportResult.createdTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.updated')} value={externalImportResult.updatedTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.invalid')} value={externalImportResult.skippedInvalidTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.duplicateOrLocked')} value={externalImportResult.skippedExistingTotal + externalImportResult.skippedLockedTotal} /></Col>
                 </Row>
                 <Space direction="vertical" style={{ width: '100%' }}>
                   {externalImportResult.previewItems.slice(0, 6).map(item => (
                     <Space key={`${item.wallet}-${item.action}`} style={{ justifyContent: 'space-between', width: '100%' }}>
                       <Space direction="vertical" size={0}>
                         <Text strong>{item.wallet.slice(0, 12)}...</Text>
-                        <Text type="secondary">{item.category} · {item.sourceName} · score {item.externalScore || '-'}</Text>
+                        <Text type="secondary">{t('leaderResearch.externalImportItemMeta', {
+                              category: item.category,
+                              sourceName: item.sourceName,
+                              externalScore: item.externalScore || '-'
+                            })}</Text>
                       </Space>
                       <Tag color={item.action === 'CREATE' ? 'green' : item.action === 'UPDATE' ? 'blue' : item.action === 'SKIP_INVALID' ? 'red' : 'default'}>
                         {item.action}
@@ -1272,41 +1997,47 @@ const LeaderResearch: React.FC = () => {
   )
 }
 
-const PaperTradeTable: React.FC<{ trades: LeaderPaperTrade[] }> = ({ trades }) => (
-  <Table
-    rowKey="id"
-    size="small"
-    dataSource={trades}
-    columns={[
-      { title: 'Time', dataIndex: 'eventTime', render: formatDate },
-      { title: 'Side', dataIndex: 'side' },
-      { title: 'Market', dataIndex: 'marketTitle', render: (value?: string, item?: LeaderPaperTrade) => value || item?.marketId },
-      { title: 'Leader Price', dataIndex: 'leaderPrice' },
-      { title: 'Sim Amount', dataIndex: 'simulatedAmount' },
-      { title: 'Filter', dataIndex: 'filterResult' },
-      { title: 'Quote', dataIndex: 'quoteConfidence' },
-      { title: 'Valuation', dataIndex: 'valuationStatus', render: valuationTag }
-    ]}
-  />
-)
+const PaperTradeTable: React.FC<{ trades: LeaderPaperTrade[] }> = ({ trades }) => {
+  const { t } = useTranslation()
+  return (
+    <Table
+      rowKey="id"
+      size="small"
+      dataSource={trades}
+      columns={[
+        { title: t('leaderResearch.paperTradeTime'), dataIndex: 'eventTime', render: formatDate },
+        { title: t('leaderResearch.paperTradeSide'), dataIndex: 'side' },
+        { title: t('leaderResearch.paperTradeMarket'), dataIndex: 'marketTitle', render: (value?: string, item?: LeaderPaperTrade) => value || item?.marketId },
+        { title: t('leaderResearch.paperTradeLeaderPrice'), dataIndex: 'leaderPrice' },
+        { title: t('leaderResearch.paperTradeSimAmount'), dataIndex: 'simulatedAmount' },
+        { title: t('leaderResearch.paperTradeFilter'), dataIndex: 'filterResult' },
+        { title: t('leaderResearch.paperTradeQuote'), dataIndex: 'quoteConfidence' },
+        { title: t('leaderResearch.paperTradeValuation'), dataIndex: 'valuationStatus', render: valuationTag }
+      ]}
+    />
+  )
+}
 
-const PaperPositionTable: React.FC<{ positions: LeaderPaperPosition[] }> = ({ positions }) => (
-  <Table
-    rowKey="id"
-    size="small"
-    dataSource={positions}
-    columns={[
-      { title: 'Market', dataIndex: 'marketId' },
-      { title: 'Outcome', dataIndex: 'outcome' },
-      { title: 'Qty', dataIndex: 'quantity' },
-      { title: 'Cost', dataIndex: 'cost' },
-      { title: 'Value', dataIndex: 'currentValue' },
-      { title: 'PnL', dataIndex: 'unrealizedPnl' },
-      { title: 'Quote', dataIndex: 'quoteConfidence' },
-      { title: 'Valuation', dataIndex: 'valuationStatus', render: valuationTag }
-    ]}
-  />
-)
+const PaperPositionTable: React.FC<{ positions: LeaderPaperPosition[] }> = ({ positions }) => {
+  const { t } = useTranslation()
+  return (
+    <Table
+      rowKey="id"
+      size="small"
+      dataSource={positions}
+      columns={[
+        { title: t('leaderResearch.paperPositionMarket'), dataIndex: 'marketId' },
+        { title: t('leaderResearch.paperPositionOutcome'), dataIndex: 'outcome' },
+        { title: t('leaderResearch.paperPositionQty'), dataIndex: 'quantity' },
+        { title: t('leaderResearch.paperPositionCost'), dataIndex: 'cost' },
+        { title: t('leaderResearch.paperPositionValue'), dataIndex: 'currentValue' },
+        { title: t('leaderResearch.paperPositionPnl'), dataIndex: 'unrealizedPnl' },
+        { title: t('leaderResearch.paperPositionQuote'), dataIndex: 'quoteConfidence' },
+        { title: t('leaderResearch.paperPositionValuation'), dataIndex: 'valuationStatus', render: valuationTag }
+      ]}
+    />
+  )
+}
 
 const summaryFallback: LeaderResearchSummary = {
   discoveredCount: 0,

@@ -3,6 +3,7 @@ package com.wrbug.polymarketbot.service.copytrading.research
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceBucketDto
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceRecommendationDto
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceSampleDto
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
@@ -15,6 +16,7 @@ class LeaderResearchPoliticsSourceDiagnoseService(
     private val jdbcTemplate: NamedParameterJdbcTemplate
 ) {
     fun diagnose(request: LeaderResearchPoliticsSourceDiagnoseRequest): LeaderResearchPoliticsSourceDiagnoseResponse {
+        val category = normalizeCategory(request.category)
         val lookbackDays = request.lookbackDays.coerceIn(1, 365)
         val minEvents = request.minEvents.coerceIn(1, 1000)
         val minDistinctMarkets = request.minDistinctMarkets.coerceIn(1, 1000)
@@ -24,6 +26,7 @@ class LeaderResearchPoliticsSourceDiagnoseService(
         val maxTailPriceRatio = request.maxTailPriceRatio.toBigDecimalOrDefault(BigDecimal("0.50"))
         val limit = request.limit.coerceIn(1, MAX_SCAN_LIMIT)
         val since = System.currentTimeMillis() - lookbackDays.toLong() * DAY_MS
+        val marketPattern = LeaderResearchMarketCategoryPatterns.patternFor(category)
 
         val rows = jdbcTemplate.queryForList(
             """
@@ -50,6 +53,7 @@ class LeaderResearchPoliticsSourceDiagnoseService(
               c.risk_flags,
               c.source,
               c.source_evidence,
+              c.last_source_seen_at,
               ps.trade_count,
               ps.copyable_pnl
             from leader_activity_event e
@@ -71,6 +75,7 @@ class LeaderResearchPoliticsSourceDiagnoseService(
               c.risk_flags,
               c.source,
               c.source_evidence,
+              c.last_source_seen_at,
               ps.trade_count,
               ps.copyable_pnl
             order by total_events desc, safe_price_events desc, distinct_markets desc
@@ -78,7 +83,7 @@ class LeaderResearchPoliticsSourceDiagnoseService(
             """.trimIndent(),
             MapSqlParameterSource()
                 .addValue("since", since)
-                .addValue("marketPattern", POLITICS_PATTERN)
+                .addValue("marketPattern", marketPattern)
                 .addValue("limit", limit)
         )
 
@@ -94,7 +99,13 @@ class LeaderResearchPoliticsSourceDiagnoseService(
             val tailRatio = ratio(tailPriceEvents, totalEvents)
             val score = row.bigDecimal("score")
             val state = row["research_state"]?.toString()
+            val candidateId = row.longValueOrNull("candidate_id")
+            val paperTradeCount = row.intValueOrNull("trade_count")
+            val copyablePnl = row.bigDecimal("copyable_pnl")
             val riskFlags = row["risk_flags"].toStringList()
+            val evidenceCategories = row["source_evidence"].evidenceCategories()
+            val lastSourceSeenAt = row.longValueOrNull("last_source_seen_at")
+            val sourceFresh72h = lastSourceSeenAt?.let { System.currentTimeMillis() - it <= SOURCE_FRESH_72H_MS } != false
             val blockers = mutableListOf<String>()
 
             if (totalEvents < minEvents) blockers += "events_below_${minEvents}"
@@ -106,15 +117,25 @@ class LeaderResearchPoliticsSourceDiagnoseService(
             if (row["candidate_id"] != null) blockers += "already_in_research_pool"
             if (state == "PAPER") blockers += "already_paper"
             if (score != null && score < PAPER_PROMOTE_SCORE) blockers += "score_below_75"
+            if (candidateId != null && evidenceCategories.isNotEmpty() && category !in evidenceCategories) {
+                blockers += "category_mismatch"
+            }
+            if (candidateId != null && evidenceCategories.size > 1) {
+                blockers += "mixed_category_evidence"
+            }
+            if (candidateId != null && !sourceFresh72h) {
+                blockers += "source_stale_over_72h"
+            }
             riskFlags.forEach { blockers += "risk:$it" }
 
             LeaderResearchPoliticsSourceSampleDto(
                 wallet = wallet,
+                candidateId = candidateId,
                 action = when {
                     row["candidate_id"] == null && blockers.isEmpty() -> "UNKNOWN_ELIGIBLE"
                     row["candidate_id"] == null -> "UNKNOWN_BLOCKED"
                     state == "PAPER" -> "EXISTING_PAPER"
-                    blockers.any { it.startsWith("risk:") || it == "score_below_75" } -> "EXISTING_BLOCKED"
+                    blockers.any { it.startsWith("risk:") || it in BLOCKING_EXISTING_FLAGS || it == "score_below_75" } -> "EXISTING_BLOCKED"
                     else -> "EXISTING_REFRESH"
                 },
                 totalEvents = totalEvents,
@@ -127,6 +148,8 @@ class LeaderResearchPoliticsSourceDiagnoseService(
                 totalAmount = row.bigDecimal("total_amount").format4(),
                 currentState = state,
                 currentScore = score?.format4(),
+                paperTradeCount = paperTradeCount,
+                copyablePnl = copyablePnl?.format4(),
                 riskFlags = riskFlags,
                 blockers = blockers.distinct()
             )
@@ -147,7 +170,7 @@ class LeaderResearchPoliticsSourceDiagnoseService(
             }
 
         return LeaderResearchPoliticsSourceDiagnoseResponse(
-            category = "politics",
+            category = category,
             lookbackDays = lookbackDays,
             scannedWallets = samples.size,
             passImportCriteria = samples.count { it.blockers.none(::isImportCriteriaBlocker) },
@@ -166,8 +189,82 @@ class LeaderResearchPoliticsSourceDiagnoseService(
                     .thenByDescending { it.totalEvents }
                     .thenByDescending { it.safePriceRatio.toBigDecimalOrNull() ?: BigDecimal.ZERO })
                 .take(PREVIEW_LIMIT),
+            recommendations = buildRecommendations(samples, category),
             generatedAt = System.currentTimeMillis()
         )
+    }
+
+    private fun buildRecommendations(
+        samples: List<LeaderResearchPoliticsSourceSampleDto>,
+        category: String
+    ): List<LeaderResearchPoliticsSourceRecommendationDto> {
+        return samples.mapNotNull { sample ->
+            val score = sample.currentScore?.toBigDecimalOrNull()
+            val paperTradeCount = sample.paperTradeCount ?: 0
+            val copyablePnl = sample.copyablePnl?.toBigDecimalOrNull()
+            val blockerSet = sample.blockers.toSet()
+            val importBlocked = sample.blockers.any(::isImportCriteriaBlocker)
+            val riskBlocked = sample.blockers.any { it.startsWith("risk:") }
+            val categoryBlocked = sample.blockers.any { it in BLOCKING_EXISTING_FLAGS }
+
+            val recommendation = when {
+                sample.action == "UNKNOWN_ELIGIBLE" -> RecommendationPlan(
+                    recommendation = "IMPORT_NOW",
+                    priority = 100,
+                    reason = "未知钱包通过${categoryLabel(category)}来源导入阈值，可优先导入研究池"
+                )
+                sample.currentState == "TRIAL_READY" && !riskBlocked && !categoryBlocked && (copyablePnl ?: BigDecimal.ZERO) > BigDecimal.ZERO -> RecommendationPlan(
+                    recommendation = "FAST_WATCH_REVIEW",
+                    priority = 95,
+                    reason = "${categoryLabel(category)}候选已进入 TRIAL_READY 且 copyable PnL 为正，可进入禁用试跟配置人工复核"
+                )
+                sample.currentState == "DISCOVERED" && !importBlocked && !riskBlocked && !categoryBlocked && (score ?: BigDecimal.ZERO) >= BigDecimal("70") -> RecommendationPlan(
+                    recommendation = "SCORE_REFRESH",
+                    priority = 90,
+                    reason = "已在研究池但尚未 PAPER，${categoryLabel(category)}样本合格且评分接近晋级阈值"
+                )
+                sample.currentState == "PAPER" && !riskBlocked && !categoryBlocked && (score ?: BigDecimal.ZERO) >= BigDecimal("80") && paperTradeCount < 20 -> RecommendationPlan(
+                    recommendation = "PAPER_PROCESS",
+                    priority = 85,
+                    reason = "${categoryLabel(category)} PAPER 高分但纸跟交易数不足，优先推进 paper/process"
+                )
+                sample.currentState == "PAPER" && !riskBlocked && !categoryBlocked && paperTradeCount >= 20 && (copyablePnl ?: BigDecimal.ZERO) > BigDecimal.ZERO -> RecommendationPlan(
+                    recommendation = "FAST_WATCH_REVIEW",
+                    priority = 80,
+                    reason = "${categoryLabel(category)} PAPER 样本已过 20 笔且 copyable PnL 为正，检查 7 天观察期与稳定评分"
+                )
+                sample.currentState != null && "already_in_research_pool" in blockerSet && !riskBlocked && !importBlocked && !categoryBlocked -> RecommendationPlan(
+                    recommendation = "WATCH_SOURCE",
+                    priority = 50,
+                    reason = "已在研究池，继续积累${categoryLabel(category)}事件样本并等待评分/纸跟推进"
+                )
+                else -> null
+            } ?: return@mapNotNull null
+
+            LeaderResearchPoliticsSourceRecommendationDto(
+                wallet = sample.wallet,
+                candidateId = sample.candidateId,
+                recommendation = recommendation.recommendation,
+                priority = recommendation.priority,
+                reason = recommendation.reason,
+                action = sample.action,
+                currentState = sample.currentState,
+                currentScore = sample.currentScore,
+                totalEvents = sample.totalEvents,
+                distinctMarkets = sample.distinctMarkets,
+                buyEvents = sample.buyEvents,
+                sellEvents = sample.sellEvents,
+                safePriceRatio = sample.safePriceRatio,
+                tailPriceRatio = sample.tailPriceRatio,
+                paperTradeCount = sample.paperTradeCount,
+                copyablePnl = sample.copyablePnl,
+                blockers = sample.blockers
+            )
+        }
+            .sortedWith(compareByDescending<LeaderResearchPoliticsSourceRecommendationDto> { it.priority }
+                .thenByDescending { it.totalEvents }
+                .thenByDescending { it.safePriceRatio.toBigDecimalOrNull() ?: BigDecimal.ZERO })
+            .take(RECOMMENDATION_LIMIT)
     }
 
     private fun bucketDescription(bucket: String): String {
@@ -181,6 +278,9 @@ class LeaderResearchPoliticsSourceDiagnoseService(
             bucket.startsWith("markets_below") -> "政治市场多样性不足"
             bucket.startsWith("buy_below") -> "买入行为不足"
             bucket.startsWith("sell_below") -> "卖出/退出行为不足"
+            bucket == "category_mismatch" -> "候选已有研究分类与当前诊断分类不匹配"
+            bucket == "mixed_category_evidence" -> "候选存在多个主分类证据，不能按单一分类直接推荐"
+            bucket == "source_stale_over_72h" -> "候选来源超过 72 小时未刷新，需等待新活动或重新发现"
             bucket.startsWith("safe_ratio_below") -> "安全价格区间交易比例不足"
             bucket.startsWith("tail_ratio_above") -> "长尾极端价格交易比例过高"
             else -> bucket
@@ -210,10 +310,35 @@ class LeaderResearchPoliticsSourceDiagnoseService(
             .orEmpty()
     }
 
+    private fun Any?.evidenceCategories(): Set<String> {
+        return this?.toString()
+            ?.lines()
+            ?.flatMap { line ->
+                CATEGORY_EVIDENCE_REGEX.findAll(line).map { it.groupValues[1].lowercase() }.toList()
+            }
+            ?.filter { it in PRIMARY_DIAGNOSE_CATEGORIES }
+            ?.toSet()
+            .orEmpty()
+    }
+
     private fun Map<String, Any?>.longValue(key: String): Long {
         return when (val value = this[key]) {
             is Number -> value.toLong()
             else -> value?.toString()?.toLongOrNull() ?: 0L
+        }
+    }
+
+    private fun Map<String, Any?>.longValueOrNull(key: String): Long? {
+        return when (val value = this[key]) {
+            is Number -> value.toLong()
+            else -> value?.toString()?.toLongOrNull()
+        }
+    }
+
+    private fun Map<String, Any?>.intValueOrNull(key: String): Int? {
+        return when (val value = this[key]) {
+            is Number -> value.toInt()
+            else -> value?.toString()?.toIntOrNull()
         }
     }
 
@@ -233,12 +358,33 @@ class LeaderResearchPoliticsSourceDiagnoseService(
         return (this ?: BigDecimal.ZERO).setScale(4, RoundingMode.HALF_UP).toPlainString()
     }
 
+    private fun normalizeCategory(category: String): String {
+        val normalized = category.trim().lowercase()
+        return if (normalized in PRIMARY_DIAGNOSE_CATEGORIES) normalized else "politics"
+    }
+
+    private fun categoryLabel(category: String): String {
+        return when (category) {
+            "finance" -> "金融"
+            else -> "政治"
+        }
+    }
+
+    private data class RecommendationPlan(
+        val recommendation: String,
+        val priority: Int,
+        val reason: String
+    )
+
     companion object {
         private const val MAX_SCAN_LIMIT = 2000
         private const val PREVIEW_LIMIT = 100
+        private const val RECOMMENDATION_LIMIT = 20
         private const val DAY_MS = 24L * 60 * 60 * 1000
+        private const val SOURCE_FRESH_72H_MS = 72L * 60 * 60 * 1000
         private val PAPER_PROMOTE_SCORE = BigDecimal("75")
-        private const val POLITICS_PATTERN =
-            "(election|president|senate|congress|parliament|trump|biden|democrat|republican|israel|ukraine|russia|taiwan|military-clash|tariff|war|ceasefire|nato|iran|gaza|minister|court|supreme|nominee|governor|mayor|primary|hezbollah|lebanon|crimea|colombian|diplomatic|netanyahu|white-house|truth-social)"
+        private val PRIMARY_DIAGNOSE_CATEGORIES = setOf("politics", "finance")
+        private val BLOCKING_EXISTING_FLAGS = setOf("category_mismatch", "mixed_category_evidence", "source_stale_over_72h")
+        private val CATEGORY_EVIDENCE_REGEX = Regex("""category:(politics|finance|sports|crypto)""", RegexOption.IGNORE_CASE)
     }
 }

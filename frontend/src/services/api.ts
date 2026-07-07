@@ -23,6 +23,10 @@ import type {
   LeaderPoolUpdateStatusRequest,
   LeaderResearchApprovalRequest,
   LeaderResearchApprovalResponse,
+  LeaderResearchActivityScoreRequest,
+  LeaderResearchActivityScoreResponse,
+  LeaderResearchActivitySourceImportRequest,
+  LeaderResearchActivitySourceImportResponse,
   LeaderResearchCandidateDetail,
   LeaderResearchCandidateListRequest,
   LeaderResearchCandidateListResponse,
@@ -31,6 +35,8 @@ import type {
   LeaderResearchExternalAnalyticsImportResponse,
   LeaderResearchFalconLeaderboardImportRequest,
   LeaderResearchFalconLeaderboardImportResponse,
+  LeaderResearchFastWatchRequest,
+  LeaderResearchFastWatchResponse,
   LeaderResearchFunnel,
   LeaderResearchMarketPeerSourceImportRequest,
   LeaderResearchMarketPeerSourceImportResponse,
@@ -38,6 +44,15 @@ import type {
   LeaderResearchOfficialLeaderboardDiagnoseResponse,
   LeaderResearchOfficialLeaderboardImportRequest,
   LeaderResearchOfficialLeaderboardImportResponse,
+  LeaderResearchPaperProcessRequest,
+  LeaderResearchPaperProcessResponse,
+  LeaderResearchPaperPromotionRequest,
+  LeaderResearchPaperPromotionResponse,
+  LeaderResearchPaperScoreRequest,
+  LeaderResearchPaperScoreResponse,
+  LeaderResearchPoliticsRecommendationExecuteRequest,
+  LeaderResearchPoliticsRecommendationExecutionSnapshot,
+  LeaderResearchPoliticsRecommendationExecuteResponse,
   LeaderResearchPoliticsSourceDiagnose,
   LeaderResearchPoliticsSourceDiagnoseRequest,
   LeaderResearchPolymarketAnalyticsCopyTradeImportRequest,
@@ -509,6 +524,15 @@ export const apiService = {
     funnel: () =>
       apiClient.post<ApiResponse<LeaderResearchFunnel>>('/copy-trading/leader-research/funnel', {}),
 
+    fastWatch: (data: LeaderResearchFastWatchRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchFastWatchResponse>>('/copy-trading/leader-research/paper/fast-watch', data, { timeout: 60000 }),
+
+    processPaper: (data: LeaderResearchPaperProcessRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchPaperProcessResponse>>('/copy-trading/leader-research/paper/process', data, { timeout: 120000 }),
+
+    scorePaper: (data: LeaderResearchPaperScoreRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchPaperScoreResponse>>('/copy-trading/leader-research/paper/score', data, { timeout: 120000 }),
+
     listCandidates: (data: LeaderResearchCandidateListRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchCandidateListResponse>>('/copy-trading/leader-research/candidates/list', data),
 
@@ -519,7 +543,31 @@ export const apiService = {
       apiClient.post<ApiResponse<LeaderResearchSourceState[]>>('/copy-trading/leader-research/source-health', {}),
 
     diagnosePoliticsSource: (data: LeaderResearchPoliticsSourceDiagnoseRequest = {}) =>
-      apiClient.post<ApiResponse<LeaderResearchPoliticsSourceDiagnose>>('/copy-trading/leader-research/politics-source/diagnose', data),
+      apiClient.post<ApiResponse<LeaderResearchPoliticsSourceDiagnose>>('/copy-trading/leader-research/politics-source/diagnose', data, { timeout: 120000 }),
+
+    executePoliticsRecommendations: (data: LeaderResearchPoliticsRecommendationExecuteRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchPoliticsRecommendationExecuteResponse>>('/copy-trading/leader-research/politics-source/execute-recommendations', data, { timeout: 180000 }),
+
+    latestPoliticsRecommendationExecution: () =>
+      apiClient.post<ApiResponse<LeaderResearchPoliticsRecommendationExecutionSnapshot | null>>('/copy-trading/leader-research/politics-source/recommendation-executions/latest', {}),
+
+    recentPoliticsRecommendationExecutions: () =>
+      apiClient.post<ApiResponse<LeaderResearchPoliticsRecommendationExecutionSnapshot[]>>('/copy-trading/leader-research/politics-source/recommendation-executions/recent', {}),
+
+    latestPrimaryRecommendationExecutions: () =>
+      apiClient.post<ApiResponse<LeaderResearchPoliticsRecommendationExecutionSnapshot[]>>('/copy-trading/leader-research/primary-source/recommendation-executions/latest', {}),
+
+    recentPrimaryRecommendationExecutions: () =>
+      apiClient.post<ApiResponse<LeaderResearchPoliticsRecommendationExecutionSnapshot[]>>('/copy-trading/leader-research/primary-source/recommendation-executions/recent', {}),
+
+    importActivitySource: (data: LeaderResearchActivitySourceImportRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchActivitySourceImportResponse>>('/copy-trading/leader-research/activity-source/import', data, { timeout: 120000 }),
+
+    runActivityScore: (data: LeaderResearchActivityScoreRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchActivityScoreResponse>>('/copy-trading/leader-research/activity-score/run', data, { timeout: 120000 }),
+
+    promoteActivityScoreToPaper: (data: LeaderResearchPaperPromotionRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchPaperPromotionResponse>>('/copy-trading/leader-research/activity-score/promote-paper', data, { timeout: 120000 }),
 
     importMarketPeerSource: (data: LeaderResearchMarketPeerSourceImportRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchMarketPeerSourceImportResponse>>('/copy-trading/leader-research/market-peer-source/import', data, { timeout: 120000 }),

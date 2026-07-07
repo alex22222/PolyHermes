@@ -36,6 +36,10 @@ class LeaderResearchActivitySourceImportService(
         val since = System.currentTimeMillis() - request.lookbackDays.coerceIn(1, 365).toLong() * DAY_MS
         val minSafePriceRatio = request.minSafePriceRatio.toBigDecimalOrDefault(BigDecimal("0.25"))
         val maxTailPriceRatio = request.maxTailPriceRatio.toBigDecimalOrDefault(BigDecimal("0.45"))
+        val targetWallets = request.wallets
+            .map { it.trim().lowercase() }
+            .filter { WALLET_REGEX.matches(it) }
+            .distinct()
         val previewItems = mutableListOf<LeaderResearchActivitySourcePreviewItemDto>()
         val selectedWallets = mutableSetOf<String>()
         val categoryResults = mutableListOf<LeaderResearchActivitySourceCategoryDto>()
@@ -46,17 +50,37 @@ class LeaderResearchActivitySourceImportService(
         var skippedLockedTotal = 0
 
         categories.forEach { category ->
-            val selected = activityEventRepository.discoverWalletsFromActivitySource(
-                since = since,
-                marketPattern = LeaderResearchMarketCategoryPatterns.patternFor(category),
-                minEvents = request.minEvents.coerceIn(1, 1000),
-                minDistinctMarkets = request.minDistinctMarkets.coerceIn(1, 1000),
-                minBuyEvents = request.minBuyEvents.coerceIn(1, 1000),
-                minSellEvents = request.minSellEvents.coerceIn(1, 1000),
-                minSafePriceRatio = minSafePriceRatio,
-                maxTailPriceRatio = maxTailPriceRatio,
-                limit = (limit * OVERSAMPLE_FACTOR).coerceAtMost(MAX_SOURCE_SCAN_PER_CATEGORY)
-            )
+            val marketPattern = LeaderResearchMarketCategoryPatterns.patternFor(category)
+            val minEvents = request.minEvents.coerceIn(1, 1000)
+            val minDistinctMarkets = request.minDistinctMarkets.coerceIn(1, 1000)
+            val minBuyEvents = request.minBuyEvents.coerceIn(1, 1000)
+            val minSellEvents = request.minSellEvents.coerceIn(1, 1000)
+            val discovered = if (targetWallets.isEmpty()) {
+                activityEventRepository.discoverWalletsFromActivitySource(
+                    since = since,
+                    marketPattern = marketPattern,
+                    minEvents = minEvents,
+                    minDistinctMarkets = minDistinctMarkets,
+                    minBuyEvents = minBuyEvents,
+                    minSellEvents = minSellEvents,
+                    minSafePriceRatio = minSafePriceRatio,
+                    maxTailPriceRatio = maxTailPriceRatio,
+                    limit = (limit * OVERSAMPLE_FACTOR).coerceAtMost(MAX_SOURCE_SCAN_PER_CATEGORY)
+                )
+            } else {
+                activityEventRepository.discoverWalletsFromActivitySourceForWallets(
+                    wallets = targetWallets,
+                    since = since,
+                    marketPattern = marketPattern,
+                    minEvents = minEvents,
+                    minDistinctMarkets = minDistinctMarkets,
+                    minBuyEvents = minBuyEvents,
+                    minSellEvents = minSellEvents,
+                    minSafePriceRatio = minSafePriceRatio,
+                    maxTailPriceRatio = maxTailPriceRatio
+                )
+            }
+            val selected = discovered
                 .asSequence()
                 .filter { selectedWallets.add(it.getNormalizedWallet().lowercase()) }
                 .map { source ->
@@ -95,7 +119,8 @@ class LeaderResearchActivitySourceImportService(
                         created += 1
                         "CREATE"
                     }
-                    hasExactEvidence(existing.sourceEvidence, sourceEvidence) -> {
+                    hasExactEvidence(existing.sourceEvidence, sourceEvidence) &&
+                        hasCurrentFreshness(existing, source.getLastEventTime()) -> {
                         skippedExisting += 1
                         "SKIP_EXISTING"
                     }
@@ -107,6 +132,7 @@ class LeaderResearchActivitySourceImportService(
 
                 if (!request.dryRun && action != "SKIP_LOCKED" && action != "SKIP_EXISTING") {
                     val now = System.currentTimeMillis()
+                    val sourceSeenAt = source.getLastEventTime() ?: now
                     val saved = if (existing == null) {
                         candidateRepository.save(
                             LeaderResearchCandidate(
@@ -123,7 +149,7 @@ class LeaderResearchActivitySourceImportService(
                                 },
                                 sourceEvidence = sourceEvidence,
                                 firstSeenAt = now,
-                                lastSourceSeenAt = now,
+                                lastSourceSeenAt = sourceSeenAt,
                                 lastTransitionAt = now,
                                 createdAt = now,
                                 updatedAt = now
@@ -141,7 +167,7 @@ class LeaderResearchActivitySourceImportService(
                                     existing.provenance
                                 },
                                 sourceEvidence = appendEvidence(existing.sourceEvidence, sourceEvidence),
-                                lastSourceSeenAt = now,
+                                lastSourceSeenAt = sourceSeenAt,
                                 updatedAt = now
                             )
                         )
@@ -266,6 +292,10 @@ class LeaderResearchActivitySourceImportService(
         }
     }
 
+    private fun hasCurrentFreshness(existing: LeaderResearchCandidate, lastEventTime: Long?): Boolean {
+        return lastEventTime == null || existing.lastSourceSeenAt == lastEventTime
+    }
+
     private fun String.toBigDecimalOrDefault(default: BigDecimal): BigDecimal {
         return runCatching { BigDecimal(this) }.getOrDefault(default)
     }
@@ -281,6 +311,7 @@ class LeaderResearchActivitySourceImportService(
         private const val OVERSAMPLE_FACTOR = 20
         private const val MAX_SOURCE_SCAN_PER_CATEGORY = 1000
         private const val DAY_MS = 24L * 60 * 60 * 1000
+        private val WALLET_REGEX = Regex("^0x[a-f0-9]{40}$")
     }
 
     private data class ActivitySourceSelection(

@@ -54,6 +54,8 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
             leader_id=1,
             leader_address="0xabc",
             leader_category="sports",
+            leader_research_tag=None,
+            leader_research_risk_flags=None,
             copy_mode="RATIO",
             copy_ratio=Decimal("1"),
             fixed_amount=None,
@@ -124,6 +126,42 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
         ]
         self.assertIsNone(self.engine.active_account_id)
 
+    def test_resolve_wallet_address_by_account_id(self):
+        class FakeCursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, sql, params):
+                self.sql = sql
+                self.params = params
+
+            def fetchone(self):
+                return {"wallet_address": "0xAbC0000000000000000000000000000000000001"}
+
+        class FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def cursor(self):
+                return FakeCursor()
+
+        with patch.object(self.engine, "_connect", return_value=FakeConnection()):
+            self.assertEqual(
+                self.engine.resolve_wallet_address_by_account_id(2),
+                "0xabc0000000000000000000000000000000000001",
+            )
+
+    def test_resolve_wallet_address_by_account_id_ignores_invalid_id(self):
+        with patch.object(self.engine, "_connect") as connect:
+            self.assertIsNone(self.engine.resolve_wallet_address_by_account_id("0"))
+            connect.assert_not_called()
+
     def test_category_match_passes(self):
         reason = self.engine._check_filters(
             self.engine._configs[0],
@@ -135,6 +173,51 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
             market_category="sports",
         )
         self.assertIsNone(reason)
+
+    def test_research_risky_leader_buy_is_filtered(self):
+        cfg = self._base_config(
+            leader_research_tag="RISKY",
+            leader_research_risk_flags="negative_pnl,zero_win_rate",
+        )
+        reason = self.engine._check_filters(
+            cfg,
+            side="BUY",
+            title="NBA Finals",
+            price=Decimal("0.5"),
+            market_end_date_ms=None,
+            signal_timestamp_ms=None,
+            market_category="sports",
+        )
+        self.assertEqual(reason, "leader research tag RISKY")
+
+    def test_research_risky_leader_sell_is_not_filtered(self):
+        cfg = self._base_config(
+            leader_research_tag="RISKY",
+            leader_research_risk_flags="negative_pnl,zero_win_rate",
+        )
+        reason = self.engine._check_filters(
+            cfg,
+            side="SELL",
+            title="NBA Finals",
+            price=Decimal("0.5"),
+            market_end_date_ms=None,
+            signal_timestamp_ms=None,
+            market_category="sports",
+        )
+        self.assertIsNone(reason)
+
+    def test_research_hard_risk_flag_buy_is_filtered(self):
+        cfg = self._base_config(leader_research_risk_flags="buy_only_no_exit")
+        reason = self.engine._check_filters(
+            cfg,
+            side="BUY",
+            title="NBA Finals",
+            price=Decimal("0.5"),
+            market_end_date_ms=None,
+            signal_timestamp_ms=None,
+            market_category="sports",
+        )
+        self.assertEqual(reason, "leader research risk flags: buy_only_no_exit")
 
     def test_category_mismatch_filters(self):
         reason = self.engine._check_filters(

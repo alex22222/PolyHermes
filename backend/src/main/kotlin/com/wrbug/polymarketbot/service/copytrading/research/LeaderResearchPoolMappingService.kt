@@ -53,18 +53,37 @@ class LeaderResearchPoolMappingService(
     }
 
     private fun ensureLeader(candidate: LeaderResearchCandidate): Leader {
+        val researchCategory = researchCategory(candidate)
         candidate.leaderId?.let { id ->
-            leaderRepository.findById(id).orElse(null)?.let { return it }
+            leaderRepository.findById(id).orElse(null)?.let { return fillMissingCategory(it, researchCategory) }
         }
-        leaderRepository.findByLeaderAddress(candidate.normalizedWallet)?.let { return it }
+        leaderRepository.findByLeaderAddress(candidate.normalizedWallet)?.let { return fillMissingCategory(it, researchCategory) }
         val now = System.currentTimeMillis()
         return leaderRepository.save(
             Leader(
                 leaderAddress = candidate.normalizedWallet,
                 leaderName = "Research ${candidate.normalizedWallet.take(6)}...${candidate.normalizedWallet.takeLast(4)}",
+                category = researchCategory,
                 remark = "Created by Leader Research Agent. Manual enable is required before real-money copy trading.",
                 createdAt = now,
                 updatedAt = now
+            )
+        )
+    }
+
+    private fun researchCategory(candidate: LeaderResearchCandidate): String? {
+        val evidence = LeaderResearchCategoryEvidenceClassifier.classify(candidate.sourceEvidence)
+        return evidence.category.takeIf { it != "unknown" && !evidence.mixed }
+    }
+
+    private fun fillMissingCategory(leader: Leader, researchCategory: String?): Leader {
+        if (!leader.category.isNullOrBlank() || researchCategory.isNullOrBlank()) {
+            return leader
+        }
+        return leaderRepository.save(
+            leader.copy(
+                category = researchCategory,
+                updatedAt = System.currentTimeMillis()
             )
         )
     }

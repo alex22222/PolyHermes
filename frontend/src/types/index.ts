@@ -385,6 +385,7 @@ export type LeaderPoolStatus = 'CANDIDATE' | 'WATCH' | 'PAPER' | 'TRIAL' | 'ACTI
 
 export interface LeaderPoolSummary {
   totalCount: number
+  trialReadyCount: number
   trialCount: number
   estimatedWorstExposure: string
   pendingRiskCount: number
@@ -558,6 +559,9 @@ export interface LeaderResearchTrialReadiness {
   ageHours: number
   stableHighScoreCount: number
   requiredStableHighScoreCount: number
+  requiredAgeHours?: number
+  hoursUntilTrialReady?: number
+  trialReadyAt?: number
 }
 
 export interface LeaderResearchAllocationHealth {
@@ -588,7 +592,74 @@ export interface LeaderResearchFunnel {
   generatedAt: number
 }
 
+export interface LeaderResearchFastWatchRequest {
+  categories?: string[]
+  limit?: number
+  includeTrialReady?: boolean
+}
+
+export interface LeaderResearchFastWatchResponse {
+  total: number
+  fastWatchCount: number
+  trialReadyCount: number
+  categories: string[]
+  criteria: string
+  items: LeaderResearchFunnelCandidate[]
+  generatedAt: number
+}
+
+export interface LeaderResearchPaperProcessRequest {
+  batchSize?: number
+  candidateIds?: number[]
+}
+
+export interface LeaderResearchPaperProcessResponse {
+  processed: number
+  filtered: number
+  failed: number
+  requestedBatchSize: number
+  effectiveBatchSize: number
+  maxBatchSize: number
+  truncated: boolean
+  candidateSummaries: LeaderResearchPaperProcessCandidate[]
+}
+
+export interface LeaderResearchPaperProcessCandidate {
+  candidateId: number
+  wallet: string
+  processed: number
+  filtered: number
+  failed: number
+  beforeTradeCount: number
+  afterTradeCount: number
+  tradeCountDelta: number
+  beforeFilteredCount: number
+  afterFilteredCount: number
+  filteredCountDelta: number
+  beforeCopyablePnl: string
+  afterCopyablePnl: string
+  copyablePnlDelta: string
+}
+
+export interface LeaderResearchPaperScoreRequest {
+  candidateIds?: number[]
+  maxCandidates?: number
+}
+
+export interface LeaderResearchPaperScoreResponse {
+  scoredCount: number
+  states: string[]
+  scoreVersion: string
+  targeted: boolean
+  requestedCandidateIds: number[]
+  missingCandidateIds: number[]
+  effectiveCandidateCount: number
+  maxCandidates?: number
+  truncated: boolean
+}
+
 export interface LeaderResearchPoliticsSourceDiagnoseRequest {
+  category?: 'politics' | 'finance' | string
   lookbackDays?: number
   minEvents?: number
   minDistinctMarkets?: number
@@ -607,6 +678,7 @@ export interface LeaderResearchPoliticsSourceBucket {
 
 export interface LeaderResearchPoliticsSourceSample {
   wallet: string
+  candidateId?: number
   action: string
   totalEvents: number
   distinctMarkets: number
@@ -618,7 +690,29 @@ export interface LeaderResearchPoliticsSourceSample {
   totalAmount: string
   currentState?: string
   currentScore?: string
+  paperTradeCount?: number
+  copyablePnl?: string
   riskFlags: string[]
+  blockers: string[]
+}
+
+export interface LeaderResearchPoliticsSourceRecommendation {
+  wallet: string
+  candidateId?: number
+  recommendation: string
+  priority: number
+  reason: string
+  action: string
+  currentState?: string
+  currentScore?: string
+  totalEvents: number
+  distinctMarkets: number
+  buyEvents: number
+  sellEvents: number
+  safePriceRatio: string
+  tailPriceRatio: string
+  paperTradeCount?: number
+  copyablePnl?: string
   blockers: string[]
 }
 
@@ -634,7 +728,166 @@ export interface LeaderResearchPoliticsSourceDiagnose {
   eligibleForPaperNow: number
   buckets: LeaderResearchPoliticsSourceBucket[]
   samples: LeaderResearchPoliticsSourceSample[]
+  recommendations: LeaderResearchPoliticsSourceRecommendation[]
   generatedAt: number
+}
+
+export interface LeaderResearchPoliticsRecommendationExecuteRequest {
+  dryRun?: boolean
+  actions?: string[]
+  diagnose?: LeaderResearchPoliticsSourceDiagnoseRequest
+  maxImport?: number
+  maxScoreRefresh?: number
+  maxPaperProcess?: number
+  paperProcessBatchSize?: number
+  promotionMinScore?: string
+}
+
+export interface LeaderResearchPoliticsRecommendationActionPlan {
+  action: string
+  selectedCount: number
+  candidateIds: number[]
+  wallets: string[]
+  executed: boolean
+  skippedReason?: string
+}
+
+export interface LeaderResearchPoliticsRecommendationExecuteResponse {
+  dryRun: boolean
+  generatedAt: number
+  recommendationCounts: Record<string, number>
+  plannedActions: LeaderResearchPoliticsRecommendationActionPlan[]
+  recommendations: LeaderResearchPoliticsSourceRecommendation[]
+  importResult?: LeaderResearchActivitySourceImportResponse
+  activityScoreResult?: LeaderResearchActivityScoreResponse
+  promotionResult?: LeaderResearchPaperPromotionResponse
+  paperProcessResult?: LeaderResearchPaperProcessResponse
+  paperScoreResult?: LeaderResearchPaperScoreResponse
+  fastWatchReviewCandidateIds: number[]
+  trialReadyCandidateIds: number[]
+}
+
+export interface LeaderResearchPoliticsRecommendationExecutionSnapshot {
+  id: number
+  category: string
+  status: string
+  dryRun: boolean
+  actions: string[]
+  recommendationCounts: Record<string, number>
+  plannedActions: LeaderResearchPoliticsRecommendationActionPlan[]
+  reviewCandidates: LeaderResearchFunnelCandidate[]
+  resultSummary: Record<string, any>
+  errorMessage?: string
+  startedAt: number
+  finishedAt?: number
+  durationMs?: number
+}
+
+export interface LeaderResearchActivitySourceImportRequest {
+  dryRun?: boolean
+  categories?: string[]
+  wallets?: string[]
+  limitPerCategory?: number
+  lookbackDays?: number
+  minEvents?: number
+  minDistinctMarkets?: number
+  minBuyEvents?: number
+  minSellEvents?: number
+  minSafePriceRatio?: string
+  maxTailPriceRatio?: string
+}
+
+export interface LeaderResearchActivitySourceCategory {
+  category: string
+  selectedCount: number
+  createdCount: number
+  updatedCount: number
+  skippedExistingCount: number
+  skippedLockedCount: number
+}
+
+export interface LeaderResearchActivitySourcePreviewItem {
+  category: string
+  wallet: string
+  action: string
+  totalEvents: number
+  distinctMarkets: number
+  buyEvents: number
+  sellEvents: number
+  safePriceEvents: number
+  tailPriceEvents: number
+  avgAmount: string
+  totalAmount: string
+  lastEventTime?: number
+  sourceEvidence: string
+}
+
+export interface LeaderResearchActivitySourceImportResponse {
+  dryRun: boolean
+  requestedCategories: string[]
+  selectedTotal: number
+  createdTotal: number
+  updatedTotal: number
+  skippedExistingTotal: number
+  skippedLockedTotal: number
+  categories: LeaderResearchActivitySourceCategory[]
+  previewItems: LeaderResearchActivitySourcePreviewItem[]
+}
+
+export interface LeaderResearchActivityScoreRequest {
+  states?: string[]
+  force?: boolean
+  candidateIds?: number[]
+}
+
+export interface LeaderResearchActivityScoreResponse {
+  scoreVersion: string
+  scannedCount: number
+  scoredCount: number
+  skippedCount: number
+  riskFlagCounts: Record<string, number>
+  categoryCounts: Record<string, number>
+}
+
+export interface LeaderResearchPaperPromotionRequest {
+  minScore?: string
+  politicsLimit?: number
+  financeLimit?: number
+  sportsLimit?: number
+  cryptoLimit?: number
+  dryRun?: boolean
+  candidateIds?: number[]
+}
+
+export interface LeaderResearchPaperPromotionCategory {
+  category: string
+  requestedLimit: number
+  selectedCount: number
+  promotedCount: number
+  skippedRiskCount: number
+}
+
+export interface LeaderResearchPaperPromotionItem {
+  candidateId: number
+  wallet: string
+  category: string
+  score: string
+  previousState: string
+  nextState: string
+  riskFlags: string[]
+}
+
+export interface LeaderResearchPaperPromotionResponse {
+  dryRun: boolean
+  minScore: string
+  selectedTotal: number
+  promotedTotal: number
+  skippedRiskTotal: number
+  categories: LeaderResearchPaperPromotionCategory[]
+  items: LeaderResearchPaperPromotionItem[]
+  requestedSelectedTotal: number
+  effectiveSelectedLimit: number
+  truncated: boolean
 }
 
 export interface LeaderResearchMarketPeerSourceImportRequest {

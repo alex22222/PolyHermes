@@ -43,6 +43,7 @@ data class LeaderPoolRemoveRequest(
 
 data class LeaderPoolSummaryDto(
     val totalCount: Int,
+    val trialReadyCount: Int = 0,
     val trialCount: Int,
     val estimatedWorstExposure: String,
     val pendingRiskCount: Int,

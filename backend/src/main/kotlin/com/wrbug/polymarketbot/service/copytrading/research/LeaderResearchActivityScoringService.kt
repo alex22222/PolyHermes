@@ -31,8 +31,19 @@ class LeaderResearchActivityScoringService(
         val states = request.states
             .mapNotNull { runCatching { LeaderResearchState.valueOf(it.uppercase()) }.getOrNull() }
             .ifEmpty { listOf(LeaderResearchState.DISCOVERED, LeaderResearchState.CANDIDATE) }
-        val candidates = candidateRepository.findByResearchStateIn(states).associateBy { it.id }
-        val metrics = candidateRepository.aggregateActivityMetrics(states.map { it.name })
+        val targetIds = request.candidateIds.distinct().filter { it > 0 }
+        val targeted = targetIds.isNotEmpty()
+        val candidateList = if (targeted) {
+            candidateRepository.findAllById(targetIds).filter { it.researchState in states }
+        } else {
+            candidateRepository.findByResearchStateIn(states)
+        }
+        val candidates = candidateList.associateBy { it.id }
+        val metrics = if (targeted) {
+            if (candidateList.isEmpty()) emptyList() else candidateRepository.aggregateActivityMetricsForCandidateIds(candidateList.mapNotNull { it.id })
+        } else {
+            candidateRepository.aggregateActivityMetrics(states.map { it.name })
+        }
         val riskCounts = linkedMapOf<String, Int>()
         val categoryCounts = linkedMapOf<String, Int>()
         var scored = 0

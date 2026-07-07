@@ -9,6 +9,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import main as bridge_main  # noqa: E402
 from main import (  # noqa: E402
+    _high_confidence_buy_reason,
     _leader_event_activity_buy_reason,
     _short_cycle_daily_limit_buy_reason,
     _short_cycle_duplicate_buy_reason,
@@ -134,6 +135,19 @@ def test_tail_risk_low_price_buy_guard():
     assert sell is None, sell
 
 
+def test_high_confidence_buy_guard():
+    allowed = _high_confidence_buy_reason("BUY", Decimal("0.9499"))
+    assert allowed is None, allowed
+
+    high_price = _high_confidence_buy_reason("BUY", Decimal("0.96"))
+    assert high_price is not None, high_price
+    assert "High-price low-upside BUY skipped" in high_price
+    assert "max=0.95" in high_price
+
+    sell = _high_confidence_buy_reason("SELL", Decimal("0.96"))
+    assert sell is None, sell
+
+
 def test_same_event_high_frequency_buy_guard():
     original = bridge_main.recorder
     try:
@@ -252,6 +266,7 @@ def main() -> int:
     test_btc_updown_5m_duplicate_buy_guard()
     test_btc_updown_5m_price_band_buy_guard()
     test_tail_risk_low_price_buy_guard()
+    test_high_confidence_buy_guard()
     test_same_event_high_frequency_buy_guard()
     test_same_event_multi_outcome_combo_buy_guard()
     test_btc_updown_5m_global_buy_guard()

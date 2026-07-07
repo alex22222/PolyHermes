@@ -42,6 +42,7 @@ BTC_UPDOWN_5M_MIN_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MIN_BUY_PRICE", "
 BTC_UPDOWN_5M_MAX_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MAX_BUY_PRICE", "0.65"))
 BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS = int(os.getenv("BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS", "50"))
 TAIL_RISK_MIN_BUY_PRICE = Decimal(os.getenv("TAIL_RISK_MIN_BUY_PRICE", "0.02"))
+HIGH_CONFIDENCE_MAX_BUY_PRICE = Decimal(os.getenv("HIGH_CONFIDENCE_MAX_BUY_PRICE", "0.95"))
 LEADER_EVENT_ACTIVITY_WINDOW_SECONDS = int(
     os.getenv("LEADER_EVENT_ACTIVITY_WINDOW_SECONDS", "1800")
 )
@@ -1061,6 +1062,21 @@ async def handle_signal(signal: LeaderTradeSignal):
                         reason=tail_risk_reason,
                     )
                     continue
+                high_confidence_reason = _high_confidence_buy_reason(side_upper, price_dec)
+                if high_confidence_reason:
+                    logger.info(
+                        f"Config {cfg.id}: BUY skipped for {signal.transaction_hash}: "
+                        f"{high_confidence_reason}"
+                    )
+                    _record_failed_signal(
+                        signal=signal,
+                        side=side_upper,
+                        quantity=quantity,
+                        price=price_dec,
+                        amount=amount,
+                        reason=high_confidence_reason,
+                    )
+                    continue
                 event_activity_reason = _leader_event_activity_buy_reason(
                     signal=signal,
                     side=side_upper,
@@ -1468,6 +1484,20 @@ def _tail_risk_low_price_buy_reason(side: str, price: Decimal) -> Optional[str]:
         return (
             "Low-price tail-risk BUY skipped: "
             f"price={price}, min={TAIL_RISK_MIN_BUY_PRICE}"
+        )
+    return None
+
+
+def _high_confidence_buy_reason(side: str, price: Decimal) -> Optional[str]:
+    """Return a skip reason for high-price BUYs with poor copy-trading payoff."""
+    if side.upper() != "BUY":
+        return None
+    if price >= HIGH_CONFIDENCE_MAX_BUY_PRICE:
+        max_upside = Decimal("1") - price
+        return (
+            "High-price low-upside BUY skipped: "
+            f"price={price}, max={HIGH_CONFIDENCE_MAX_BUY_PRICE}, "
+            f"max_upside={max_upside}"
         )
     return None
 

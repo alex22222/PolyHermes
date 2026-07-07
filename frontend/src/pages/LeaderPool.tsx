@@ -40,6 +40,7 @@ const VISIBLE_STATUSES: Array<{ value: LeaderPoolStatus; color: string }> = [
 ]
 
 type LeaderPoolFilterValue = LeaderPoolStatus | 'ALL'
+type ResearchFilterValue = 'TRIAL_READY' | undefined
 
 const formatDate = (timestamp?: number) => {
   if (!timestamp) return '-'
@@ -55,6 +56,7 @@ const LeaderPool: React.FC = () => {
   const [poolData, setPoolData] = useState<LeaderPoolListResponse>({
     summary: {
       totalCount: 0,
+      trialReadyCount: 0,
       trialCount: 0,
       estimatedWorstExposure: '0',
       pendingRiskCount: 0,
@@ -66,6 +68,7 @@ const LeaderPool: React.FC = () => {
   const [leaders, setLeaders] = useState<Leader[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [statusFilter, setStatusFilter] = useState<LeaderPoolStatus | undefined>()
+  const [researchFilter, setResearchFilter] = useState<ResearchFilterValue>()
   const [loading, setLoading] = useState(false)
   const [adding, setAdding] = useState(false)
   const [creatingMap, setCreatingMap] = useState<Record<number, boolean>>({})
@@ -79,6 +82,10 @@ const LeaderPool: React.FC = () => {
 
   const statusLabel = (status: LeaderPoolStatus) =>
     t(`leaderPool.statuses.${status}`, { defaultValue: status })
+
+  const visiblePoolList = researchFilter === 'TRIAL_READY'
+    ? poolData.list.filter(item => item.researchState === 'TRIAL_READY')
+    : poolData.list
 
   const fetchPool = async (status = statusFilter) => {
     setLoading(true)
@@ -262,6 +269,11 @@ const LeaderPool: React.FC = () => {
     }
   }
 
+  const showTrialReadyLeaders = () => {
+    setStatusFilter(undefined)
+    setResearchFilter('TRIAL_READY')
+  }
+
   const columns = [
     {
       title: t('leaderPool.leader'),
@@ -430,6 +442,18 @@ const LeaderPool: React.FC = () => {
             <Card><Statistic title={t('leaderPool.totalCount')} value={poolData.summary.totalCount} /></Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
+            <Card
+              hoverable
+              onClick={showTrialReadyLeaders}
+              style={{
+                cursor: 'pointer',
+                borderColor: researchFilter === 'TRIAL_READY' ? '#52c41a' : undefined
+              }}
+            >
+              <Statistic title={t('leaderPool.trialReadyCount')} value={poolData.summary.trialReadyCount} />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} lg={6}>
             <Card><Statistic title={t('leaderPool.trialCount')} value={poolData.summary.trialCount} /></Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
@@ -446,17 +470,32 @@ const LeaderPool: React.FC = () => {
               style={{ width: 220 }}
               placeholder={t('leaderPool.filterStatus')}
               value={statusFilter ?? 'ALL'}
-              onChange={(value: LeaderPoolFilterValue) => setStatusFilter(value === 'ALL' ? undefined : value)}
+              onChange={(value: LeaderPoolFilterValue) => {
+                setResearchFilter(undefined)
+                setStatusFilter(value === 'ALL' ? undefined : value)
+              }}
               options={[
                 { value: 'ALL', label: t('common.all') },
                 ...VISIBLE_STATUSES.map(item => ({ value: item.value, label: statusLabel(item.value) }))
               ]}
             />
+            {researchFilter === 'TRIAL_READY' && (
+              <Alert
+                type="success"
+                showIcon
+                message={t('leaderPool.trialReadyFilterActive', { count: visiblePoolList.length })}
+                action={
+                  <Button size="small" onClick={() => setResearchFilter(undefined)}>
+                    {t('leaderPool.clearResearchFilter')}
+                  </Button>
+                }
+              />
+            )}
             <Table
               rowKey="id"
               loading={loading}
               columns={columns}
-              dataSource={poolData.list}
+              dataSource={visiblePoolList}
               scroll={{ x: 1280 }}
               locale={{
                 emptyText: (

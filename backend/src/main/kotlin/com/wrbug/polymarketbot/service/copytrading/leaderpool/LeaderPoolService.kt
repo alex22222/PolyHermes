@@ -102,6 +102,7 @@ class LeaderPoolService(
             }
             val summary = LeaderPoolSummaryDto(
                 totalCount = items.size,
+                trialReadyCount = items.count { it.researchState == LeaderResearchState.TRIAL_READY.name },
                 trialCount = items.count { it.status == LeaderPoolStatus.TRIAL.name || it.status == LeaderPoolStatus.ACTIVE.name },
                 estimatedWorstExposure = estimatedWorstExposure.strip(),
                 pendingRiskCount = items.count { it.status == LeaderPoolStatus.COOLDOWN.name || it.hasEnabledCopyTrading },

@@ -11,6 +11,8 @@ import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchFalconLeaderboardImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchFalconLeaderboardImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchFastWatchRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchFastWatchResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchFunnelResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportResponse
@@ -23,11 +25,16 @@ import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessCandidateDto
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperPromotionRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperPromotionResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPaperScoreRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperScoreResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsRecommendationExecuteRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsRecommendationExecutionSnapshotDto
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsRecommendationExecuteResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPolymarketAnalyticsCopyTradeImportRequest
@@ -40,6 +47,8 @@ import com.wrbug.polymarketbot.dto.LeaderResearchScannerPoolImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchScannerPoolImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchSourceStateDto
 import com.wrbug.polymarketbot.dto.LeaderResearchSummaryDto
+import com.wrbug.polymarketbot.dto.LeaderResearchTrialReadyRecheckRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchTrialReadyRecheckResponse
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.enums.LeaderResearchTriggerType
@@ -57,6 +66,7 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMapper
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMarketPeerSourceImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardDiagnoseService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPoliticsRecommendationExecutionService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPoliticsSourceDiagnoseService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchRealMoneyForbiddenException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScannerPoolImportService
@@ -66,6 +76,7 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPaperP
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperTradingService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPolymarketAnalyticsCopyTradeImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPolyburgTelegramImportService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchTrialReadyRecheckService
 import org.slf4j.LoggerFactory
 import org.springframework.context.MessageSource
 import org.springframework.http.ResponseEntity
@@ -73,6 +84,7 @@ import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
+import java.math.BigDecimal
 
 data class LeaderResearchDetailRequest(val candidateId: Long)
 data class LeaderResearchEventsRequest(val page: Int = 0, val size: Int = 50)
@@ -94,14 +106,20 @@ class LeaderResearchController(
     private val officialLeaderboardImportService: LeaderResearchOfficialLeaderboardImportService,
     private val officialLeaderboardDiagnoseService: LeaderResearchOfficialLeaderboardDiagnoseService,
     private val politicsSourceDiagnoseService: LeaderResearchPoliticsSourceDiagnoseService,
+    private val politicsRecommendationExecutionService: LeaderResearchPoliticsRecommendationExecutionService,
     private val paperTradingService: LeaderPaperTradingService,
     private val paperPromotionService: LeaderResearchPaperPromotionService,
+    private val trialReadyRecheckService: LeaderResearchTrialReadyRecheckService,
     private val scoringService: LeaderResearchScoringService,
     private val approvalService: LeaderResearchApprovalService,
     private val mapper: LeaderResearchMapper,
     private val messageSource: MessageSource
 ) {
     private val logger = LoggerFactory.getLogger(LeaderResearchController::class.java)
+
+    companion object {
+        private const val PAPER_SCORE_TARGET_MAX = 500
+    }
 
     @PostMapping("/run")
     fun run(@RequestBody request: LeaderResearchRunRequest): ResponseEntity<ApiResponse<LeaderResearchRunDto>> {
@@ -260,6 +278,43 @@ class LeaderResearchController(
         }
     }
 
+    @PostMapping("/politics-source/execute-recommendations")
+    fun executePoliticsRecommendations(
+        @RequestBody(required = false) request: LeaderResearchPoliticsRecommendationExecuteRequest?
+    ): ResponseEntity<ApiResponse<LeaderResearchPoliticsRecommendationExecuteResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            politicsRecommendationExecutionService.execute(request ?: LeaderResearchPoliticsRecommendationExecuteRequest())
+        }
+    }
+
+    @PostMapping("/politics-source/recommendation-executions/latest")
+    fun latestPoliticsRecommendationExecution(): ResponseEntity<ApiResponse<LeaderResearchPoliticsRecommendationExecutionSnapshotDto?>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            politicsRecommendationExecutionService.latestPoliticsExecution()
+        }
+    }
+
+    @PostMapping("/politics-source/recommendation-executions/recent")
+    fun recentPoliticsRecommendationExecutions(): ResponseEntity<ApiResponse<List<LeaderResearchPoliticsRecommendationExecutionSnapshotDto>>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            politicsRecommendationExecutionService.recentPoliticsExecutions()
+        }
+    }
+
+    @PostMapping("/primary-source/recommendation-executions/latest")
+    fun latestPrimaryCategoryRecommendationExecutions(): ResponseEntity<ApiResponse<List<LeaderResearchPoliticsRecommendationExecutionSnapshotDto>>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            politicsRecommendationExecutionService.latestPrimaryCategoryExecutions()
+        }
+    }
+
+    @PostMapping("/primary-source/recommendation-executions/recent")
+    fun recentPrimaryCategoryRecommendationExecutions(): ResponseEntity<ApiResponse<List<LeaderResearchPoliticsRecommendationExecutionSnapshotDto>>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            politicsRecommendationExecutionService.recentPrimaryCategoryExecutions()
+        }
+    }
+
     @PostMapping("/activity-score/promote-paper")
     fun promoteActivityScoreToPaper(
         @RequestBody request: LeaderResearchPaperPromotionRequest
@@ -287,22 +342,78 @@ class LeaderResearchController(
                 requestedBatchSize = request.batchSize,
                 effectiveBatchSize = effectiveBatchSize,
                 maxBatchSize = LeaderPaperTradingService.MANUAL_MAX_PROCESSING_BATCH_SIZE,
-                truncated = request.batchSize != effectiveBatchSize
+                truncated = request.batchSize != effectiveBatchSize,
+                candidateSummaries = result.candidateSummaries.map { item ->
+                    LeaderResearchPaperProcessCandidateDto(
+                        candidateId = item.candidateId,
+                        wallet = item.wallet,
+                        processed = item.processed,
+                        filtered = item.filtered,
+                        failed = item.failed,
+                        beforeTradeCount = item.beforeTradeCount,
+                        afterTradeCount = item.afterTradeCount,
+                        tradeCountDelta = item.afterTradeCount - item.beforeTradeCount,
+                        beforeFilteredCount = item.beforeFilteredCount,
+                        afterFilteredCount = item.afterFilteredCount,
+                        filteredCountDelta = item.afterFilteredCount - item.beforeFilteredCount,
+                        beforeCopyablePnl = item.beforeCopyablePnl.strip(),
+                        afterCopyablePnl = item.afterCopyablePnl.strip(),
+                        copyablePnlDelta = item.afterCopyablePnl.subtract(item.beforeCopyablePnl).strip()
+                    )
+                }
             )
         }
     }
 
     @PostMapping("/paper/score")
-    fun scorePaper(): ResponseEntity<ApiResponse<LeaderResearchPaperScoreResponse>> {
+    fun scorePaper(
+        @RequestBody(required = false) request: LeaderResearchPaperScoreRequest?
+    ): ResponseEntity<ApiResponse<LeaderResearchPaperScoreResponse>> {
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
             val states = listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
-            val scored = researchService.findCandidatesForStates(states)
+            val requestedIds = request?.candidateIds.orEmpty().distinct().filter { it > 0 }
+            val targeted = requestedIds.isNotEmpty()
+            val candidates = if (targeted) {
+                researchService.findCandidatesByIds(requestedIds)
+                    .filter { it.researchState in states }
+            } else {
+                researchService.findCandidatesForStates(states)
+            }
+            val maxCandidates = request?.maxCandidates?.coerceIn(1, PAPER_SCORE_TARGET_MAX) ?: PAPER_SCORE_TARGET_MAX
+            val selectedCandidates = if (targeted) candidates.take(maxCandidates) else candidates
+            val selectedIds = selectedCandidates.mapNotNull { it.id }.toSet()
+            val foundIds = candidates.mapNotNull { it.id }.toSet()
+            val scored = selectedCandidates
                 .map { scoringService.scoreCandidate(it, runId = null) }
             LeaderResearchPaperScoreResponse(
                 scoredCount = scored.size,
                 states = states.map { it.name },
-                scoreVersion = LeaderResearchScoringService.SCORE_VERSION
+                scoreVersion = LeaderResearchScoringService.SCORE_VERSION,
+                targeted = targeted,
+                requestedCandidateIds = requestedIds,
+                missingCandidateIds = if (targeted) requestedIds.filter { it !in foundIds } else emptyList(),
+                effectiveCandidateCount = selectedIds.size,
+                maxCandidates = if (targeted) maxCandidates else null,
+                truncated = targeted && candidates.size > selectedCandidates.size
             )
+        }
+    }
+
+    @PostMapping("/paper/fast-watch")
+    fun fastWatch(
+        @RequestBody(required = false) request: LeaderResearchFastWatchRequest?
+    ): ResponseEntity<ApiResponse<LeaderResearchFastWatchResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            researchService.fastWatch(request ?: LeaderResearchFastWatchRequest())
+        }
+    }
+
+    @PostMapping("/paper/trial-ready/recheck")
+    fun recheckTrialReady(
+        @RequestBody(required = false) request: LeaderResearchTrialReadyRecheckRequest?
+    ): ResponseEntity<ApiResponse<LeaderResearchTrialReadyRecheckResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            trialReadyRecheckService.recheck(request ?: LeaderResearchTrialReadyRecheckRequest())
         }
     }
 
@@ -350,4 +461,6 @@ class LeaderResearchController(
         }
         return ResponseEntity.ok(ApiResponse.error(errorCode, null, messageSource))
     }
+
+    private fun BigDecimal.strip(): String = stripTrailingZeros().toPlainString()
 }

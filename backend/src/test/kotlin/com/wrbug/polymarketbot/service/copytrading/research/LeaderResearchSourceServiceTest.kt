@@ -55,6 +55,7 @@ class LeaderResearchSourceServiceTest {
             .thenReturn(SystemConfig(configKey = LeaderResearchSourceService.CONFIG_WATCHLIST, configValue = "$watchWallet,not-a-wallet,$watchWallet"))
         Mockito.`when`(leaderRepository.findByLeaderAddress(watchWallet)).thenReturn(null)
         Mockito.`when`(leaderRepository.findByLeaderAddress(activityWallet)).thenReturn(null)
+        Mockito.`when`(leaderRepository.findLatestByLeaderAddressIn(anyStringCollection())).thenReturn(emptyList())
         Mockito.`when`(leaderRepository.findAllByOrderByCreatedAtAsc())
             .thenReturn(listOf(Leader(id = 2L, leaderAddress = existingWallet, leaderName = "known")))
         Mockito.`when`(leaderPoolRepository.findByLeaderId(2L)).thenReturn(LeaderPool(id = 20L, leaderId = 2L))
@@ -82,6 +83,8 @@ class LeaderResearchSourceServiceTest {
         assertEquals(LeaderCandidateProvenance.MANUAL_LOCKED, preserved.provenance)
         assertTrue(preserved.sourceEvidence!!.contains("manual note"))
         assertTrue(preserved.sourceEvidence!!.contains("leader_activity_event:fresh_count=2"))
+        Mockito.verify(leaderRepository).findLatestByLeaderAddressIn(anyStringCollection())
+        Mockito.verify(leaderRepository, Mockito.never()).findByLeaderAddress(activityWallet)
     }
 
     @Test
@@ -95,6 +98,7 @@ class LeaderResearchSourceServiceTest {
         Mockito.`when`(leaderRepository.findAllByOrderByCreatedAtAsc())
             .thenReturn(listOf(Leader(id = 2L, leaderAddress = existingWallet)))
         Mockito.`when`(leaderRepository.findByLeaderAddress(Mockito.anyString())).thenReturn(null)
+        Mockito.`when`(leaderRepository.findLatestByLeaderAddressIn(anyStringCollection())).thenReturn(emptyList())
         Mockito.`when`(activityEventRepository.findByUsableForDiscoveryTrueAndEventTimeGreaterThanEqual(Mockito.anyLong()))
             .thenReturn(listOf(activityEvent(activityWallet)))
         Mockito.`when`(candidateRepository.findByResearchStateIn(anyResearchStates()))
@@ -205,6 +209,11 @@ class LeaderResearchSourceServiceTest {
 
     private fun anyStringList(): List<String> {
         Mockito.anyList<String>()
+        return emptyList()
+    }
+
+    private fun anyStringCollection(): Collection<String> {
+        Mockito.anyCollection<String>()
         return emptyList()
     }
 

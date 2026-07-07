@@ -10,6 +10,62 @@
 
 > 2026-06-24 update: 第一目标已设置为 `COMPLETED_PENDING_RESTART`，保留所有历史记录和后续重启入口；第二目标升级为当前主目标 `ACTIVE`。系统新增 `/api/loop-goals/status` 与 `/api/loop-goals/update`，并在 `/optimization-daily` 的“目标控制”对话框中支持启动/暂停目标。Leader Research 定时任务会在第二目标非 `ACTIVE` 时跳过。
 
+> 2026-06-29 sample audit: 第二目标当前不是“缺候选广度”，而是“缺高质量可验证深度”。`leader_research_candidate=27314`、`leader_activity_event=486816`、近 24h 活跃钱包 `13970`，原始发现池已足够；但有纸跟交易的候选仅 `249`，纸跟交易数 >=20 的候选仅 `35`，`TRIAL_READY=0`。下一阶段优先把 politics/finance pending 与高分 PAPER 候选推进到有效纸跟样本，而不是继续盲目扩原始钱包数。
+
+> 2026-06-29 loop iteration: 后台 Leader 候选发现定时任务仍在运作，本轮日志显示写入/更新 `35043` 个 scanner 候选；当前 `leader_research_candidate=33954`，其中 `PAPER=33234`、`DISCOVERED=701`、`TRIAL_READY=0`。手动对 politics/finance 高分 PAPER 候选执行两批 `/paper/process`，合计 processed `37`、filtered `3`、failed `0`，使 `paper_trade_count >= 20` 的候选从 `44/45` 推进到 `48`。`TRIAL_READY=0` 的主要原因不是没有高分候选，而是 PAPER 观察期未满 7 天；多名候选已满足 score>=80、PnL>0、稳定高分 3 次、trade_count>=10，但 paper age 约 70-116 小时。下一步需要把全量 `/paper/score` 改为候选级/增量评分，因为当前 3.3 万 PAPER 全量评分 180 秒超时。
+
+> 2026-06-29 engineering iteration: 已补后段验证链路能力。`POST /api/copy-trading/leader-research/paper/score` 支持 `candidateIds` 增量评分，传指定候选时不会再全量扫 `PAPER/TRIAL_READY`；新增 `POST /api/copy-trading/leader-research/paper/fast-watch`，直接输出未满 7 天但满足快速观察条件的候选。本轮运行时验证：FAST_WATCH politics/finance 返回 `total=8`、`fastWatchCount=8`、`trialReadyCount=0`，top 包括 `1742`, `1609`, `2079`, `1611`, `2063`；targeted score 对 candidate `2063` 返回 `scoredCount=1`, `targeted=true`, `truncated=false`。后端已由 tmux 会话 `polyhermes-backend-codex` 托管运行，PID `38933`，健康检查 `UP`。
+
+> 2026-06-29 UI iteration: Leader 研究页面已接入 FAST_WATCH 可观测输出。前端新增 `LeaderResearchFastWatchRequest/Response` 类型与 `apiService.leaderResearch.fastWatch`，页面 `loadAll()` 并行拉取 politics/finance 快速观察候选，并新增“快速观察候选”卡片展示总数、FAST_WATCH、TRIAL_READY、覆盖分类、评分、PnL、过滤率、观察时长、稳定高分窗口和阻塞原因。本轮验证：`npm run build` 通过；运行时 API 返回 `total=8`, `fastWatchCount=8`, `trialReadyCount=0`, top items `[1742, 1609, 2079]`；前端 dev server 已在 `:3000` 监听，后端 `:8000` 健康检查 `UP`。
+
+> 2026-06-29 UI action iteration: FAST_WATCH 卡片新增“增量评分”和“推进纸跟”两个批量动作。前端补齐 `LeaderResearchPaperProcessRequest/Response` 与 `LeaderResearchPaperScoreRequest/Response` 类型，并新增 `apiService.leaderResearch.processPaper` / `scorePaper`。`增量评分` 会对当前 FAST_WATCH 候选执行 targeted `/paper/score`；`推进纸跟` 会对当前 FAST_WATCH 候选执行 `/paper/process` 后再 targeted score 并刷新页面。本轮验证：`npm run build` 通过；运行时 targeted score 对 `[1742,1609,2079]` 返回 `scoredCount=3`, `targeted=true`, `missingCandidateIds=[]`, `truncated=false`；后端 `:8000` 和前端 `:3000` 均在运行。
+
+> 2026-06-29 sample sufficiency conclusion: 第二目标的样本量口径已更新。`1000+` 不能再理解为原始钱包或 Leader 管理页记录数达标；当前原始研究池已足够，但可用于决策的高质量样本仍不足。判断依据：`TRIAL_READY=0`，politics/finance FAST_WATCH 仅少量出现，`paper_trade_count >= 20` 的候选仍未达到 100 个，且 FAST_WATCH top 偏 finance，politics 高质量样本偏薄。因此第二目标继续保持 `ACTIVE`，下一轮优先加厚 politics/finance 高分 PAPER 样本、补 7 天观察期后的稳定评分、输出禁用试跟配置候选，而不是继续追求原始候选池膨胀。
+
+> 2026-06-29 paper process observability iteration: `/paper/process` 已从聚合计数升级为返回 candidate 级推进明细。后端 `LeaderPaperProcessingResult` 现在包含 `candidateSummaries`，记录每个候选的 processed/filtered/failed、处理前后 paper trade count、filtered count、copyable PnL 与 delta；`LeaderResearchPaperProcessResponse` 同步暴露这些字段。Leader 研究页 FAST_WATCH 卡片的“推进纸跟”动作会展示“最近推进结果”，可直接看到本轮实际加厚了哪些候选。验证：`LeaderPaperTradingServiceTest` 与 `LeaderResearchControllerTest` 通过；`frontend npm run build` 通过。下一轮可按 candidateSummaries 优先继续推进 tradeCount delta 正、PnL 未恶化、politics/finance 的候选。
+
+> 2026-06-29 politics recommendation iteration: 政治来源诊断从“统计/阻塞展示”升级为“推荐动作队列”。`/politics-source/diagnose` 现在返回 `recommendations`，按 `IMPORT_NOW`、`SCORE_REFRESH`、`PAPER_PROCESS`、`FAST_WATCH_REVIEW`、`WATCH_SOURCE` 标注下一步，并带 priority、reason、candidateId、paperTradeCount、copyablePnl、buy/sell 样本与 blocker。Leader 研究页新增“政治推荐动作”卡片，直接展示下一批政治候选该导入、重评分、推进纸跟还是复核 FAST_WATCH。验证：`LeaderResearchPoliticsSourceDiagnoseServiceTest` 与 `LeaderResearchControllerTest` 通过；`frontend npm run build` 通过。下一轮应把推荐动作接成按钮/批处理：IMPORT_NOW -> activity-source import，PAPER_PROCESS -> targeted paper/process + score，FAST_WATCH_REVIEW -> 禁用试跟配置候选。
+
+> 2026-06-29 politics action iteration: 政治推荐动作已接入第一个安全批处理按钮。Leader 研究页“政治推荐动作”卡片新增“执行纸跟推荐”，只选取 `recommendation=PAPER_PROCESS` 且有 `candidateId` 的政治候选，执行 targeted `/paper/process` 后 targeted `/paper/score`，并复用“最近推进结果”展示 candidateSummaries。该动作仅加厚 PAPER 样本，不导入未知钱包、不创建真钱配置。验证：`frontend npm run build` 通过；后端 `LeaderResearchPoliticsSourceDiagnoseServiceTest`、`LeaderPaperTradingServiceTest`、`LeaderResearchControllerTest` 通过。下一轮可继续接 `IMPORT_NOW` 的 dry-run/导入确认，以及 `FAST_WATCH_REVIEW` 的禁用试跟配置候选输出。
+
+> 2026-06-29 politics import iteration: `IMPORT_NOW` 推荐动作已接入定向 dry-run/确认导入。`LeaderResearchActivitySourceImportRequest` 新增 `wallets` 白名单；后端 activity-source import 在带 wallets 时会使用相同 marketPattern 与阈值重新校验指定钱包，只导入通过校验的钱包，避免宽泛扫描误导入。Leader 研究页“政治推荐动作”卡片新增“预览导入”和“确认导入”，确认前弹窗说明导入后仍只是研究候选，不会启用真钱跟单。验证：`LeaderResearchActivitySourceImportServiceTest`、`LeaderResearchControllerTest`、`LeaderResearchPoliticsSourceDiagnoseServiceTest` 通过；`frontend npm run build` 通过。下一轮可接 `FAST_WATCH_REVIEW` -> 禁用试跟配置候选输出。
+
+> 2026-06-29 fast watch review iteration: `FAST_WATCH_REVIEW` 推荐动作已接入禁用试跟人工复核入口。政治来源诊断现在会把已进入 `TRIAL_READY` 且 copyable PnL 为正的政治候选推荐为 `FAST_WATCH_REVIEW`；Leader 研究页“政治推荐动作”卡片显示 FAST_WATCH_REVIEW 数量，并在候选已是 `TRIAL_READY` 时提供“创建禁用试跟”按钮。按钮会先拉取候选详情，再复用现有 approval 弹窗；后端 `LeaderResearchApprovalService` 仍强制只允许 `TRIAL_READY` 且 `enabled=false` 的禁用配置。验证：`LeaderResearchPoliticsSourceDiagnoseServiceTest`、`LeaderResearchApprovalServiceTest`、`LeaderResearchControllerTest` 通过；`frontend npm run build` 通过。下一轮可补 `SCORE_REFRESH` targeted 推进，或实际运行 politics 推荐闭环观察是否出现 TRIAL_READY 候选。
+
+> 2026-06-29 score refresh iteration: `SCORE_REFRESH` 推荐动作已接入 targeted 评分与晋级闭环。`LeaderResearchActivityScoreRequest` 与 `LeaderResearchPaperPromotionRequest` 均新增 `candidateIds`；activity score 在 targeted 模式下只聚合指定候选的 activity metrics，paper promotion 在 targeted 模式下只从指定候选中筛选晋级。Leader 研究页“政治推荐动作”卡片新增“刷新评分晋级”，执行 targeted `/activity-score/run` 后 targeted `/activity-score/promote-paper`，并展示晋级结果。该动作仅推进 DISCOVERED/CANDIDATE -> PAPER，不创建跟单配置、不启用真钱。验证：`LeaderResearchActivityScoringServiceTest`、`LeaderResearchPaperPromotionServiceTest`、`LeaderResearchControllerTest` 通过；`frontend npm run build` 通过。政治推荐闭环已具备 `IMPORT_NOW -> SCORE_REFRESH -> PAPER_PROCESS -> FAST_WATCH_REVIEW -> 禁用试跟人工确认` 的可操作路径。
+
+> 2026-06-29 context update: “现在 leader 样本量够了吗”的结论已写入第二目标上下文：当前不能用 Leader 管理页约 555/600+ 记录或 1000+ 原始候选来判断目标完成。原始发现广度已够，但可实盘决策的有效样本仍不够；有效样本必须同时具备分类稳定、足够 PAPER 交易、正 copyable PnL、BUY/SELL 样本完整、过滤率可接受、风险标记干净、观察期达标。第二目标保持 `ACTIVE`，后续日报与 loop 优先跟踪 `paper_trade_count >= 20` 候选数、politics/finance FAST_WATCH/TRIAL_READY 数、禁用试跟候选数，而不是继续把原始钱包数作为核心 KPI。
+
+> 2026-06-29 recommendation execution iteration: 政治推荐闭环已从前端逐按钮编排沉到后端可复用接口。新增 `POST /api/copy-trading/leader-research/politics-source/execute-recommendations`，默认 `dryRun=true`，会重新运行 politics diagnose，按 `IMPORT_NOW`、`SCORE_REFRESH`、`PAPER_PROCESS`、`FAST_WATCH_REVIEW` 生成 plannedActions；只有 `dryRun=false` 才会真实执行导入、activity score、promote-paper、paper/process 与 targeted paper score。Leader 研究页新增“后端预演闭环”按钮和结果摘要。验证：`LeaderResearchPoliticsRecommendationExecutionServiceTest`、`LeaderResearchControllerTest` 通过；`frontend npm run build` 通过；`bootJar` 通过；后端已用 `run_backend_local.sh` 重启到 `:8000` 且 health `UP`。未带 token 调用新接口返回“缺少认证令牌”，说明路由进入鉴权链，后续可在页面登录态下直接预演。
+
+> 2026-06-29 recommendation execution snapshot iteration: 后端政治推荐闭环新增持久化快照能力。新增 Flyway `V70__create_leader_recommendation_execution.sql` 与 `leader_research_recommendation_execution` 表，记录每次 dry-run/live 的 actions、recommendationCounts、plannedActions、resultSummary、status、duration 与错误信息；新增 `POST /politics-source/recommendation-executions/latest` 返回最近一次快照。Leader 研究页加载并展示“最近后端闭环”，点击“后端预演闭环”后会刷新快照。验证：`LeaderResearchPoliticsRecommendationExecutionServiceTest`、`LeaderResearchControllerTest` 通过；`frontend npm run build` 通过；`bootJar` 通过；后端用 `run_backend_local.sh` 干净重启，Java PID `88098`，health `UP`，启动日志显示 Flyway 正常完成且服务启动。
+
+> 2026-06-29 scheduled recommendation dry-run iteration: 第二目标推荐闭环已接入安全定时任务。`LeaderResearchJobService` 新增 `scheduledRecommendationDryRun()`，按 `leader.research.recommendation-dry-run.fixed-delay-ms` 默认每小时触发；必须同时满足 `leader.research.enabled=true`、`leader.research.recommendation-dry-run.enabled=true` 且第二目标 `ACTIVE`，否则跳过。该任务只调用 `execute(dryRun=true)`，仅写 `leader_research_recommendation_execution` 快照，不导入钱包、不推进 PAPER、不创建或启用真钱配置。验证：`LeaderResearchJobServiceTest` 覆盖 goal inactive 跳过与 goal active dry-run 执行；相关后端测试、`frontend npm run build`、`bootJar`、`git diff --check` 均通过；后端已重启，Java PID `21439`，health `UP`。
+
+> 2026-06-29 optimization daily recommendation snapshot iteration: 优化日报页已接入第二目标推荐闭环快照。`/optimization-daily` 现在会拉取 `latestPoliticsRecommendationExecution()`，新增“第二目标推荐闭环”卡片，展示最近 dry-run/live 的 IMPORT_NOW、SCORE_REFRESH、PAPER_PROCESS、FAST_WATCH_REVIEW 数量、模式、耗时、最近运行时间与 plannedActions；当 PAPER_PROCESS 和 FAST_WATCH_REVIEW 均为 0 时，页面明确提示 politics 高质量样本仍不足。验证：`frontend npm run build` 通过；`git diff --check` 通过。下一轮可在登录态页面观察快照是否随定时任务刷新，并把连续多轮 0 产出的情况转成更明确的补源/加厚动作。
+
+> 2026-06-29 second-goal context lock: 关于“当前 leader 样本量是否足够”的结论已作为第二目标执行口径固定下来：leader 管理页约 555 条、研究候选 1000+ 或 scanner 原始钱包数都只能证明发现广度，不代表可跟单样本充足。第二目标完成度以后只看有效决策样本：politics/finance 优先，`paper_trade_count >= 20`，`copyable_pnl > 0`，BUY/SELL 样本完整，过滤率和风险标记可接受，观察期达标，并最终进入 FAST_WATCH/TRIAL_READY/禁用试跟候选。当前判断仍是“原始池足够、可实盘决策样本不足”，所以第二目标继续 `ACTIVE`；下一轮 loop 应优先加厚 politics/finance PAPER 样本、追踪连续薄样本轮次、把 TRIAL_READY 从 0 推出来。
+
+> 2026-06-29 recommendation history iteration: 第二目标推荐闭环从“最近一次快照”升级为“最近多轮趋势”。新增 `POST /api/copy-trading/leader-research/politics-source/recommendation-executions/recent`，返回最近 politics recommendation execution 快照；`/optimization-daily` 会展示最近 5 轮快照，并计算连续 `PAPER_PROCESS=0` 且 `FAST_WATCH_REVIEW=0` 的薄样本轮次。这样每日检查能判断问题是偶发无候选，还是连续多轮 politics 高质量样本不足。验证：`frontend npm run build` 通过；后端 `LeaderResearchPoliticsRecommendationExecutionServiceTest` 与 `LeaderResearchControllerTest` 通过。下一轮如果连续薄样本轮次 >=3，应优先补 politics/finance 来源或调整 targeted paper/process 目标，而不是继续追原始钱包数。
+
+> 2026-06-29 startup recommendation dry-run iteration: 数据库审计发现 `leader_research_recommendation_execution` 为 0，优化日报无法获得第二目标推荐闭环证据。原因是 recommendation dry-run 被完整扫链开关 `leader.research.enabled` 一起拦住；该 dry-run 只是安全计划快照，不应依赖昂贵全量扫链开关。本轮改为只受 `leader.research.recommendation-dry-run.enabled` 与第二目标 `ACTIVE` 控制，并新增启动后短延迟 dry-run（默认 30 秒，可用 `LEADER_RESEARCH_RECOMMENDATION_DRY_RUN_STARTUP_DELAY_MS` 调整，负数关闭）。重启验证后已写入 2 条 `SUCCESS` politics dry-run 快照，最新快照显示 `IMPORT_NOW=1`、`FAST_WATCH_REVIEW=3`、`PAPER_PROCESS=0`；复核候选为 `153`、`2361`、`786`。优化日报会直接展示复核候选 ID 与待导入钱包短地址。验证：后端相关测试、`frontend npm run build`、`bootJar`、`git diff --check` 均通过，后端 health `UP`。
+
+> 2026-06-29 recommendation review detail iteration: 第二目标日报从“只知道 FAST_WATCH_REVIEW 候选 ID”升级为“可直接复核候选质量”。`LeaderResearchPoliticsRecommendationExecutionSnapshotDto` 新增 `reviewCandidates`，由 latest/recent 快照中的 `FAST_WATCH_REVIEW` candidateIds 复用 `LeaderResearchService` 的 `trialReadiness` 逻辑生成，包含 wallet、category、score、paper trade count、copyable PnL、filtered ratio、max drawdown、research state、观察小时、稳定高分次数和 blockers。`/optimization-daily` 的“第二目标推荐闭环”卡片新增“复核候选质量”展示，不用再查数据库才能判断候选是否值得人工复核。运行态重启后快照增至 9 条，最新 `FAST_WATCH_REVIEW=3`；验证：`LeaderResearchPoliticsRecommendationExecutionServiceTest`、`LeaderResearchJobServiceTest`、`LeaderResearchControllerTest`、`frontend npm run build`、`bootJar`、`git diff --check` 均通过，后端 health `UP`。
+
+> 2026-06-29 review decision UI iteration: 优化日报的“复核候选质量”继续升级为“可决策提示”。前端根据后端 `trialReadiness.blockers` / `fastWatchBlockers` 与 filtered ratio，为每个 FAST_WATCH_REVIEW 候选展示动作标签：`可试跟复核`、`等观察期`、`复核过滤率`、`等评分稳定` 或 `人工复核`，并展示对应原因。这让 `#2361/#786/#153` 这类候选不会因为 score/PnL 好看而被误认为已可真钱跟单；日报能明确指出是等待 7 天观察期，还是需要人工检查过滤率偏高。验证：`frontend npm run build`、`git diff --check` 通过，后端 health `UP`。
+
+> 2026-06-29 disabled trial approval entry iteration: 优化日报的 FAST_WATCH_REVIEW 候选卡片已接入“创建禁用试跟”人工确认入口，但只在 `trialReadiness.level=TRIAL_READY` 时可点击；当前 FAST_WATCH/PAPER 候选仍显示 `等待TRIALREADY`，不能直接创建配置。点击后会复用 `leaderResearch.detail` 重新拉候选详情并再次确认 `researchState=TRIAL_READY`，再选择账户调用 `approval/create-disabled-trial-config(confirm=true)`；后端仍强制只创建 `enabled=false` 的试跟配置。页面弹窗明确提示“不会自动真钱跟单，需要手动启用”。验证：`frontend npm run build`、`git diff --check` 通过，后端 health `UP`。
+
+> 2026-06-29 finance source diagnose context update: 第二目标上下文已补充“politics/finance 双主线”诊断口径。此前 recommendation diagnose 与页面闭环偏 politics，容易让第二目标偏离“政治、金融为主，占比 80%”的策略。本轮将 `LeaderResearchPoliticsSourceDiagnoseRequest` 增加 `category`，诊断服务按 `LeaderResearchMarketCategoryPatterns.patternFor(category)` 支持 `politics` / `finance`，Leader 研究页新增“金融来源诊断”卡片，展示 finance 的 IMPORT_NOW、SCORE_REFRESH、PAPER_PROCESS、FAST_WATCH_REVIEW 分布、扫描钱包数、可导入、PAPER、高分干净和 bucket。当前边界：finance 仅进入诊断与可观测层，不自动导入、不自动推进 PAPER、不创建跟单配置；下一轮应把 recommendation execution snapshot 从 politics-only 扩展为 primary categories（politics + finance）安全 dry-run。验证：`LeaderResearchPoliticsSourceDiagnoseServiceTest`、`LeaderResearchControllerTest`、`frontend npm run build`、`bootJar`、`git diff --check` 均通过；后端重启后 health `UP`。
+
+> 2026-06-30 primary category recommendation snapshot iteration: 第二目标推荐闭环已从 politics-only 快照升级为 primary categories 安全快照。`LeaderResearchPoliticsRecommendationExecutionService` 现在按 `request.diagnose.category` 保存实际 category，并提供 `executePrimaryCategoryDryRuns()`、`latestPrimaryCategoryExecutions()`、`recentPrimaryCategoryExecutions()`；`LeaderResearchJobService` 的 scheduled/startup dry-run 会同时跑 politics 与 finance。为保留安全边界，finance 即使被请求 live 也强制落为 dry-run，不执行导入、activity score、paper/process 或跟单配置创建。新增 `/primary-source/recommendation-executions/latest` 与 `/primary-source/recommendation-executions/recent`，优化日报改为展示 politics/finance 汇总计数、类别快照标签与主策略复核候选质量。运行态验证：重启后 health `UP`，数据库 `leader_research_recommendation_execution` 新增 `id=24 politics SUCCESS dry_run=1 FAST_WATCH_REVIEW=3` 与 `id=25 finance SUCCESS dry_run=1 FAST_WATCH_REVIEW=2`。验证：相关后端测试、`frontend npm run build`、`bootJar`、`git diff --check` 均通过。
+
+> 2026-06-30 category bottleneck observability iteration: 优化日报继续补强第二目标按类别判断能力。数据库已连续产出 primary category 快照，最新 `id=26 politics SUCCESS dry_run=1 IMPORT_NOW=4 FAST_WATCH_REVIEW=3`、`id=27 finance SUCCESS dry_run=1 FAST_WATCH_REVIEW=2`。本轮将 `/optimization-daily` 的“第二目标推荐闭环”卡片新增 politics/finance 独立状态块，分别展示类别健康标签、连续薄样本轮次、IMPORT/SCORE/PAPER/REVIEW 计数和最近快照 id/时间；这样后续能直接判断是政治、金融哪一侧缺来源或缺 PAPER 深度，而不是用合并薄样本数字误判主策略。验证：`frontend npm run build` 通过。
+
+> 2026-07-01 trial readiness ETA iteration: 当前高质量候选已跑出但仍未 TRIAL_READY：`#2361` score `88.59`、paper trades `21`、copyable PnL `8.9957`、filtered ratio `0.4324`，距离 7 天 PAPER 观察期约还差 `39.5h`；`#153/#786` 观察期已满足但 score 仍低于 80。为减少人工猜测，本轮将 `LeaderResearchTrialReadinessDto` 增加 `requiredAgeHours`、`hoursUntilTrialReady`、`trialReadyAt`，并在 `/leader-research` 快速观察/优先候选和 `/optimization-daily` 复核候选质量中展示“还差 Xh / 预计时间”。验证：后端相关测试、`npm run build`、`bootJar`、`git diff --check` 通过；后端已重启，health `UP`。
+
+> 2026-07-04 second-goal live loop iteration: 按推荐闭环执行 politics `PAPER_PROCESS` 安全推进。当前后端 health `UP`，最近完整 Leader Research run `#7` 成功完成，研究池为 `DISCOVERED=621`、`PAPER=24244`、`TRIAL_READY=7`、`COOLDOWN=22549`；启动本轮前推荐快照 `#164` 显示 politics 有 `PAPER_PROCESS=1`（candidate `1755`）和 `FAST_WATCH_REVIEW=2`（`153/786`）。通过正式鉴权 API 执行 `dryRun=false, actions=[PAPER_PROCESS]` 后，candidate `1755` 纸跟从 `12` 笔推进到 `31` 笔，`processed=19`、`filtered=1`、`failed=0`，copyable PnL 仍为正 `3.0084`，score 更新为 `83.7762`，filtered ratio `0.1143`。随后 `/paper/trial-ready/recheck` dry-run 确认 `1755` `READY_TO_PROMOTE`，真实 recheck 后 candidate `1755` 进入 `TRIAL_READY`，全局 `TRIAL_READY` 从 `7` 增至 `8`，leader pool `#51` 已同步为 `RESEARCH_TRIAL_READY`。`786` 仍卡 `stable_high_scores_below_3`，`153` 仍卡 `score_below_80`。下一轮：优先复核 `1755` 是否创建禁用试跟配置；继续等待/刷新 `786` 稳定高分窗口；对 `153` 不推进真钱，只继续观察或降权。
+
 ## Active Goal Override
 
 当前执行优先级：
@@ -6652,3 +6708,596 @@
   - 建立最小可评分样本缺口统计，区分差几笔交易可进入 PAPER。
 - 针对 `HARD_RISK=65`：
   - 输出排除样本列表，避免进入跟单模板。
+
+### Iteration 101 - Leader Research 页面 timeout 修复（2026-07-01）
+
+**症状**：
+- `http://localhost:3000/leader-research` 出现 timeout / connection reset。
+
+**定位**：
+- 前端 `127.0.0.1:3000` 秒开，后端 `127.0.0.1:8000/actuator/health` 为 `UP`。
+- 当前 shell 环境存在 `ALL_PROXY=socks5://127.0.0.1:7890`，但 `NO_PROXY` 只有 `127.0.0.1`，不包含 `localhost` / `::1`。
+- `localhost` 请求被代理接走后 reset；补 `NO_PROXY=localhost,127.0.0.1,::1` 后 `localhost:3000/leader-research` 秒开。
+- 页面首屏加载原先使用 `Promise.all` 串联多个接口，任一接口慢或失败会拖垮整页。
+
+**代码变更**：
+- `frontend/vite.config.ts`：
+  - dev proxy 默认后端从 `localhost` 改为 `127.0.0.1`。
+  - bridge runtime 默认目标从 `localhost` 改为 `127.0.0.1`。
+  - dev server 增加 IPv6/loopback 监听配置。
+- `frontend/package.json`：
+  - dev 命令从 `--host 0.0.0.0` 改为 `--host ::`。
+- `frontend/src/pages/LeaderResearch.tsx`：
+  - 首屏主请求改为 `Promise.allSettled`。
+  - candidates / summary / funnel / fast-watch / source-health / latest execution / accounts 分别降级处理。
+  - politics/finance diagnose 改为后台补齐，避免诊断慢导致整页 timeout。
+
+**验证**：
+- `npm run build` 通过。
+- `./gradlew compileKotlin` 通过。
+- 已重启前端 tmux 会话 `polyhermes-frontend`。
+- 当前前端监听：IPv6 `*:3000`。
+- 当前后端监听：`:8000`，health 为 `UP`。
+- `127.0.0.1:3000/leader-research` 返回 200。
+- `NO_PROXY=localhost,127.0.0.1,::1` 下 `localhost:3000/leader-research` 返回 200。
+
+**结论**：
+- 本次 timeout 的根因之一是本机代理绕过规则缺失 `localhost` / `::1`。
+- 代码侧已增强页面容错，后续单个慢接口不会让整个 Leader Research 页面不可用。
+
+### Iteration 102 - 真实试跟 Leader 复核与源新鲜度修正（2026-07-03）
+
+**目标**：
+- 执行“先复核、只推进到可试跟、不直接真钱启用”的下一步。
+
+**执行**：
+- 后端升级到包含 `POST /api/copy-trading/leader-research/paper/trial-ready/recheck` 的版本。
+- 首次 dry-run 发现 13 个候选，其中 12 个数值上满足 TRIAL_READY 门槛，candidate 2361 还差约 13 小时观察期。
+- 正式执行复核后，状态机把这批候选转入 `COOLDOWN`，原因为 `source_stale_over_72h`。
+
+**根因**：
+- 这些候选的 PAPER 交易与分数表现达标，但 `last_source_seen_at` 已超过 72 小时。
+- 状态机要求 source freshness，避免把近期无活跃来源的 leader 推进到真实试跟。
+- 复核接口 dry-run 原本没有把 `source_stale_over_72h` 纳入阻断条件，导致预览误报 `READY_TO_PROMOTE`。
+
+**代码修正**：
+- `LeaderResearchTrialReadyRecheckService` 增加 72 小时 source freshness 检查。
+- dry-run 阻断原因现在包含 `source_stale_over_72h`。
+- 自动候选筛选不再选择 stale source 候选。
+
+**验证**：
+- `./gradlew compileKotlin` 通过。
+- `./gradlew bootJar` 通过。
+- 后端已重启，`/actuator/health` 为 `UP`。
+- 修复后复核 dry-run：
+  - `scannedCount=0`
+  - `selectedCount=0`
+  - `advancedCount=0`
+- 数据库当前状态：
+  - `PAPER=33221`
+  - `DISCOVERED=706`
+  - `COOLDOWN=28`
+  - `CANDIDATE=4`
+  - 满足全部 TRIAL_READY 且 source 72h 内新鲜的候选：`0`
+- Bridge 状态：
+  - `ready=true`
+  - `logged_in=true`
+  - 钱包识别正常
+  - 当前仍有余额不足风险：available `0.8400 USDC`，固定 1 USDC BUY 可能失败。
+
+**后续动作已启动**：
+- 已启动一次异步 Leader Research 刷新：
+  - `runId=7`
+  - `status=RUNNING`
+  - `triggerType=MANUAL`
+  - `dryRun=false`
+- 历史完整运行耗时约 6-7 小时，runId=7 完成后再执行 trial-ready recheck，并只为 TRIAL_READY 创建禁用试跟配置。
+
+### Iteration 103 - 第二目标恢复推进与 source freshness 修正（2026-07-06）
+
+**目标**：
+- 恢复并推进第二目标：持续发现、评分、入池高质量 Polymarket leader，政治/金融优先。
+
+**当前状态核验**：
+- 后端 `8000`、Bridge `8080`、前端 `3000` 均在运行。
+- runId=7 已完成：
+  - `status=SUCCESS`
+  - started=`2026-07-03 00:40:00`
+  - finished=`2026-07-03 11:14:13`
+  - duration=`38052.9s`
+- 当前研究池：
+  - `PAPER=24243`
+  - `COOLDOWN=22549`
+  - `DISCOVERED=623`
+  - `TRIAL_READY=8`
+  - `CANDIDATE=4`
+
+**发现的问题**：
+- `activity-source/import` 原先用“导入发生时间”写入 `last_source_seen_at`。
+- 这会把实际最近交易发生在数天前的钱包误标成“今天 source fresh”，污染 `TRIAL_READY` freshness 判断。
+- 例子：定向 dry-run 显示 candidate 1755 最近 politics event 为 `2026-06-26` 左右，但旧逻辑可能在导入时写成当前时间。
+
+**代码修正**：
+- `LeaderResearchActivitySourceImportService`：
+  - 创建/更新候选时，`lastSourceSeenAt` 改为 `source.getLastEventTime() ?: now`。
+  - 当 source evidence 相同但 `lastSourceSeenAt` 与 `lastEventTime` 不一致时，不再 `SKIP_EXISTING`，而是执行 `UPDATE` 修正 freshness。
+- `LeaderResearchActivitySourceImportServiceTest`：
+  - 新增测试：导入使用 activity source 的 `lastEventTime` 作为 freshness marker。
+  - 新增测试：evidence 未变但 freshness 错误时会更新。
+- `LeaderResearchControllerTest`：
+  - 补齐 `LeaderResearchTrialReadyRecheckService` mock，恢复测试编译。
+
+**执行结果**：
+- 重跑 politics/finance activity-source import：
+  - selectedTotal=`72`
+  - createdTotal=`0`
+  - updatedTotal=`72`
+  - politics=`66`
+  - finance=`6`
+- 修正后真实 source fresh 72h：
+  - `PAPER=55`
+  - `COOLDOWN=1`
+  - `DISCOVERED=2`
+  - `TRIAL_READY=0`
+- 这说明当前没有 source 72h 内新鲜且已达 TRIAL_READY 的候选。
+
+**候选推进**：
+- 重评分 `DISCOVERED/CANDIDATE`：
+  - scanned=`627`
+  - scored=`627`
+- 推进 PAPER：
+  - candidate `48059` politics，score=`100`，进入 `PAPER`
+  - candidate `48058` politics，score=`100`，进入 `PAPER`
+- 纸跟处理：
+  - candidate `48059`：processed=`10`，filtered=`0`，copyablePnl=`0.0316953385`
+  - candidate `48058`：processed=`10`，filtered=`0`，copyablePnl=`0.0452088466`
+- 纸跟重评分：
+  - candidate `48059`：research-copyability score=`75.06383223`
+  - candidate `48058`：research-copyability score=`75.09085950`
+- trial-ready dry-run：
+  - 两者均 `WAIT_OBSERVATION`
+  - blocker=`score_below_80`
+  - `hoursUntilTrialReady=168`
+
+**后台动作**：
+- 已启动新一轮完整异步 Leader Research：
+  - `runId=8`
+  - `status=RUNNING`
+  - `triggerType=MANUAL`
+  - `dryRun=false`
+- 后端重启后健康检查：`/actuator/health=UP`
+- Bridge 状态：`ready=true`，`logged_in=true`
+
+**验证**：
+- `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivitySourceImportServiceTest` 通过。
+- `./gradlew test --tests com.wrbug.polymarketbot.controller.copytrading.research.LeaderResearchControllerTest` 通过。
+- `./gradlew bootJar` 通过。
+
+**下一步**：
+- 等 runId=8 完成后执行：
+  - `trial-ready/recheck`
+  - 对 fresh 且 80+ 的候选只创建禁用试跟配置，不自动真钱启用。
+- finance 来源仍偏弱：本轮 fresh activity source 只有 6 个 finance，应继续补 Falcon / Polymarket Analytics / Dune / 官方榜单 finance 源。
+
+### Iteration 104 - 运行中保护与分类推荐一致性修复（2026-07-06）
+
+**目标**：
+- 在 runId=8 完整后台研究运行期间，继续推进第二目标，但避免并发写入冲突。
+
+**运行状态**：
+- 后端 `8000` health=`UP`。
+- Bridge `8080`：`ready=true`，`logged_in=true`。
+- 前端 `3000` 正常监听。
+- runId=8：
+  - `status=RUNNING`
+  - `triggerType=MANUAL`
+  - `dryRun=false`
+  - 当前仅运行约 5.5 分钟，历史完整 run 需要数小时。
+- 因 runId=8 正在写研究数据，本轮没有并发执行新的 `paper/process`、`promotion` 或 `trial-ready/recheck` 写操作。
+
+**只读诊断**：
+- politics 30d diagnose：
+  - scannedWallets=`500`
+  - passImportCriteria=`111`
+  - unknownWallets=`20`
+  - paperWallets=`429`
+  - cleanHighWallets=`2`
+  - recommendations：`FAST_WATCH_REVIEW=3`，`WATCH_SOURCE=5`
+  - 主要候选仍为 `1755`、`153`、`786`。
+- finance 30d diagnose：
+  - scannedWallets=`500`
+  - passImportCriteria=`25`
+  - unknownWallets=`55`
+  - paperWallets=`345`
+  - cleanHighWallets=`0`
+  - recommendations 原本只有 `FAST_WATCH_REVIEW=1`，但该候选是 `153`，其 source evidence 为 politics-only。
+
+**发现的问题**：
+- 诊断服务按请求分类筛选 market activity，但已有候选的 PAPER score 是全局分数，不是分类分数。
+- 这会导致 politics-only 的 candidate `153` 在 finance diagnose 中被误推荐为 finance FAST_WATCH_REVIEW。
+- 这与第二目标“分领域挑 leader，政治/金融优先但不混淆分类”的原则冲突。
+
+**代码修正**：
+- `LeaderResearchPoliticsSourceDiagnoseService`：
+  - 从 `source_evidence` 解析 `category:politics|finance|sports|crypto`。
+  - 已存在候选如果 evidence category 不包含当前诊断分类，增加 `category_mismatch` blocker。
+  - 已存在候选如果包含多个主分类证据，增加 `mixed_category_evidence` blocker。
+  - `category_mismatch` / `mixed_category_evidence` 会阻止 `FAST_WATCH_REVIEW`、`PAPER_PROCESS`、`SCORE_REFRESH`、`WATCH_SOURCE` 推荐。
+- `LeaderResearchPoliticsSourceDiagnoseServiceTest`：
+  - 新增 finance diagnose 不推荐 politics-only existing candidate 的测试。
+  - 新增 matching finance evidence 可推荐的测试。
+
+**验证**：
+- `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPoliticsSourceDiagnoseServiceTest` 通过。
+- `./gradlew bootJar` 通过。
+
+**部署状态**：
+- 已构建新 jar。
+- 暂未重启后端，因为 runId=8 正在运行，重启会中断本轮完整研究。
+
+**下一步**：
+- 等 runId=8 完成后：
+  - 重启后端，让分类推荐一致性修复生效。
+  - 重新跑 politics/finance diagnose。
+  - 执行 `trial-ready/recheck`。
+  - finance 若仍无 clean high，应优先补 Falcon / Polymarket Analytics / Dune / official leaderboard finance 源。
+
+### Iteration 105 - Finance 源瓶颈只读审计与 stale 推荐修正（2026-07-06）
+
+**目标**：
+- 在 runId=8 继续运行期间，不做并发写入，继续定位 finance 高质量候选不足的真实瓶颈。
+
+**运行状态**：
+- runId=8 仍为 `RUNNING`。
+- 后端 health=`UP`，Bridge `ready=true` / `logged_in=true`，前端 `3000` 正常。
+- 因 runId=8 正在写研究数据，本轮不执行 `paper/process`、`promotion`、`trial-ready/recheck` 写操作。
+
+**finance 源只读审计**：
+- finance market 近 72 小时 activity：
+  - events=`130626`
+  - wallets=`11216`
+  - markets=`4691`
+  - latest event=`2026-07-06 18:20:03`
+- 结论：finance 源不是“没数据”，而是高活跃钱包大多已经在研究池，且多数被风控/质量评分压住。
+
+**finance top 钱包交叉结果**：
+- Top finance activity 钱包大多已在 `leader_research_candidate`。
+- 高分但处于 COOLDOWN 的候选：
+  - `1612` score=`96.9595`，trades=`59`，copyablePnl=`10.7818`，filteredRatio=`0.2027`
+  - `1609` score=`92.5445`，trades=`59`，copyablePnl=`6.7485`，filteredRatio=`0.0635`
+  - `1611` score=`91.4244`，trades=`81`，copyablePnl=`6.9493`，filteredRatio=`0.1649`
+  - `1606` score=`91.3291`，trades=`65`，copyablePnl=`6.2983`，filteredRatio=`0.0845`
+  - `1618` score=`86.6819`，trades=`53`，copyablePnl=`6.0314`，filteredRatio=`0.1587`
+  - `1610` score=`83.9841`，trades=`96`，copyablePnl=`4.1349`，filteredRatio=`0.0857`
+  - `1629` score=`83.6326`，trades=`22`，copyablePnl=`3.2052`，filteredRatio=`0.1852`
+- 这些候选早前因 `source_stale_over_72h` 进入 COOLDOWN；若 runId=8 用真实最新 activity 刷新 source，状态机应可在 cooldown 到期后恢复。
+
+**发现的问题**：
+- 诊断服务会推荐 `TRIAL_READY` / PAPER 候选，但原先不检查 `last_source_seen_at` 是否在 72 小时内。
+- 这会让页面推荐 `1755` 这类 TRIAL_READY 但 source stale 的候选，后续 recheck 又拦截，造成“推荐可试跟但实际不能试跟”的误导。
+
+**代码修正**：
+- `LeaderResearchPoliticsSourceDiagnoseService`：
+  - 查询字段增加 `c.last_source_seen_at`。
+  - 已存在候选如果 source 超过 72 小时未刷新，增加 `source_stale_over_72h` blocker。
+  - `source_stale_over_72h` 会阻止 `FAST_WATCH_REVIEW`、`PAPER_PROCESS`、`SCORE_REFRESH`、`WATCH_SOURCE` 推荐。
+- `LeaderResearchPoliticsSourceDiagnoseServiceTest`：
+  - 新增 stale TRIAL_READY 不推荐测试。
+
+**验证**：
+- `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPoliticsSourceDiagnoseServiceTest` 通过。
+- `./gradlew bootJar` 通过。
+
+**部署状态**：
+- 新 jar 已构建。
+- 暂不重启后端，避免中断 runId=8。
+
+**下一步**：
+- 等 runId=8 完成后重启后端，使分类一致性和 stale 推荐修复生效。
+- 重跑 politics/finance diagnose，预期：
+  - stale `1755` 不应再作为 FAST_WATCH_REVIEW 推荐。
+  - politics-only `153` 不应再出现在 finance 推荐中。
+- 对恢复出 COOLDOWN 的 finance 高分候选执行 `trial-ready/recheck`，只推进到禁用试跟候选，不自动真钱启用。
+
+### Iteration 106 - Fresh72 候选筛选与送钱型 leader 风险修复（2026-07-06）
+
+**目标**：
+- 在 runId=8 仍运行期间继续推进第二目标，使用只读数据筛出近 72 小时可继续观察的政治/金融候选。
+- 修复 `Alienated-Invite` 这类高频长尾 BUY-only / 0 胜率负 PnL leader 被误判为可跟的风险。
+
+**运行状态**：
+- runId=8 仍为 `RUNNING`，开始时间 `2026-07-06 18:13:21`，当前仅有 `RUN_STARTED` 事件。
+- 后端 health=`UP`，Bridge `ready=true` / `logged_in=true` / `copy_trading_account_id=2` / `copy_trading_config_count=3`。
+- 因 runId=8 持续运行且后端 CPU 较高，本轮不重启后端、不强杀事务、不执行可能冲突的大批量写入。
+
+**送钱型 leader 风险修复**：
+- `Alienated-Invite` / leaderId=`91` / wallet=`0x0ec7f0eac6c47934ab9b41e02bd8f15a5f4293d1`：
+  - 近样本 activity=`36`，markets=`34`，BUY=`36`，SELL=`0`。
+  - Leader 管理统计：trades=`66`，winRate=`0%`，totalPnl=`-5.1105`。
+  - 当前没有绑定任何 copy_trading 配置。
+- 结论：不是正常调仓型 leader，而是 sports/esports 长尾铺单或低质量扫单；应避免跟单。
+- 代码修复：
+  - `LeaderResearchRepositories.aggregateActivityMetricsForCandidateIds` targeted 重评分改为统计钱包全部 activity，不再只看 `usable_for_discovery=1`，避免漏掉 BUY-only 风险。
+  - `LeaderResearchScoreAdapterService` 对 `trades >= 10 && winRate <= 0 && pnl < 0` 增加 `zero_win_rate` / `zero_win_negative_pnl`，并将标签封顶到 `RISKY`。
+  - 新增 `LeaderResearchScoreAdapterServiceTest.zero win rate negative pnl leader is blocked as risky`。
+- 即时数据矫正：
+  - `copy_trading_leaders.id=91` 已更新为 `research_tag=RISKY`、`research_score=14.99`、risk flags=`negative_pnl,zero_win_rate,zero_win_negative_pnl,category_low_priority`。
+  - `leader_research_candidate.id=1479` 暂未矫正成功，原因是 runId=8 运行期间发生锁等待；待 runId=8 完成后重评分会按新逻辑处理。
+
+**Fresh72 数据池**：
+- 近 72 小时 activity source：
+  - events=`225187`
+  - wallets=`32986`
+  - markets=`12475`
+  - latest=`2026-07-06 18:34:04`
+- 数据源活跃，当前瓶颈不是“无数据”，而是需要更快把 fresh 候选推进到 PAPER / recheck。
+
+**Politics clean fresh 候选**：
+- `48058` / wallet=`0x6009ad0a19dbd62684f872fa0e8c31bae28332ac`
+  - state=`PAPER`，score=`75.0909`，riskFlags=`NULL`
+  - fresh72 metrics：events=`31`，markets=`6`，BUY=`16`，SELL=`15`，safeRatio=`1.0000`，tailRatio=`0.0000`
+  - paper session：tradeCount=`10`，copyablePnl=`0.0452`，filteredRatio=`0`，ageHours 仍不足 7 天
+- `48059` / wallet=`0x57529760adb4b96dcb63e692d3e912a11f728139`
+  - state=`PAPER`，score=`75.0638`，riskFlags=`NULL`
+  - fresh72 metrics：events=`39`，markets=`7`，BUY=`26`，SELL=`13`，safeRatio=`1.0000`，tailRatio=`0.0000`
+  - paper session：tradeCount=`10`，copyablePnl=`0.0317`，filteredRatio=`0`，ageHours 仍不足 7 天
+- 结论：这两个是新鲜、干净、但观察期不足的 politics 候选，应进入持续观察，不应立即真钱试跟。
+
+**Finance fresh 高分候选**：
+- `1660` / wallet=`0x5b6331e7ff0831a3fe2ed12004747db1a9c911a4`
+  - state=`COOLDOWN`，score=`95.1471`，riskFlags=`NULL`
+  - fresh72 metrics：events=`83`，markets=`72`，BUY=`75`，SELL=`8`，safeRatio=`0.7349`，tailRatio=`0.1687`
+  - paper session：tradeCount=`23`，copyablePnl=`13.5642`，filteredRatio=`0.3235`
+- `1609` / wallet=`0x674887d1ac838099a48b629dff53f25b7b87ee08`
+  - state=`COOLDOWN`，score=`92.5445`，riskFlags=`NULL`
+  - fresh72 metrics：events=`769`，markets=`561`，BUY=`227`，SELL=`542`，safeRatio=`0.8778`，tailRatio=`0.0065`
+  - paper session：tradeCount=`59`，copyablePnl=`6.7485`，filteredRatio=`0.0635`
+- `1606` / wallet=`0xdf7930e89a2c47560165331863c31deca0733dcd`
+  - state=`COOLDOWN`，score=`91.3291`，riskFlags=`NULL`
+  - fresh72 metrics：events=`981`，markets=`509`，BUY=`481`，SELL=`500`，safeRatio=`0.7727`，tailRatio=`0.0591`
+  - paper session：tradeCount=`65`，copyablePnl=`6.2983`，filteredRatio=`0.0845`
+- 结论：这三位 finance 是当前最值得优先恢复/复核的高质量候选；状态仍在 COOLDOWN，需要 runId=8 完成后用最新 source freshness 和状态机推进。
+
+**接口状态**：
+- `/api/copy-trading/leader-research/politics-source/diagnose` 返回 500。
+- `/api/copy-trading/leader-research/paper/trial-ready/recheck` 带 JWT 仍返回 500。
+- 当前后端进程仍是 runId=8 运行中的旧 jar；新 jar 已通过 `bootJar`，但未重启加载。
+
+**验证**：
+- `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.leaders.LeaderResearchScoreAdapterServiceTest --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityScoringServiceTest` 通过。
+- `./gradlew bootJar` 通过。
+- DB 验证 `copy_trading_leaders.id=91` 已为 `RISKY`。
+
+**下一步**：
+- 等 runId=8 完成后，重启 backend 加载新 jar。
+- 立即重试 diagnose / trial-ready recheck 接口。
+- 对 `48058`、`48059` 保持 PAPER 观察，补充连续评分窗口。
+- 对 `1660`、`1609`、`1606` 做 cooldown 恢复与 trial-ready recheck；只允许进入禁用试跟配置人工复核，不自动启用真钱跟单。
+
+### Iteration 107 - 高买低卖 Leader 跟单硬拦截与扫链卡死修复（2026-07-06）
+
+**问题确认**：
+- `Alienated-Invite` 这类记录不是可复制的正常调仓，当前特征是高频 BUY、缺少 SELL、0 胜率、负 PnL。
+- 这类 leader 即使有“调仓/套利/长尾铺单”的外观，对小额跟单账户也不可复制：我们拿不到 leader 的全局仓位、对冲腿、成交时序优势，只会复制到高买低卖或无退出的亏损腿。
+
+**已落地规则**：
+- `copy_trading_leaders.id=91` 已保持 `research_tag=RISKY`，`research_score=14.9900`，risk flags=`negative_pnl,zero_win_rate,zero_win_negative_pnl,category_low_priority`。
+- BUY 跟单新增硬拦截：
+  - leader `research_tag=RISKY` 时禁止 BUY。
+  - leader 命中 `zero_win_negative_pnl`、`zero_win_rate`、`buy_only_no_exit`、`negative_pnl` 时禁止 BUY。
+  - SELL 不拦截，避免已有仓位无法退出。
+- Bridge/Magic fallback 路径也加同一条硬拦截，避免无 CLOB API 凭证时绕过普通过滤器直接发到 Web Bridge。
+- 被拦截订单会写入 `filtered_order`，`filterType=LEADER_RESEARCH_RISK`，可在过滤订单/跟单可见性链路中追踪。
+
+**扫链卡死修复**：
+- runId=`8` 长时间 `RUNNING`，jstack 显示卡在 `LeaderResearchSourceService.discoverFromPersistedActivity`。
+- 根因：
+  - 对 fresh activity wallet 逐个执行 `leaderRepository.findByLeaderAddress(wallet)`。
+  - 对每个 wallet 又执行 `events.count { it.normalizedWallet == wallet }`，形成 O(N²) 计数。
+- 修复：
+  - activity-derived fresh count 改为一次 `groupingBy().eachCount()`。
+  - leader 查询新增 `findLatestByLeaderAddressIn()` 批量查询。
+  - 空 wallet 列表增加保护，避免 `IN ()`。
+- runId=`8` 已标记 `FAILED`，`error_class=LeaderResearchRestartedForOptimization`，用于清理旧卡死状态。
+
+**服务状态**：
+- backend 已重启加载新 jar，PID=`96084`，health=`UP`。
+- Bridge 直接状态：`ready=true`，`logged_in=true`，`copy_trading_account_id=2`，`copy_trading_config_count=3`。
+- 后端业务接口 `.env` 内旧 `POLYHERMES_TOKEN` 已过期，接口认证验证需刷新登录 token 后继续。
+
+**验证**：
+- `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchSourceServiceTest --tests com.wrbug.polymarketbot.service.copytrading.leaders.LeaderResearchScoreAdapterServiceTest` 通过。
+- `./gradlew bootJar` 通过。
+
+**下一步**：
+- 刷新页面登录 token 后重跑 leader research diagnose / trial-ready recheck。
+- 重点检查 `LEADER_RESEARCH_RISK` 是否在过滤订单中可见。
+- 继续推进 `1660`、`1609`、`1606` finance 候选的 cooldown 恢复与试跟候选复核。
+
+### Iteration 108 - 第二目标 TRIAL_READY 主类别推进与分类同步修复（2026-07-07）
+
+**运行状态**：
+- backend health=`UP`。
+- Bridge status=`ready=true`、`logged_in=true`、`copy_trading_account_id=2`、`copy_trading_config_count=3`。
+- 最近完整 Leader Research run：`#10 SUCCESS`，研究池状态为 `COOLDOWN=33563`、`PAPER=22618`、`CANDIDATE=3494`、`DISCOVERED=558`、`TRIAL_READY=14`（本轮 recheck 后提升到 18）。
+
+**诊断结论**：
+- politics diagnose：`scannedWallets=500`、`passImportCriteria=119`、`unknownWallets=12`、`existingWallets=488`、`paperWallets=397`、`cleanHighWallets=3`、`eligibleForPaperNow=0`。
+- finance diagnose：`scannedWallets=500`、`passImportCriteria=29`、`unknownWallets=43`、`existingWallets=457`、`paperWallets=287`、`cleanHighWallets=1`、`eligibleForPaperNow=0`。
+- 新来源短期瓶颈仍是 `score_below_75`、`small_sample`、`safe_ratio_below`、`tail_ratio_above`、`mixed_category_evidence` 和 source stale；本轮不强行放宽阈值。
+
+**推进动作**：
+- 对候选 `1606`、`1609`、`1660`、`2361` 先做 targeted trial-ready dry-run，四个均满足 `meets_trial_ready_threshold`。
+- 执行真实 recheck 后：
+  - `1606` finance：score=`91.3291`，paper trades=`65`，copyable PnL=`6.2983`，进入 `TRIAL_READY`。
+  - `1609` finance：score=`92.5445`，paper trades=`59`，copyable PnL=`6.7485`，进入 `TRIAL_READY`。
+  - `1660` finance：score=`95.1471`，paper trades=`23`，copyable PnL=`13.5642`，进入 `TRIAL_READY`。
+  - `2361` politics：score=`91.5049`，paper trades=`21`，copyable PnL=`8.9957`，进入 `TRIAL_READY`。
+- `340`、`617` 虽高分高 PnL，但命中 `mixed_category_evidence`，继续阻塞，不推进试跟。
+- `1351` score=`80` 但 copyable PnL 为负，继续阻塞。
+
+**修复**：
+- `LeaderResearchPoolMappingService` 新增分类同步：
+  - 新建 research leader 时从 `sourceEvidence` 提取单一分类并写入 `copy_trading_leaders.category`。
+  - 已存在 leader 若 category 为空，则补写研究分类。
+  - 已有人工/非空 category 不覆盖，避免改坏人工配置。
+- 新增 `LeaderResearchPoolMappingServiceTest` 覆盖：
+  - 空 category leader 会从 finance evidence 补分类。
+  - 已有 sports category 不被 finance evidence 覆盖。
+
+**验证**：
+- `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPoolMappingServiceTest --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPaperPromotionServiceTest --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchTrialReadyRecheckServiceTest` 通过。
+- `./gradlew bootJar` 通过，并已重启 backend。
+- 分类同步后 `TRIAL_READY` 分布：
+  - finance=`11`
+  - politics=`3`
+  - sports=`3`
+  - crypto=`1`
+  - 主类别 politics+finance=`14/18=77.8%`，接近目标 80%，且所有 `TRIAL_READY` 已无 NULL category。
+
+**下一步**：
+- 继续扩大 politics/finance 新来源；当前 diagnose 显示没有新的 `eligibleForPaperNow`，下一轮应优先用 external analytics / official leaderboard / Polyburg / market peer 扩来源，而不是继续重复同一 activity source。
+- 对 `TRIAL_READY` finance 候选只创建禁用试跟配置供人工确认，不自动启用真钱跟单。
+
+### Iteration 109 - 第二目标官方榜单增量导入与首批 PAPER 验证（2026-07-07 22:43 CST）
+
+**运行状态**：
+- backend health=`UP`。
+- Bridge status=`ready=true`、`logged_in=true`、`copy_trading_account_id=2`、`copy_trading_config_count=3`。
+- `.env` 内 `POLYHERMES_TOKEN` 已过期，本轮使用 `JWT_SECRET` + `admin tokenVersion=9` 生成本地临时 token 调用后端接口。
+
+**基线**：
+- 研究池初始状态：`COOLDOWN=33563`、`PAPER=22614`、`CANDIDATE=3494`、`DISCOVERED=558`、`TRIAL_READY=18`。
+- `TRIAL_READY` 分类分布维持：finance=`11`、politics=`3`、sports=`3`、crypto=`1`。
+
+**来源 dry-run**：
+- `official-leaderboard/import` dry-run：
+  - fetchedTotal=`500`
+  - dedupedTotal=`354`
+  - expected created=`102`
+  - expected updated=`252`
+  - politics `WEEK/MONTH x PNL/VOL` 均正常返回；finance `WEEK PNL=100`，其余 finance 页返回 50。
+- `market-peer-source/import` dry-run：
+  - selectedTotal=`25`
+  - created=`0`
+  - updated=`25`
+  - politics=`13`，finance=`12`
+  - 结论：market peer 当前主要用于增强已有候选证据，不是新增主来源。
+
+**执行动作**：
+- 正式执行 `official-leaderboard/import`：
+  - fetchedTotal=`500`
+  - dedupedTotal=`354`
+  - created=`102`
+  - updated=`252`
+  - skippedInvalid=`0`
+- 正式执行 `market-peer-source/import`：
+  - selectedTotal=`25`
+  - created=`0`
+  - updated=`25`
+- 执行 `activity-score/run`，`states=[DISCOVERED,CANDIDATE]`，`force=true`：
+  - scanned=`4154`
+  - scored=`4154`
+  - categoryCounts：politics=`440`、finance=`280`、sports=`61`、crypto=`45`、unknown=`3328`
+  - 主要风险：`small_sample=3677`、`unknown_category=3328`、`low_market_diversity=1998`、`scanner_pool_unverified=583`、`buy_only_no_exit=447`
+- 执行 `activity-score/promote-paper` dry-run，`minScore=75`，只允许 politics/finance：
+  - 可选 finance=`29`
+  - politics=`0`
+- 正式执行 `promote-paper`：
+  - 受 `LIVE_PROMOTE_BATCH_LIMIT=8` 限制，本轮推进 8 个 finance 候选进入 `PAPER`
+  - candidateIds：`2334,2287,2250,2240,2201,2194,2193,2189`
+- 对上述 8 个执行 `paper/process`：
+  - processed=`6`
+  - filtered=`2`
+  - failed=`0`
+- 对上述 8 个执行 `paper/score`：
+  - scored=`8`
+- 对上述 8 个执行 `paper/trial-ready/recheck`：
+  - advanced=`0`
+  - 全部保持 `PAPER`
+  - 阻塞原因均为 `score_below_80`
+
+**验证结果**：
+- 研究池结束状态：
+  - `COOLDOWN=33563`
+  - `PAPER=22622`
+  - `CANDIDATE=3486`
+  - `DISCOVERED=660`
+  - `TRIAL_READY=18`
+- 本轮新增候选：`102`，均为官方榜单导入后落入 `DISCOVERED`。
+- 本轮 PAPER 净增：`8`。
+- 本轮 TRIAL_READY 未新增，属于预期安全拦截：首批 8 个虽然 activity 预筛高分，但 paper 后样本太小或过滤率高，综合评分只有 `50-59`，不应进入试跟。
+- 8 个新 PAPER 中表现：
+  - 正 copyable PnL：`2240=1.85714392`、`2250=1.56410199`、`2287=0.25`、`2189=0.000001`
+  - 负 copyable PnL：`2194=-1.999998`
+  - 过滤率高：`2334`、`2201`
+- `paper/fast-watch` 返回 total=`24`、trialReadyCount=`24`、fastWatchCount=`0`。注意：fast-watch 分类显示与 `copy_trading_leaders.category` 存在不一致迹象，例如 candidate `360` 数据库 leader category 为 `crypto`，fast-watch 显示为 `politics`；下一轮需要统一 fast-watch 分类来源，避免页面误导。
+
+**下一步**：
+- 继续执行剩余 21 个 finance 可晋级候选的分批 PAPER 推进，每批不超过 8 个，并保持 `score_below_80` 不放宽。
+- 增加一轮 politics 专项来源扩展：官方榜单已能新增，但 activity/paper 合格不足；下一轮优先引入 Polyburg/Polymarket Analytics politics 钱包或放宽来源采样，不放宽交易风控。
+- 修复/统一 `fast-watch` 展示分类与 leader/category/evidence 分类来源，避免 `TRIAL_READY` 分类误报。
+
+### Iteration 110 - fast-watch 分类修复与第二批 finance PAPER 推进（2026-07-07 22:57 CST）
+
+**修复目标**：
+- 上轮发现 `paper/fast-watch` 会把 candidate `360` 显示为 politics，但数据库中其绑定 leader category 为 `crypto`。
+- 根因是 `LeaderResearchService.categoryOf(candidate)` 只按 `sourceEvidence` 中最后一个 `category:` 推断分类，未优先使用已绑定的 `copy_trading_leaders.category`。
+
+**代码修复**：
+- `LeaderResearchService` 增加批量 leader 分类上下文：
+  - `leaderCategoriesById(candidates)` 批量读取绑定 leader 的正式分类。
+  - `categoryOf(candidate, leaderCategoriesById)` 优先使用非空且合法的 `copy_trading_leaders.category`。
+  - `fastWatch`、`funnel`、`funnelCandidatesByIds` 统一使用上述分类上下文。
+- 新增 `LeaderResearchServiceTest`：
+  - 覆盖 source evidence 为 `category:politics`，但绑定 leader category 为 `crypto` 时，fast-watch 必须在 crypto 查询中展示，且不能出现在 politics 查询中。
+
+**验证**：
+- `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchServiceTest --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPaperPromotionServiceTest --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchTrialReadyRecheckServiceTest` 通过。
+- `./gradlew bootJar` 通过。
+- backend 已重启，health=`UP`。
+- Bridge status=`ready=true`、`logged_in=true`、`copy_trading_account_id=2`、`copy_trading_config_count=3`。
+- 运行态 fast-watch 验证：
+  - `categories=[politics,finance]` 返回 total=`23`，不再包含 candidate `360`。
+  - `categories=[crypto]` 返回 total=`1`，candidate `360` category=`crypto`，score=`100`。
+
+**第二批 PAPER 推进**：
+- `promote-paper` dry-run 后剩余可晋级 finance 候选为 `21`，politics 仍为 `0`。
+- 正式推进第二批 8 个 finance 候选进入 PAPER：
+  - `2165,2147,2143,2140,1825,1754,433,2067`
+- `paper/process`：
+  - processed=`5`
+  - filtered=`3`
+  - failed=`0`
+- `paper/score`：
+  - scored=`8`
+- `paper/trial-ready/recheck`：
+  - advanced=`0`
+  - 全部保持 `PAPER`
+  - 阻塞原因均为 `score_below_80`
+
+**第二批结果明细**：
+- `2165`：score=`59`，trade=`1`，copyable PnL=`-1`，risk=`small_sample`
+- `2147`：score=`59`，trade=`1`，copyable PnL=`0`，risk=`small_sample`
+- `2143`：score=`59`，trade=`1`，copyable PnL=`0`，risk=`small_sample`
+- `2140`：score=`50`，filtered=`1`，filteredRatio=`1`，risk=`high_filtered_ratio,small_sample`
+- `1825`：score=`59`，trade=`1`，copyable PnL=`0.81818195`，risk=`small_sample`
+- `1754`：score=`59`，trade=`1`，copyable PnL=`-1`，risk=`small_sample`
+- `433`：score=`50`，filtered=`2`，filteredRatio=`1`，risk=`high_filtered_ratio,small_sample`
+- `2067`：score=`50`，filtered=`1`，filteredRatio=`1`，risk=`high_filtered_ratio,small_sample`
+
+**研究池状态**：
+- `COOLDOWN=33563`
+- `PAPER=22630`
+- `CANDIDATE=3478`
+- `DISCOVERED=660`
+- `TRIAL_READY=18`
+
+**结论**：
+- 分类误报已修复，页面/接口更适合用于“分领域筛 leader”。
+- 第二批 finance 高 activity 预筛候选在 paper 后仍被安全阈值拦截，说明当前阈值能防止小样本、高过滤率或负收益候选进入真钱试跟。
+- 目标仍未完成：距离 1000+ 高质量 leader 和更多 politics/finance TRIAL_READY 仍需继续扩来源与观察样本。
+
+**下一步**：
+- 继续推进剩余 13 个 finance 可晋级候选进入 PAPER，仍按每批不超过 8 个执行。
+- politics 方向不能只依赖 official leaderboard/activity，目前可晋级为 0；下一轮优先接 Polyburg/Polymarket Analytics politics 钱包或提升 politics source 采样覆盖。

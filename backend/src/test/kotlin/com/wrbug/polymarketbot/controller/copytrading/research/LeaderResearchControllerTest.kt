@@ -5,11 +5,18 @@ import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchFastWatchRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchFastWatchResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchFunnelCandidateDto
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardDiagnoseRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardDiagnoseResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPaperScoreRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsRecommendationExecuteRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsRecommendationExecutionSnapshotDto
+import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsRecommendationExecuteResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPoliticsSourceDiagnoseResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPolymarketAnalyticsCopyTradeImportRequest
@@ -17,9 +24,14 @@ import com.wrbug.polymarketbot.dto.LeaderResearchPolymarketAnalyticsCopyTradeImp
 import com.wrbug.polymarketbot.dto.LeaderResearchPolyburgTelegramImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPolyburgTelegramImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchRunRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchTrialReadinessDto
+import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
 import com.wrbug.polymarketbot.entity.LeaderResearchRun
+import com.wrbug.polymarketbot.entity.LeaderResearchScore
+import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.enums.LeaderResearchTriggerType
 import com.wrbug.polymarketbot.enums.ErrorCode
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperCandidateProcessingSummary
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperProcessingResult
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalConfirmRequiredException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalService
@@ -33,6 +45,7 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMapper
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMarketPeerSourceImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardDiagnoseService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPoliticsRecommendationExecutionService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPoliticsSourceDiagnoseService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPolymarketAnalyticsCopyTradeImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPolyburgTelegramImportService
@@ -41,10 +54,12 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScorin
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPaperPromotionService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperTradingService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchTrialReadyRecheckService
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito
 import org.springframework.context.support.StaticMessageSource
+import java.math.BigDecimal
 
 class LeaderResearchControllerTest {
     private val jobService: LeaderResearchJobService = mock()
@@ -60,8 +75,10 @@ class LeaderResearchControllerTest {
     private val officialLeaderboardImportService: LeaderResearchOfficialLeaderboardImportService = mock()
     private val officialLeaderboardDiagnoseService: LeaderResearchOfficialLeaderboardDiagnoseService = mock()
     private val politicsSourceDiagnoseService: LeaderResearchPoliticsSourceDiagnoseService = mock()
+    private val politicsRecommendationExecutionService: LeaderResearchPoliticsRecommendationExecutionService = mock()
     private val paperTradingService: LeaderPaperTradingService = mock()
     private val paperPromotionService: LeaderResearchPaperPromotionService = mock()
+    private val trialReadyRecheckService: LeaderResearchTrialReadyRecheckService = mock()
     private val scoringService: LeaderResearchScoringService = mock()
     private val approvalService: LeaderResearchApprovalService = mock()
     private val mapper: LeaderResearchMapper = mock()
@@ -79,8 +96,10 @@ class LeaderResearchControllerTest {
         officialLeaderboardImportService = officialLeaderboardImportService,
         officialLeaderboardDiagnoseService = officialLeaderboardDiagnoseService,
         politicsSourceDiagnoseService = politicsSourceDiagnoseService,
+        politicsRecommendationExecutionService = politicsRecommendationExecutionService,
         paperTradingService = paperTradingService,
         paperPromotionService = paperPromotionService,
+        trialReadyRecheckService = trialReadyRecheckService,
         scoringService = scoringService,
         approvalService = approvalService,
         mapper = mapper,
@@ -174,7 +193,28 @@ class LeaderResearchControllerTest {
     @Test
     fun `paper process passes targeted candidate ids`() {
         Mockito.`when`(paperTradingService.processPaperCandidates(runId = null, batchSize = 5, candidateIds = listOf(42L, 43L)))
-            .thenReturn(LeaderPaperProcessingResult(processed = 4, filtered = 1, failed = 0))
+            .thenReturn(
+                LeaderPaperProcessingResult(
+                    processed = 4,
+                    filtered = 1,
+                    failed = 0,
+                    candidateSummaries = listOf(
+                        LeaderPaperCandidateProcessingSummary(
+                            candidateId = 42L,
+                            wallet = "0x4242424242424242424242424242424242424242",
+                            processed = 4,
+                            filtered = 1,
+                            failed = 0,
+                            beforeTradeCount = 18,
+                            afterTradeCount = 22,
+                            beforeFilteredCount = 2,
+                            afterFilteredCount = 3,
+                            beforeCopyablePnl = BigDecimal("1.25"),
+                            afterCopyablePnl = BigDecimal("2.75")
+                        )
+                    )
+                )
+            )
 
         val response = controller.processPaper(
             LeaderResearchPaperProcessRequest(batchSize = 5, candidateIds = listOf(42L, 43L))
@@ -184,7 +224,87 @@ class LeaderResearchControllerTest {
         assertEquals(4, response.body!!.data!!.processed)
         assertEquals(1, response.body!!.data!!.filtered)
         assertEquals(5, response.body!!.data!!.effectiveBatchSize)
+        val summary = response.body!!.data!!.candidateSummaries.single()
+        assertEquals(42L, summary.candidateId)
+        assertEquals(4, summary.tradeCountDelta)
+        assertEquals(1, summary.filteredCountDelta)
+        assertEquals("1.5", summary.copyablePnlDelta)
         Mockito.verify(paperTradingService).processPaperCandidates(runId = null, batchSize = 5, candidateIds = listOf(42L, 43L))
+    }
+
+    @Test
+    fun `paper score can target candidate ids without full paper scan`() {
+        val candidate = LeaderResearchCandidate(
+            id = 42L,
+            normalizedWallet = "0x1111111111111111111111111111111111111111",
+            researchState = LeaderResearchState.PAPER
+        )
+        val score = LeaderResearchScore(
+            candidateId = 42L,
+            scoreVersion = LeaderResearchScoringService.SCORE_VERSION,
+            totalScore = BigDecimal("90")
+        )
+        Mockito.`when`(researchService.findCandidatesByIds(listOf(42L, 404L))).thenReturn(listOf(candidate))
+        Mockito.`when`(scoringService.scoreCandidate(candidate, runId = null)).thenReturn(score)
+
+        val response = controller.scorePaper(
+            LeaderResearchPaperScoreRequest(candidateIds = listOf(42L, 404L), maxCandidates = 10)
+        )
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(1, response.body!!.data!!.scoredCount)
+        assertEquals(true, response.body!!.data!!.targeted)
+        assertEquals(listOf(42L, 404L), response.body!!.data!!.requestedCandidateIds)
+        assertEquals(listOf(404L), response.body!!.data!!.missingCandidateIds)
+        assertEquals(1, response.body!!.data!!.effectiveCandidateCount)
+        assertEquals(10, response.body!!.data!!.maxCandidates)
+        assertEquals(false, response.body!!.data!!.truncated)
+        Mockito.verify(researchService).findCandidatesByIds(listOf(42L, 404L))
+        Mockito.verify(scoringService).scoreCandidate(candidate, runId = null)
+    }
+
+    @Test
+    fun `paper fast watch delegates to research service`() {
+        val request = LeaderResearchFastWatchRequest(categories = listOf("finance"), limit = 5)
+        val result = LeaderResearchFastWatchResponse(
+            total = 1,
+            fastWatchCount = 1,
+            trialReadyCount = 0,
+            categories = listOf("finance"),
+            criteria = "criteria",
+            items = listOf(
+                LeaderResearchFunnelCandidateDto(
+                    candidateId = 42L,
+                    wallet = "0x1111111111111111111111111111111111111111",
+                    category = "finance",
+                    score = "90",
+                    tradeCount = 25,
+                    filteredRatio = "0.1",
+                    copyablePnl = "5",
+                    maxDrawdown = "0",
+                    researchState = "PAPER",
+                    trialReadiness = LeaderResearchTrialReadinessDto(
+                        eligible = false,
+                        level = "FAST_WATCH",
+                        label = "快速观察",
+                        blockers = listOf("PAPER 观察不足 7 天：当前 96 小时"),
+                        fastWatchBlockers = emptyList(),
+                        ageHours = 96,
+                        stableHighScoreCount = 3,
+                        requiredStableHighScoreCount = 3
+                    )
+                )
+            ),
+            generatedAt = 123L
+        )
+        Mockito.`when`(researchService.fastWatch(request)).thenReturn(result)
+
+        val response = controller.fastWatch(request)
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(1, response.body!!.data!!.fastWatchCount)
+        assertEquals("FAST_WATCH", response.body!!.data!!.items.first().trialReadiness.level)
+        Mockito.verify(researchService).fastWatch(request)
     }
 
     @Test
@@ -211,6 +331,149 @@ class LeaderResearchControllerTest {
         assertEquals(0, response.body!!.code)
         assertEquals(10, response.body!!.data!!.scannedWallets)
         Mockito.verify(politicsSourceDiagnoseService).diagnose(request)
+    }
+
+    @Test
+    fun `politics recommendation execution delegates to service`() {
+        val request = LeaderResearchPoliticsRecommendationExecuteRequest(dryRun = true, maxPaperProcess = 3)
+        val result = LeaderResearchPoliticsRecommendationExecuteResponse(
+            dryRun = true,
+            generatedAt = 123L,
+            recommendationCounts = mapOf("PAPER_PROCESS" to 2),
+            plannedActions = emptyList(),
+            recommendations = emptyList()
+        )
+        Mockito.`when`(politicsRecommendationExecutionService.execute(request)).thenReturn(result)
+
+        val response = controller.executePoliticsRecommendations(request)
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(true, response.body!!.data!!.dryRun)
+        assertEquals(2, response.body!!.data!!.recommendationCounts["PAPER_PROCESS"])
+        Mockito.verify(politicsRecommendationExecutionService).execute(request)
+    }
+
+    @Test
+    fun `latest politics recommendation execution delegates to service`() {
+        val result = LeaderResearchPoliticsRecommendationExecutionSnapshotDto(
+            id = 7L,
+            category = "politics",
+            status = "SUCCESS",
+            dryRun = true,
+            actions = listOf("IMPORT_NOW"),
+            recommendationCounts = mapOf("IMPORT_NOW" to 1),
+            plannedActions = emptyList(),
+            resultSummary = emptyMap(),
+            errorMessage = null,
+            startedAt = 100L,
+            finishedAt = 120L,
+            durationMs = 20L
+        )
+        Mockito.`when`(politicsRecommendationExecutionService.latestPoliticsExecution()).thenReturn(result)
+
+        val response = controller.latestPoliticsRecommendationExecution()
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(7L, response.body!!.data!!.id)
+        assertEquals("SUCCESS", response.body!!.data!!.status)
+        Mockito.verify(politicsRecommendationExecutionService).latestPoliticsExecution()
+    }
+
+    @Test
+    fun `recent politics recommendation executions delegates to service`() {
+        val result = listOf(
+            LeaderResearchPoliticsRecommendationExecutionSnapshotDto(
+                id = 8L,
+                category = "politics",
+                status = "SUCCESS",
+                dryRun = true,
+                actions = listOf("PAPER_PROCESS"),
+                recommendationCounts = mapOf("PAPER_PROCESS" to 0),
+                plannedActions = emptyList(),
+                resultSummary = emptyMap(),
+                errorMessage = null,
+                startedAt = 200L,
+                finishedAt = 220L,
+                durationMs = 20L
+            )
+        )
+        Mockito.`when`(politicsRecommendationExecutionService.recentPoliticsExecutions()).thenReturn(result)
+
+        val response = controller.recentPoliticsRecommendationExecutions()
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(1, response.body!!.data!!.size)
+        assertEquals(8L, response.body!!.data!!.first().id)
+        Mockito.verify(politicsRecommendationExecutionService).recentPoliticsExecutions()
+    }
+
+    @Test
+    fun `latest primary category recommendation executions delegates to service`() {
+        val result = listOf(
+            LeaderResearchPoliticsRecommendationExecutionSnapshotDto(
+                id = 9L,
+                category = "finance",
+                status = "SUCCESS",
+                dryRun = true,
+                actions = listOf("PAPER_PROCESS"),
+                recommendationCounts = mapOf("PAPER_PROCESS" to 2),
+                plannedActions = emptyList(),
+                resultSummary = emptyMap(),
+                errorMessage = null,
+                startedAt = 300L,
+                finishedAt = 320L,
+                durationMs = 20L
+            ),
+            LeaderResearchPoliticsRecommendationExecutionSnapshotDto(
+                id = 8L,
+                category = "politics",
+                status = "SUCCESS",
+                dryRun = true,
+                actions = listOf("FAST_WATCH_REVIEW"),
+                recommendationCounts = mapOf("FAST_WATCH_REVIEW" to 1),
+                plannedActions = emptyList(),
+                resultSummary = emptyMap(),
+                errorMessage = null,
+                startedAt = 200L,
+                finishedAt = 220L,
+                durationMs = 20L
+            )
+        )
+        Mockito.`when`(politicsRecommendationExecutionService.latestPrimaryCategoryExecutions()).thenReturn(result)
+
+        val response = controller.latestPrimaryCategoryRecommendationExecutions()
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(listOf("finance", "politics"), response.body!!.data!!.map { it.category })
+        Mockito.verify(politicsRecommendationExecutionService).latestPrimaryCategoryExecutions()
+    }
+
+    @Test
+    fun `recent primary category recommendation executions delegates to service`() {
+        val result = listOf(
+            LeaderResearchPoliticsRecommendationExecutionSnapshotDto(
+                id = 10L,
+                category = "finance",
+                status = "SUCCESS",
+                dryRun = true,
+                actions = listOf("PAPER_PROCESS"),
+                recommendationCounts = mapOf("PAPER_PROCESS" to 1),
+                plannedActions = emptyList(),
+                resultSummary = emptyMap(),
+                errorMessage = null,
+                startedAt = 400L,
+                finishedAt = 420L,
+                durationMs = 20L
+            )
+        )
+        Mockito.`when`(politicsRecommendationExecutionService.recentPrimaryCategoryExecutions()).thenReturn(result)
+
+        val response = controller.recentPrimaryCategoryRecommendationExecutions()
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(1, response.body!!.data!!.size)
+        assertEquals("finance", response.body!!.data!!.first().category)
+        Mockito.verify(politicsRecommendationExecutionService).recentPrimaryCategoryExecutions()
     }
 
     @Test

@@ -20,9 +20,14 @@ class LeaderResearchPaperPromotionService(
     fun promote(request: LeaderResearchPaperPromotionRequest): LeaderResearchPaperPromotionResponse {
         val minScore = request.minScore.toBigDecimalOrNull() ?: BigDecimal("80")
         val now = System.currentTimeMillis()
-        val candidates = candidateRepository.findByResearchStateIn(
-            listOf(LeaderResearchState.DISCOVERED, LeaderResearchState.CANDIDATE)
-        )
+        val eligibleStates = listOf(LeaderResearchState.DISCOVERED, LeaderResearchState.CANDIDATE)
+        val targetIds = request.candidateIds.distinct().filter { it > 0 }
+        val targeted = targetIds.isNotEmpty()
+        val candidates = if (targeted) {
+            candidateRepository.findAllById(targetIds).filter { it.researchState in eligibleStates }
+        } else {
+            candidateRepository.findByResearchStateIn(eligibleStates)
+        }
         val plans = listOf(
             "politics" to request.politicsLimit,
             "finance" to request.financeLimit,

@@ -7,6 +7,8 @@ import com.wrbug.polymarketbot.dto.LeaderResearchCandidateDto
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchEventDto
+import com.wrbug.polymarketbot.dto.LeaderResearchFastWatchRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchFastWatchResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchFunnelCandidateDto
 import com.wrbug.polymarketbot.dto.LeaderResearchFunnelCategoryDto
 import com.wrbug.polymarketbot.dto.LeaderResearchFunnelResponse
@@ -48,6 +50,30 @@ class LeaderResearchService(
         return candidateRepository.findByResearchStateIn(states)
     }
 
+    fun findCandidatesByIds(candidateIds: Collection<Long>): List<LeaderResearchCandidate> {
+        val ids = candidateIds.distinct().filter { it > 0 }
+        if (ids.isEmpty()) return emptyList()
+        val order = ids.withIndex().associate { it.value to it.index }
+        return candidateRepository.findAllById(ids)
+            .sortedBy { candidate -> order[candidate.id] ?: Int.MAX_VALUE }
+    }
+
+    fun funnelCandidatesByIds(candidateIds: Collection<Long>): List<LeaderResearchFunnelCandidateDto> {
+        val candidates = findCandidatesByIds(candidateIds)
+        if (candidates.isEmpty()) return emptyList()
+        val order = candidateIds.distinct().withIndex().associate { it.value to it.index }
+        val sessionsByCandidateId = paperSessionRepository.findLatestByCandidateIds(
+            candidates.mapNotNull { it.id }
+        ).associateBy { it.candidateId }
+        val leaderCategoriesById = leaderCategoriesById(candidates)
+        return candidates.mapNotNull { candidate ->
+            val candidateId = candidate.id ?: return@mapNotNull null
+            val session = sessionsByCandidateId[candidateId] ?: return@mapNotNull null
+            val category = categoryOf(candidate, leaderCategoriesById)
+            funnelCandidate(candidate, session, category)
+        }.sortedBy { item -> order[item.candidateId] ?: Int.MAX_VALUE }
+    }
+
     fun summary(): LeaderResearchSummaryDto {
         return LeaderResearchSummaryDto(
             discoveredCount = candidateRepository.countByResearchState(LeaderResearchState.DISCOVERED),
@@ -73,6 +99,7 @@ class LeaderResearchService(
             .takeIf { it.isNotEmpty() }
             ?.let { paperSessionRepository.findLatestByCandidateIds(it).associateBy { session -> session.candidateId } }
             .orEmpty()
+        val leaderCategoriesById = leaderCategoriesById(candidates)
         val cleanHighScore = paperCandidates.filter { candidate ->
             val session = candidate.id?.let { latestSessionsByCandidateId[it] }
             candidate.score != null &&
@@ -84,9 +111,9 @@ class LeaderResearchService(
         }
         val categoryNames = listOf("politics", "finance", "sports", "crypto")
         val categories = categoryNames.map { category ->
-            val categoryCandidates = candidates.filter { categoryOf(it) == category }
-            val categoryPaper = paperCandidates.filter { categoryOf(it) == category }
-            val categoryClean = cleanHighScore.filter { categoryOf(it) == category }
+            val categoryCandidates = candidates.filter { categoryOf(it, leaderCategoriesById) == category }
+            val categoryPaper = paperCandidates.filter { categoryOf(it, leaderCategoriesById) == category }
+            val categoryClean = cleanHighScore.filter { categoryOf(it, leaderCategoriesById) == category }
             val top = categoryClean.maxByOrNull { it.score ?: BigDecimal.ZERO }
             LeaderResearchFunnelCategoryDto(
                 category = category,
@@ -100,7 +127,7 @@ class LeaderResearchService(
         val allocationHealth = buildAllocationHealth(categories)
         val priorityCandidates = cleanHighScore
             .sortedWith(
-                compareBy<LeaderResearchCandidate> { allocationRank(it, allocationHealth.primaryDeficitCount) }
+                compareBy<LeaderResearchCandidate> { allocationRank(it, allocationHealth.primaryDeficitCount, leaderCategoriesById) }
                     .thenByDescending { it.score ?: BigDecimal.ZERO }
                     .thenByDescending { candidate -> candidate.id?.let { latestSessionsByCandidateId[it]?.copyablePnl } ?: BigDecimal.ZERO }
             )
@@ -108,10 +135,11 @@ class LeaderResearchService(
             .mapNotNull { candidate ->
                 val candidateId = candidate.id ?: return@mapNotNull null
                 val session = latestSessionsByCandidateId[candidateId] ?: return@mapNotNull null
+                val category = categoryOf(candidate, leaderCategoriesById)
                 LeaderResearchFunnelCandidateDto(
                     candidateId = candidateId,
                     wallet = candidate.normalizedWallet,
-                    category = categoryOf(candidate),
+                    category = category,
                     score = candidate.score.format4(),
                     tradeCount = session.tradeCount,
                     filteredRatio = session.filteredRatio.format4(),
@@ -192,7 +220,20 @@ class LeaderResearchService(
 
     private fun allocationRank(candidate: LeaderResearchCandidate, primaryDeficitCount: Int): Int {
         if (primaryDeficitCount <= 0) return 0
-        return if (categoryOf(candidate) in PRIMARY_CATEGORIES) 0 else 1
+        return allocationRank(categoryOf(candidate))
+    }
+
+    private fun allocationRank(
+        candidate: LeaderResearchCandidate,
+        primaryDeficitCount: Int,
+        leaderCategoriesById: Map<Long, String>
+    ): Int {
+        if (primaryDeficitCount <= 0) return 0
+        return allocationRank(categoryOf(candidate, leaderCategoriesById))
+    }
+
+    private fun allocationRank(category: String): Int {
+        return if (category in PRIMARY_CATEGORIES) 0 else 1
     }
 
     private fun buildTrialReadiness(
@@ -204,6 +245,9 @@ class LeaderResearchService(
         val score = candidate.score ?: BigDecimal.ZERO
         val ageMs = (now - session.startedAt).coerceAtLeast(0)
         val ageHours = ageMs / HOUR_MS
+        val requiredAgeHours = PAPER_MIN_AGE_MS / HOUR_MS
+        val hoursUntilTrialReady = ((PAPER_MIN_AGE_MS - ageMs).coerceAtLeast(0) + HOUR_MS - 1) / HOUR_MS
+        val trialReadyAt = session.startedAt + PAPER_MIN_AGE_MS
         val totalTrades = session.tradeCount + session.filteredCount
         val unknownRatio = if (session.openExposure > BigDecimal.ZERO) {
             session.unknownValuationExposure.safeDivide(session.openExposure)
@@ -252,7 +296,10 @@ class LeaderResearchService(
             fastWatchBlockers = fastWatchBlockers,
             ageHours = ageHours,
             stableHighScoreCount = stableHighScoreCount,
-            requiredStableHighScoreCount = TRIAL_READY_STABLE_SCORE_WINDOW
+            requiredStableHighScoreCount = TRIAL_READY_STABLE_SCORE_WINDOW,
+            requiredAgeHours = requiredAgeHours,
+            hoursUntilTrialReady = hoursUntilTrialReady,
+            trialReadyAt = trialReadyAt
         )
     }
 
@@ -299,6 +346,69 @@ class LeaderResearchService(
             list = mapper.candidateDtos(content, listContext(content)),
             total = page.totalElements,
             summary = summary()
+        )
+    }
+
+    fun fastWatch(request: LeaderResearchFastWatchRequest): LeaderResearchFastWatchResponse {
+        val categories = request.categories
+            .map { it.trim().lowercase() }
+            .filter { it in CATEGORY_NAMES }
+            .distinct()
+            .ifEmpty { PRIMARY_CATEGORIES.toList() }
+        val limit = request.limit.coerceIn(1, 100)
+        val candidates = candidateRepository.findByResearchStateIn(
+            listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
+        )
+        val latestSessionsByCandidateId = candidates
+            .mapNotNull { it.id }
+            .takeIf { it.isNotEmpty() }
+            ?.let { paperSessionRepository.findLatestByCandidateIds(it).associateBy { session -> session.candidateId } }
+            .orEmpty()
+        val leaderCategoriesById = leaderCategoriesById(candidates)
+        val allItems = candidates.mapNotNull { candidate ->
+            val candidateId = candidate.id ?: return@mapNotNull null
+            val category = categoryOf(candidate, leaderCategoriesById)
+            if (category !in categories) return@mapNotNull null
+            val session = latestSessionsByCandidateId[candidateId] ?: return@mapNotNull null
+            val readiness = buildTrialReadiness(candidate, session)
+            val shouldInclude = readiness.level == "FAST_WATCH" ||
+                (request.includeTrialReady && readiness.level == "TRIAL_READY")
+            if (!shouldInclude) return@mapNotNull null
+            funnelCandidate(candidate, session, category, readiness)
+        }.sortedWith(
+            compareBy<LeaderResearchFunnelCandidateDto> { if (it.trialReadiness.level == "TRIAL_READY") 0 else 1 }
+                .thenBy { allocationRank(it.category) }
+                .thenByDescending { it.score.toBigDecimalOrNull() ?: BigDecimal.ZERO }
+                .thenByDescending { it.copyablePnl.toBigDecimalOrNull() ?: BigDecimal.ZERO }
+        )
+        return LeaderResearchFastWatchResponse(
+            total = allItems.size,
+            fastWatchCount = allItems.count { it.trialReadiness.level == "FAST_WATCH" },
+            trialReadyCount = allItems.count { it.trialReadiness.level == "TRIAL_READY" },
+            categories = categories,
+            criteria = "FAST_WATCH/TRIAL_READY from PAPER candidates; score>=85 for FAST_WATCH, >=48h age, >=20 paper trades, positive PnL, low unknown exposure, low filtered ratio, stable high score window=$TRIAL_READY_STABLE_SCORE_WINDOW",
+            items = allItems.take(limit),
+            generatedAt = System.currentTimeMillis()
+        )
+    }
+
+    private fun funnelCandidate(
+        candidate: LeaderResearchCandidate,
+        session: com.wrbug.polymarketbot.entity.LeaderPaperSession,
+        category: String = categoryOf(candidate),
+        readiness: LeaderResearchTrialReadinessDto = buildTrialReadiness(candidate, session)
+    ): LeaderResearchFunnelCandidateDto {
+        return LeaderResearchFunnelCandidateDto(
+            candidateId = candidate.id ?: 0,
+            wallet = candidate.normalizedWallet,
+            category = category,
+            score = candidate.score.format4(),
+            tradeCount = session.tradeCount,
+            filteredRatio = session.filteredRatio.format4(),
+            copyablePnl = session.copyablePnl.format4(),
+            maxDrawdown = session.maxDrawdown.format4(),
+            researchState = candidate.researchState.name,
+            trialReadiness = readiness
         )
     }
 
@@ -367,6 +477,26 @@ class LeaderResearchService(
         }
     }
 
+    private fun categoryOf(candidate: LeaderResearchCandidate, leaderCategoriesById: Map<Long, String>): String {
+        return candidate.leaderId
+            ?.let { leaderCategoriesById[it] }
+            ?: categoryOf(candidate)
+    }
+
+    private fun leaderCategoriesById(candidates: List<LeaderResearchCandidate>): Map<Long, String> {
+        val leaderIds = candidates.mapNotNull { it.leaderId }.distinct()
+        if (leaderIds.isEmpty()) return emptyMap()
+        return leaderRepository.findByIdIn(leaderIds)
+            .mapNotNull { leader ->
+                val id = leader.id ?: return@mapNotNull null
+                val category = leader.category?.trim()?.lowercase()
+                    ?.takeIf { it in CATEGORY_NAMES }
+                    ?: return@mapNotNull null
+                id to category
+            }
+            .toMap()
+    }
+
     private fun BigDecimal?.format4(): String {
         return (this ?: BigDecimal.ZERO).setScale(4, RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()
     }
@@ -388,6 +518,7 @@ class LeaderResearchService(
         private const val FAST_WATCH_MIN_TRADES = 20
         private const val FAST_WATCH_MIN_AGE_MS = 48L * 60 * 60 * 1000
         private const val HOUR_MS = 60L * 60 * 1000
+        private val CATEGORY_NAMES = setOf("politics", "finance", "sports", "crypto")
         private val PRIMARY_CATEGORIES = setOf("politics", "finance")
         private val PRIMARY_ALLOCATION_TARGET = BigDecimal("0.80")
         private val SECONDARY_ALLOCATION_TARGET = BigDecimal("0.20")

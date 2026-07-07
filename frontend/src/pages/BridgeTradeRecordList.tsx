@@ -2,19 +2,25 @@ import { useEffect, useState } from 'react'
 import { Alert, Card, Table, Tag, Tabs, message, Space, Button, Tooltip, Radio, Typography } from 'antd'
 import { useTranslation } from 'react-i18next'
 import { useMediaQuery } from 'react-responsive'
-import { ReloadOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import { apiService } from '../services/api'
-import type { BridgeTradeRecord, BridgeWebhookLog } from '../types'
+import type { BridgeRuntimeStatus, BridgeTradeRecord, BridgeWebhookLog } from '../types'
 import { formatUSDC } from '../utils'
 
 type RecordStatus = '' | 'SUCCESS' | 'PENDING' | 'FAILED'
 type WebhookLogStatus = '' | 'SUCCESS' | 'FAILED' | 'PENDING'
+type BackendHealthStatus = 'unknown' | 'healthy' | 'unhealthy'
 
 const BridgeTradeRecordList: React.FC = () => {
   const { t, i18n } = useTranslation()
   const isMobile = useMediaQuery({ maxWidth: 768 })
 
   const [activeTab, setActiveTab] = useState('records')
+  const [backendHealth, setBackendHealth] = useState<BackendHealthStatus>('unknown')
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeRuntimeStatus | null>(null)
+  const [healthError, setHealthError] = useState<string | null>(null)
+  const [healthLoading, setHealthLoading] = useState(false)
+  const [healthCheckedAt, setHealthCheckedAt] = useState<number | null>(null)
 
   // 交易记录
   const [records, setRecords] = useState<BridgeTradeRecord[]>([])
@@ -44,6 +50,33 @@ const BridgeTradeRecordList: React.FC = () => {
     }
   }, [activeTab, recordsPagination.current, recordsPagination.pageSize, statusFilter, webhookLogsPagination.current, webhookLogsPagination.pageSize, webhookStatusFilter])
 
+  useEffect(() => {
+    fetchSystemHealth()
+  }, [])
+
+  const fetchSystemHealth = async () => {
+    setHealthLoading(true)
+    try {
+      const response = await apiService.bridgeTradeRecords.status()
+      setBackendHealth('healthy')
+      setHealthCheckedAt(Date.now())
+      if (response.data.code === 0 && response.data.data) {
+        setBridgeStatus(response.data.data)
+        setHealthError(null)
+      } else {
+        setBridgeStatus(null)
+        setHealthError(response.data.msg || t('bridgeTradeRecord.health.bridgeUnavailable') || 'Bridge 状态暂不可用')
+      }
+    } catch (error: any) {
+      setBackendHealth('unhealthy')
+      setBridgeStatus(null)
+      setHealthCheckedAt(Date.now())
+      setHealthError(error.message || t('bridgeTradeRecord.health.backendUnavailable') || '后端不可用')
+    } finally {
+      setHealthLoading(false)
+    }
+  }
+
   const fetchRecords = async () => {
     setRecordsLoading(true)
     try {
@@ -66,6 +99,72 @@ const BridgeTradeRecordList: React.FC = () => {
     } finally {
       setRecordsLoading(false)
     }
+  }
+
+  const isBridgeHealthy = Boolean(bridgeStatus?.ready && bridgeStatus?.loggedIn && !bridgeStatus?.lastError)
+
+  const renderHealthTag = (healthy: boolean, unknown = false) => {
+    if (unknown) {
+      return <Tag>{t('bridgeTradeRecord.health.unknown') || '未知'}</Tag>
+    }
+    return (
+      <Tag color={healthy ? 'success' : 'error'} icon={healthy ? <CheckCircleOutlined /> : <CloseCircleOutlined />}>
+        {healthy ? (t('bridgeTradeRecord.health.normal') || '正常') : (t('bridgeTradeRecord.health.abnormal') || '异常')}
+      </Tag>
+    )
+  }
+
+  const renderSystemHealth = () => {
+    const checkedAt = healthCheckedAt
+      ? new Date(healthCheckedAt).toLocaleString(i18n.language || 'zh-CN')
+      : '-'
+    return (
+      <Alert
+        type={backendHealth === 'healthy' && isBridgeHealthy ? 'success' : healthError ? 'error' : 'info'}
+        showIcon
+        message={
+          <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
+            <Space wrap>
+              <Typography.Text strong>
+                {t('bridgeTradeRecord.health.title') || '系统健康检查'}
+              </Typography.Text>
+              <Space size={4}>
+                <Typography.Text>{t('bridgeTradeRecord.health.backend') || '后端'}</Typography.Text>
+                {renderHealthTag(backendHealth === 'healthy', backendHealth === 'unknown')}
+              </Space>
+              <Space size={4}>
+                <Typography.Text>Bridge</Typography.Text>
+                {renderHealthTag(isBridgeHealthy, !bridgeStatus && !healthError)}
+              </Space>
+            </Space>
+            <Button size="small" icon={<ReloadOutlined />} onClick={fetchSystemHealth} loading={healthLoading}>
+              {t('bridgeTradeRecord.health.refresh') || '检查'}
+            </Button>
+          </Space>
+        }
+        description={
+          <Space direction="vertical" size={2}>
+            <Typography.Text type={healthError ? 'danger' : undefined}>
+              {healthError ||
+                t('bridgeTradeRecord.health.description', {
+                  loggedIn: bridgeStatus?.loggedIn ? t('bridgeTradeRecord.health.yes') : t('bridgeTradeRecord.health.no'),
+                  accountId: bridgeStatus?.copyTradingAccountId ?? '-',
+                  configCount: bridgeStatus?.copyTradingConfigCount ?? 0
+                }) ||
+                `Bridge 登录=${bridgeStatus?.loggedIn ? '是' : '否'}，账户=${bridgeStatus?.copyTradingAccountId ?? '-'}，跟单配置=${bridgeStatus?.copyTradingConfigCount ?? 0}`}
+            </Typography.Text>
+            {bridgeStatus?.lastError && (
+              <Typography.Text type="danger">
+                {t('bridgeTradeRecord.health.lastError') || '最近错误'}: {bridgeStatus.lastError}
+              </Typography.Text>
+            )}
+            <Typography.Text type="secondary">
+              {t('bridgeTradeRecord.health.checkedAt') || '检查时间'}: {checkedAt}
+            </Typography.Text>
+          </Space>
+        }
+      />
+    )
   }
 
   const fetchWebhookLogs = async () => {
@@ -561,6 +660,9 @@ const BridgeTradeRecordList: React.FC = () => {
         <h2>{t('bridgeTradeRecord.title') || '桥接交易记录'}</h2>
       </div>
       <Card>
+        <div style={{ marginBottom: '16px' }}>
+          {renderSystemHealth()}
+        </div>
         <Tabs activeKey={activeTab} onChange={setActiveTab} items={items} />
       </Card>
     </div>

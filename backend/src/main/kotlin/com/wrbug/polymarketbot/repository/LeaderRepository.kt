@@ -27,6 +27,21 @@ interface LeaderRepository : JpaRepository<Leader, Long> {
     )
     fun findByLeaderAddress(@Param("leaderAddress") leaderAddress: String): Leader?
 
+    @Query(
+        value = """
+            SELECT l.*
+            FROM copy_trading_leaders l
+            INNER JOIN (
+                SELECT leader_address, MAX(id) AS id
+                FROM copy_trading_leaders
+                WHERE leader_address IN (:leaderAddresses)
+                GROUP BY leader_address
+            ) latest ON latest.id = l.id
+        """,
+        nativeQuery = true
+    )
+    fun findLatestByLeaderAddressIn(@Param("leaderAddresses") leaderAddresses: Collection<String>): List<Leader>
+
     fun findByLeaderAddressAndCategory(leaderAddress: String, category: String?): Leader?
     
     /**
