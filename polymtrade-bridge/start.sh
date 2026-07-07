@@ -31,7 +31,7 @@ mkdir -p "$LOG_DIR"
 
 # Port ownership check: fail fast if BRIDGE_PORT is held by a non-Bridge process.
 # This prevents a silent mis-routing where backend calls /portfolio hit the wrong service.
-PORT_PIDS=$(lsof -nP -iTCP:"$BRIDGE_PORT" -sTCP:LISTEN -t 2>/dev/null || true)
+PORT_PIDS=$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk -v port=":$BRIDGE_PORT" '$9 !~ /->/ && $9 ~ port "$" {print $2}' | sort -u || true)
 if [[ -n "$PORT_PIDS" ]]; then
     for PID in $PORT_PIDS; do
         CMD=$(ps -p "$PID" -o command= 2>/dev/null || true)

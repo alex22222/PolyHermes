@@ -10,6 +10,7 @@ import com.wrbug.polymarketbot.service.bridge.BridgeWebhookClient
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderActivityIngestionService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchSourceHealthService
 import com.wrbug.polymarketbot.service.copytrading.statistics.CopyOrderTrackingService
+import com.wrbug.polymarketbot.service.common.MarketService
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -23,6 +24,7 @@ class PolymarketActivityWsResearchCaptureTest {
     private val ingestionService = LeaderActivityIngestionService(activityEventRepository, Gson())
     private val healthService: LeaderResearchSourceHealthService = mock()
     private val bridgeWebhookClient: BridgeWebhookClient = mock()
+    private val marketService: MarketService = mock()
 
     @Test
     fun `disabled global capture records disabled source health without parsing message`() {
@@ -91,6 +93,7 @@ class PolymarketActivityWsResearchCaptureTest {
         researchIngestionProvider = provider(ingestionService),
         researchSourceHealthProvider = provider(healthService),
         bridgeWebhookClient = bridgeWebhookClient,
+        marketService = marketService,
         researchGlobalCaptureEnabled = globalCaptureEnabled,
         researchGlobalCaptureMaxWritesPerMinute = maxWritesPerMinute
     )

@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from pydantic import BaseModel, Field, ConfigDict
 
 from polymtrade_executor import PolymtradeExecutor
-from copy_trading_config import COPY_MODE_PROPORTIONAL_RISK, CopyTradingRuleEngine
+from copy_trading_config import COPY_MODE_PROPORTIONAL_RISK, CopyTradingRuleEngine, infer_market_category
 from bridge_recorder import BridgeTradeRecorder
 from position_ledger import PositionLedger
 from bridge_reliability_audit import (
@@ -41,13 +41,18 @@ BTC_UPDOWN_5M_SECONDS = 300
 BTC_UPDOWN_5M_MIN_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MIN_BUY_PRICE", "0.20"))
 BTC_UPDOWN_5M_MAX_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MAX_BUY_PRICE", "0.65"))
 BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS = int(os.getenv("BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS", "50"))
-TAIL_RISK_MIN_BUY_PRICE = Decimal(os.getenv("TAIL_RISK_MIN_BUY_PRICE", "0.02"))
-HIGH_CONFIDENCE_MAX_BUY_PRICE = Decimal(os.getenv("HIGH_CONFIDENCE_MAX_BUY_PRICE", "0.95"))
+TAIL_RISK_MIN_BUY_PRICE = Decimal(os.getenv("TAIL_RISK_MIN_BUY_PRICE", "0.10"))
+HIGH_CONFIDENCE_MAX_BUY_PRICE = Decimal(os.getenv("HIGH_CONFIDENCE_MAX_BUY_PRICE", "0.65"))
 LEADER_EVENT_ACTIVITY_WINDOW_SECONDS = int(
     os.getenv("LEADER_EVENT_ACTIVITY_WINDOW_SECONDS", "1800")
 )
 LEADER_EVENT_ACTIVITY_MAX_RECORDS = int(os.getenv("LEADER_EVENT_ACTIVITY_MAX_RECORDS", "5"))
 LEADER_EVENT_COMBO_MIN_MARKETS = int(os.getenv("LEADER_EVENT_COMBO_MIN_MARKETS", "2"))
+GENERIC_REPEAT_BUY_WINDOW_SECONDS = int(os.getenv("GENERIC_REPEAT_BUY_WINDOW_SECONDS", "1800"))
+NEAR_EXPIRY_NEWS_BUY_MAX_HOURS = Decimal(os.getenv("NEAR_EXPIRY_NEWS_BUY_MAX_HOURS", "72"))
+NEAR_EXPIRY_NEWS_BUY_MAX_LEADER_VALUE = Decimal(
+    os.getenv("NEAR_EXPIRY_NEWS_BUY_MAX_LEADER_VALUE", "25")
+)
 PROPORTIONAL_RISK_BUYBACK_WINDOW_SECONDS = int(
     os.getenv("PROPORTIONAL_RISK_BUYBACK_WINDOW_SECONDS", "600")
 )
@@ -117,6 +122,7 @@ class LeaderTradeSignal(BaseModel):
     outcome_index: Optional[int] = Field(None, alias="outcomeIndex")
     price: float
     size: float
+    market_end_date: Optional[int] = Field(None, alias="marketEndDate")
     copy_trading_id: Optional[int] = Field(None, alias="copyTradingId")
     source: Optional[str] = None
 
@@ -1077,6 +1083,44 @@ async def handle_signal(signal: LeaderTradeSignal):
                         reason=high_confidence_reason,
                     )
                     continue
+                repeat_buy_reason = _generic_repeat_buy_reason(
+                    signal=signal,
+                    side=side_upper,
+                )
+                if repeat_buy_reason:
+                    logger.info(
+                        f"Config {cfg.id}: BUY skipped for {signal.transaction_hash}: "
+                        f"{repeat_buy_reason}"
+                    )
+                    _record_failed_signal(
+                        signal=signal,
+                        side=side_upper,
+                        quantity=quantity,
+                        price=price_dec,
+                        amount=amount,
+                        reason=repeat_buy_reason,
+                    )
+                    continue
+                near_expiry_reason = _near_expiry_news_buy_reason(
+                    signal=signal,
+                    side=side_upper,
+                    price=price_dec,
+                    leader_size=leader_size_dec,
+                )
+                if near_expiry_reason:
+                    logger.info(
+                        f"Config {cfg.id}: BUY skipped for {signal.transaction_hash}: "
+                        f"{near_expiry_reason}"
+                    )
+                    _record_failed_signal(
+                        signal=signal,
+                        side=side_upper,
+                        quantity=quantity,
+                        price=price_dec,
+                        amount=amount,
+                        reason=near_expiry_reason,
+                    )
+                    continue
                 event_activity_reason = _leader_event_activity_buy_reason(
                     signal=signal,
                     side=side_upper,
@@ -1492,7 +1536,7 @@ def _high_confidence_buy_reason(side: str, price: Decimal) -> Optional[str]:
     """Return a skip reason for high-price BUYs with poor copy-trading payoff."""
     if side.upper() != "BUY":
         return None
-    if price >= HIGH_CONFIDENCE_MAX_BUY_PRICE:
+    if price > HIGH_CONFIDENCE_MAX_BUY_PRICE:
         max_upside = Decimal("1") - price
         return (
             "High-price low-upside BUY skipped: "
@@ -1500,6 +1544,94 @@ def _high_confidence_buy_reason(side: str, price: Decimal) -> Optional[str]:
             f"max_upside={max_upside}"
         )
     return None
+
+
+def _same_market_record_matches_signal(record: dict, signal: LeaderTradeSignal) -> bool:
+    raw = {}
+    raw_payload = record.get("raw_payload")
+    if raw_payload:
+        try:
+            raw = json.loads(raw_payload)
+        except Exception:
+            raw = {}
+    record_market_id = record.get("market_id")
+    record_slug = raw.get("marketSlug") or raw.get("market_slug")
+    signal_market_id = signal.condition_id or signal.market_slug or ""
+    if record_market_id and signal_market_id and record_market_id == signal_market_id:
+        return True
+    if record_slug and signal.market_slug and record_slug == signal.market_slug:
+        return True
+    return False
+
+
+def _generic_repeat_buy_reason(
+    signal: LeaderTradeSignal,
+    side: str,
+    now_ms: Optional[int] = None,
+) -> Optional[str]:
+    """Skip repeated BUYs for the same leader and market in a short window."""
+    if side.upper() != "BUY" or not recorder:
+        return None
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    since_ms = now - GENERIC_REPEAT_BUY_WINDOW_SECONDS * 1000
+    records = recorder.recent_leader_records_since(
+        leader_address=signal.leader_address,
+        since_ms=since_ms,
+    )
+    for record in records:
+        if str(record.get("side") or "").upper() != "BUY":
+            continue
+        if str(record.get("status") or "").upper() not in {"PENDING", "SUCCESS"}:
+            continue
+        if _same_market_record_matches_signal(record, signal):
+            return (
+                "Repeat same-market BUY skipped: "
+                f"window={GENERIC_REPEAT_BUY_WINDOW_SECONDS}s"
+            )
+    return None
+
+
+def _signal_market_end_date_ms(signal: LeaderTradeSignal) -> Optional[int]:
+    if signal.market_end_date is not None:
+        return int(signal.market_end_date)
+    if recorder:
+        return recorder.get_market_end_date(signal.condition_id)
+    return None
+
+
+def _near_expiry_news_buy_reason(
+    signal: LeaderTradeSignal,
+    side: str,
+    price: Decimal,
+    leader_size: Decimal,
+    now_ms: Optional[int] = None,
+) -> Optional[str]:
+    """Skip small leader-notional news/event BUYs close to market end."""
+    if side.upper() != "BUY":
+        return None
+    market_category = infer_market_category(signal.title)
+    if market_category in {"sports", "crypto"}:
+        return None
+
+    end_date_ms = _signal_market_end_date_ms(signal)
+    if end_date_ms is None:
+        return None
+
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    hours_to_end = Decimal(end_date_ms - now) / Decimal("3600000")
+    if hours_to_end < 0 or hours_to_end > NEAR_EXPIRY_NEWS_BUY_MAX_HOURS:
+        return None
+
+    leader_value = price * leader_size
+    if leader_value > NEAR_EXPIRY_NEWS_BUY_MAX_LEADER_VALUE:
+        return None
+
+    return (
+        "Near-expiry small news-event BUY skipped: "
+        f"hours_to_end={hours_to_end:.2f}, leader_value={leader_value}, "
+        f"max_hours={NEAR_EXPIRY_NEWS_BUY_MAX_HOURS}, "
+        f"max_leader_value={NEAR_EXPIRY_NEWS_BUY_MAX_LEADER_VALUE}"
+    )
 
 
 def _normalized_token_text(value: Optional[str]) -> str:
@@ -1717,11 +1849,23 @@ def _get_pids_listening_on_port(port: int) -> list[int]:
     """Return PIDs that currently listen on the given TCP port."""
     try:
         output = subprocess.check_output(
-            ["lsof", "-i", f":{port}", "-t"],
+            ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
             stderr=subprocess.DEVNULL,
             text=True,
         )
-        return [int(p.strip()) for p in output.strip().split("\n") if p.strip().isdigit()]
+        pids = []
+        suffix = f":{port}"
+        for line in output.strip().split("\n")[1:]:
+            parts = line.split()
+            if len(parts) < 9:
+                continue
+            name = parts[8]
+            if "->" in name or not name.endswith(suffix):
+                continue
+            pid = parts[1]
+            if pid.isdigit():
+                pids.append(int(pid))
+        return sorted(set(pids))
     except Exception:
         return []
 

@@ -238,6 +238,22 @@ class BridgeTradeRecorder:
             logger.warning(f"Failed to query recent leader bridge records: {e}")
             return []
 
+    def get_market_end_date(self, market_id: Optional[str]) -> Optional[int]:
+        """Return cached market end_date in milliseconds when available."""
+        if not market_id:
+            return None
+        sql = "SELECT end_date FROM markets WHERE market_id = %s LIMIT 1"
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (market_id,))
+                    row = cur.fetchone() or {}
+                    value = row.get("end_date")
+                    return int(value) if value is not None else None
+        except Exception as e:
+            logger.warning(f"Failed to query market end date: {e}")
+            return None
+
     def recent_success_sell_size(
         self,
         market_id: str,

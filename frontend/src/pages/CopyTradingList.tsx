@@ -256,9 +256,9 @@ const CopyTradingList: React.FC = () => {
       )
     },
     {
-      title: '总盈亏（含未实现）',
+      title: '盈亏（已实现/浮动）',
       key: 'totalPnl',
-      width: isMobile ? 100 : 150,
+      width: isMobile ? 120 : 170,
       render: (_: any, record: CopyTrading) => {
         const stats = statisticsMap[record.id]
         if (!stats) {
@@ -268,7 +268,9 @@ const CopyTradingList: React.FC = () => {
             <span style={{ fontSize: isMobile ? 11 : 12 }}>-</span>
           )
         }
+        const lowConfidence = Boolean(stats.riskDiagnosis?.lowConfidence)
         return (
+          <Tooltip title={lowConfidence ? stats.riskDiagnosis?.confidenceReason : undefined}>
           <div>
             <div style={{ 
               color: getPnlColor(stats.totalPnl), 
@@ -280,17 +282,24 @@ const CopyTradingList: React.FC = () => {
             }}>
               {getPnlIcon(stats.totalPnl)}
               {isMobile ? formatUSDC(stats.totalPnl) : `$${formatUSDC(stats.totalPnl)}`}
+              {lowConfidence && <Tag color="orange" style={{ marginLeft: 2, marginInlineEnd: 0 }}>未验证</Tag>}
             </div>
             {!isMobile && (
-              <div style={{ 
-                fontSize: 12, 
-                color: getPnlColor(stats.totalPnlPercent),
-                marginTop: 4
-              }}>
-                {formatPercent(stats.totalPnlPercent)}
-              </div>
+              <>
+                <div style={{
+                  fontSize: 12,
+                  color: getPnlColor(stats.totalPnlPercent),
+                  marginTop: 4
+                }}>
+                  {formatPercent(stats.totalPnlPercent)}
+                </div>
+                <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>
+                  已实现 ${formatUSDC(stats.totalRealizedPnl)} / 浮动 ${formatUSDC(stats.totalUnrealizedPnl)}
+                </div>
+              </>
             )}
           </div>
+          </Tooltip>
         )
       }
     },
@@ -537,7 +546,7 @@ const CopyTradingList: React.FC = () => {
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
                           <div>
                             <div style={{ fontSize: '10px', color: '#8c8c8c' }}>
-                              总盈亏（含未实现）
+                              盈亏（已实现/浮动）
                             </div>
                             {stats ? (
                               <div style={{ 
@@ -550,6 +559,7 @@ const CopyTradingList: React.FC = () => {
                               }}>
                                 {getPnlIcon(stats.totalPnl)}
                                 ${formatUSDC(stats.totalPnl)}
+                                {stats.riskDiagnosis?.lowConfidence && <Tag color="orange" style={{ marginInlineEnd: 0 }}>未验证</Tag>}
                               </div>
                             ) : loadingStatistics.has(record.id) ? (
                               <Spin size="small" />
@@ -568,6 +578,9 @@ const CopyTradingList: React.FC = () => {
                                 color: getPnlColor(stats.totalPnlPercent)
                               }}>
                                 {formatPercent(stats.totalPnlPercent)}
+                              </div>
+                              <div style={{ fontSize: '10px', color: '#8c8c8c', marginTop: '2px' }}>
+                                已实现 ${formatUSDC(stats.totalRealizedPnl)} / 浮动 ${formatUSDC(stats.totalUnrealizedPnl)}
                               </div>
                             </div>
                           )}
@@ -711,4 +724,3 @@ const CopyTradingList: React.FC = () => {
 }
 
 export default CopyTradingList
-

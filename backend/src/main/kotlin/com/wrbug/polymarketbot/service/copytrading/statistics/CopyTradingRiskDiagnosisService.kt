@@ -38,8 +38,23 @@ object CopyTradingRiskDiagnosisService {
         val zeroSellLoss = matchDetails
             .filter { it.sellPrice.lte(BigDecimal.ZERO) }
             .sumOf { it.realizedPnl.abs() }
-        val sampleSize = buyOrders.size
-        val lowConfidence = pnl.totalPnl.gt(BigDecimal.ZERO) && sampleSize < MIN_CONFIDENCE_SAMPLE_SIZE
+        val totalBuyOrders = if (buyOrders.isNotEmpty()) {
+            buyOrders.size
+        } else {
+            pnl.totalBuyOrders.toBoundedInt()
+        }
+        val totalSellRecords = if (sellRecordsCount > 0) {
+            sellRecordsCount
+        } else {
+            pnl.totalSellOrders.toBoundedInt()
+        }
+        val sampleSize = totalBuyOrders + totalSellRecords
+        val unrealizedOnlyProfit = pnl.totalPnl.gt(BigDecimal.ZERO) &&
+            pnl.totalRealizedPnl.lte(BigDecimal.ZERO) &&
+            pnl.totalSellOrders == 0L &&
+            pnl.currentPositionCost.gt(BigDecimal.ZERO)
+        val lowConfidence = pnl.totalPnl.gt(BigDecimal.ZERO) &&
+            (sampleSize < MIN_CONFIDENCE_SAMPLE_SIZE || unrealizedOnlyProfit)
         val missingSources = buildList {
             if (pnl.quoteStatusSummary.overallStatus == PositionQuoteStatus.UNAVAILABLE) add("position-quotes")
         }
@@ -55,16 +70,16 @@ object CopyTradingRiskDiagnosisService {
             confirmedZeroValuePositionCost = pnl.confirmedZeroValuePositionCost.toPlainString(),
             zeroSellLoss = zeroSellLoss.toPlainString(),
             openPositionQuantity = pnl.currentPositionQuantity.toPlainString(),
-            totalBuyOrders = buyOrders.size,
-            totalSellRecords = sellRecordsCount,
+            totalBuyOrders = totalBuyOrders,
+            totalSellRecords = totalSellRecords,
             totalMatchDetails = matchDetails.size,
             filteredOrderCount = filteredOrderCount,
             sampleSize = sampleSize,
             lowConfidence = lowConfidence,
-            confidenceReason = if (lowConfidence) {
-                "样本量 ${sampleSize} 笔，低于 ${MIN_CONFIDENCE_SAMPLE_SIZE} 笔，不能视为已验证盈利"
-            } else {
-                "样本量满足第一版诊断阈值"
+            confidenceReason = when {
+                unrealizedOnlyProfit -> "当前为未实现浮盈，尚无卖出/已实现收益，不能视为已验证盈利"
+                lowConfidence -> "样本量 ${sampleSize} 笔，低于 ${MIN_CONFIDENCE_SAMPLE_SIZE} 笔，不能视为已验证盈利"
+                else -> "样本量满足第一版诊断阈值"
             },
             quoteOverallStatus = pnl.quoteStatusSummary.overallStatus.name,
             quoteAvailableCount = pnl.quoteStatusSummary.availableCount,
@@ -146,6 +161,8 @@ object CopyTradingRiskDiagnosisService {
     private fun BigDecimal.strip(): String = stripTrailingZeros().toPlainString()
 
     private fun BigDecimal.lt(other: BigDecimal): Boolean = compareTo(other) < 0
+
+    private fun Long.toBoundedInt(): Int = coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 }
 
 enum class RiskSeverity {

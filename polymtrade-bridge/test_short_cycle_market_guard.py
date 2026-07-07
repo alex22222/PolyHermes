@@ -10,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import main as bridge_main  # noqa: E402
 from main import (  # noqa: E402
     _high_confidence_buy_reason,
+    _generic_repeat_buy_reason,
     _leader_event_activity_buy_reason,
+    _near_expiry_news_buy_reason,
     _short_cycle_daily_limit_buy_reason,
     _short_cycle_duplicate_buy_reason,
     _short_cycle_global_buy_reason,
@@ -27,15 +29,18 @@ class FakeRecorder:
         has_any_prior=False,
         daily_usage=(0, Decimal("0")),
         recent_records=None,
+        market_end_date=None,
     ):
         self.has_prior = has_prior
         self.has_any_prior = has_any_prior
         self.daily_usage = daily_usage
         self.recent_records = recent_records or []
+        self.market_end_date = market_end_date
         self.calls = []
         self.any_calls = []
         self.daily_calls = []
         self.recent_calls = []
+        self.end_date_calls = []
 
     def has_prior_short_cycle_buy(self, market_id, market_slug, leader_address):
         self.calls.append((market_id, market_slug, leader_address))
@@ -52,6 +57,10 @@ class FakeRecorder:
     def recent_leader_records_since(self, leader_address, since_ms, limit=200):
         self.recent_calls.append((leader_address, since_ms, limit))
         return self.recent_records
+
+    def get_market_end_date(self, market_id):
+        self.end_date_calls.append(market_id)
+        return self.market_end_date
 
 
 def test_btc_updown_5m_buy_is_skipped_near_close():
@@ -124,28 +133,97 @@ def test_btc_updown_5m_price_band_buy_guard():
 
 
 def test_tail_risk_low_price_buy_guard():
-    allowed = _tail_risk_low_price_buy_reason("BUY", Decimal("0.02"))
+    allowed = _tail_risk_low_price_buy_reason("BUY", Decimal("0.10"))
     assert allowed is None, allowed
 
-    low_price = _tail_risk_low_price_buy_reason("BUY", Decimal("0.006"))
+    low_price = _tail_risk_low_price_buy_reason("BUY", Decimal("0.0999"))
     assert low_price is not None, low_price
     assert "Low-price tail-risk BUY skipped" in low_price
+    assert "min=0.10" in low_price
 
     sell = _tail_risk_low_price_buy_reason("SELL", Decimal("0.006"))
     assert sell is None, sell
 
 
 def test_high_confidence_buy_guard():
-    allowed = _high_confidence_buy_reason("BUY", Decimal("0.9499"))
+    allowed = _high_confidence_buy_reason("BUY", Decimal("0.65"))
     assert allowed is None, allowed
 
-    high_price = _high_confidence_buy_reason("BUY", Decimal("0.96"))
+    high_price = _high_confidence_buy_reason("BUY", Decimal("0.6501"))
     assert high_price is not None, high_price
     assert "High-price low-upside BUY skipped" in high_price
-    assert "max=0.95" in high_price
+    assert "max=0.65" in high_price
 
     sell = _high_confidence_buy_reason("SELL", Decimal("0.96"))
     assert sell is None, sell
+
+
+def test_generic_repeat_same_market_buy_guard():
+    original = bridge_main.recorder
+    try:
+        bridge_main.recorder = FakeRecorder(
+            recent_records=[
+                {
+                    "market_id": "0xmarket",
+                    "side": "BUY",
+                    "status": "SUCCESS",
+                    "raw_payload": '{"marketSlug":"same-market","outcome":"Yes"}',
+                }
+            ]
+        )
+        signal = SimpleNamespace(
+            leader_address="0xLeader",
+            condition_id="0xmarket",
+            market_slug="same-market",
+        )
+        duplicate = _generic_repeat_buy_reason(signal, "BUY", now_ms=1783234800000)
+        assert duplicate is not None, duplicate
+        assert "Repeat same-market BUY skipped" in duplicate
+
+        sell = _generic_repeat_buy_reason(signal, "SELL", now_ms=1783234800000)
+        assert sell is None, sell
+    finally:
+        bridge_main.recorder = original
+
+
+def test_near_expiry_small_news_buy_guard():
+    signal = SimpleNamespace(
+        title="Iran successfully targets shipping on July 8?",
+        condition_id="0xiran",
+        market_end_date=1783497600000,
+    )
+    reason = _near_expiry_news_buy_reason(
+        signal=signal,
+        side="BUY",
+        price=Decimal("0.50"),
+        leader_size=Decimal("10"),
+        now_ms=1783400000000,
+    )
+    assert reason is not None, reason
+    assert "Near-expiry small news-event BUY skipped" in reason
+
+    large = _near_expiry_news_buy_reason(
+        signal=signal,
+        side="BUY",
+        price=Decimal("0.50"),
+        leader_size=Decimal("100"),
+        now_ms=1783400000000,
+    )
+    assert large is None, large
+
+    sports = SimpleNamespace(
+        title="Will Mexico reach the 2026 FIFA World Cup final?",
+        condition_id="0xfifa",
+        market_end_date=1783497600000,
+    )
+    sports_reason = _near_expiry_news_buy_reason(
+        signal=sports,
+        side="BUY",
+        price=Decimal("0.50"),
+        leader_size=Decimal("10"),
+        now_ms=1783400000000,
+    )
+    assert sports_reason is None, sports_reason
 
 
 def test_same_event_high_frequency_buy_guard():
@@ -267,6 +345,8 @@ def main() -> int:
     test_btc_updown_5m_price_band_buy_guard()
     test_tail_risk_low_price_buy_guard()
     test_high_confidence_buy_guard()
+    test_generic_repeat_same_market_buy_guard()
+    test_near_expiry_small_news_buy_guard()
     test_same_event_high_frequency_buy_guard()
     test_same_event_multi_outcome_combo_buy_guard()
     test_btc_updown_5m_global_buy_guard()

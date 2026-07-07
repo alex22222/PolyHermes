@@ -208,6 +208,7 @@ open class CopyOrderTrackingService(
                 outcomeIndex = trade.outcomeIndex,
                 price = trade.price.toDoubleOrNull() ?: 0.0,
                 size = trade.size.toDoubleOrNull() ?: 0.0,
+                marketEndDate = market?.endDate,
                 source = "copy_order_tracking_bridge_fallback"
             )
         )

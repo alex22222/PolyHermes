@@ -13,6 +13,7 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderActivityIngest
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchSourceHealthService
 import com.wrbug.polymarketbot.service.copytrading.statistics.CopyOrderTrackingService
 import com.wrbug.polymarketbot.service.bridge.BridgeWebhookClient
+import com.wrbug.polymarketbot.service.common.MarketService
 import com.wrbug.polymarketbot.util.fromJson
 import com.wrbug.polymarketbot.constants.PolymarketConstants
 import com.wrbug.polymarketbot.websocket.PolymarketWebSocketClient
@@ -38,6 +39,7 @@ class PolymarketActivityWsService(
     private val researchIngestionProvider: ObjectProvider<LeaderActivityIngestionService>,
     private val researchSourceHealthProvider: ObjectProvider<LeaderResearchSourceHealthService>,
     private val bridgeWebhookClient: BridgeWebhookClient,
+    private val marketService: MarketService,
     @Value("\${leader.research.global-capture.enabled:false}") private val researchGlobalCaptureEnabled: Boolean,
     @Value("\${leader.research.global-capture.max-writes-per-minute:120}") private val researchGlobalCaptureMaxWritesPerMinute: Long
 ) {
@@ -401,6 +403,9 @@ class PolymarketActivityWsService(
             val trade = parseActivityTrade(payload, leaderIds.first())
             if (trade != null) {
                 logger.info("✅ 检测到 Leader 交易: leaderIds=$leaderIds, address=$traderAddress, side=${trade.side}, market=${trade.market}, size=${trade.size}")
+                val market = runCatching { marketService.getMarket(trade.market) }
+                    .onFailure { e -> logger.debug("Activity Bridge webhook 获取市场信息失败: marketId=${trade.market}, error=${e.message}") }
+                    .getOrNull()
 
                 // 发送 webhook 到 Bridge，实现无日志依赖的实时信号推送
                 try {
@@ -418,6 +423,7 @@ class PolymarketActivityWsService(
                             outcomeIndex = trade.outcomeIndex,
                             price = trade.price.toDoubleOrNull() ?: 0.0,
                             size = trade.size.toDoubleOrNull() ?: 0.0,
+                            marketEndDate = market?.endDate,
                             source = tradeMessage.topic
                         )
                     )

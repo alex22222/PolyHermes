@@ -192,6 +192,7 @@ class BridgeWebhookClient(
         val outcomeIndex: Int?,
         val price: Double,
         val size: Double,
+        val marketEndDate: Long? = null,
         val source: String?
     )
 }

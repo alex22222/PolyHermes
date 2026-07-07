@@ -7301,3 +7301,67 @@
 **下一步**：
 - 继续推进剩余 13 个 finance 可晋级候选进入 PAPER，仍按每批不超过 8 个执行。
 - politics 方向不能只依赖 official leaderboard/activity，目前可晋级为 0；下一轮优先接 Polyburg/Polymarket Analytics politics 钱包或提升 politics source 采样覆盖。
+
+### Iteration 111 - Bridge BUY 硬风控补强（2026-07-08 00:31 CST）
+
+**触发原因**：
+- `Research 0xad53...ef24` 真实跟单 12 笔 BUY 后无 SELL，当前表现为浮亏。
+- 复盘发现固定 `$1` 会放大 leader 小额单，且缺少全局价格区间、同市场短窗口重复 BUY、临近到期新闻事件保护。
+
+**代码修复**：
+- `polymtrade-bridge/copy_trading_config.py`
+  - 新增 `COPY_TRADING_MAX_LEADER_VALUE_AMPLIFICATION`，默认 `1`。
+  - BUY 本地金额不能大于 leader 本笔名义金额；否则记录 `Leader notional amplification skipped`。
+- `polymtrade-bridge/main.py`
+  - 全局 BUY 最低价默认从 `0.02` 提高到 `0.10`。
+  - 全局 BUY 最高价默认从 `0.95` 降到 `0.65`，`price > 0.65` 跳过。
+  - 新增同 leader 同市场短窗口重复 BUY 拦截，窗口默认 `1800s`。
+  - 新增临近到期新闻事件小额 BUY 拦截：默认 `72h` 内、leader 名义金额 `<= $25`、非 sports/crypto。
+- `polymtrade-bridge/bridge_recorder.py`
+  - 新增按 `market_id` 读取本地 `markets.end_date`，兼容旧 webhook payload。
+- 后端 Bridge webhook payload 新增 `marketEndDate`：
+  - `BridgeWebhookClient.BridgeSignal`
+  - `CopyOrderTrackingService` fallback 发送点
+  - `PolymarketActivityWsService` activity 发送点
+
+**验证**：
+- `polymtrade-bridge/.venv/bin/python polymtrade-bridge/test_copy_trading_config.py` 通过：30 tests OK。
+- `polymtrade-bridge/.venv/bin/python polymtrade-bridge/test_short_cycle_market_guard.py` 通过。
+- `polymtrade-bridge/.venv/bin/python polymtrade-bridge/test_proportional_risk_bridge.py` 通过。
+- `polymtrade-bridge/.venv/bin/python -m py_compile polymtrade-bridge/main.py polymtrade-bridge/copy_trading_config.py polymtrade-bridge/bridge_recorder.py polymtrade-bridge/test_copy_trading_config.py polymtrade-bridge/test_short_cycle_market_guard.py` 通过。
+- `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.monitor.PolymarketActivityWsResearchCaptureTest --tests com.wrbug.polymarketbot.service.copytrading.statistics.CopyTradingRiskDiagnosisServiceTest` 通过。
+- `./gradlew bootJar` 通过。
+
+**运行态**：
+- backend 已重启，`http://localhost:8000/actuator/health` 返回 `UP`。
+- WeChat 存在到远端 `:8080` 的连接，Bridge start 脚本曾误判 8080 占用；已修复为只检查本地 LISTEN。
+- Bridge 已恢复到 8080，`http://localhost:8080/health` 返回 `executor_ready=true`。
+
+**下一步**：
+- 观察桥接交易记录中新增的 `Leader notional amplification skipped`、`Repeat same-market BUY skipped`、`Near-expiry small news-event BUY skipped` 是否按预期出现。
+- 若误杀优质大额临近到期单，再调高 `NEAR_EXPIRY_NEWS_BUY_MAX_LEADER_VALUE` 或按 leader score 分层。
+
+### Iteration 112 - Bridge SELL 小额风险减仓放行（2026-07-08 02:13 CST）
+
+**触发原因**：
+- 最近 Fed 市场 SELL 信号已进入 Bridge，但因 `value < min_order_size=1` 被记录为 FAILED。
+- 对 SELL 来说，小额减仓/清仓优先级高于最小订单金额限制；BUY 的最小金额规则仍应保留。
+
+**代码修复**：
+- `polymtrade-bridge/copy_trading_config.py`
+  - `compute_sell_shares()` 不再用 `min_order_size` 拦截 SELL。
+  - `sell_skip_reason()` 不再返回 `Below min_order_size`。
+  - SELL 仍保留 `max_order_size` 上限。
+- 执行层现有 live portfolio 检查继续生效：
+  - 本地/实时仓位不足时跳过。
+  - 目标 SELL 数量超过实时持仓时，自动缩到可卖数量。
+
+**验证**：
+- `polymtrade-bridge/.venv/bin/python -m pytest polymtrade-bridge/test_copy_trading_config.py polymtrade-bridge/test_proportional_risk_bridge.py` 通过：35 passed。
+- Bridge 已重启，`http://localhost:8080/health` 返回 `{"status":"ok","executor_ready":true}`。
+- `http://localhost:8080/status` 返回 `ready=true`、`logged_in=true`、`copy_trading_config_count=3`。
+- 后端 `http://localhost:8000/actuator/health` 返回 `UP`。
+
+**下一步**：
+- 观察下一笔小额 SELL 是否从 `Below min_order_size` 变为真实执行或因实时无仓位被明确跳过。
+- 若 Polymtrade UI 本身拒绝过小 SELL，再在执行层加入“能清仓则清仓；UI 拒绝则记录平台最小可卖限制”的专门错误分类。

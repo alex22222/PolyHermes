@@ -146,11 +146,13 @@ class CopyTradingStatisticsService(
                 return null
             }
 
-            val records = bridgeTradeRecordRepository.findByBridgeIdAndMarketIdIn(
-                "polymtrade-bridge",
-                conditionIds,
-                Pageable.unpaged()
-            ).content
+            val records = bridgeTradeRecordRepository.findByBridgeIdAndLeaderAddressInRawPayload(
+                bridgeId = "polymtrade-bridge",
+                leaderAddress = leader.leaderAddress,
+                pageable = Pageable.unpaged()
+            ).content.filter {
+                it.marketId in conditionIds && it.createdAt >= copyTrading.createdAt
+            }
 
             val successRecords = records.filter { it.status.equals("SUCCESS", ignoreCase = true) }
             val buyRecords = successRecords.filter { it.side.equals("BUY", ignoreCase = true) }

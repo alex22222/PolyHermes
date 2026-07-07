@@ -17,6 +17,9 @@ COPY_MODE_RATIO = "RATIO"
 COPY_MODE_FIXED = "FIXED"
 COPY_MODE_PROPORTIONAL_RISK = "PROPORTIONAL_RISK"
 PRIMARY_CATEGORIES = {"politics", "finance"}
+MAX_LEADER_VALUE_AMPLIFICATION = Decimal(
+    os.getenv("COPY_TRADING_MAX_LEADER_VALUE_AMPLIFICATION", "1")
+)
 
 
 def is_category_allowed(leader_category: Optional[str], market_category: Optional[str]) -> bool:
@@ -369,6 +372,9 @@ class CopyTradingRuleEngine:
         value = self._raw_buy_value(cfg, leader_price, leader_size)
         if value is None:
             return None
+        if self._leader_value_amplification_reason(value, leader_price, leader_size):
+            logger.info(f"Config {cfg.id}: BUY value {value} amplifies leader notional, skipping")
+            return None
 
         if cfg.min_order_size and value < cfg.min_order_size:
             logger.info(f"Config {cfg.id}: value {value} below min_order_size, skipping")
@@ -385,8 +391,26 @@ class CopyTradingRuleEngine:
         value = self._raw_buy_value(cfg, leader_price, leader_size)
         if value is None:
             return f"Unsupported copy mode for BUY: {cfg.copy_mode}"
+        amplification_reason = self._leader_value_amplification_reason(value, leader_price, leader_size)
+        if amplification_reason:
+            return amplification_reason
         if cfg.min_order_size and value < cfg.min_order_size:
             return f"Below min_order_size, skipped (value={value}, min={cfg.min_order_size})"
+        return None
+
+    def _leader_value_amplification_reason(
+        self, local_value: Decimal, leader_price: Decimal, leader_size: Decimal
+    ) -> Optional[str]:
+        leader_value = leader_price * leader_size
+        if leader_value <= 0:
+            return "Leader notional is zero, skipped"
+        max_local_value = leader_value * MAX_LEADER_VALUE_AMPLIFICATION
+        if local_value > max_local_value:
+            return (
+                "Leader notional amplification skipped: "
+                f"local_value={local_value}, leader_value={leader_value}, "
+                f"max_ratio={MAX_LEADER_VALUE_AMPLIFICATION}"
+            )
         return None
 
     def _raw_buy_value(
@@ -408,9 +432,6 @@ class CopyTradingRuleEngine:
             return None
 
         value = shares * leader_price
-        if cfg.min_order_size and value < cfg.min_order_size:
-            logger.info(f"Config {cfg.id}: sell value {value} below min_order_size, skipping")
-            return None
         if cfg.max_order_size and value > cfg.max_order_size:
             shares = cfg.max_order_size / leader_price
 
@@ -423,9 +444,6 @@ class CopyTradingRuleEngine:
         shares = self._raw_sell_shares(cfg, leader_price, leader_size)
         if shares is None:
             return f"Unsupported copy mode for SELL: {cfg.copy_mode}"
-        value = shares * leader_price
-        if cfg.min_order_size and value < cfg.min_order_size:
-            return f"Below min_order_size, skipped (value={value}, min={cfg.min_order_size})"
         return None
 
     def _raw_sell_shares(

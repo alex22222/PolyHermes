@@ -88,6 +88,34 @@ class CopyTradingRiskDiagnosisServiceTest {
     }
 
     @Test
+    fun `uses bridge pnl order counts when tracking orders are absent`() {
+        val pnl = bridgePnl(
+            totalBuyOrders = 12,
+            totalSellOrders = 0,
+            currentPositionCost = "12",
+            currentPositionValue = "13.3264",
+            totalRealizedPnl = "0",
+            totalUnrealizedPnl = "1.3264"
+        )
+
+        val diagnosis = CopyTradingRiskDiagnosisService.buildDiagnosis(
+            copyTrading = conservativeCopyTrading(),
+            buyOrders = emptyList(),
+            sellRecordsCount = 0,
+            matchDetails = emptyList(),
+            filteredOrderCount = 6,
+            pnl = pnl,
+            generatedAt = 1234
+        )
+
+        assertEquals(12, diagnosis.totalBuyOrders)
+        assertEquals(0, diagnosis.totalSellRecords)
+        assertEquals(12, diagnosis.sampleSize)
+        assertTrue(diagnosis.lowConfidence)
+        assertTrue(diagnosis.confidenceReason.contains("未实现浮盈"))
+    }
+
+    @Test
     fun `returns field level conservative suggestions for unsafe config`() {
         val warnings = CopyTradingRiskDiagnosisService.inspectRiskConfig(riskyCopyTrading())
 
@@ -174,4 +202,36 @@ class CopyTradingRiskDiagnosisServiceTest {
     )
 
     private fun bd(value: String) = BigDecimal(value)
+
+    private fun bridgePnl(
+        totalBuyOrders: Long,
+        totalSellOrders: Long,
+        currentPositionCost: String,
+        currentPositionValue: String,
+        totalRealizedPnl: String,
+        totalUnrealizedPnl: String
+    ): CopyTradingPnlStatistics {
+        val realized = bd(totalRealizedPnl)
+        val unrealized = bd(totalUnrealizedPnl)
+        val totalPnl = realized.add(unrealized)
+        return CopyTradingPnlStatistics(
+            totalBuyQuantity = bd("45.6167"),
+            totalBuyOrders = totalBuyOrders,
+            totalBuyAmount = bd(currentPositionCost),
+            avgBuyPrice = bd("0.2631"),
+            totalSellQuantity = BigDecimal.ZERO,
+            totalSellOrders = totalSellOrders,
+            totalSellAmount = BigDecimal.ZERO,
+            currentPositionQuantity = bd("45.6167"),
+            currentPositionCost = bd(currentPositionCost),
+            currentPositionValue = bd(currentPositionValue),
+            zeroValuePositionCost = BigDecimal.ZERO,
+            confirmedZeroValuePositionCost = BigDecimal.ZERO,
+            quoteStatusSummary = QuoteStatusSummary.from(List(totalBuyOrders.toInt()) { PositionQuoteStatus.AVAILABLE }),
+            totalRealizedPnl = realized,
+            totalUnrealizedPnl = unrealized,
+            totalPnl = totalPnl,
+            totalPnlPercent = bd("11.05")
+        )
+    }
 }
