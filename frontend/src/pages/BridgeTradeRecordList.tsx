@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Alert, Card, Table, Tag, Tabs, message, Space, Button, Tooltip, Radio, Typography } from 'antd'
+import { Alert, Card, Table, Tag, Tabs, message, Space, Button, Tooltip, Radio, Typography, Input } from 'antd'
 import { useTranslation } from 'react-i18next'
 import { useMediaQuery } from 'react-responsive'
 import { CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined } from '@ant-design/icons'
@@ -26,6 +26,8 @@ const BridgeTradeRecordList: React.FC = () => {
   const [records, setRecords] = useState<BridgeTradeRecord[]>([])
   const [recordsLoading, setRecordsLoading] = useState(false)
   const [statusFilter, setStatusFilter] = useState<RecordStatus>('')
+  const [marketSearchInput, setMarketSearchInput] = useState('')
+  const [marketFilter, setMarketFilter] = useState('')
   const [recordsPagination, setRecordsPagination] = useState({
     current: 1,
     pageSize: 20,
@@ -48,7 +50,7 @@ const BridgeTradeRecordList: React.FC = () => {
     } else if (activeTab === 'webhookLogs') {
       fetchWebhookLogs()
     }
-  }, [activeTab, recordsPagination.current, recordsPagination.pageSize, statusFilter, webhookLogsPagination.current, webhookLogsPagination.pageSize, webhookStatusFilter])
+  }, [activeTab, recordsPagination.current, recordsPagination.pageSize, statusFilter, marketFilter, webhookLogsPagination.current, webhookLogsPagination.pageSize, webhookStatusFilter])
 
   useEffect(() => {
     fetchSystemHealth()
@@ -83,7 +85,8 @@ const BridgeTradeRecordList: React.FC = () => {
       const response = await apiService.bridgeTradeRecords.list({
         page: recordsPagination.current,
         size: recordsPagination.pageSize,
-        status: statusFilter || undefined
+        status: statusFilter || undefined,
+        marketKeyword: marketFilter || undefined
       })
       if (response.data.code === 0 && response.data.data) {
         setRecords(response.data.data.list || [])
@@ -327,6 +330,68 @@ const BridgeTradeRecordList: React.FC = () => {
     return '-'
   }
 
+  const parseRecordPayload = (record: BridgeTradeRecord): any | null => {
+    if (!record.rawPayload) return null
+    try {
+      return JSON.parse(record.rawPayload)
+    } catch {
+      return null
+    }
+  }
+
+  const normalizePolymtradeUrl = (url: unknown): string | null => {
+    if (typeof url !== 'string' || !url.trim()) return null
+    const value = url.trim()
+    if (value.startsWith('https://polym.trade/')) return value
+    if (value.startsWith('http://polym.trade/')) return value.replace('http://', 'https://')
+    if (value.startsWith('/')) return `https://polym.trade${value}`
+    return null
+  }
+
+  const extractParamFromHref = (href: unknown, key: 'marketSlug' | 'eventSlug' | 'eventId'): string | null => {
+    if (typeof href !== 'string' || !href.trim()) return null
+    try {
+      const parsed = new URL(href, 'https://polym.trade')
+      return parsed.searchParams.get(key)
+    } catch {
+      return null
+    }
+  }
+
+  const resolveMarketUrl = (record: BridgeTradeRecord): string | null => {
+    const payload = parseRecordPayload(record)
+    const directUrl =
+      normalizePolymtradeUrl(payload?.polymtradeUrl) ||
+      normalizePolymtradeUrl(payload?.polymtrade_url) ||
+      normalizePolymtradeUrl(payload?.href) ||
+      normalizePolymtradeUrl(payload?.marketUrl) ||
+      normalizePolymtradeUrl(payload?.market_url) ||
+      normalizePolymtradeUrl(payload?.url)
+    if (directUrl) return directUrl
+
+    const eventSlug =
+      payload?.eventSlug ||
+      payload?.event_slug ||
+      extractParamFromHref(payload?.href, 'eventSlug') ||
+      extractParamFromHref(payload?.url, 'eventSlug') ||
+      payload?.marketSlug ||
+      payload?.market_slug ||
+      extractParamFromHref(payload?.href, 'marketSlug') ||
+      extractParamFromHref(payload?.url, 'marketSlug')
+    const eventId =
+      payload?.eventId ||
+      payload?.event_id ||
+      extractParamFromHref(payload?.href, 'eventId') ||
+      extractParamFromHref(payload?.url, 'eventId')
+
+    if (!eventSlug) return null
+    const params = new URLSearchParams()
+    if (eventId) params.set('eventId', String(eventId))
+    params.set('eventSlug', String(eventSlug))
+    params.set('eventSource', 'polymarket')
+    return `https://polym.trade/portfolio?${params.toString()}`
+  }
+
   const renderPositionMismatch = (record: BridgeTradeRecord) => {
     if (!record.positionMismatch) return null
     const snapshotTime = record.snapshotSyncedAt
@@ -366,9 +431,18 @@ const BridgeTradeRecordList: React.FC = () => {
       title: t('bridgeTradeRecord.market') || '市场',
       dataIndex: 'marketTitle',
       key: 'marketTitle',
-      render: (_title: string | undefined, record: BridgeTradeRecord) => (
-        <Space direction="vertical" size={0}>
-          <Typography.Text strong>{resolveMarketTitle(record)}</Typography.Text>
+      render: (_title: string | undefined, record: BridgeTradeRecord) => {
+        const marketTitle = resolveMarketTitle(record)
+        const marketUrl = resolveMarketUrl(record)
+        return (
+          <Space direction="vertical" size={0}>
+            {marketUrl ? (
+              <Typography.Link strong href={marketUrl} target="_blank" rel="noopener noreferrer">
+                {marketTitle}
+              </Typography.Link>
+            ) : (
+              <Typography.Text strong>{marketTitle}</Typography.Text>
+            )}
           <Typography.Text style={{ fontFamily: 'monospace', fontSize: '12px', color: '#888' }}>
             {record.marketId.slice(0, 16)}...
           </Typography.Text>
@@ -377,8 +451,9 @@ const BridgeTradeRecordList: React.FC = () => {
               {record.externalTradeId.slice(0, 20)}...
             </Typography.Text>
           )}
-        </Space>
-      )
+          </Space>
+        )
+      }
     },
     {
       title: t('bridgeTradeRecord.side') || '方向',
@@ -556,20 +631,40 @@ const BridgeTradeRecordList: React.FC = () => {
   const renderRecordsTab = () => (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
-        <Radio.Group
-          value={statusFilter}
-          onChange={(e) => {
-            setStatusFilter(e.target.value)
-            setRecordsPagination((prev) => ({ ...prev, current: 1 }))
-          }}
-          optionType="button"
-          buttonStyle="solid"
-        >
-          <Radio.Button value="">{t('bridgeTradeRecord.statusFilter.all') || '全部'}</Radio.Button>
-          <Radio.Button value="SUCCESS">{t('bridgeTradeRecord.statusFilter.success') || '成功'}</Radio.Button>
-          <Radio.Button value="PENDING">{t('bridgeTradeRecord.statusFilter.pending') || '进行中'}</Radio.Button>
-          <Radio.Button value="FAILED">{t('bridgeTradeRecord.statusFilter.failed') || '失败'}</Radio.Button>
-        </Radio.Group>
+        <Space wrap>
+          <Radio.Group
+            value={statusFilter}
+            onChange={(e) => {
+              setStatusFilter(e.target.value)
+              setRecordsPagination((prev) => ({ ...prev, current: 1 }))
+            }}
+            optionType="button"
+            buttonStyle="solid"
+          >
+            <Radio.Button value="">{t('bridgeTradeRecord.statusFilter.all') || '全部'}</Radio.Button>
+            <Radio.Button value="SUCCESS">{t('bridgeTradeRecord.statusFilter.success') || '成功'}</Radio.Button>
+            <Radio.Button value="PENDING">{t('bridgeTradeRecord.statusFilter.pending') || '进行中'}</Radio.Button>
+            <Radio.Button value="FAILED">{t('bridgeTradeRecord.statusFilter.failed') || '失败'}</Radio.Button>
+          </Radio.Group>
+          <Input.Search
+            allowClear
+            value={marketSearchInput}
+            placeholder="模糊查询市场标题或 Market ID"
+            style={{ width: isMobile ? '100%' : 300 }}
+            onChange={(event) => {
+              const value = event.target.value
+              setMarketSearchInput(value)
+              if (!value && marketFilter) {
+                setMarketFilter('')
+                setRecordsPagination((prev) => ({ ...prev, current: 1 }))
+              }
+            }}
+            onSearch={(value) => {
+              setMarketFilter(value.trim())
+              setRecordsPagination((prev) => ({ ...prev, current: 1 }))
+            }}
+          />
+        </Space>
         <Button icon={<ReloadOutlined />} onClick={fetchRecords} loading={recordsLoading}>
           {t('bridgeTradeRecord.refresh') || '刷新'}
         </Button>

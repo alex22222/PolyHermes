@@ -83,6 +83,7 @@ class LeaderResearchMapper(
             scoreVersion = candidate.scoreVersion,
             reason = candidate.reason,
             riskFlags = splitFlags(candidate.riskFlags),
+            strategyType = candidate.strategyType,
             locked = candidate.locked,
             agentOwned = candidate.agentOwned,
             provenance = candidate.provenance.name,

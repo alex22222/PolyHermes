@@ -7,6 +7,7 @@ import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.repository.*
 import com.wrbug.polymarketbot.service.accounts.AccountService
 import com.wrbug.polymarketbot.service.accounts.BridgePositionSellService
+import com.wrbug.polymarketbot.service.accounts.DailyAssetSnapshotService
 import com.wrbug.polymarketbot.service.common.BlockchainService
 import com.wrbug.polymarketbot.service.common.MarketService
 import com.wrbug.polymarketbot.service.copytrading.statistics.CopyTradingStatisticsService
@@ -120,7 +121,9 @@ class AccountControllerTest {
         accountService = Mockito.mock(AccountService::class.java),
         messageSource = messageSource,
         bridgePositionSellService = Mockito.mock(BridgePositionSellService::class.java),
-        statisticsService = service
+        statisticsService = service,
+        dailyAssetSnapshotService = Mockito.mock(DailyAssetSnapshotService::class.java),
+        accountRepository = Mockito.mock(AccountRepository::class.java)
     )
 
     private class StubStatisticsService(

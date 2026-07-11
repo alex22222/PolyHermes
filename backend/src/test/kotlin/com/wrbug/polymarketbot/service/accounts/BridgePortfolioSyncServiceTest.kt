@@ -17,12 +17,14 @@ class BridgePortfolioSyncServiceTest {
     private val snapshotRepository = mock(BridgePositionSnapshotRepository::class.java)
     private val marketRepository = mock(MarketRepository::class.java)
     private val accountRepository = mock(AccountRepository::class.java)
+    private val dailyAssetSnapshotService = mock(DailyAssetSnapshotService::class.java)
 
     private val service = BridgePortfolioSyncService(
         bridgePortfolioClient,
         snapshotRepository,
         marketRepository,
-        accountRepository
+        accountRepository,
+        dailyAssetSnapshotService
     )
 
     @Test

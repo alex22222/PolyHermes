@@ -3,6 +3,9 @@ package com.wrbug.polymarketbot.service.copytrading.research
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardRefreshRequest
+import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
+import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -12,9 +15,11 @@ import java.math.BigDecimal
 class LeaderResearchOfficialLeaderboardImportServiceTest {
     private val client = FakeOfficialLeaderboardClient()
     private val externalAnalyticsImportService: LeaderResearchExternalAnalyticsImportService = mock()
+    private val candidateRepository: LeaderResearchCandidateRepository = mock()
     private val service = LeaderResearchOfficialLeaderboardImportService(
         client = client,
-        externalAnalyticsImportService = externalAnalyticsImportService
+        externalAnalyticsImportService = externalAnalyticsImportService,
+        candidateRepository = candidateRepository
     )
 
     @Test
@@ -38,6 +43,7 @@ class LeaderResearchOfficialLeaderboardImportServiceTest {
             LeaderResearchOfficialLeaderboardImportRequest(
                 dryRun = true,
                 categories = listOf("politics", "finance", "sports"),
+                timePeriods = listOf("MONTH"),
                 limitPerPage = 50,
                 maxPagesPerQuery = 1,
                 maxItems = 10
@@ -54,6 +60,67 @@ class LeaderResearchOfficialLeaderboardImportServiceTest {
     }
 
     @Test
+    fun `imports only wallets profitable across every requested pnl period`() {
+        val consistentlyProfitable = "0x6666666666666666666666666666666666666666"
+        val longTermLoser = "0x7777777777777777777777777777777777777777"
+        client.responses["FINANCE-MONTH-PNL-0"] = listOf(
+            OfficialLeaderboardEntry(
+                wallet = consistentlyProfitable,
+                rank = 3,
+                name = "steady",
+                pnl = BigDecimal("25"),
+                volume = BigDecimal("250")
+            ),
+            OfficialLeaderboardEntry(
+                wallet = longTermLoser,
+                rank = 4,
+                name = "recent-only",
+                pnl = BigDecimal("20"),
+                volume = BigDecimal("200")
+            )
+        )
+        client.responses["FINANCE-ALL-PNL-0"] = listOf(
+            OfficialLeaderboardEntry(
+                wallet = consistentlyProfitable,
+                rank = 8,
+                name = "steady",
+                pnl = BigDecimal("120"),
+                volume = BigDecimal("1200")
+            ),
+            OfficialLeaderboardEntry(
+                wallet = longTermLoser,
+                rank = 9,
+                name = "recent-only",
+                pnl = BigDecimal("-10"),
+                volume = BigDecimal("900")
+            )
+        )
+        var capturedRequest: LeaderResearchExternalAnalyticsImportRequest? = null
+        Mockito.doAnswer {
+            capturedRequest = it.arguments[0] as LeaderResearchExternalAnalyticsImportRequest
+            importResponse(requested = capturedRequest!!.items.size)
+        }.`when`(externalAnalyticsImportService).importFromExternalAnalytics(anyImportRequest())
+
+        val response = service.importFromOfficialLeaderboard(
+            LeaderResearchOfficialLeaderboardImportRequest(
+                dryRun = true,
+                categories = listOf("finance"),
+                timePeriods = listOf("MONTH", "ALL"),
+                orderBys = listOf("PNL"),
+                limitPerPage = 50,
+                maxPagesPerQuery = 1,
+                maxItems = 10
+            )
+        )
+
+        assertEquals(4, response.fetchedTotal)
+        assertEquals(1, response.dedupedTotal)
+        assertEquals(listOf(consistentlyProfitable), capturedRequest!!.items.map { it.wallet })
+        assertTrue(capturedRequest!!.items.single().note!!.contains("MONTH"))
+        assertTrue(capturedRequest!!.items.single().note!!.contains("ALL"))
+    }
+
+    @Test
     fun `records fetch errors instead of silently returning empty success`() {
         client.failKeys += "POLITICS-MONTH-PNL-0"
         Mockito.`when`(externalAnalyticsImportService.importFromExternalAnalytics(anyImportRequest()))
@@ -63,6 +130,7 @@ class LeaderResearchOfficialLeaderboardImportServiceTest {
             LeaderResearchOfficialLeaderboardImportRequest(
                 dryRun = true,
                 categories = listOf("politics"),
+                timePeriods = listOf("MONTH"),
                 limitPerPage = 20,
                 maxPagesPerQuery = 1
             )
@@ -73,6 +141,67 @@ class LeaderResearchOfficialLeaderboardImportServiceTest {
         assertEquals(1, response.fetches.size)
         assertTrue(response.fetches.single().error!!.contains("boom"))
         Mockito.verify(externalAnalyticsImportService).importFromExternalAnalytics(anyImportRequest())
+    }
+
+    @Test
+    fun `refreshes only requested official leaderboard wallets`() {
+        val targetWallet = "0x3333333333333333333333333333333333333333"
+        val otherWallet = "0x4444444444444444444444444444444444444444"
+        client.responses["FINANCE-MONTH-PNL-0"] = listOf(
+            OfficialLeaderboardEntry(wallet = otherWallet, rank = 1, name = "other", pnl = BigDecimal("30"), volume = BigDecimal("300")),
+            OfficialLeaderboardEntry(wallet = targetWallet, rank = 2, name = "target", pnl = BigDecimal("20"), volume = BigDecimal("200"))
+        )
+        var capturedRequest: LeaderResearchExternalAnalyticsImportRequest? = null
+        Mockito.doAnswer {
+            capturedRequest = it.arguments[0] as LeaderResearchExternalAnalyticsImportRequest
+            importResponse(requested = capturedRequest!!.items.size)
+        }.`when`(externalAnalyticsImportService).importFromExternalAnalytics(anyImportRequest())
+
+        val response = service.refreshCandidatesFromOfficialLeaderboard(
+            LeaderResearchOfficialLeaderboardRefreshRequest(
+                dryRun = true,
+                wallets = listOf(targetWallet),
+                categories = listOf("finance"),
+                limitPerPage = 50,
+                maxPagesPerQuery = 1
+            )
+        )
+
+        assertEquals(2, response.fetchedTotal)
+        assertEquals(1, response.matchedTotal)
+        assertEquals(listOf(targetWallet), response.requestedWallets)
+        assertEquals(listOf(targetWallet), capturedRequest!!.items.map { it.wallet })
+        assertEquals("finance", capturedRequest!!.items.single().category)
+    }
+
+    @Test
+    fun `refresh resolves candidate ids to wallets`() {
+        val targetWallet = "0x5555555555555555555555555555555555555555"
+        Mockito.`when`(candidateRepository.findAllById(listOf(1660L))).thenReturn(
+            listOf(LeaderResearchCandidate(id = 1660L, normalizedWallet = targetWallet))
+        )
+        client.responses["FINANCE-MONTH-PNL-0"] = listOf(
+            OfficialLeaderboardEntry(wallet = targetWallet, rank = 7, name = "target", pnl = BigDecimal("10"), volume = BigDecimal("100"))
+        )
+        var capturedRequest: LeaderResearchExternalAnalyticsImportRequest? = null
+        Mockito.doAnswer {
+            capturedRequest = it.arguments[0] as LeaderResearchExternalAnalyticsImportRequest
+            importResponse(requested = capturedRequest!!.items.size)
+        }.`when`(externalAnalyticsImportService).importFromExternalAnalytics(anyImportRequest())
+
+        val response = service.refreshCandidatesFromOfficialLeaderboard(
+            LeaderResearchOfficialLeaderboardRefreshRequest(
+                dryRun = true,
+                candidateIds = listOf(1660L),
+                categories = listOf("finance"),
+                limitPerPage = 50,
+                maxPagesPerQuery = 1
+            )
+        )
+
+        assertEquals(1, response.matchedTotal)
+        assertEquals(listOf(targetWallet), response.requestedWallets)
+        assertEquals(listOf(targetWallet), capturedRequest!!.items.map { it.wallet })
     }
 
     private fun importResponse(requested: Int) = LeaderResearchExternalAnalyticsImportResponse(

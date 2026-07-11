@@ -75,6 +75,9 @@ class LeaderResearchService(
     }
 
     fun summary(): LeaderResearchSummaryDto {
+        val activeCandidates = candidateRepository.findByResearchStateIn(
+            listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
+        )
         return LeaderResearchSummaryDto(
             discoveredCount = candidateRepository.countByResearchState(LeaderResearchState.DISCOVERED),
             candidateCount = candidateRepository.countByResearchState(LeaderResearchState.CANDIDATE),
@@ -82,11 +85,32 @@ class LeaderResearchService(
             trialReadyCount = candidateRepository.countByResearchState(LeaderResearchState.TRIAL_READY),
             cooldownCount = candidateRepository.countByResearchState(LeaderResearchState.COOLDOWN),
             retiredCount = candidateRepository.countByResearchState(LeaderResearchState.RETIRED),
-            activePaperSessions = candidateRepository.findByResearchStateIn(listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)).count().toLong(),
+            activePaperSessions = activeCandidates.count().toLong(),
             pendingRiskCount = candidateRepository.findByResearchStateIn(listOf(LeaderResearchState.COOLDOWN)).count().toLong(),
+            strategyTypeCounts = activeCandidates.strategyTypeCounts(),
+            nonCopyableStrategyBlockers = activeCandidates.nonCopyableStrategyBlockers(),
             lastRun = runRepository.findTopByOrderByStartedAtDesc()?.let { mapper.runDto(it) },
             sourceLimitations = mapper.sourceLimitations()
         )
+    }
+
+    private fun List<LeaderResearchCandidate>.strategyTypeCounts(): List<com.wrbug.polymarketbot.dto.LeaderResearchCountDto> {
+        return groupingBy { it.strategyType?.takeIf { value -> value.isNotBlank() } ?: LeaderResearchStrategyTypeClassifier.UNKNOWN }
+            .eachCount()
+            .entries
+            .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+            .map { com.wrbug.polymarketbot.dto.LeaderResearchCountDto(it.key, it.value.toLong()) }
+    }
+
+    private fun List<LeaderResearchCandidate>.nonCopyableStrategyBlockers(): List<com.wrbug.polymarketbot.dto.LeaderResearchCountDto> {
+        return flatMap { candidate ->
+            LeaderResearchStrategyTypeClassifier.trialReadyBlockerCode(candidate.strategyType)?.let { listOf(it) } ?: emptyList()
+        }
+            .groupingBy { it }
+            .eachCount()
+            .entries
+            .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+            .map { com.wrbug.polymarketbot.dto.LeaderResearchCountDto(it.key, it.value.toLong()) }
     }
 
     fun funnel(): LeaderResearchFunnelResponse {
@@ -140,6 +164,7 @@ class LeaderResearchService(
                     candidateId = candidateId,
                     wallet = candidate.normalizedWallet,
                     category = category,
+                    strategyType = candidate.strategyType,
                     score = candidate.score.format4(),
                     tradeCount = session.tradeCount,
                     filteredRatio = session.filteredRatio.format4(),
@@ -257,6 +282,7 @@ class LeaderResearchService(
         val stableHighScoreCount = latestStableHighScoreCount(candidate)
 
         if (score < TRIAL_READY_MIN_SCORE) blockers += "研究评分低于 80"
+        LeaderResearchStrategyTypeClassifier.trialReadyBlocker(candidate.strategyType)?.let { blockers += it }
         if (!candidate.riskFlags.isNullOrBlank()) blockers += "风险标记未清空：${candidate.riskFlags}"
         if (ageMs < PAPER_MIN_AGE_MS) blockers += "PAPER 观察不足 7 天：当前 ${ageHours} 小时"
         if (session.tradeCount < PAPER_MIN_TRADES) blockers += "通过模拟交易少于 10 笔：当前 ${session.tradeCount}"
@@ -314,6 +340,7 @@ class LeaderResearchService(
     ): List<String> {
         val blockers = mutableListOf<String>()
         if (score < FAST_WATCH_MIN_SCORE) blockers += "快速观察要求评分 >= 85"
+        LeaderResearchStrategyTypeClassifier.trialReadyBlocker(candidate.strategyType)?.let { blockers += it }
         if (!candidate.riskFlags.isNullOrBlank()) blockers += "风险标记未清空：${candidate.riskFlags}"
         if (ageMs < FAST_WATCH_MIN_AGE_MS) blockers += "快速观察至少需要 48 小时：当前 ${ageMs / HOUR_MS} 小时"
         if (session.tradeCount < FAST_WATCH_MIN_TRADES) blockers += "快速观察通过交易少于 ${FAST_WATCH_MIN_TRADES} 笔：当前 ${session.tradeCount}"
@@ -402,6 +429,7 @@ class LeaderResearchService(
             candidateId = candidate.id ?: 0,
             wallet = candidate.normalizedWallet,
             category = category,
+            strategyType = candidate.strategyType,
             score = candidate.score.format4(),
             tradeCount = session.tradeCount,
             filteredRatio = session.filteredRatio.format4(),

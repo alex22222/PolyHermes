@@ -17,15 +17,29 @@ COPY_MODE_RATIO = "RATIO"
 COPY_MODE_FIXED = "FIXED"
 COPY_MODE_PROPORTIONAL_RISK = "PROPORTIONAL_RISK"
 PRIMARY_CATEGORIES = {"politics", "finance"}
+CRYPTO_CATEGORY = "crypto"
 MAX_LEADER_VALUE_AMPLIFICATION = Decimal(
     os.getenv("COPY_TRADING_MAX_LEADER_VALUE_AMPLIFICATION", "1")
 )
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def is_category_allowed(leader_category: Optional[str], market_category: Optional[str]) -> bool:
     if leader_category is None or market_category is None:
         return True
     if leader_category == market_category:
+        return True
+    if (
+        _env_bool("COPY_TRADING_ALLOW_PRIMARY_TO_CRYPTO")
+        and leader_category in PRIMARY_CATEGORIES
+        and market_category == CRYPTO_CATEGORY
+    ):
         return True
     return leader_category in PRIMARY_CATEGORIES and market_category in PRIMARY_CATEGORIES
 

@@ -1,9 +1,13 @@
 package com.wrbug.polymarketbot.service.copytrading.research
 
 import com.wrbug.polymarketbot.dto.CopyTradingCreateRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchApprovalPreviewAccountDto
+import com.wrbug.polymarketbot.dto.LeaderResearchApprovalPreviewRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchApprovalPreviewResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchApprovalRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchApprovalResponse
 import com.wrbug.polymarketbot.entity.LeaderPool
+import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
 import com.wrbug.polymarketbot.enums.LeaderPoolStatus
 import com.wrbug.polymarketbot.enums.LeaderResearchEventType
 import com.wrbug.polymarketbot.enums.LeaderResearchState
@@ -22,6 +26,7 @@ class LeaderResearchApprovalConfirmRequiredException : RuntimeException("创建�
 class LeaderResearchDuplicateTrialConfigException : RuntimeException("该账户已存在此 Leader 的跟单配置")
 class LeaderResearchRealMoneyForbiddenException : RuntimeException("Leader Research Agent 不允许自动启用真钱跟单")
 class LeaderResearchCandidateLockedException : RuntimeException("研究候选已锁定")
+class LeaderResearchCandidateNotCopyableException(reason: String) : RuntimeException(reason)
 
 @Service
 class LeaderResearchApprovalService(
@@ -34,6 +39,51 @@ class LeaderResearchApprovalService(
     private val eventService: LeaderResearchEventService
 ) {
     private val logger = LoggerFactory.getLogger(LeaderResearchApprovalService::class.java)
+
+    fun previewDisabledTrialConfig(request: LeaderResearchApprovalPreviewRequest): Result<LeaderResearchApprovalPreviewResponse> {
+        return try {
+            val candidate = candidateRepository.findById(request.candidateId).orElse(null)
+                ?: return Result.failure(IllegalArgumentException("候选不存在"))
+            val leaderId = resolveLeaderId(candidate)
+            val candidateBlockers = approvalBlockers(candidate, leaderId)
+            val accounts = accountRepository.findAllByOrderByCreatedAtAsc()
+            val accountDtos = accounts.mapNotNull { account ->
+                val accountId = account.id ?: return@mapNotNull null
+                val duplicate = leaderId?.let { copyTradingRepository.findByAccountIdAndLeaderId(accountId, it).firstOrNull() }
+                LeaderResearchApprovalPreviewAccountDto(
+                    accountId = accountId,
+                    accountName = account.accountName,
+                    walletAddress = account.walletAddress,
+                    proxyAddress = account.proxyAddress,
+                    enabled = account.isEnabled,
+                    readOnly = account.isReadOnly,
+                    duplicateConfigId = duplicate?.id,
+                    duplicateConfigEnabled = duplicate?.enabled
+                )
+            }
+            val blockers = candidateBlockers.toMutableList()
+            if (accountDtos.isEmpty()) blockers += "no_accounts"
+            if (accountDtos.isNotEmpty() && accountDtos.none { it.duplicateConfigId == null }) blockers += "all_accounts_duplicate"
+            Result.success(
+                LeaderResearchApprovalPreviewResponse(
+                    candidateId = candidate.id ?: request.candidateId,
+                    leaderId = leaderId,
+                    poolId = candidate.poolId,
+                    category = categoryOf(candidate),
+                    strategyType = candidate.strategyType,
+                    researchState = candidate.researchState.name,
+                    riskFlags = riskFlags(candidate),
+                    locked = candidate.locked,
+                    canCreate = blockers.isEmpty(),
+                    blockerCodes = blockers.distinct(),
+                    accounts = accountDtos
+                )
+            )
+        } catch (e: Exception) {
+            logger.error("Leader research approval preview failed: candidateId=${request.candidateId}", e)
+            Result.failure(e)
+        }
+    }
 
     @Transactional
     fun createDisabledTrialConfig(request: LeaderResearchApprovalRequest): Result<LeaderResearchApprovalResponse> {
@@ -59,22 +109,32 @@ class LeaderResearchApprovalService(
                 )
                 return Result.failure(LeaderResearchCandidateNotReadyException())
             }
+            val leaderId = resolveLeaderId(candidate)
+            val copyabilityBlockers = approvalBlockers(candidate, leaderId)
+            if (copyabilityBlockers.isNotEmpty()) {
+                eventService.record(
+                    type = LeaderResearchEventType.APPROVAL_REJECTED,
+                    candidateId = candidate.id,
+                    reason = "Candidate is not copyable for disabled trial: ${copyabilityBlockers.joinToString(",")}"
+                )
+                return Result.failure(LeaderResearchCandidateNotCopyableException(copyabilityBlockers.joinToString(",")))
+            }
             val account = accountRepository.findByIdForUpdate(request.accountId)
                 ?: return Result.failure(IllegalArgumentException("账户不存在"))
             val synced = poolMappingService.syncCandidate(candidate)
             val pool = synced.poolId?.let { leaderPoolRepository.findById(it).orElse(null) }
                 ?: return Result.failure(IllegalStateException("Leader Pool 同步失败"))
-            val leaderId = synced.leaderId ?: pool.leaderId
-            if (copyTradingRepository.findByAccountIdAndLeaderId(account.id ?: request.accountId, leaderId).isNotEmpty()) {
+            val syncedLeaderId = synced.leaderId ?: pool.leaderId
+            if (copyTradingRepository.findByAccountIdAndLeaderId(account.id ?: request.accountId, syncedLeaderId).isNotEmpty()) {
                 eventService.record(
                     type = LeaderResearchEventType.DUPLICATE_APPROVAL,
                     candidateId = candidate.id,
-                    reason = "Duplicate copy trading config for account=${account.id}, leader=$leaderId"
+                    reason = "Duplicate copy trading config for account=${account.id}, leader=$syncedLeaderId"
                 )
                 return Result.failure(LeaderResearchDuplicateTrialConfigException())
             }
 
-            val copyRequest = buildDisabledCopyTradingRequest(pool, request.accountId, leaderId)
+            val copyRequest = buildDisabledCopyTradingRequest(pool, request.accountId, syncedLeaderId)
             if (copyRequest.enabled) {
                 eventService.record(
                     type = LeaderResearchEventType.REAL_MONEY_ACTIVATION_FORBIDDEN,
@@ -101,7 +161,7 @@ class LeaderResearchApprovalService(
                 type = LeaderResearchEventType.APPROVAL_CREATED_DISABLED_CONFIG,
                 candidateId = candidate.id,
                 reason = "Created disabled copy trading config id=${copyTrading.id}; manual enable required",
-                payloadSummary = "accountId=${request.accountId}, leaderId=$leaderId",
+                payloadSummary = "accountId=${request.accountId}, leaderId=$syncedLeaderId",
                 dedupeKey = "approval-disabled:${candidate.id}:${request.accountId}"
             )
             Result.success(LeaderResearchApprovalResponse(copyTrading))
@@ -142,5 +202,56 @@ class LeaderResearchApprovalService(
         )
     }
 
+    private fun resolveLeaderId(candidate: LeaderResearchCandidate): Long? {
+        return candidate.leaderId ?: candidate.poolId?.let { leaderPoolRepository.findById(it).orElse(null)?.leaderId }
+    }
+
+    private fun approvalBlockers(candidate: LeaderResearchCandidate, leaderId: Long?): List<String> {
+        val blockers = mutableListOf<String>()
+        if (candidate.locked) blockers += "candidate_locked"
+        if (candidate.researchState != LeaderResearchState.TRIAL_READY) blockers += "not_trial_ready"
+        if (leaderId == null) blockers += "leader_mapping_missing"
+        if (candidate.strategyType != "human_directional") blockers += "strategy_not_human_directional"
+        blockers += LeaderResearchProfitWindowParser.parse(candidate.sourceEvidence).blockers
+        if (riskFlags(candidate).isNotEmpty()) blockers += "risk_flags_not_empty"
+        if (categoryOf(candidate) !in PRIMARY_CATEGORIES) blockers += "category_not_primary"
+        return blockers
+    }
+
+    private fun riskFlags(candidate: LeaderResearchCandidate): List<String> {
+        return candidate.riskFlags.orEmpty()
+            .split(",")
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+    }
+
+    private fun categoryOf(candidate: LeaderResearchCandidate): String {
+        return officialLeaderboardCategory(candidate.sourceEvidence)
+            ?: LeaderResearchCategoryEvidenceClassifier.classify(candidate.sourceEvidence, candidate.source).category
+    }
+
+    private fun officialLeaderboardCategory(sourceEvidence: String?): String? {
+        return OFFICIAL_CATEGORY_REGEX.findAll(sourceEvidence.orEmpty())
+            .mapNotNull { match -> normalizeCategory(match.groupValues.getOrNull(1)) }
+            .firstOrNull()
+    }
+
+    private fun normalizeCategory(value: String?): String? {
+        val normalized = value?.trim()?.lowercase()?.replace("_", "-") ?: return null
+        return when (normalized) {
+            "politics", "political" -> "politics"
+            "finance", "financial", "economics", "economic" -> "finance"
+            else -> normalized.takeIf { it in PRIMARY_CATEGORIES }
+        }
+    }
+
     private fun BigDecimal.strip(): String = stripTrailingZeros().toPlainString()
+
+    companion object {
+        private val PRIMARY_CATEGORIES = setOf("politics", "finance")
+        private val OFFICIAL_CATEGORY_REGEX = Regex(
+            "external_analytics:polymarket_official_leaderboard[^\\n\\r]*category[:=]([a-z_-]+)",
+            RegexOption.IGNORE_CASE
+        )
+    }
 }

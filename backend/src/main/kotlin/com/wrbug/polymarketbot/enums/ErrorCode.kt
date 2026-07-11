@@ -122,6 +122,7 @@ enum class ErrorCode(
     LEADER_RESEARCH_CANDIDATE_LOCKED(4266, "研究候选已锁定", "error.leader_research_candidate_locked"),
     LEADER_RESEARCH_SOURCE_UNAVAILABLE(4267, "研究来源不可用", "error.leader_research_source_unavailable"),
     LEADER_RESEARCH_PAPER_VALUATION_UNAVAILABLE(4268, "纸跟估值不可用", "error.leader_research_paper_valuation_unavailable"),
+    LEADER_RESEARCH_CANDIDATE_NOT_COPYABLE(4269, "研究候选不符合可复制试跟条件", "error.leader_research_candidate_not_copyable"),
     
     // 订单相关 (4301-4399)
     ORDER_CREATE_FAILED(4301, "创建订单失败", "error.order_create_failed"),

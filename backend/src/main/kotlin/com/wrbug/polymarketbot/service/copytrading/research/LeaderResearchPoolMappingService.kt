@@ -26,6 +26,7 @@ class LeaderResearchPoolMappingService(
         val now = System.currentTimeMillis()
         val leader = ensureLeader(candidate)
         val pool = ensurePool(candidate, leader)
+        syncResearchManagedCategory(leader, pool, researchCategory(candidate))
         val badge = when (candidate.researchState) {
             LeaderResearchState.TRIAL_READY -> "RESEARCH_TRIAL_READY"
             LeaderResearchState.PAPER -> "RESEARCH_PAPER"
@@ -81,6 +82,21 @@ class LeaderResearchPoolMappingService(
             return leader
         }
         return leaderRepository.save(
+            leader.copy(
+                category = researchCategory,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+    }
+
+    private fun syncResearchManagedCategory(leader: Leader, pool: LeaderPool, researchCategory: String?) {
+        if (pool.source != "RESEARCH_AGENT" || pool.locked || researchCategory.isNullOrBlank()) {
+            return
+        }
+        if (leader.category == researchCategory) {
+            return
+        }
+        leaderRepository.save(
             leader.copy(
                 category = researchCategory,
                 updatedAt = System.currentTimeMillis()

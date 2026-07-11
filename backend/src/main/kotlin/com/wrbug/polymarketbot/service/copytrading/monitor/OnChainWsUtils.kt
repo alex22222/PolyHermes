@@ -217,6 +217,16 @@ object OnChainWsUtils {
                 outById[t.tokenId] = (outById[t.tokenId] ?: BigInteger.ZERO) + t.value
             }
         }
+
+        if (usdcOut == BigInteger.ZERO && usdcIn == BigInteger.ZERO &&
+            (inById.size > 1 || outById.size > 1)
+        ) {
+            logger.info(
+                "忽略无抵押品流动的多 token ERC1155 操作: txHash=$txHash, " +
+                    "incomingTokens=${inById.size}, outgoingTokens=${outById.size}"
+            )
+            return null
+        }
         
         // 找到最大的流入和流出 tokenId
         fun best(map: Map<BigInteger, BigInteger>): Pair<BigInteger?, BigInteger> =
@@ -440,4 +450,3 @@ object OnChainWsUtils {
         return BigInteger(1, slice)
     }
 }
-

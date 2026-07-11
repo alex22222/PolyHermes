@@ -85,7 +85,7 @@ class LeaderResearchActivitySourceImportService(
                 .filter { selectedWallets.add(it.getNormalizedWallet().lowercase()) }
                 .map { source ->
                     val normalizedWallet = source.getNormalizedWallet().lowercase()
-                    val sourceEvidence = sourceEvidence(category, source)
+                    val sourceEvidence = sourceEvidence(category, source, request.lookbackDays)
                     val existing = candidateRepository.findByNormalizedWallet(normalizedWallet)
                     ActivitySourceSelection(
                         source = source,
@@ -241,7 +241,7 @@ class LeaderResearchActivitySourceImportService(
         )
     }
 
-    private fun sourceEvidence(category: String, source: LeaderResearchActivitySourceProjection): String {
+    private fun sourceEvidence(category: String, source: LeaderResearchActivitySourceProjection, lookbackDays: Int): String {
         val totalEvents = source.getTotalEvents().coerceAtLeast(1)
         val safeRatio = BigDecimal(source.getSafePriceEvents()).divide(BigDecimal(totalEvents), 4, RoundingMode.HALF_UP)
         val tailRatio = BigDecimal(source.getTailPriceEvents()).divide(BigDecimal(totalEvents), 4, RoundingMode.HALF_UP)
@@ -256,6 +256,7 @@ class LeaderResearchActivitySourceImportService(
             "tail_price_ratio:$tailRatio",
             "avg_amount:${source.getAvgAmount().format4()}",
             "total_amount:${source.getTotalAmount().format4()}",
+            "activity_window:${lookbackDays.coerceIn(1, 365)}d_trades:${source.getTotalEvents()}",
             "last_event_time:${source.getLastEventTime() ?: 0}"
         ).joinToString(" | ")
     }

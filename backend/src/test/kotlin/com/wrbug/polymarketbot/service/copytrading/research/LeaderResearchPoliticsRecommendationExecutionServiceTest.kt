@@ -249,6 +249,7 @@ class LeaderResearchPoliticsRecommendationExecutionServiceTest {
                     candidateId = 44L,
                     wallet = "0x4444444444444444444444444444444444444444",
                     category = "politics",
+                    strategyType = "human_directional",
                     score = "88.5000",
                     tradeCount = 21,
                     filteredRatio = "0.1000",

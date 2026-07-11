@@ -263,7 +263,8 @@ class LeaderPoolServiceTest {
     private fun leader(id: Long = 1) = Leader(
         id = id,
         leaderAddress = "0x${id.toString().padStart(40, '0')}",
-        leaderName = "Leader $id"
+        leaderName = "Leader $id",
+        researchTag = "TRADEABLE"
     )
 
     private fun account() = Account(

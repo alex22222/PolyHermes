@@ -24,7 +24,8 @@ class BridgePortfolioSyncService(
     private val bridgePortfolioClient: BridgePortfolioClient,
     private val bridgePositionSnapshotRepository: BridgePositionSnapshotRepository,
     private val marketRepository: MarketRepository,
-    private val accountRepository: AccountRepository
+    private val accountRepository: AccountRepository,
+    private val dailyAssetSnapshotService: DailyAssetSnapshotService
 ) {
 
     private val logger = LoggerFactory.getLogger(BridgePortfolioSyncService::class.java)
@@ -96,6 +97,18 @@ class BridgePortfolioSyncService(
             snapshot.updatedAt = now
 
             bridgePositionSnapshotRepository.save(snapshot)
+        }
+
+        if (availableBalance != null) {
+            val positionsValue = validPositions.fold(BigDecimal.ZERO) { total, position ->
+                total.add(position.currentValue?.let(BigDecimal::valueOf) ?: BigDecimal.ZERO)
+            }
+            dailyAssetSnapshotService.captureIfAbsent(
+                walletAddress = walletAddress,
+                availableBalance = BigDecimal.valueOf(availableBalance),
+                positionsValue = positionsValue,
+                capturedAt = syncedAt
+            )
         }
 
         // 删除已不在持仓列表中的旧快照

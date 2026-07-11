@@ -20,6 +20,10 @@ interface LeaderResearchActivityMetricProjection {
     fun getUsablePaperEvents(): Long
     fun getSafePriceEvents(): Long
     fun getTailPriceEvents(): Long
+    fun getPoliticsEvents(): Long
+    fun getFinanceEvents(): Long
+    fun getSportsEvents(): Long
+    fun getCryptoEvents(): Long
     fun getAvgAmount(): BigDecimal?
     fun getTotalAmount(): BigDecimal?
     fun getLastEventTime(): Long?
@@ -60,6 +64,19 @@ interface LeaderResearchCandidateRepository : JpaRepository<LeaderResearchCandid
     fun findByResearchStateIn(states: Collection<LeaderResearchState>, pageable: Pageable): Page<LeaderResearchCandidate>
     fun findAllByOrderByUpdatedAtDesc(pageable: Pageable): Page<LeaderResearchCandidate>
     fun countByResearchState(researchState: LeaderResearchState): Long
+
+    @Query(
+        """
+        select c from LeaderResearchCandidate c
+        where c.researchState in (:states)
+          and (c.strategyType is null or c.strategyType = '' or c.strategyType = 'unknown')
+        order by c.lastScoredAt asc, c.updatedAt asc
+        """
+    )
+    fun findUnknownStrategyCandidates(
+        @Param("states") states: Collection<LeaderResearchState>,
+        pageable: Pageable
+    ): List<LeaderResearchCandidate>
 
     @Query(
         """
@@ -108,6 +125,18 @@ interface LeaderResearchCandidateRepository : JpaRepository<LeaderResearchCandid
           coalesce(sum(case
             when e.price < 0.05000000 or e.price > 0.95000000
             then 1 else 0 end), 0) as tailPriceEvents,
+          coalesce(sum(case
+            when lower(concat(coalesce(e.market_slug, ''), ' ', coalesce(e.market_title, ''))) regexp '(election|president|senate|congress|parliament|trump|biden|democrat|republican|israel|ukraine|russia|taiwan|military-clash|tariff|war|ceasefire|nato|iran|gaza|minister|court|supreme|nominee|governor|mayor|primary|hezbollah|lebanon|crimea|colombian|diplomatic|netanyahu|white-house|truth-social)'
+            then 1 else 0 end), 0) as politicsEvents,
+          coalesce(sum(case
+            when lower(concat(coalesce(e.market_slug, ''), ' ', coalesce(e.market_title, ''))) regexp '(the-fed|fed-rate|feds-upper|rate-cut|rate-cuts|rate-hike|interest-rate|interest-rates|inflation|cpi|gdp|recession|tariff|dollar|treasury|nasdaq|dow-jones|sp500|s-p-500|spx|stock-market|crude-oil|wti|gold|unemployment|jobs|fomc|yield)'
+            then 1 else 0 end), 0) as financeEvents,
+          coalesce(sum(case
+            when lower(concat(coalesce(e.market_slug, ''), ' ', coalesce(e.market_title, ''))) regexp '(fifwc|fifa|world-cup|world cup|team-to-advance|win on 20[0-9]{2}-[0-9]{2}-[0-9]{2}|end in a draw|top goalscorer|nba|nfl|mlb|nhl|epl|uefa|champions-league|soccer|football|basketball|baseball|hockey|tennis|ufc|esports|e-sports)'
+            then 1 else 0 end), 0) as sportsEvents,
+          coalesce(sum(case
+            when lower(concat(coalesce(e.market_slug, ''), ' ', coalesce(e.market_title, ''))) regexp '(bitcoin|btc|ethereum|eth|solana|sol|xrp|doge|crypto|cryptocurrency|binance|coinbase|usdt|stablecoin)'
+            then 1 else 0 end), 0) as cryptoEvents,
           avg(coalesce(e.amount, e.price * e.size)) as avgAmount,
           coalesce(sum(coalesce(e.amount, e.price * e.size, 0)), 0) as totalAmount,
           max(e.event_time) as lastEventTime
@@ -139,6 +168,18 @@ interface LeaderResearchCandidateRepository : JpaRepository<LeaderResearchCandid
           coalesce(sum(case
             when e.price < 0.05000000 or e.price > 0.95000000
             then 1 else 0 end), 0) as tailPriceEvents,
+          coalesce(sum(case
+            when lower(concat(coalesce(e.market_slug, ''), ' ', coalesce(e.market_title, ''))) regexp '(election|president|senate|congress|parliament|trump|biden|democrat|republican|israel|ukraine|russia|taiwan|military-clash|tariff|war|ceasefire|nato|iran|gaza|minister|court|supreme|nominee|governor|mayor|primary|hezbollah|lebanon|crimea|colombian|diplomatic|netanyahu|white-house|truth-social)'
+            then 1 else 0 end), 0) as politicsEvents,
+          coalesce(sum(case
+            when lower(concat(coalesce(e.market_slug, ''), ' ', coalesce(e.market_title, ''))) regexp '(the-fed|fed-rate|feds-upper|rate-cut|rate-cuts|rate-hike|interest-rate|interest-rates|inflation|cpi|gdp|recession|tariff|dollar|treasury|nasdaq|dow-jones|sp500|s-p-500|spx|stock-market|crude-oil|wti|gold|unemployment|jobs|fomc|yield)'
+            then 1 else 0 end), 0) as financeEvents,
+          coalesce(sum(case
+            when lower(concat(coalesce(e.market_slug, ''), ' ', coalesce(e.market_title, ''))) regexp '(fifwc|fifa|world-cup|world cup|team-to-advance|win on 20[0-9]{2}-[0-9]{2}-[0-9]{2}|end in a draw|top goalscorer|nba|nfl|mlb|nhl|epl|uefa|champions-league|soccer|football|basketball|baseball|hockey|tennis|ufc|esports|e-sports)'
+            then 1 else 0 end), 0) as sportsEvents,
+          coalesce(sum(case
+            when lower(concat(coalesce(e.market_slug, ''), ' ', coalesce(e.market_title, ''))) regexp '(bitcoin|btc|ethereum|eth|solana|sol|xrp|doge|crypto|cryptocurrency|binance|coinbase|usdt|stablecoin)'
+            then 1 else 0 end), 0) as cryptoEvents,
           avg(coalesce(e.amount, e.price * e.size)) as avgAmount,
           coalesce(sum(coalesce(e.amount, e.price * e.size, 0)), 0) as totalAmount,
           max(e.event_time) as lastEventTime

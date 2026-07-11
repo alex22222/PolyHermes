@@ -58,7 +58,7 @@ class LeaderResearchStateMachine(
                 }
             }
             LeaderResearchState.PAPER -> {
-                cooldownReason(latestSession, sourceFresh72h)?.let {
+                cooldownReason(candidate, latestSession, sourceFresh72h)?.let {
                     return transition(candidate, LeaderResearchState.COOLDOWN, runId, it)
                 }
                 if (
@@ -72,10 +72,17 @@ class LeaderResearchStateMachine(
                 }
             }
             LeaderResearchState.TRIAL_READY -> {
-                cooldownReason(latestSession, sourceFresh72h)?.let {
+                cooldownReason(candidate, latestSession, sourceFresh72h)?.let {
                     return transition(candidate, LeaderResearchState.COOLDOWN, runId, it)
                 }
-                candidate.researchState
+                if (
+                    latestSession != null &&
+                    (!isCleanHighCandidate(candidate, latestSession, now) || !hasStableCleanHighScores(candidate))
+                ) {
+                    LeaderResearchState.PAPER
+                } else {
+                    candidate.researchState
+                }
             }
             LeaderResearchState.COOLDOWN -> {
                 val cooldownElapsed = candidate.cooldownUntil?.let { now >= it } ?: true
@@ -112,9 +119,18 @@ class LeaderResearchStateMachine(
             candidate.poolId != null
     }
 
-    private fun cooldownReason(session: LeaderPaperSession?, sourceFresh72h: Boolean): String? {
+    private fun cooldownReason(candidate: LeaderResearchCandidate, session: LeaderPaperSession?, sourceFresh72h: Boolean): String? {
         if (session == null) return null
+        enrichmentFailureCooldownReason(candidate, session)?.let { return it }
         return paperTradingService.shouldEnterCooldown(session, sourceFresh72h)
+    }
+
+    private fun enrichmentFailureCooldownReason(candidate: LeaderResearchCandidate, session: LeaderPaperSession): String? {
+        val strategyType = candidate.strategyType?.takeIf { it.isNotBlank() } ?: LeaderResearchStrategyTypeClassifier.UNKNOWN
+        if (strategyType != LeaderResearchStrategyTypeClassifier.UNKNOWN) return null
+        if (session.tradeCount == 0 && session.filteredCount >= 2) return "unknown_strategy_all_filtered_after_enrichment"
+        if (session.tradeCount in 1..2 && session.copyablePnl < BigDecimal.ZERO) return "unknown_strategy_negative_pnl_after_enrichment"
+        return null
     }
 
     private fun canBootstrapPaperObservation(candidate: LeaderResearchCandidate): Boolean {
@@ -123,6 +139,7 @@ class LeaderResearchStateMachine(
 
     private fun isCleanHighCandidate(candidate: LeaderResearchCandidate, session: LeaderPaperSession, now: Long): Boolean {
         return (candidate.score ?: BigDecimal.ZERO) >= TRIAL_READY_MIN_SCORE &&
+            LeaderResearchStrategyTypeClassifier.isTrialReadyCopyable(candidate.strategyType) &&
             candidate.riskFlags.isNullOrBlank() &&
             paperTradingService.isEligibleForTrialReady(session, now)
     }

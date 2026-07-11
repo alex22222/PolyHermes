@@ -209,7 +209,7 @@ class LeaderResearchActivitySourceImportServiceTest {
     fun `import skips existing activity source candidate when evidence is unchanged`() {
         val wallet = "0x5555555555555555555555555555555555555555"
         val source = activitySource(wallet)
-        val evidence = "activity_source:politics | category:politics | events:24 | markets:6 | buy_events:18 | sell_events:6 | safe_price_ratio:0.5833 | tail_price_ratio:0.0833 | avg_amount:3.2500 | total_amount:78.0000 | last_event_time:1782284401000"
+        val evidence = "activity_source:politics | category:politics | events:24 | markets:6 | buy_events:18 | sell_events:6 | safe_price_ratio:0.5833 | tail_price_ratio:0.0833 | avg_amount:3.2500 | total_amount:78.0000 | activity_window:30d_trades:24 | last_event_time:1782284401000"
         Mockito.`when`(
             activityEventRepository.discoverWalletsFromActivitySource(
                 Mockito.anyLong(),

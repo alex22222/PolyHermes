@@ -146,6 +146,7 @@ class LeaderResearchSourceServiceTest {
         eventService = eventService,
         ingestionService = ingestionService,
         backfillLimit = 200,
+        existingLeaderBackfillEnabled = true,
         globalCaptureEnabled = globalCaptureEnabled
     )
 

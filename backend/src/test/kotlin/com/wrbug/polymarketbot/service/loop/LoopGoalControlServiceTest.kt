@@ -3,7 +3,6 @@ package com.wrbug.polymarketbot.service.loop
 import com.wrbug.polymarketbot.entity.SystemConfig
 import com.wrbug.polymarketbot.repository.SystemConfigRepository
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito
 
@@ -11,16 +10,13 @@ class LoopGoalControlServiceTest {
     private val repository: SystemConfigRepository = mock()
 
     @Test
-    fun `default status promotes goal two and keeps goal one restartable`() {
+    fun `default status exposes only active copyable leader goal`() {
         Mockito.`when`(repository.findByConfigKey(Mockito.anyString())).thenReturn(null)
 
         val status = LoopGoalControlService(repository).status()
 
         assertEquals(LoopGoalControlService.GOAL_LEADER_DISCOVERY, status.activeGoalKey)
-        assertEquals(
-            LoopGoalStatus.COMPLETED_PENDING_RESTART.name,
-            status.goals.first { it.goalKey == LoopGoalControlService.GOAL_BRIDGE_RELIABILITY }.status
-        )
+        assertEquals(1, status.goals.size)
         assertEquals(
             LoopGoalStatus.ACTIVE.name,
             status.goals.first { it.goalKey == LoopGoalControlService.GOAL_LEADER_DISCOVERY }.status
@@ -28,25 +24,13 @@ class LoopGoalControlServiceTest {
     }
 
     @Test
-    fun `starting goal one pauses leader discovery and keeps both goals retained`() {
+    fun `archived bridge goal can no longer be started`() {
         val stored = mutableMapOf<String, SystemConfig>()
         stubRepository(stored)
 
-        val status = LoopGoalControlService(repository).update(
-            LoopGoalControlService.GOAL_BRIDGE_RELIABILITY,
-            LoopGoalAction.START.name
-        )
-
-        assertEquals(LoopGoalControlService.GOAL_BRIDGE_RELIABILITY, status.activeGoalKey)
-        assertEquals(
-            LoopGoalStatus.ACTIVE.name,
-            status.goals.first { it.goalKey == LoopGoalControlService.GOAL_BRIDGE_RELIABILITY }.status
-        )
-        assertEquals(
-            LoopGoalStatus.PAUSED.name,
-            status.goals.first { it.goalKey == LoopGoalControlService.GOAL_LEADER_DISCOVERY }.status
-        )
-        assertTrue(status.goals.all { it.retained })
+        org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+            LoopGoalControlService(repository).update("bridge-reliability-goal-1", LoopGoalAction.START.name)
+        }
     }
 
     @Test

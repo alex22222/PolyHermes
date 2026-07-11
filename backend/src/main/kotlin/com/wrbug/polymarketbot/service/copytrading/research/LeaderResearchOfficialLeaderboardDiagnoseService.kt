@@ -9,6 +9,7 @@ import com.wrbug.polymarketbot.entity.LeaderPaperSession
 import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
 import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.repository.LeaderPaperSessionRepository
+import com.wrbug.polymarketbot.repository.LeaderResearchActivityMetricProjection
 import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import org.springframework.stereotype.Service
 import java.math.BigDecimal
@@ -28,14 +29,22 @@ class LeaderResearchOfficialLeaderboardDiagnoseService(
             .takeIf { it.isNotEmpty() }
             ?.let { paperSessionRepository.findLatestByCandidateIds(it).associateBy { session -> session.candidateId } }
             .orEmpty()
+        val metricsByCandidateId = candidates
+            .mapNotNull { it.id }
+            .takeIf { it.isNotEmpty() }
+            ?.let { candidateRepository.aggregateActivityMetricsForCandidateIds(it).associateBy { metric -> metric.getCandidateId() } }
+            .orEmpty()
         val diagnoses = candidates.map { candidate ->
             val session = candidate.id?.let { sessionsByCandidateId[it] }
+            val sourceCategory = categoryOf(candidate)
+            val metric = candidate.id?.let { metricsByCandidateId[it] }
+            val flags = riskFlags(candidate, sourceCategory, metric)
             DiagnosedOfficialCandidate(
                 candidate = candidate,
                 session = session,
-                category = categoryOf(candidate),
-                bucket = bucketOf(candidate, session, now, staleMs),
-                riskFlags = riskFlags(candidate)
+                category = sourceCategory,
+                bucket = bucketOf(candidate, sourceCategory, session, now, staleMs, flags),
+                riskFlags = flags
             )
         }
 
@@ -86,6 +95,7 @@ class LeaderResearchOfficialLeaderboardDiagnoseService(
             cleanHighTotal = diagnoses.count { it.bucket == "CLEAN_HIGH" },
             fastWatchTotal = diagnoses.count { it.bucket == "FAST_WATCH" },
             readyForPaperTotal = diagnoses.count { it.bucket == "READY_FOR_PAPER" },
+            disabledTrialCandidateTotal = diagnoses.count { isDisabledTrialCandidate(it) },
             buckets = buckets,
             categories = categories,
             riskFlagCounts = riskFlagCounts,
@@ -94,16 +104,31 @@ class LeaderResearchOfficialLeaderboardDiagnoseService(
         )
     }
 
-    private fun bucketOf(candidate: LeaderResearchCandidate, session: LeaderPaperSession?, now: Long, staleMs: Long): String {
-        val flags = riskFlags(candidate)
+    private fun bucketOf(
+        candidate: LeaderResearchCandidate,
+        sourceCategory: String,
+        session: LeaderPaperSession?,
+        now: Long,
+        staleMs: Long,
+        flags: List<String>
+    ): String {
         val ageMs = candidate.lastSourceSeenAt?.let { now - it }
         val score = candidate.score ?: BigDecimal.ZERO
         val sourceFresh = ageMs?.let { it <= SOURCE_FRESH_48H_MS } == true
+        val stale = "stale_activity" in flags || ageMs?.let { it > staleMs } == true
         if (candidate.locked) return "LOCKED"
         if ("no_activity_sample" in flags) return "NO_ACTIVITY_SAMPLE"
-        if ("stale_activity" in flags || ageMs?.let { it > staleMs } == true) return "STALE_ACTIVITY"
-        if ("tail_price_spray" in flags || "low_safe_price_ratio" in flags || "buy_only_no_exit" in flags) return "HARD_RISK"
-        if ("mixed_category_evidence" in flags || categoryOf(candidate) !in PRIMARY_CATEGORIES) return "CATEGORY_CONFLICT"
+        if ("half_year_pnl_negative" in flags || "multi_window_profit_inconsistent" in flags ||
+            "recent_pnl_negative" in flags || "tail_price_spray" in flags ||
+            "low_safe_price_ratio" in flags || "buy_only_no_exit" in flags
+        ) return "HARD_RISK"
+        if ("inactive_recently" in flags) return "INACTIVE_RECENTLY"
+        if ("needs_half_year_profit_window" in flags || "needs_activity_window" in flags) return "NEEDS_PROFIT_WINDOW"
+        if ("mixed_category_evidence" in flags || "activity_category_mismatch" in flags || sourceCategory !in PRIMARY_CATEGORIES) return "CATEGORY_CONFLICT"
+        if (stale) {
+            if (isHighQualityPaperCandidate(candidate, sourceCategory, session, score, flags)) return "STALE_HIGH_QUALITY"
+            return "STALE_ACTIVITY"
+        }
         if (candidate.researchState == LeaderResearchState.PAPER || candidate.researchState == LeaderResearchState.TRIAL_READY) {
             if (session != null && score >= BigDecimal("80") && flags.isEmpty() && session.tradeCount >= 10 && session.copyablePnl > BigDecimal.ZERO) {
                 val totalTrades = session.tradeCount + session.filteredCount
@@ -119,6 +144,23 @@ class LeaderResearchOfficialLeaderboardDiagnoseService(
         return "OBSERVE"
     }
 
+    private fun isHighQualityPaperCandidate(
+        candidate: LeaderResearchCandidate,
+        sourceCategory: String,
+        session: LeaderPaperSession?,
+        score: BigDecimal,
+        flags: List<String>
+    ): Boolean {
+        val nonStaleFlags = flags.filter { it != "stale_activity" }
+        return sourceCategory in PRIMARY_CATEGORIES &&
+            candidate.researchState in PAPER_STATES &&
+            session != null &&
+            score >= BigDecimal("80") &&
+            nonStaleFlags.isEmpty() &&
+            session.tradeCount >= 10 &&
+            session.copyablePnl > BigDecimal.ZERO
+    }
+
     private fun sampleDto(diagnosis: DiagnosedOfficialCandidate, now: Long): LeaderResearchOfficialLeaderboardSampleDto {
         val candidate = diagnosis.candidate
         val session = diagnosis.session
@@ -128,6 +170,7 @@ class LeaderResearchOfficialLeaderboardDiagnoseService(
             category = diagnosis.category,
             bucket = diagnosis.bucket,
             researchState = candidate.researchState.name,
+            strategyType = candidate.strategyType,
             score = candidate.score?.format4(),
             riskFlags = diagnosis.riskFlags,
             lastSourceAgeHours = candidate.lastSourceSeenAt?.let { ((now - it).coerceAtLeast(0) / HOUR_MS) },
@@ -138,16 +181,86 @@ class LeaderResearchOfficialLeaderboardDiagnoseService(
         )
     }
 
-    private fun categoryOf(candidate: LeaderResearchCandidate): String {
-        return LeaderResearchCategoryEvidenceClassifier.classify(candidate.sourceEvidence, candidate.source).category
+    private fun isDisabledTrialCandidate(diagnosis: DiagnosedOfficialCandidate): Boolean {
+        return diagnosis.bucket == "CLEAN_HIGH" &&
+            diagnosis.candidate.researchState == LeaderResearchState.TRIAL_READY &&
+            diagnosis.candidate.strategyType == "human_directional" &&
+            diagnosis.category in PRIMARY_CATEGORIES &&
+            diagnosis.riskFlags.isEmpty()
     }
 
-    private fun riskFlags(candidate: LeaderResearchCandidate): List<String> {
-        return candidate.riskFlags.orEmpty()
+    private fun categoryOf(candidate: LeaderResearchCandidate): String {
+        return officialLeaderboardCategory(candidate.sourceEvidence)
+            ?: LeaderResearchCategoryEvidenceClassifier.classify(candidate.sourceEvidence, candidate.source).category
+    }
+
+    private fun officialLeaderboardCategory(sourceEvidence: String?): String? {
+        return OFFICIAL_CATEGORY_REGEX.findAll(sourceEvidence.orEmpty())
+            .mapNotNull { match -> normalizeCategory(match.groupValues.getOrNull(1)) }
+            .firstOrNull()
+    }
+
+    private fun normalizeCategory(value: String?): String? {
+        val normalized = value?.trim()?.lowercase()?.replace("_", "-") ?: return null
+        return when (normalized) {
+            "politics", "political" -> "politics"
+            "finance", "financial", "economics", "economic" -> "finance"
+            "sports", "sport", "esports", "e-sports" -> "sports"
+            "crypto", "cryptocurrency", "bitcoin", "btc" -> "crypto"
+            else -> normalized.takeIf { it in ALL_CATEGORIES }
+        }
+    }
+
+    private fun riskFlags(
+        candidate: LeaderResearchCandidate,
+        sourceCategory: String,
+        metric: LeaderResearchActivityMetricProjection?
+    ): List<String> {
+        val flags = candidate.riskFlags.orEmpty()
             .split(",")
             .map { it.trim() }
             .filter { it.isNotBlank() }
-            .distinct()
+            .toMutableList()
+        flags += LeaderResearchProfitWindowParser.parse(candidate.sourceEvidence).blockers
+        val activityCategory = metric?.let { reliableActivityCategory(it) }
+        if (activityCategory != null && activityCategory != sourceCategory) {
+            flags += "activity_category_mismatch"
+        }
+        if (metric != null && metric.getTotalEvents() >= PRICE_DISTRIBUTION_MIN_EVENTS) {
+            val totalEvents = BigDecimal(metric.getTotalEvents())
+            val safePriceRatio = BigDecimal(metric.getSafePriceEvents()).divide(totalEvents, 8, RoundingMode.HALF_UP)
+            val tailPriceRatio = BigDecimal(metric.getTailPriceEvents()).divide(totalEvents, 8, RoundingMode.HALF_UP)
+            if (safePriceRatio < MIN_SAFE_PRICE_RATIO) flags += "low_safe_price_ratio"
+            if (tailPriceRatio > MAX_TAIL_PRICE_RATIO) flags += "tail_price_spray"
+        }
+        return flags.distinct()
+    }
+
+    private fun reliableActivityCategory(metric: LeaderResearchActivityMetricProjection): String? {
+        val counts = mapOf(
+            "politics" to metric.getPoliticsEvents(),
+            "finance" to metric.getFinanceEvents(),
+            "sports" to metric.getSportsEvents(),
+            "crypto" to metric.getCryptoEvents()
+        ).filterValues { it > 0 }
+        val total = counts.values.sum()
+        val dominant = counts.maxWithOrNull(compareBy<Map.Entry<String, Long>> { it.value }.thenBy { priority(it.key) })
+            ?: return null
+        val ratio = dominant.value.toDouble() / total.toDouble()
+        return dominant.key.takeIf {
+            total >= LeaderResearchActivityScoringService.ACTIVITY_CATEGORY_MIN_EVENTS &&
+                ratio >= LeaderResearchActivityScoringService.ACTIVITY_CATEGORY_DOMINANCE
+        }
+    }
+
+    private fun priority(category: String): Int {
+        return when (category) {
+            "politics" -> 0
+            "finance" -> 1
+            "sports" -> 2
+            "crypto" -> 3
+            else -> 9
+        }
     }
 
     private fun BigDecimal.format4(): String {
@@ -165,7 +278,15 @@ class LeaderResearchOfficialLeaderboardDiagnoseService(
     companion object {
         private const val HOUR_MS = 60L * 60 * 1000
         private const val SOURCE_FRESH_48H_MS = 48L * HOUR_MS
+        private const val PRICE_DISTRIBUTION_MIN_EVENTS = 20L
+        private val MIN_SAFE_PRICE_RATIO = BigDecimal("0.50")
+        private val MAX_TAIL_PRICE_RATIO = BigDecimal("0.15")
         private val PRIMARY_CATEGORIES = setOf("politics", "finance")
+        private val ALL_CATEGORIES = setOf("politics", "finance", "sports", "crypto")
+        private val OFFICIAL_CATEGORY_REGEX = Regex(
+            "external_analytics:polymarket_official_leaderboard[^\\n\\r]*category[:=]([a-z_-]+)",
+            RegexOption.IGNORE_CASE
+        )
         private val PAPER_STATES = setOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
         private val BUCKET_DESCRIPTIONS = mapOf(
             "READY_FOR_PAPER" to "来源新鲜、评分达标、无硬风险，可进入 PAPER 观察。",
@@ -174,9 +295,12 @@ class LeaderResearchOfficialLeaderboardDiagnoseService(
             "PAPER_OBSERVING" to "已进入 PAPER，但样本或收益质量仍需观察。",
             "SMALL_SAMPLE" to "交易样本不足，不应直接跟单。",
             "NO_ACTIVITY_SAMPLE" to "系统暂未捕获足够可评分活动。",
+            "STALE_HIGH_QUALITY" to "来源过期但历史评分和纸跟表现较好，需要优先刷新来源。",
             "STALE_ACTIVITY" to "来源或活动过期，需要重新确认近期活跃。",
             "HIGH_FILTERED_RATIO" to "PAPER 过滤率高，可复制性差。",
             "HARD_RISK" to "存在低价长尾、低安全价格比例或只有买无退出等硬风险。",
+            "INACTIVE_RECENTLY" to "近期真实成交不足或最近成交已过期，不进入试跟队列。",
+            "NEEDS_PROFIT_WINDOW" to "缺少长期盈利或近期活动窗口证据，不能判断是否适合跟单。",
             "CATEGORY_CONFLICT" to "分类证据混杂或不属于主类别。",
             "OTHER_RISK" to "存在其他风险标记。",
             "LOCKED" to "用户锁定候选，不自动处理。",
@@ -186,11 +310,12 @@ class LeaderResearchOfficialLeaderboardDiagnoseService(
             "READY_FOR_PAPER" to 0,
             "FAST_WATCH" to 1,
             "CLEAN_HIGH" to 2,
-            "PAPER_OBSERVING" to 3,
-            "SMALL_SAMPLE" to 4,
-            "NO_ACTIVITY_SAMPLE" to 5,
-            "STALE_ACTIVITY" to 6,
-            "HARD_RISK" to 7
+            "STALE_HIGH_QUALITY" to 3,
+            "PAPER_OBSERVING" to 4,
+            "SMALL_SAMPLE" to 5,
+            "NO_ACTIVITY_SAMPLE" to 6,
+            "STALE_ACTIVITY" to 7,
+            "HARD_RISK" to 8
         )
     }
 }

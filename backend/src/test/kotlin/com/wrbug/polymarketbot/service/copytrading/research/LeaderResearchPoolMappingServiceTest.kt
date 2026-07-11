@@ -60,6 +60,28 @@ class LeaderResearchPoolMappingServiceTest {
         Mockito.verify(leaderRepository, Mockito.never()).save(anyLeader())
     }
 
+    @Test
+    fun `sync corrects research agent managed leader category from research evidence`() {
+        val candidate = financeCandidate(leaderId = 11L)
+        val leader = Leader(
+            id = 11L,
+            leaderAddress = candidate.normalizedWallet,
+            leaderName = "Hideous-Racer",
+            category = "crypto"
+        )
+        Mockito.`when`(leaderRepository.findById(11L)).thenReturn(Optional.of(leader))
+        Mockito.`when`(leaderRepository.save(anyLeader())).thenAnswer { it.arguments[0] }
+        Mockito.`when`(leaderPoolRepository.findByLeaderId(11L)).thenReturn(pool(source = "RESEARCH_AGENT"))
+        Mockito.`when`(leaderPoolRepository.save(anyPool())).thenAnswer { it.arguments[0] }
+        Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer { it.arguments[0] }
+
+        service.syncCandidate(candidate)
+
+        val captor = ArgumentCaptor.forClass(Leader::class.java)
+        Mockito.verify(leaderRepository).save(captor.capture())
+        assertEquals("finance", captor.value.category)
+    }
+
     private fun financeCandidate(leaderId: Long): LeaderResearchCandidate {
         return LeaderResearchCandidate(
             id = 1L,
@@ -70,10 +92,11 @@ class LeaderResearchPoolMappingServiceTest {
         )
     }
 
-    private fun pool(): LeaderPool {
+    private fun pool(source: String = "MANUAL"): LeaderPool {
         return LeaderPool(
             id = 2L,
-            leaderId = 11L
+            leaderId = 11L,
+            source = source
         )
     }
 

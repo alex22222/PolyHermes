@@ -44,24 +44,15 @@ class BridgeTradeRecordService(
         return try {
             val pageRequest = PageRequest.of(
                 (request.page - 1).coerceAtLeast(0),
-                request.size.coerceIn(1, 100),
-                Sort.by(Sort.Order.desc("createdAt"))
+                request.size.coerceIn(1, 100)
             )
 
-            val page: Page<BridgeTradeRecord> = when {
-                !request.bridgeId.isNullOrBlank() && !request.status.isNullOrBlank() -> {
-                    bridgeTradeRecordRepository.findByBridgeIdAndStatus(request.bridgeId, request.status, pageRequest)
-                }
-                !request.bridgeId.isNullOrBlank() -> {
-                    bridgeTradeRecordRepository.findByBridgeId(request.bridgeId, pageRequest)
-                }
-                !request.status.isNullOrBlank() -> {
-                    bridgeTradeRecordRepository.findByStatus(request.status, pageRequest)
-                }
-                else -> {
-                    bridgeTradeRecordRepository.findAll(pageRequest)
-                }
-            }
+            val page: Page<BridgeTradeRecord> = bridgeTradeRecordRepository.findFiltered(
+                bridgeId = request.bridgeId?.trim()?.takeIf { it.isNotEmpty() },
+                status = request.status?.trim()?.takeIf { it.isNotEmpty() },
+                marketKeyword = request.marketKeyword?.trim()?.takeIf { it.isNotEmpty() },
+                pageable = pageRequest
+            )
 
             val positionViews = buildPositionViews(page.content)
             val list = page.content.map { it.toDto(positionViews[it.positionKey()]) }

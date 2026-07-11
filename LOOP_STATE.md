@@ -1,10 +1,133 @@
 # Loop Engineering State: PolyHermes Web Bridge BUY/SELL 可靠性持续改进
 
+### Iteration 135 - 质量门槛 v4 首段落地（2026-07-10 CST）
+
+### Iteration 136 - 活动证据兼容复核（2026-07-10 CST）
+
+### Iteration 137 - 官方盈利窗口与近期活动补源（2026-07-11 CST）
+
+### Iteration 138 - 分批回填第一轮性能验证（2026-07-11 CST）
+
+### Iteration 139 - candidateIds 分批评分闭环（2026-07-11 CST）
+
+### Iteration 140 - ALL 盈利候选反向扩池（2026-07-11 CST）
+
+### Iteration 141 - Falcon 发现源补充（2026-07-11 CST）
+
+### Iteration 142 - 长期 PnL 外部数据缺口确认（2026-07-11 CST）
+
+### Iteration 143 - 长期盈利窗口调整为半年（2026-07-11 CST）
+
+**用户决策**：
+- 将长期盈利硬门槛从 `ALL/365D` 调整为 `180D/6M`。
+
+**代码变化**：
+- `LeaderResearchProfitWindowParser` 现在只接受 `profit_window:180d:*`、`profit_window:6m:*` 或 `6-month` 作为长期盈利证据。
+- 长期亏损 blocker 改为 `half_year_pnl_negative`，缺失 blocker 改为 `needs_half_year_profit_window`。
+- official diagnose、trial-ready recheck、approval 继续复用同一硬门槛；近期活跃、BUY/SELL、风险和可复制性门槛不变。
+- 相关 parser、diagnose、recheck、approval 测试及 `bootJar` 通过。
+
+**运行态**：
+- 当前数据库标准化 `180D/6M` evidence 仍为 `0`；旧 `ALL/365D` evidence 不再被当作半年证据。
+- 目标按新口径重新继续，下一步必须补真实半年窗口数据，再分批评分和 recheck。
+
+**最终阻塞审计**：
+- candidate `1660`：`1408` 条本地 activity，BUY `1179`、SELL `229`，覆盖 `2026-06-21` 至 `2026-07-11`，不足 365D/ALL。
+- candidate `1458`：`265` 条本地 activity，BUY `91`、SELL `174`，覆盖 `2026-06-21` 至 `2026-07-10`，不足 365D/ALL。
+- 官方 ALL PNL 榜单已扫描 2000 条但没有命中这两个 activity-rich 候选。
+- Falcon 已验证可用但仅有 15D 指标；Polyburg/Polymarket Analytics 当前没有可直接提供长期窗口的可用数据。
+- 因此当前不能在不违反长期盈利硬门槛的情况下新增可试跟 leader。
+
+**执行结果**：
+- Falcon dry-run 可用，返回 15D ROI、胜率、Sharpe、交易数和 PnL；该源没有 ALL/365D 长期收益字段，只作为发现入口。
+- live 导入 `100` 个 finance 候选，新增 `47` 个。
+- 其中 `73` 个完成 targeted activity score；`24` 个无近期 activity，其他主要被 `small_sample`、`low_market_diversity`、`weak_exit_sample`、`buy_only_no_exit` 或类别错配阻断。
+- 本轮 promoted PAPER `0`，没有新增可试跟候选。
+
+**结论**：
+- Falcon 能扩大候选发现池，但 15D 数据不足以满足长期盈利硬门槛。
+- 继续目标循环，下一轮优先从已有 activity-rich PAPER 候选补 ALL/365D 外部证据；不把 Falcon 15D 结果直接当作试跟资格。
+
+**执行结果**：
+- 官方 `ALL + PNL` 扫描 `2000` 条观测，筛出 `500` 条，新增候选 `179` 个。
+- 其中 `228` 个候选完成 targeted activity score；`188` 个因无近期 activity sample 被阻断，未直接晋级 PAPER。
+- 对新增候选降低到发现阶段最低活动样本要求后，activity source 仍选中 `0` 个，说明官方长期盈利榜与本地近期 activity pool 当前没有交集。
+- 当前候选状态：`DISCOVERED=881`、`PAPER=22618`、`TRIAL_READY=17`；满足 `PAPER/TRIAL_READY + score>=80 + risk_flags empty` 的候选仅 `2` 个。
+- 后端 health `UP`，`git diff --check` 通过。
+
+**结论**：
+- 扩大官方 ALL 榜单确实增加了研究候选，但没有增加可试跟数量。
+- 继续放宽活动阈值没有证据收益；下一轮应把已有 activity-rich 候选逐个补长期 PnL，而不是继续扩大官方榜单。
+
+**执行结果**：
+- 当前 `PAPER/TRIAL_READY + score>=70` 候选共 `11` 个。
+- 11 个候选均完成 targeted paper score，`scoredCount=11`，未超时。
+- activity source 小批回填选中 `4` 个，更新 `2` 个；批量路径可用。
+- official 定向刷新对 `1660/1458` 命中 `1` 个，但 recheck 仍分别因 `needs_profit_window` 阻断。
+- `1660` 当前 evidence 仍缺少可验证的 `ALL/365D` PnL，不能仅凭 MONTH/WEEK 盈利进入试跟。
+
+**结论**：
+- `candidateIds` 分批评分解决了全量 paper score 超时问题，但本轮没有产生新的可试跟 leader。
+- 下一轮切换到能提供长期 PnL 的外部来源或补充 365D/ALL 数据，不再重复刷新同一官方榜单窗口。
+
+**结果**：
+- activity source 已增加标准化 `activity_window:<days>d_trades:<count>` evidence 字段，相关测试通过。
+- 但当前全量 politics/finance activity source 请求超过 180 秒并未提交；数据库标准化 activity window 仍为 `0`。
+- backend health 保持 `UP`，`git diff --check` 通过。
+
+**下一步**：
+- 将 activity source 回填改为按 candidateIds 的小批量事务，先处理 PAPER/TRIAL_READY 高分候选，再逐批扩展。
+
+**执行结果**：
+- 官方 leaderboard `MONTH + ALL` 实际拉取 `800` 条观测，筛出 `65` 个跨窗口候选；写入更新数为 `0`，说明这些候选已有相同证据或被现有记录合并。
+- 近 14 天 politics/finance activity source 选出 `81` 个、更新 `78` 个候选。
+- 强制 activity score 执行后，官方 diagnose 仍为 `CLEAN_HIGH=0`、`FAST_WATCH=0`、`disabledTrialCandidateTotal=0`。
+- 全量 paper score（500 个候选）超过 180 秒超时；随后 trial-ready recheck 扫描到 `0` 个符合当前高质量预筛条件的候选。
+
+**结论**：
+- 不能通过降低门槛来增加数量；当前瓶颈是高质量候选的标准化盈利/活动证据与 paper 评分吞吐。
+- 下一轮应改为按官方跨窗口候选的 candidateIds 分批 paper score，并新增 activity window evidence 回填，避免全量评分超时。
+
+**执行结果**：
+- `LeaderResearchProfitWindowParser` 兼容既有 `last_event_time`，并取 evidence 中最新时间作为活动时间。
+- 定向 recheck API 的无令牌调用被正常拒绝，未绕过鉴权或直接修改状态。
+- 数据库只读复核显示候选 `153`、`1660`、`2361` 均有近 14 天真实 activity event；因此它们不是“近期不活跃”，而是旧 `source_evidence` 尚未回填 `activity_window` / 最新活动时间。
+- parser、trial-ready recheck、approval 定向测试及 `bootJar` 均通过；后端重启后 `/actuator/health=UP`。
+
+**下一步**：
+- 新增受鉴权的批量 activity evidence 回填动作，从 `leader_activity_event` 写入 `activity_window:7d_trades`、`activity_window:14d_trades`、`last_trade_at`。
+- 通过 Leader Research 页面执行回填后，再运行 trial-ready recheck，输出最终可跟单数量与阻断分布。
+
+**目标推进**：
+- 将“近期活跃 + 全年/长期盈利”从文档要求变成研究晋级和试跟创建的后端硬门槛。
+
+**代码变化**：
+- 新增 `LeaderResearchProfitWindowParser`，解析 `profit_window:*`、官方 `period:* pnl:*` 兼容证据、`activity_window:*_trades` 和 `last_trade_at`。
+- 新增 blocker：`needs_profit_window`、`needs_activity_window`、`annual_pnl_negative`、`multi_window_profit_inconsistent`、`recent_pnl_negative`、`inactive_recently`。
+- official leaderboard diagnose 新增 `NEEDS_PROFIT_WINDOW`、`INACTIVE_RECENTLY`、长期/多窗口亏损进入 `HARD_RISK`。
+- trial-ready recheck、disabled-trial approval preview/create 复用同一 parser，数据缺失或质量 blocker 均不得晋级/创建模板。
+- official leaderboard 导入证据新增标准化 `profit_window:<window>:<pnl>`。
+
+**验证**：
+- parser、official diagnose、trial-ready recheck、approval 定向测试通过。
+- `bootJar` 通过；后端已重启，`/actuator/health=UP`。
+- 全量 `*LeaderResearchTest` 有 1 个既有 `LeaderResearchSourceServiceTest` 失败，失败与本轮 parser/质量门槛无关，需后续单独处理。
+
+**运行态只读复核**：
+- official leaderboard 候选 `1082`。
+- 其中已能从旧 evidence 识别长期负 PnL 的约 `32` 个。
+- 旧候选普遍没有标准化近期活跃窗口，因此当前应归为“需要补证据”，而不是继续计入可跟单数量。
+- 旧 `TRIAL_READY` 状态未直接改库；下一步执行 targeted/full trial-ready recheck，让状态与新门槛同步。
+
+**下一步**：
+- 补 activity window / last trade evidence，优先 official finance/politics 候选。
+- 执行 recheck 后重新统计 `CLEAN_HIGH`、`NEEDS_PROFIT_WINDOW`、`INACTIVE_RECENTLY`、`HARD_RISK`。
+
 ## Goal
 
 通过挖掘 Bridge 日志和数据库中的 BUY/SELL 失败记录，持续修复 `polymtrade-bridge` 的执行可靠性问题，降低误判失败和假成功比例。
 
-> 2026-06-24 note: 用户提出“第二目标”：第一阶段积累并评分 1000+ 新的高质量 Leader 候选。由于 Codex goal 工具中旧 Bridge 目标仍为 paused，不能并行新建持久 goal；第二目标先落到项目文档 `docs/zh/leader-discovery-goal-2-phase-1.md`，后续可在完成/切换旧 goal 后正式创建。
+> 2026-06-24 note: 用户提出“第二目标”：第一阶段积累并评分 1000+ 新的高质量 Leader 候选。由于 Codex goal 工具中旧 Bridge 目标仍为 paused，不能并行新建持久 goal；第二目标先落到项目文档 `docs/archive/goals/leader-discovery-goal-2-history.md`，后续可在完成/切换旧 goal 后正式创建。
 
 > 2026-06-24 11:35 note: 用户确认“先把第一个目标往后放，启动第二个积累 leader 目标”。执行层面暂停 Bridge 可靠性目标的新迭代，优先推进 Leader 候选积累目标；Codex goal 工具仍被旧 paused goal 占用，因此第二目标通过项目 spec、代码/API、数据库候选池与本 loop state 追踪。
 
@@ -66,16 +189,52 @@
 
 > 2026-07-04 second-goal live loop iteration: 按推荐闭环执行 politics `PAPER_PROCESS` 安全推进。当前后端 health `UP`，最近完整 Leader Research run `#7` 成功完成，研究池为 `DISCOVERED=621`、`PAPER=24244`、`TRIAL_READY=7`、`COOLDOWN=22549`；启动本轮前推荐快照 `#164` 显示 politics 有 `PAPER_PROCESS=1`（candidate `1755`）和 `FAST_WATCH_REVIEW=2`（`153/786`）。通过正式鉴权 API 执行 `dryRun=false, actions=[PAPER_PROCESS]` 后，candidate `1755` 纸跟从 `12` 笔推进到 `31` 笔，`processed=19`、`filtered=1`、`failed=0`，copyable PnL 仍为正 `3.0084`，score 更新为 `83.7762`，filtered ratio `0.1143`。随后 `/paper/trial-ready/recheck` dry-run 确认 `1755` `READY_TO_PROMOTE`，真实 recheck 后 candidate `1755` 进入 `TRIAL_READY`，全局 `TRIAL_READY` 从 `7` 增至 `8`，leader pool `#51` 已同步为 `RESEARCH_TRIAL_READY`。`786` 仍卡 `stable_high_scores_below_3`，`153` 仍卡 `score_below_80`。下一轮：优先复核 `1755` 是否创建禁用试跟配置；继续等待/刷新 `786` 稳定高分窗口；对 `153` 不推进真钱，只继续观察或降权。
 
+> 2026-07-09 second-goal improvement plan update: 第二目标执行口径已从“扩大 leader 数量/看高分”升级为“识别可复制交易机制”。当前主要瓶颈是 PAPER/TRIAL_READY 中 `strategy_type=unknown` 占比过高，且长尾低价、调仓 churn、做市/套利、高频小额等机制可能让高分候选不可跟。下一阶段优先级固定为：1) 批量补齐 PAPER/TRIAL_READY 的 strategy type，每轮默认 100 个；2) 将不可复制机制作为高优先级 blocker，禁止进入 TRIAL_READY/跟单模板；3) 加厚 politics/finance targeted paper 样本，使主类别 clean human_directional 候选可复核；4) 最终试跟前把 Bridge BUY 放大、SELL 及时性、重复 BUY、特殊市场硬规则和记录完整性纳入门槛。详细计划已写入 `docs/archive/goals/leader-discovery-goal-2-history.md` 的“2026-07-09 第二目标改进计划：从高分转向可复制机制”。最近下一步：完成“补齐100个unknown”后端接口、日报按钮、单测和运行态验证。
+
+> 2026-07-09 second-goal improvement plan v2: 第二目标下一阶段从“按 unknown 队列持续加厚”调整为“高质量来源优先转化”。最新计划已写入 `docs/archive/goals/leader-discovery-goal-2-history.md` 的“2026-07-09 改进计划 v2：从加厚 unknown 转向高质量来源转化”。执行顺序固定为：1) official leaderboard / external analytics 的 CLEAN_HIGH、TRIAL_READY 候选优先复核；2) 先处理 candidate `1660` finance 与 `153` politics，补 targeted activity score、paper score、trial-ready recheck，并确认是否已在 leader pool / copy trading 配置中；3) finance unknown 继续小批 dry-run 20、live enrich 5，保留正 PnL 薄样本但不晋级，负 PnL/全过滤进入 COOLDOWN；4) 如果连续 3 轮 live enrich 的 COOLDOWN 比例 >=60% 或没有新增 clean human_directional，则暂停扩大加厚批量，改优化来源选择；5) 任何可试跟候选必须满足 `strategy_type=human_directional`、politics/finance 优先、BUY/SELL 样本完整、copyable PnL 为正、无不可复制 risk flag，且 Bridge 没有同类市场执行缺口。下一轮直接从复核 `1660/153` 开始。
+
+> 2026-07-09 official leaderboard candidate recheck: 已按 v2 计划复核 `1660` 与 `153`。两者都在 leader pool，且当前都没有 copy trading 配置。正式 API 执行 targeted activity score、paper score、trial-ready recheck：`1660` 最终为 finance `TRIAL_READY`、`strategy_type=human_directional`、score `90.1471`、paper trades `23`、copyable PnL `13.5642`、risk flags 空，可作为“禁用试跟配置候选”，但本轮未自动创建配置；`153` 最终为 `PAPER`、`strategy_type=unknown`、score `77.9036`、paper trades `31`、copyable PnL `1.2851`，recheck 阻断原因为 `score_below_80`，不推进跟单。额外发现：`153` 的 source evidence 为 politics，但 `copy_trading_leaders.category` 仍是 `crypto`，后续需要修复/检查 research candidate 真实类别与 leader pool/leader category 的同步，避免分领域资金分配误判。详细结果已写入目标文档“2026-07-09 Official Leaderboard 候选复核：1660 / 153”。下一步：围绕 `1660` 输出禁用试跟人工确认入口，继续查下一个 politics/finance CLEAN_HIGH，并修分类同步问题。
+
+> 2026-07-09 research leader category sync fix: 已修复上轮发现的 `153` 分类不同步问题。根因是 `LeaderResearchPoolMappingService` 只会在 `copy_trading_leaders.category` 为空时补 research category，旧错误分类不会被覆盖。本轮新增规则：仅当 leader pool `source=RESEARCH_AGENT`、`locked=false`、research evidence 为单一明确分类且 leader.category 不一致时，同步修正 leader.category；手工 pool、locked pool、mixed/unknown evidence 不覆盖。新增 `LeaderResearchPoolMappingServiceTest` 覆盖 research agent 旧分类修正，并保留手工分类不覆盖。验证：相关后端测试通过，`bootJar` 通过，后端 tmux `polyhermes-backend-codex` health `UP`；对 `153` 执行正式 recheck 后，DB 显示 `leader_category` 已从 `crypto` 修正为 `politics`，`1660` 保持 `finance`。`153` 仍因 `score_below_80` 保持 PAPER，不推进试跟。下一步：围绕 `1660` 建立禁用试跟人工确认入口或继续 official leaderboard diagnose 查找下一个 politics/finance CLEAN_HIGH。
+
+> 2026-07-09 official diagnose approval entry: 已补齐 Leader 研究页 official leaderboard diagnose 样本列表的禁用试跟入口。当前正式 diagnose 返回 `1660` 为 finance `CLEAN_HIGH`、`TRIAL_READY`、score `90.1471`，是样本列表第一条；页面现在会在 `researchState=TRIAL_READY` 的 official sample 行展示“创建禁用试跟”按钮，复用现有 `openApprovalByCandidateId()` 与后端 `approval/create-disabled-trial-config`，后端仍强制配置 `enabled=false` 并拒绝非 TRIAL_READY 或重复配置。本轮未自动创建 copy trading config，只让用户能从 official source 复核结果直接人工确认。验证：`frontend npm run build` 通过；正式 `official-leaderboard/diagnose` 确认 `trialReadySamples=[1660]`。
+
+> 2026-07-09 official candidate 174 recheck: 继续按第二目标 v2 复核 official leaderboard 高质量来源。`174` 起初在 official diagnose 中是 finance `PAPER_OBSERVING`、activity score `100`、`human_directional`、paper trades `0`，看似是 `1660` 之外最接近的 finance 候选。本轮对 `174` 执行 targeted paper/process、activity score、paper score、trial-ready recheck：paper 新增 processed `9`、filtered `11`、copyable PnL `+1.5350`，但 activity score 识别真实活动主类为 sports，并打上 `activity_category_mismatch`；最终 score 降为 `50`，risk flags 为 `activity_category_mismatch,high_filtered_ratio,tail_price_spray,small_sample`，recheck 阻断 `score_below_80`。市场摘要显示主要交易是世界杯/体育市场，如 Argentina/Norway World Cup、FIFWC O/U。复查 official diagnose 后 `174` 不再出现在 top samples，当前唯一 CLEAN_HIGH 仍是 `1660`。结论：`174` 是 official finance 来源中的伪 finance 高分样本，应转出主策略复核队列；下一步继续找下一个 politics/finance CLEAN_HIGH，并提高 official finance 候选的真实活动类别一致性要求。
+
+> 2026-07-09 official diagnose activity category precheck: 已将 `174` 暴露出的经验固化到 official diagnose 服务。`LeaderResearchOfficialLeaderboardDiagnoseService` 现在会读取 `aggregateActivityMetricsForCandidateIds`，当真实活动类别样本数 >=20 且 dominant ratio >=70%，但 dominant category 与 official source category 不一致时，直接加入 `activity_category_mismatch` 并归入 `CATEGORY_CONFLICT`。新增 `LeaderResearchOfficialLeaderboardDiagnoseServiceTest` 覆盖“source finance、paper session clean、真实 sports dominant”的 false positive，确认不再输出 CLEAN_HIGH。验证：official diagnose service/controller 测试通过，`bootJar` 通过，后端重启后 health `UP`；正式 diagnose 显示 `activity_category_mismatch=49`，top sample 仍只有 `1660` 是 CLEAN_HIGH，`174` 不再进入前 50 个可复核样本。意义：official finance/politics 来源现在先过真实活动类别一致性检查，减少主策略被 sports 钱包污染。
+
+> 2026-07-09 official leaderboard refresh iteration: 继续第二目标“补源 + 复核”闭环。对 official leaderboard 执行 politics/finance、WEEK/MONTH、PNL/VOL 刷新，dry-run 显示 fetched `500`、deduped `334`、would create `29`、would update `305`、fetch errors `0`；随后真实导入 research pool，created `29`、updated `305`，不创建跟单配置。导入后 official diagnose：total `1078`、PAPER `278`、CLEAN_HIGH `1`、READY_FOR_PAPER `0`、activity_category_mismatch `51`，唯一 CLEAN_HIGH 仍是 `1660`。选取 top no-session candidates `61235/52591/58959/58958/49736/60080/49179/60873/56030/49175` 做 targeted activity score + paper score：10 个全部 `small_sample`，9 个 `low_market_diversity`，3 个 `strategy_low_price_tail_risk`；最终 7 个仍为 unknown score `59` 且无 paper trades，3 个低价长尾 score `20`。结论：official source 已扩容，但没有新增可试跟候选；下一步应补 activity 样本和提高已有 BUY/SELL 样本优先级，而不是单纯扩大 official import 页数。
+
+> 2026-07-09 official buy-sell active candidate audit: 按上一轮结论，不继续扩大 official import 页数，改从现有 official 候选中筛 BUY+SELL 都存在、真实活动类别 politics/finance 占比 >=70%、events>=20、markets>=5、未命中 mismatch/低价长尾的候选。宽松筛选发现 `503/512/3048/3043/1761` 等活跃 politics 钱包，但 targeted activity score 后 5 个全部命中 `tail_price_spray`、`low_safe_price_ratio`、`strategy_low_price_tail_risk`；paper/process 仅 `512` 处理 1 笔，其余几乎全过滤，recheck 全部 score `20` 且 `score_below_80`。进一步加入 `safe_price_ratio>=0.50`、`tail_price_ratio<=0.15` 后，official 候选返回 0 个。结论：official PNL/VOL 来源里有活跃 politics 钱包，但当前可见的一批主要是低价长尾，盈利但不可跟；下一步应把 safe/tail ratio 作为 official 预筛硬门槛，避免继续消耗 paper 加厚资源。
+
+> 2026-07-09 official safe-tail prefilter iteration: 已把上一轮结论固化到 official leaderboard diagnose。`LeaderResearchOfficialLeaderboardDiagnoseService` 在读取 `aggregateActivityMetricsForCandidateIds` 后，当活动样本数 >=20 且 `safe_price_ratio < 0.50` 时加入 `low_safe_price_ratio`，当 `tail_price_ratio > 0.15` 时加入 `tail_price_spray`，并直接归入 `HARD_RISK`，避免低价长尾候选被显示为 CLEAN_HIGH 或继续消耗 paper 加厚资源。新增测试覆盖“paper 高分盈利但价格分布不可复制”的 false positive。验证：official diagnose service/controller 测试通过，`bootJar` 通过，后端 `:8000` 重启后 health `UP`；正式 diagnose 显示 official total `1078`、PAPER `278`、CLEAN_HIGH `0`、HARD_RISK `116`、`low_safe_price_ratio=149`、`tail_price_spray=157`、`activity_category_mismatch=51`。复核 `1660` 本身 safe `0.7502`、tail `0.1064`，未被本轮 safe/tail 规则误伤；但其 source evidence 已混入 activity_source，后续需单独清理/明确 official diagnose 的来源证据口径。
+
+> 2026-07-09 official source category precedence fix: 已修正 official diagnose 的来源分类口径。根因是通用 `LeaderResearchCategoryEvidenceClassifier` 会统计 `source_evidence` 中所有 `category:`，当 activity/source/scanner evidence 多于 official evidence 时，official leaderboard 原始 category 可能被覆盖。本轮仅在 `LeaderResearchOfficialLeaderboardDiagnoseService` 内新增 official 段优先解析：优先读取 `external_analytics:polymarket_official_leaderboard ... category:<category>`，失败时才回退通用分类器；`bucketOf` 同步使用该 sourceCategory，避免二次调用通用分类器造成 CATEGORY_CONFLICT 误判。新增测试覆盖多来源 evidence 中 sports 占多数但 official category=finance 的场景。验证：official diagnose service/controller 测试通过，`bootJar` 通过，后端重启后 PID `45738` health `UP`。正式 diagnose 当前 `1660` 仍未进入 top 50 sample，直接原因是 `last_source_seen_at` 已约 `56.1h`，超过 `staleHours=48`，不是分类解析失败；`1660` safe `0.7502`、tail `0.1064`、paper PnL `13.5642` 仍可作为后续手工复核对象，但需要刷新 official source 或明确 stale 策略后再展示为 CLEAN_HIGH。
+
+> 2026-07-09 official stale high-quality bucket iteration: 已新增 official diagnose 的 `STALE_HIGH_QUALITY` 桶，用于暴露“过期但历史评分和纸跟表现仍好”的候选，避免这类候选被普通 `STALE_ACTIVITY` 淹没，也避免混入 `CLEAN_HIGH`。准入条件保持保守：official source category 必须是 politics/finance、候选处于 PAPER/TRIAL_READY、score>=80、paper trade>=10、copyable PnL>0，且除 `stale_activity` 外无其他风险标记；硬风险和类别冲突优先级高于该桶。新增测试覆盖 56h stale 的 finance TRIAL_READY 高质量样本进入 `STALE_HIGH_QUALITY` 且 `cleanHighTotal=0`。验证：official diagnose service/controller 测试通过，`bootJar` 通过，后端重启后 PID `68852` health `UP`；正式 diagnose 显示 `STALE_HIGH_QUALITY=1`，样本正是 `1660`，category `finance`、score `90.1471`、paper trades `23`、copyable PnL `13.5642`、lastSourceAgeHours `56`、riskFlags 空。`CLEAN_HIGH` 仍为 0，说明 stale 高质量候选只进入刷新/复核队列，不进入新鲜可试跟队列。
+
+> 2026-07-09 stale high-quality UI observability iteration: 已将 `STALE_HIGH_QUALITY` 接入 Leader 研究页 official diagnose 卡片。页面新增“过期高质量”统计；bucket tag 使用 gold 色，样本行会显示 `STALE_HIGH_QUALITY` 和“需刷新来源”提示。为避免误操作，样本虽然可能是 `TRIAL_READY`，但当 bucket 为 `STALE_HIGH_QUALITY` 时不显示“创建禁用试跟”按钮，必须先刷新 official source 或人工确认 stale 策略。新增中/英/繁中文案 `staleHighQuality`、`refreshOfficialSource`。验证：`frontend npm run build` 通过；后端运行态仍显示 `1660` 为 `STALE_HIGH_QUALITY`、riskFlags 空、copyable PnL `13.5642`。
+
+> 2026-07-09 official source refresh action iteration: 已新增 official stale high-quality 的定向刷新链路。后端新增 `POST /api/copy-trading/leader-research/official-leaderboard/refresh-candidates`，支持 `candidateIds` / `wallets`，默认 dry-run，只从抓取到的 official leaderboard 结果中筛选目标钱包，再复用 external analytics import 的去重、锁定保护、evidence 追加与 `lastSourceSeenAt` 更新逻辑；不会创建或启用跟单配置。Leader 研究页 stale high-quality 样本行的“需刷新来源”已从标签升级为按钮，点击后刷新该 candidate 并重跑 diagnose。验证：official import service/controller 测试通过，`frontend npm run build` 通过，`bootJar` 通过；运行态对 `1660` dry-run 匹配 finance MONTH/PNL rank `114`，随后正式刷新 updated `1`，再次 diagnose 后 `1660` 从 `STALE_HIGH_QUALITY` 回到 `CLEAN_HIGH`，lastSourceAgeHours `0`，score `90.1471`，paper trades `23`，copyable PnL `13.5642`，riskFlags 空。
+
+> 2026-07-09 official clean-high disabled trial queue plan: 已将第二目标下一步改进计划写入 `docs/archive/goals/leader-discovery-goal-2-history.md` 的“2026-07-09 改进计划 v3：Official Clean High 转禁用试跟主队列”。执行口径固定为：只有 `CLEAN_HIGH + TRIAL_READY + strategyType=human_directional + riskFlags 空 + politics/finance + 来源未 stale` 的 official 候选，才计入禁用试跟人工确认主队列并显示创建入口；`STALE_HIGH_QUALITY`、`HARD_RISK`、`CATEGORY_CONFLICT`、`strategy_type=unknown` 或任意 risk flag 非空均排除。下一轮直接实施后端 `disabledTrialCandidateTotal`、sample `strategyType`、前端“禁用试跟候选”统计和按钮 gating；创建配置仍必须 `enabled=false`，不自动启用真钱跟单。
+
+> 2026-07-09 official clean-high disabled trial queue implementation: 已落地 v3 阶段 1/2。后端 official diagnose DTO 新增 sample `strategyType` 与 response `disabledTrialCandidateTotal`，统计口径为 `CLEAN_HIGH + TRIAL_READY + human_directional + riskFlags 空 + politics/finance`；新增测试覆盖 clean human directional 计入主队列、unknown strategy 不计入。Leader 研究页 official diagnose 卡片新增“禁用试跟候选”统计，样本行展示 strategy type，并把“创建禁用试跟”按钮收紧为同一主队列条件，`STALE_HIGH_QUALITY` 仍只允许刷新来源。验证：`LeaderResearchOfficialLeaderboardDiagnoseServiceTest`、`LeaderResearchControllerTest`、`frontend npm run build`、`bootJar` 均通过；后端重启 PID `84419`，`/actuator/health=UP`；正式 diagnose 返回 total `1078`、`CLEAN_HIGH=1`、`disabledTrialCandidateTotal=1`，candidate `1660` 为 finance `CLEAN_HIGH` / `TRIAL_READY` / `human_directional` / riskFlags 空。下一步：对 `1660` 做人工确认式 disabled trial config 创建前检查，继续寻找下一个 politics/finance CLEAN_HIGH。
+
+> 2026-07-09 disabled trial approval precheck implementation: 已把 Leader Research approval 的“可复制候选”规则从页面按钮升级为后端硬门槛。`createDisabledTrialConfig` 现在除 `TRIAL_READY` 与 `enabled=false` 外，还要求 `strategyType=human_directional`、riskFlags 空、category 为 politics/finance、leader mapping 存在；否则返回 `LEADER_RESEARCH_CANDIDATE_NOT_COPYABLE` 并记录审批拒绝事件。新增只读 `POST /api/copy-trading/leader-research/approval/preview-disabled-trial-config`，返回 candidate 状态、blockerCodes、每个账户的 duplicateConfigId/duplicateConfigEnabled。Leader 研究页审批弹窗打开前会调用 preview，显示预检通过/阻断原因，默认选择无重复账户，重复账户选项禁用，`canCreate=false` 时禁用提交。验证：`LeaderResearchApprovalServiceTest`、`LeaderResearchControllerTest`、`frontend npm run build`、`bootJar` 均通过；后端重启 PID `74220`，`/actuator/health=UP`。运行态 preview candidate `1660`：leaderId `516`、poolId `99`、finance、`human_directional`、TRIAL_READY、riskFlags 空、locked=false、`canCreate=true`；账户 1/2/3 均无重复配置，其中账户 1 非 readOnly、账户 2/3 readOnly。本轮未自动创建配置，下一步应由人工选择账户后创建 disabled trial config，或继续寻找下一个 politics/finance CLEAN_HIGH。
+
+> 2026-07-10 second-goal quality gate v4 plan: 用户反馈当前筛选出的 leader 仍有不活跃、全年亏损等质量问题。第二目标执行口径已进一步从“CLEAN_HIGH + TRIAL_READY + human_directional”升级为“近期活跃 + 多周期盈利一致 + 全年/长期 PnL 为正 + 可复制机制”。新增计划已写入 `docs/archive/goals/leader-discovery-goal-2-history.md` 的“2026-07-10 改进计划 v4：把近期活跃 + 全年盈利升级为硬门槛”。下一轮优先实现 `LeaderResearchProfitWindowParser`，从 external evidence 解析 7D/30D/90D/365D/ALL PnL、近 7/30 天成交数和 last_trade_at；official diagnose 增加 `NEEDS_PROFIT_WINDOW`、`INACTIVE_RECENTLY`、`ANNUAL_PNL_NEGATIVE`、`MULTI_WINDOW_INCONSISTENT` 等 bucket/risk flags；随后把同一门槛接入 trial-ready recheck 和 disabled trial approval preview，确保不活跃或全年亏损候选不能进入跟单模板。
+
 ## Active Goal Override
 
 当前执行优先级：
 
 1. 第二目标：第一阶段积累并评分 1000+ 新的高质量 Leader 候选。状态：`ACTIVE`。
-2. 第一目标：Bridge BUY/SELL 可靠性持续改进。状态：`COMPLETED_PENDING_RESTART`，不删除，后续可从目标控制对话框重启；sell 成功率仍作为 Leader 可复制性评分的重要维度保留。
+2. G1 Bridge BUY/SELL 可靠性已于 2026-07-11 正式归档，不再出现在目标控制或允许重启；Bridge 可靠性转入普通 backlog 和运维，sell 成功率仍作为 Leader 可复制性评分的重要维度保留。
 
 第二目标启动进展：
 
-- 已建立规格文档：`docs/zh/leader-discovery-goal-2-phase-1.md`。
+- 已建立规格文档：`docs/archive/goals/leader-discovery-goal-2-history.md`。
 - 已补后端正式导入接口：`POST /api/copy-trading/leader-research/scanner-pool/import`。
 - 已新增 scanner pool -> research candidate 导入服务，支持 dry-run、分类限额、最小 discovery score、只导入 PENDING/全量切换、锁定候选保护、事件记录。
 - 已将 `leader_research_candidate` 从 3 个扩展到 1145 个，其中 `DISCOVERED=1142`、`PAPER=3`。
@@ -2973,7 +3132,7 @@
 - `backend/src/test/kotlin/com/wrbug/polymarketbot/service/copytrading/research/LeaderResearchActivitySourceImportServiceTest.kt`
 - `backend/src/test/kotlin/com/wrbug/polymarketbot/service/copytrading/research/LeaderResearchActivityScoringServiceTest.kt`
 - `backend/src/test/kotlin/com/wrbug/polymarketbot/controller/copytrading/research/LeaderResearchControllerTest.kt`
-- `docs/zh/leader-discovery-goal-2-phase-1.md`
+- `docs/archive/goals/leader-discovery-goal-2-history.md`
 - `LOOP_STATE.md`
 
 **实现内容**：
@@ -7365,3 +7524,1120 @@
 **下一步**：
 - 观察下一笔小额 SELL 是否从 `Below min_order_size` 变为真实执行或因实时无仓位被明确跳过。
 - 若 Polymtrade UI 本身拒绝过小 SELL，再在执行层加入“能清仓则清仓；UI 拒绝则记录平台最小可卖限制”的专门错误分类。
+
+### Iteration 113 - 普通 BUY 最高价放宽到 0.80（2026-07-08 15:15 CST）
+
+**触发原因**：
+- 用户确认普通 BUY 的 `maxPrice` 可从 `0.65` 放宽到 `0.80`。
+
+**代码修复**：
+- `polymtrade-bridge/main.py`
+  - `HIGH_CONFIDENCE_MAX_BUY_PRICE` 默认值从 `0.65` 改为 `0.80`。
+  - 普通 BUY 现在 `price > 0.80` 才触发 `High-price low-upside BUY skipped`。
+- `BTC_UPDOWN_5M_MAX_BUY_PRICE` 仍保持 `0.65`，短周期 BTC 5M 继续执行更严格硬规则。
+
+**验证**：
+- `polymtrade-bridge/.venv/bin/python -m pytest polymtrade-bridge/test_short_cycle_market_guard.py polymtrade-bridge/test_copy_trading_config.py` 通过：42 passed。
+- Bridge 已重启，`http://localhost:8080/health` 返回 `{"status":"ok","executor_ready":true}`。
+- `http://localhost:8080/status` 返回 `ready=true`、`logged_in=true`、`copy_trading_config_count=3`。
+
+### Iteration 114 - 第二目标升级为“可复制聪明钱分层”（2026-07-09 CST）
+
+**触发原因**：
+- 用户要求把关于 X 文章“聪明钱不是一种人，盈利钱包需要先分层再学习”的分析转成改进计划，并更新到目标上下文。
+- 核心判断：第二目标不能只追求 1000+ 盈利钱包或高分 leader，而要筛出赚钱机制可复制、Bridge 可执行、SELL 可退出的 leader。
+
+**目标上下文更新**：
+- 已更新 `docs/archive/goals/leader-discovery-goal-2-history.md`：
+  - 新增 `2026-07-09 Copyable Smart Money Plan：从“盈利钱包”升级为“可复制 leader”`。
+  - 将盈利钱包拆分为 `human_directional`、`whale`、`insider_like`、`bot_hft`、`market_maker_lp`、`arbitrage`、`low_price_tail_risk`、`rebalance_churn`、`unknown`。
+  - 明确只有 `human_directional` 或“未知但可复制”的候选可进入禁用试跟/真钱跟单候选。
+
+**改进计划**：
+- 阶段 1：增加 leader 机制标签 `strategy_type` 与机制风险 flags。
+- 阶段 2：评分中加入 `copyability_score`、`exit_quality_score`、`mechanism_score`、`execution_fit_score`、`churn_penalty`、`tail_risk_penalty`。
+- 阶段 3：回测升级为“可复制回测”，输出 `leader_pnl`、`copyable_pnl`、`copy_gap`、过滤 BUY、漏 SELL、低价长尾和调仓噪音等原因。
+- 阶段 4：`/leader-research` 和 `/optimization-daily` 展示策略机制分层、排除原因排行和可复制 leader 漏斗。
+
+**后续 loop 优先级**：
+1. 先做数据结构/DTO：支持 `strategy_type` 与机制风险标签。
+2. 再做分类器：用 XAE、Low-Futon、Research 样本建立回归测试。
+3. 再接评分与 TRIAL_READY hard block：非可复制机制不能自动进入跟单配置。
+4. 最后补页面/日报可观测：直接展示“为什么这个 leader 可跟/不可跟”。
+
+### Iteration 115 - Strategy Type Phase 1 落地（2026-07-09 CST）
+
+**目标推进**：
+- 第二目标从“计划机制分层”推进到“候选模型可保存机制标签”。
+- 本轮只做阶段 1 的最小闭环：持久化字段、DTO 输出、第一版分类器、activity prescreen 写入、后续评分保留风险标记。
+
+**代码变化**：
+- 新增 Flyway migration：
+  - `V71__add_strategy_type_to_leader_research_candidate.sql`
+- `LeaderResearchCandidate` 新增 `strategyType`。
+- `LeaderResearchCandidateDto` 与 `LeaderResearchMapper` 输出 `strategyType`。
+- 新增 `LeaderResearchStrategyTypeClassifier`：
+  - `human_directional`
+  - `whale`
+  - `bot_hft`
+  - `market_maker_lp`
+  - `arbitrage`
+  - `low_price_tail_risk`
+  - `rebalance_churn`
+  - `unknown`
+- `LeaderResearchActivityScoringService`：
+  - activity prescreen 计算并保存 `strategyType`。
+  - 对不可复制机制写入 `strategy_*` risk flags。
+  - 对低价长尾、bot、做市/LP、套利、调仓噪音、巨鲸加入评分 cap。
+- `LeaderResearchScoringService`：
+  - 后续 copyability 评分保留 `strategy_*` risk flags，避免重新评分清掉机制阻断。
+
+**验证**：
+- `backend` 目录执行：
+  - `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityScoringServiceTest --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScoringServiceTest`
+- 结果：`BUILD SUCCESSFUL`。
+
+**下一步**：
+1. 页面展示 `strategyType` 和策略风险原因。
+2. 优化日报增加 strategy type 分布和不可复制 leader 排除原因。
+3. 用真实样本跑 targeted activity score，复核 XAE/Low-Futon/Research 的分类是否符合预期。
+
+### Iteration 116 - Strategy Type 可观测层落地（2026-07-09 CST）
+
+**目标推进**：
+- 用户要求制定改进计划并更新到目标里。
+- 本轮将第二目标的改进计划落实到目标文档，并把已落地的 `strategyType` 从候选模型贯通到页面和日报。
+
+**代码变化**：
+- `LeaderResearchFunnelCandidateDto` 新增 `strategyType`，候选漏斗和推荐执行快照都能返回机制类型。
+- `/leader-research`：
+  - 候选表增加机制类型列。
+  - 候选详情增加机制类型。
+  - 快速观察候选卡片展示机制标签。
+- `/optimization-daily`：
+  - “复核候选质量”展示候选机制标签。
+- 前端类型和中英文/繁中 locale 补齐 `strategyType`。
+
+**目标文档更新**：
+- `docs/archive/goals/leader-discovery-goal-2-history.md` 新增 `2026-07-09 Strategy Type Phase 1.1`。
+- 下一轮计划明确为：
+  1. 真实样本校准。
+  2. TRIAL_READY 机制阻断。
+  3. 可复制回测指标。
+  4. 日报 strategy type 分布和排除原因排行。
+
+**验证**：
+- `frontend npm run build` 通过。
+- `backend ./gradlew test --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchScoringServiceTest --tests LeaderResearchControllerTest --tests LeaderResearchPoliticsRecommendationExecutionServiceTest` 通过。
+- `backend ./gradlew bootJar` 通过。
+
+**下一步**：
+- 用真实 leader 样本校准分类器，并把错判样本固化成测试。
+- 将不可复制机制接入 TRIAL_READY blocker，避免高分但不可复制的钱包进入真钱跟单。
+
+### Iteration 117 - 不可复制机制接入 TRIAL_READY 阻断（2026-07-09 CST）
+
+**目标推进**：
+- 第二目标继续从“高分 leader”转向“可复制高质量 leader”。
+- 本轮把 `strategyType` 从展示层推进到准入层：不可复制机制不能因为分数高、PnL 为正而自动进入试跟候选。
+
+**代码变化**：
+- `LeaderResearchStrategyTypeClassifier`：
+  - 新增 `isTrialReadyCopyable()`。
+  - 新增中文 blocker 描述。
+  - 新增 recheck blocker code。
+- `LeaderResearchService`：
+  - `buildTrialReadiness()` 和 `buildFastWatchBlockers()` 加入具体机制阻断原因。
+- `LeaderResearchStateMachine`：
+  - 自动晋级 `TRIAL_READY` 时检查机制是否可复制。
+- `LeaderResearchTrialReadyRecheckService`：
+  - recheck 输出 `strategy_not_copyable_*` 阻断码。
+  - 自动筛选高质量 recheck candidate 时排除不可复制机制。
+
+**回归测试**：
+- `LeaderResearchStateMachineTest` 覆盖 `low_price_tail_risk` 且 `riskFlags=null` 不晋级。
+- `LeaderResearchServiceTest` 覆盖 `market_maker_lp` 且 `riskFlags=null` 不进入 fast watch。
+- `LeaderResearchTrialReadyRecheckServiceTest` 覆盖 `rebalance_churn` 返回具体阻断码。
+
+**验证**：
+- `backend ./gradlew test --tests LeaderResearchStateMachineTest --tests LeaderResearchServiceTest --tests LeaderResearchTrialReadyRecheckServiceTest --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchScoringServiceTest` 通过。
+- `frontend npm run build` 通过。
+- `backend ./gradlew bootJar` 通过。
+
+**下一步**：
+- 用真实 leader 样本校准分类器：XAE12Archangel、Low-Futon、Research 0xad53...ef24。
+- 将真实样本误判结果转成回归测试。
+- 在优化日报加入 strategy type 分布和不可复制原因排行。
+
+### Iteration 118 - 真实样本校准 Strategy Type 分类器（2026-07-09 CST）
+
+**目标推进**：
+- 第二目标继续强化“可复制高质量 leader”筛选。
+- 本轮用真实 activity 数据校准分类器，减少 XAE/Low-Futon 这类不可复制 leader 被 `unknown` 放过的风险。
+
+**真实样本观察**：
+- XAE12Archangel `0xfbfd14dd4bb607373119de95f1d4b21c3b6c0029`：
+  - `total_events=63`、`markets=9`、`BUY=19`、`SELL=44`、`safe=16`、`tail=27`、`avg_amount=55.4046`。
+  - 结论：tail-heavy 且 SELL-heavy，不适合作为可复制方向型 leader。
+- Low-Futon `0xc21ea96be762bb55041529af6e386e7c53b80215`：
+  - `total_events=1753`、`markets=119`、`BUY=945`、`SELL=808`、`safe=0`、`tail=1752`、`avg_amount=0.4868`。
+  - 结论：极端低价长尾铺单，固定金额跟单会放大尾部亏损。
+- Research `0xad5353afe30c2da57709e2704ef3ccdcf67eef24`：
+  - `total_events=245`、`markets=188`、`BUY=153`、`SELL=92`、`safe=140`、`tail=30`、`avg_amount=11.3545`。
+  - 结论：分散市场、BUY/SELL 闭环、安全价格占比过半，符合 `human_directional`。
+
+**代码变化**：
+- `LeaderResearchStrategyTypeClassifier` 新增 tail-heavy 校准规则：
+  - `totalEvents >= 20 && tailPriceRatio >= 0.40 -> low_price_tail_risk`
+- 新增 `LeaderResearchStrategyTypeClassifierTest`，固化三组真实样本指标。
+
+**运行态修复**：
+- 本地 DB 原本尚未应用 `strategy_type` migration。
+- 已重启后端并应用 Flyway V71。
+- 确认 `leader_research_candidate.strategy_type` 列已存在。
+- 后端 PID `10252` 监听 `8000`，`curl --noproxy '*' http://127.0.0.1:8000/actuator/health` 返回 `UP`。
+- 发现命令行 `localhost` 会被 `ALL_PROXY=socks5://127.0.0.1:7890` 接管，健康检查应使用 `127.0.0.1` 或 `--noproxy '*'`。
+
+**验证**：
+- `backend ./gradlew test --tests LeaderResearchStrategyTypeClassifierTest --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchScoringServiceTest --tests LeaderResearchStateMachineTest --tests LeaderResearchServiceTest --tests LeaderResearchTrialReadyRecheckServiceTest` 通过。
+- `backend ./gradlew bootJar` 通过。
+
+**下一步**：
+- 通过正式 targeted activity score 重新评分三组样本，写入 `strategy_type`。
+- 在优化日报增加 strategy type 分布和不可复制原因排行。
+
+### Iteration 119 - Targeted score 写回与 TRIAL_READY 降级修复（2026-07-09 CST）
+
+**目标推进**：
+- 第二目标继续强化真实运行闭环：分类器结果不只停留在测试中，必须通过正式后端接口写入候选模型。
+- 本轮执行三组真实样本 targeted activity score，并修复重评分后不合格候选仍停留 `TRIAL_READY` 的状态机漏洞。
+
+**正式写回**：
+- 调用正式接口：
+  - `POST /api/copy-trading/leader-research/activity-score/run`
+  - body: `{"states":["PAPER","TRIAL_READY"],"force":true,"candidateIds":[3237,168,2361]}`
+- 返回：
+  - `scannedCount=3`
+  - `scoredCount=3`
+  - `skippedCount=0`
+  - `strategy_low_price_tail_risk=2`
+
+**DB 验证**：
+- XAE12Archangel `candidate=3237`：
+  - `strategy_type=low_price_tail_risk`
+  - `risk_flags=low_safe_price_ratio,strategy_low_price_tail_risk`
+  - `score=20`
+- Low-Futon `candidate=168`：
+  - `strategy_type=low_price_tail_risk`
+  - `risk_flags=tail_price_spray,low_average_size,low_safe_price_ratio,strategy_low_price_tail_risk`
+  - `score=20`
+- Research `candidate=2361`：
+  - `strategy_type=human_directional`
+  - `risk_flags=mixed_category_evidence`
+  - `research_state=PAPER`
+
+**代码修复**：
+- `LeaderResearchStateMachine`：
+  - `TRIAL_READY` 状态下如果不再满足 clean high 条件或稳定高分窗口，自动降级回 `PAPER`。
+- `LeaderResearchStateMachineTest`：
+  - 新增覆盖：已 TRIAL_READY 的候选重评分后低于阈值/有风险标记，会降回 PAPER 并同步 leader pool。
+
+**运行态验证**：
+- 重启后端到 PID `40757`。
+- `curl --noproxy '*' http://127.0.0.1:8000/actuator/health` 返回 `UP`。
+- 调用正式 recheck：
+  - `POST /api/copy-trading/leader-research/paper/trial-ready/recheck`
+  - body: `{"dryRun":false,"candidateIds":[2361],"maxCandidates":1}`
+- 结果：
+  - `trialReadyCandidateIds=[]`
+  - `candidate 2361 research_state=PAPER`
+  - `leader_pool 957 research_state=PAPER`
+  - `leader_pool 957 research_badge=RESEARCH_PAPER`
+
+**验证**：
+- `backend ./gradlew test --tests LeaderResearchStateMachineTest --tests LeaderResearchTrialReadyRecheckServiceTest --tests LeaderResearchStrategyTypeClassifierTest --tests LeaderResearchActivityScoringServiceTest` 通过。
+- `backend ./gradlew bootJar` 通过。
+
+**下一步**：
+- 在优化日报增加 strategy type 分布和不可复制原因排行。
+- 在 Leader Research 页面增加 TRIAL_READY 降级可观测提示。
+
+### Iteration 120 - 优化日报展示 Strategy Type 分布（2026-07-09 CST）
+
+**目标推进**：
+- 第二目标需要每天可见“当前 leader 池是不是可复制机制占优”。
+- 本轮将 strategy type 分布和不可复制原因排行接入 `/optimization-daily`，避免只看高分/推荐数量。
+
+**后端变化**：
+- `LeaderResearchSummaryDto` 新增：
+  - `strategyTypeCounts`
+  - `nonCopyableStrategyBlockers`
+- 统计口径限定为 `PAPER + TRIAL_READY`。
+- `LeaderResearchService.summary()` 计算 active candidate 的 strategy type 分布和 `strategy_not_copyable_*` blocker 排行。
+
+**前端变化**：
+- `/optimization-daily` 加载 `leaderResearch.summary()`。
+- “第二目标推荐闭环”卡片新增：
+  - 机制分布。
+  - 不可复制原因。
+- `LeaderResearchSummary` 类型补齐新字段，`LeaderResearch` fallback 同步补默认空数组。
+
+**运行态验证**：
+- 后端重启到 PID `81296`。
+- `POST /api/copy-trading/leader-research/summary` 返回：
+  - `activePaperSessions=22648`
+  - `strategyTypeCounts`: `unknown=22645`, `low_price_tail_risk=2`, `human_directional=1`
+  - `nonCopyableStrategyBlockers`: `strategy_not_copyable_low_price_tail_risk=2`
+
+**验证**：
+- `backend ./gradlew test --tests LeaderResearchServiceTest --tests LeaderResearchControllerTest` 通过。
+- `frontend npm run build` 通过。
+- `backend ./gradlew bootJar` 通过。
+
+**下一步**：
+- 增加批量补 strategy type 的安全动作，优先处理 PAPER/TRIAL_READY 中的 `unknown`。
+- 在日报显示 unknown 比例，并把 unknown 过高作为下一步行动提示。
+
+### Iteration 121 - 第二目标改进计划固化（2026-07-09 CST）
+
+**目标推进**：
+- 把第二目标从“高分 leader 发现”明确升级为“可复制机制筛选”。
+- 防止 `score>=80` 掩盖不可复制机制，例如低价长尾铺单、调仓 churn、做市/套利、高频小额、巨鲸大额不可跟。
+
+**计划已固化**：
+- `docs/archive/goals/leader-discovery-goal-2-history.md` 新增“2026-07-09 第二目标改进计划：从高分转向可复制机制”。
+- 当前 loop 优先级：
+  1. 先补 PAPER/TRIAL_READY 的 `strategy_type=unknown`。
+  2. 再用不可复制机制 blocker 清理 TRIAL_READY 和候选推荐。
+  3. 然后加厚 politics/finance targeted paper 样本。
+  4. 最后把 Bridge BUY/SELL 可复制性纳入试跟门槛。
+
+**下一步**：
+- 完成 `POST /api/copy-trading/leader-research/activity-score/backfill-strategy-type`。
+- 在 `/optimization-daily` 上提供“补齐100个unknown”动作。
+- 通过后端目标单测、前端 build、bootJar。
+- 重启后端后运行正式 API，记录 unknown 数量变化。
+
+### Iteration 122 - 批量补 Strategy Type 安全动作落地（2026-07-09 CST）
+
+**目标推进**：
+- 第二目标继续按“先识别可复制机制，再输出可试跟候选”推进。
+- 本轮完成 PAPER/TRIAL_READY 中 `strategy_type=unknown` 的第一轮批量补齐动作，避免高分但不可复制机制继续混入候选池。
+
+**代码变化**：
+- 后端新增正式接口：
+  - `POST /api/copy-trading/leader-research/activity-score/backfill-strategy-type`
+- 请求 DTO：
+  - `states` 默认 `["PAPER", "TRIAL_READY"]`
+  - `limit` 默认 `100`，最大 `500`
+  - `force` 默认 `false`
+- 查询口径：
+  - 只选择 `PAPER/TRIAL_READY`
+  - 只选择 `strategyType is null / blank / unknown`
+  - 按 `lastScoredAt`、`updatedAt` 取最早一批
+- 前端 `/optimization-daily`：
+  - strategy type 分布旁新增“补齐100个unknown”按钮。
+  - unknown 占比过高时显示优先补机制标签的 warning。
+
+**测试修复**：
+- 修复 `LeaderResearchActivityScoringServiceTest` 中 Kotlin + Mockito matcher 导致的 NPE。
+- backfill 测试改为精确 stub `PageRequest.of(0, 100)`，覆盖默认 states 和 limit 行为。
+
+**验证**：
+- `backend ./gradlew test --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchControllerTest` 通过。
+- `frontend npm run build` 通过。
+- `backend ./gradlew bootJar` 通过。
+
+**运行态验证**：
+- 后端已切到 tmux 会话 `polyhermes-backend-codex` 托管。
+- 当前监听：
+  - PID `60962`
+  - port `8000`
+  - `/actuator/health = UP`
+- 正式 API 执行：
+  - request: `{"states":["PAPER","TRIAL_READY"],"limit":100,"force":false}`
+  - selectedCount `100`
+  - scoredCount `100`
+  - skippedCount `0`
+
+**指标变化**：
+- `activePaperSessions=22648`
+- 执行前：
+  - `unknown=22645`
+  - `low_price_tail_risk=2`
+  - `human_directional=1`
+- 执行后：
+  - `unknown=22584`
+  - `low_price_tail_risk=41`
+  - `human_directional=14`
+  - `market_maker_lp=6`
+  - `arbitrage=1`
+  - `bot_hft=1`
+  - `whale=1`
+- 不可复制 blocker：
+  - `strategy_not_copyable_low_price_tail_risk=41`
+  - `strategy_not_copyable_market_maker_lp=6`
+  - `strategy_not_copyable_arbitrage=1`
+  - `strategy_not_copyable_bot_hft=1`
+  - `strategy_not_copyable_whale=1`
+
+**结论**：
+- 第一轮 100 个 unknown 中识别出大量不可复制机制，证明“unknown 高时先补机制标签”是正确优先级。
+- 下一轮继续执行 backfill；若不可复制比例持续偏高，应优先清理/降权旧 PAPER 池，再推进 politics/finance paper 加厚。
+
+### Iteration 123 - 第二轮 Strategy Type Backfill（2026-07-09 CST）
+
+**目标推进**：
+- 继续降低 PAPER/TRIAL_READY 的 `strategy_type=unknown`，并优先补 politics/finance 主类别。
+- 本轮不改代码，只执行正式 API 并记录运行态结果。
+
+**执行前基线**：
+- 后端 `/actuator/health = UP`
+- `activePaperSessions=22648`
+- `strategyTypeCounts`：
+  - `unknown=22584`
+  - `low_price_tail_risk=41`
+  - `human_directional=14`
+  - `market_maker_lp=6`
+  - `arbitrage=1`
+  - `bot_hft=1`
+  - `whale=1`
+
+**执行动作**：
+- `POST /api/copy-trading/leader-research/activity-score/backfill-strategy-type`
+- request: `{"states":["PAPER","TRIAL_READY"],"limit":100,"force":false}`
+- selectedCount `100`
+- scoredCount `100`
+- skippedCount `0`
+- selected sample ids: `158,159,160,161,162,163,164,165,166,167`
+
+**本轮分类分布**：
+- `finance=74`
+- `politics=26`
+
+**本轮风险/机制标记**：
+- `strategy_low_price_tail_risk=19`
+- `tail_price_spray=15`
+- `low_safe_price_ratio=18`
+- `mixed_category_evidence=28`
+- `small_sample=52`
+- `low_market_diversity=37`
+- `scanner_pool_unverified=52`
+- `buy_only_no_exit=12`
+- `low_average_size=7`
+- `sell_only_no_entry=1`
+
+**执行后 summary**：
+- `activePaperSessions=22648`
+- `unknown=22556`
+- `low_price_tail_risk=60`
+- `human_directional=23`
+- `market_maker_lp=6`
+- `arbitrage=1`
+- `bot_hft=1`
+- `whale=1`
+- blocker：
+  - `strategy_not_copyable_low_price_tail_risk=60`
+  - `strategy_not_copyable_market_maker_lp=6`
+  - `strategy_not_copyable_arbitrage=1`
+  - `strategy_not_copyable_bot_hft=1`
+  - `strategy_not_copyable_whale=1`
+
+**结论**：
+- 第二轮确实命中 politics/finance 主类别，符合第二目标方向。
+- unknown 仅减少 28，说明有一批候选即使重新评分仍缺足够机制证据。
+- 下一轮除继续 backfill 外，应补一个“评分后仍 unknown 的原因统计”，区分样本不足、买卖结构不足、价格分布不足、分类混杂等原因，避免只靠人工看 summary。
+
+### Iteration 124 - Unknown Strategy 原因统计落地（2026-07-09 CST）
+
+**目标推进**：
+- 第二目标不能只看到 `unknown` 数量，还需要知道为什么候选仍无法归类为可复制机制。
+- 本轮把 backfill 结果升级为可诊断输出，直接告诉下一步应补样本、补 BUY/SELL 结构，还是清理低价长尾/分类混杂。
+
+**代码变化**：
+- `LeaderResearchActivityScoreResponse` 新增：
+  - `unknownStrategyReasonCounts`
+- `LeaderResearchActivityScoringService`：
+  - 对每个已评分且 `strategyType=unknown` 的候选统计原因。
+  - 原因包括：`insufficient_sample`、`insufficient_market_diversity`、`no_buy_sample`、`no_sell_sample`、`sell_ratio_outside_copyable_range`、`low_safe_price_ratio_for_directional`、`high_tail_price_ratio`、`low_average_size`、`unknown_category`、`mixed_category_evidence`、`stale_or_missing_activity`、`unclassified_pattern`。
+- `/optimization-daily`：
+  - “补齐100个unknown”执行后，在机制分布卡片展示最近一轮“仍 unknown 原因”。
+
+**测试与构建**：
+- `backend ./gradlew test --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchControllerTest --tests LeaderResearchPoliticsRecommendationExecutionServiceTest` 通过。
+- `frontend npm run build` 通过。
+- `backend ./gradlew bootJar` 通过。
+
+**运行态验证**：
+- 后端已重启到 tmux 会话 `polyhermes-backend-codex`。
+- 当前监听：
+  - PID `99674`
+  - port `8000`
+  - `/actuator/health = UP`
+- 正式 API 小批验证：
+  - request: `{"states":["PAPER","TRIAL_READY"],"limit":20,"force":false}`
+  - selectedCount `20`
+  - scoredCount `20`
+  - skippedCount `0`
+  - categoryCounts: `finance=16`, `politics=4`
+
+**本轮 unknown 原因**：
+- `insufficient_sample=15`
+- `insufficient_market_diversity=6`
+- `no_buy_sample=4`
+- `sell_ratio_outside_copyable_range=7`
+- `no_sell_sample=2`
+- `low_safe_price_ratio_for_directional=4`
+- `mixed_category_evidence=1`
+- `high_tail_price_ratio=2`
+
+**执行后 summary**：
+- `activePaperSessions=22648`
+- `unknown=22553`
+- `low_price_tail_risk=62`
+- `human_directional=23`
+- `market_maker_lp=6`
+- `arbitrage=2`
+- `bot_hft=1`
+- `whale=1`
+
+**结论**：
+- 当前 unknown 的主因是样本不足、市场分散不足和 BUY/SELL 结构不足。
+- 下一轮不要只盲目继续刷新评分；应按原因统计补 activity/paper 样本，优先处理 politics/finance 中 `insufficient_sample` 和 `no_buy/no_sell` 的候选。
+
+### Iteration 125 - Unknown 样本加厚动作落地（2026-07-09 CST）
+
+**目标推进**：
+- 第二目标从“知道 unknown 的原因”继续推进到“能对原因执行样本加厚”。
+- 本轮新增 targeted paper 加厚动作，优先处理 politics/finance 中样本不足、市场分散不足、缺 BUY/SELL 或 SELL 比例异常的 unknown 候选。
+
+**代码变化**：
+- 新增 DTO：
+  - `LeaderResearchUnknownStrategySampleEnrichRequest`
+  - `LeaderResearchUnknownStrategySampleEnrichResponse`
+- 新增后端接口：
+  - `POST /api/copy-trading/leader-research/activity-score/unknown-strategy/sample-enrich`
+- `LeaderResearchActivityScoringService`：
+  - 新增 `planUnknownStrategySampleEnrichment()`。
+  - 默认扫描 PAPER/TRIAL_READY 中 strategy unknown 候选。
+  - 默认只选择 politics/finance。
+  - 只选中命中 `insufficient_sample`、`insufficient_market_diversity`、`no_buy_sample`、`no_sell_sample`、`sell_ratio_outside_copyable_range` 的候选。
+- `LeaderResearchController`：
+  - `dryRun=true` 只返回候选和原因。
+  - `dryRun=false` 执行 targeted `paper/process`，随后 targeted `paper/score`。
+- `/optimization-daily`：
+  - 新增“预览加厚”和“加厚20个样本”按钮。
+  - 展示最近一轮加厚候选、处理/过滤数量和原因标签。
+
+**验证**：
+- `backend ./gradlew test --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchControllerTest` 通过。
+- `frontend npm run build` 通过。
+- `backend ./gradlew bootJar` 通过。
+- 后端已重启到 tmux 会话 `polyhermes-backend-codex`：
+  - PID `37064`
+  - port `8000`
+  - `/actuator/health = UP`
+
+**运行态 dry-run**：
+- request: `{"categories":["politics","finance"],"limit":20,"batchSize":20,"dryRun":true}`
+- selectedCount `20`
+- categoryCounts:
+  - `finance=2`
+  - `politics=18`
+- unknown reasons:
+  - `insufficient_sample=18`
+  - `insufficient_market_diversity=9`
+  - `high_tail_price_ratio=11`
+  - `no_buy_sample=4`
+  - `sell_ratio_outside_copyable_range=8`
+  - `low_safe_price_ratio_for_directional=12`
+  - `no_sell_sample=2`
+  - `mixed_category_evidence=13`
+  - `low_average_size=2`
+
+**运行态 live 小批**：
+- request: `{"categories":["politics","finance"],"limit":5,"batchSize":10,"dryRun":false}`
+- selectedCandidateIds: `482,486,489,491,501`
+- selectedCount `5`
+- paper processed `5`
+- paper filtered `5`
+- paper failed `0`
+- paper scored `5`
+- candidate deltas:
+  - `482`: trade `+2`, filtered `0`, copyable PnL delta `-0.33333333`
+  - `486`: trade `+1`, filtered `0`, copyable PnL delta `0`
+  - `489`: trade `0`, filtered `+2`, copyable PnL delta `0`
+  - `491`: trade `0`, filtered `+2`, copyable PnL delta `0`
+  - `501`: trade `+2`, filtered `+1`, copyable PnL delta `-1`
+
+**结论**：
+- 新动作已经能把 unknown 诊断转成 targeted paper 加厚。
+- 小批结果显示部分样本一加厚就出现负 copyable PnL 或全部过滤，说明样本不足候选不能直接晋级。
+- 下一轮应对 `482/486/489/491/501` 执行 backfill/score 复查；若仍 unknown 或 PnL 恶化，应进入 cooldown 或降权，不继续消耗主策略复核资源。
+
+### Iteration 126 - 加厚候选复查与 weak_exit_sample 修复（2026-07-09 CST）
+
+**目标推进**：
+- 复查上一轮 targeted paper 加厚的 candidate `482/486/489/491/501`。
+- 防止 BUY 很多但 SELL 退出样本不足的钱包被 activity score 打成高质量。
+
+**复查发现**：
+- `501` activity 结构：
+  - activity events `64`
+  - BUY `60`
+  - SELL `4`
+  - SELL ratio `6.25%`
+  - paper trades `2`
+  - copyable PnL `-1`
+- 旧 activity scoring 一度给 `501` 打到 `100`，但它不是干净的可复制方向型 leader。
+
+**代码修复**：
+- `LeaderResearchActivityScoringService.riskFlags()` 新增：
+  - `weak_exit_sample`
+- 条件：
+  - `buyEvents >= 20`
+  - `sellRatio < 0.10`
+- `applyRiskCaps()` 对 `weak_exit_sample` 封顶 `55`。
+- 新增单测：
+  - `compute caps high buy weak exit sample`
+
+**验证**：
+- `backend ./gradlew test --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchControllerTest` 通过。
+- `backend ./gradlew bootJar` 通过。
+- `frontend npm run build` 通过。
+- 后端已重启：
+  - tmux `polyhermes-backend-codex`
+  - PID `57099`
+  - `/actuator/health = UP`
+
+**Targeted activity score 复查**：
+- request: `{"states":["PAPER","TRIAL_READY"],"force":true,"candidateIds":[482,486,489,491,501]}`
+- scoredCount `5`
+- riskFlagCounts:
+  - `small_sample=4`
+  - `low_market_diversity=2`
+  - `scanner_pool_unverified=4`
+  - `weak_exit_sample=1`
+- unknownStrategyReasonCounts:
+  - `insufficient_sample=4`
+  - `insufficient_market_diversity=2`
+  - `high_tail_price_ratio=3`
+  - `no_buy_sample=1`
+  - `sell_ratio_outside_copyable_range=2`
+  - `low_safe_price_ratio_for_directional=2`
+
+**恢复 paper score 后最终状态**:
+- `482`: PAPER, strategy `unknown`, score `59`, trades `2`, filtered `0`, copyable PnL `-0.33333333`, risk `small_sample`
+- `486`: PAPER, strategy `unknown`, score `57.77883490`, trades `1`, filtered `0`, copyable PnL `0`, risk `small_sample`
+- `489`: PAPER, strategy `unknown`, score `45`, trades `0`, filtered `2`, copyable PnL `0`, risk `high_filtered_ratio,small_sample`
+- `491`: PAPER, strategy `unknown`, score `45`, trades `0`, filtered `2`, copyable PnL `0`, risk `high_filtered_ratio,small_sample`
+- `501`: PAPER, strategy `unknown`, score `58.00000005`, trades `2`, filtered `1`, copyable PnL `-1`, risk `small_sample`
+
+**结论**：
+- 5 个候选都没有脱离 unknown。
+- `482/501` 加厚后 copyable PnL 为负。
+- `489/491` 全部过滤，说明不适合继续消耗主策略资源。
+- `486` 仍样本过少，暂保留但不优先。
+
+**下一步**：
+- 新增“加厚失败 cooldown/降权”规则：
+  - targeted 加厚后 `tradeCountDelta=0` 且 `filteredCountDelta>0`。
+  - 或 `copyablePnlDelta<0` 且仍 `strategy_type=unknown`。
+  - 或加厚后 `paper_trade_count < 3` 且仍 `small_sample`。
+- 命中后进入 COOLDOWN 或降权，避免反复加厚低价值 unknown 候选。
+
+### Iteration 127 - 加厚失败 Cooldown 规则落地（2026-07-09 CST）
+
+**目标推进**：
+- 第二目标继续清理低价值 unknown 候选，避免 politics/finance 样本加厚资源被反复失败的钱包消耗。
+- 本轮把“加厚失败”固化为状态机 cooldown 规则。
+
+**代码变化**：
+- `LeaderResearchStateMachine.cooldownReason()` 现在同时接收 candidate 与 paper session。
+- 新增 `enrichmentFailureCooldownReason()`：
+  - `strategy_type=unknown` 且 `tradeCount=0` 且 `filteredCount>=2` -> `unknown_strategy_all_filtered_after_enrichment`
+  - `strategy_type=unknown` 且 `tradeCount in 1..2` 且 `copyablePnl<0` -> `unknown_strategy_negative_pnl_after_enrichment`
+- 保守边界：
+  - 不冷却仅样本少但没有负 PnL、没有全过滤的候选。
+  - `486` 这类薄样本中性候选继续留在 PAPER。
+
+**测试**：
+- `LeaderResearchStateMachineTest` 新增：
+  - `unknown strategy with negative enrichment pnl enters cooldown`
+  - `unknown strategy with all filtered enrichment enters cooldown`
+  - `unknown strategy with thin neutral sample stays paper`
+- 验证命令：
+  - `backend ./gradlew test --tests LeaderResearchStateMachineTest --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchControllerTest`
+  - `backend ./gradlew bootJar`
+  - `frontend npm run build`
+
+**运行态验证**：
+- 后端已重启：
+  - tmux `polyhermes-backend-codex`
+  - PID `77300`
+  - `/actuator/health = UP`
+- 执行正式 recheck：
+  - request: `{"dryRun":false,"candidateIds":[482,486,489,491,501],"maxCandidates":5}`
+- DB 最终状态：
+  - `482`: COOLDOWN, cooldown_count `1`, reason `unknown_strategy_negative_pnl_after_enrichment`
+  - `486`: PAPER, cooldown_count `0`, 保留观察
+  - `489`: COOLDOWN, cooldown_count `1`, reason `unknown_strategy_all_filtered_after_enrichment`
+  - `491`: COOLDOWN, cooldown_count `1`, reason `unknown_strategy_all_filtered_after_enrichment`
+  - `501`: COOLDOWN, cooldown_count `1`, reason `unknown_strategy_negative_pnl_after_enrichment`
+
+**结论**：
+- 加厚失败候选已经能自动退出主策略加厚队列。
+- 下一轮继续用 `/activity-score/unknown-strategy/sample-enrich` 预览 politics/finance unknown 候选；真实加厚后必须立即复查和 cooldown 清理。
+
+### Iteration 128 - 第二目标下一阶段改进计划固化（2026-07-09 CST）
+
+**目标推进**：
+- 用户要求制定改进计划并更新到目标里。
+- 本轮不改交易逻辑，只把第二目标下一阶段执行计划写入目标文档和 loop 状态。
+
+**目标文档更新**：
+- `docs/archive/goals/leader-discovery-goal-2-history.md` 新增：
+  - `2026-07-09 下一阶段改进计划：样本加厚闭环升级`
+
+**计划口径**：
+- 第二目标后续不再单纯扩大 leader 数量。
+- 每轮固定按以下闭环推进：
+  1. 预览 strategy type / unknown 原因。
+  2. 小批 politics / finance unknown sample enrich。
+  3. targeted activity score + paper score。
+  4. trial-ready recheck。
+  5. cooldown 清理失败样本。
+  6. 只把 clean human_directional 候选推进 FAST_WATCH / TRIAL_READY 复核。
+
+**批量控制**：
+- backfill strategy type：默认 100。
+- unknown sample dry-run：默认 20。
+- unknown sample live enrich：默认 5 到 10。
+- trial-ready recheck：只处理本轮 live enrich candidateIds。
+
+**准入规则**：
+- `strategy_type=human_directional`。
+- politics / finance 优先。
+- paper trade count 达标，且 BUY / SELL 都有样本。
+- copyable PnL 为正。
+- 不命中 `weak_exit_sample`、`buy_only_no_exit`、`tail_price_spray`、`strategy_not_copyable_*`。
+- Bridge 执行历史不能暴露固定金额放大、小额 SELL 被挡、重复 BUY 或静默无记录问题。
+
+**淘汰规则**：
+- unknown 加厚后 `trade_count=0` 且 `filtered_count>=2`。
+- unknown 加厚后 `trade_count<=2` 且 `copyable_pnl<0`。
+- BUY 很多但 SELL 占比低于 10%。
+- 长尾低价、低平均金额、市场类别长期混杂。
+
+**下一轮动作**：
+- 复查最近 live enrich 的 `517/522/544/555/592` 最终状态。
+- 预期：
+  - 全过滤候选进入 COOLDOWN。
+  - 正 PnL 但样本薄的候选留在 PAPER，不直接晋级。
+- 将 selected、processed、filtered、copyable PnL delta 和最终状态写回本文档。
+
+### Iteration 129 - 第二批 Unknown 加厚复查（2026-07-09 CST）
+
+**目标推进**：
+- 执行 Iteration 128 指定的复查动作。
+- 复查最近 live enrich 的 `517/522/544/555/592` 最终状态，确认 cooldown 清理是否生效。
+
+**运行状态**：
+- `curl --noproxy '*' http://127.0.0.1:8000/actuator/health`
+- 返回：`UP`
+
+**DB 复查结果**：
+
+| candidate | state | strategy | score | risk flags | trades | filtered | filtered ratio | copyable PnL | 结论 |
+| ---: | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | --- |
+| 517 | COOLDOWN | unknown | 45.0000 | high_filtered_ratio,small_sample | 0 | 2 | 1.0000 | 0 | 全过滤，已冷却 |
+| 522 | PAPER | unknown | 55.2966 | mixed_category_evidence,high_filtered_ratio,small_sample | 1 | 1 | 0.5000 | 0.6483 | 正 PnL 但样本薄，保留观察 |
+| 544 | COOLDOWN | unknown | 45.0000 | mixed_category_evidence,high_filtered_ratio,small_sample | 0 | 2 | 1.0000 | 0 | 全过滤，已冷却 |
+| 555 | COOLDOWN | unknown | 45.0000 | mixed_category_evidence,high_filtered_ratio,small_sample | 0 | 2 | 1.0000 | 0 | 全过滤，已冷却 |
+| 592 | PAPER | unknown | 54.1211 | high_filtered_ratio,small_sample | 1 | 1 | 0.5000 | 0.0605 | 正 PnL 但样本薄，保留观察 |
+
+**事件证据**：
+- `517`: `COOLDOWN -> COOLDOWN: unknown_strategy_all_filtered_after_enrichment`
+- `544`: `COOLDOWN -> COOLDOWN: unknown_strategy_all_filtered_after_enrichment`
+- `555`: `COOLDOWN -> COOLDOWN: unknown_strategy_all_filtered_after_enrichment`
+- `522`: 1 笔 BUY paper recorded，1 笔 `price_outside_safe_band` filtered。
+- `592`: 1 笔 BUY paper recorded，1 笔 SELL `price_outside_safe_band` filtered。
+
+**结论**：
+- cooldown 规则符合预期：全过滤 unknown 候选已经退出主策略加厚队列。
+- `522/592` 仍是 `unknown + small_sample + high_filtered_ratio`，即使 PnL 为正也不能晋级。
+- 本轮没有产生可试跟候选，但完成了低质量 unknown 清理，符合第二目标“先筛掉不可复制/不可验证样本”的阶段目标。
+
+**下一步**：
+- 继续下一批 `unknown-strategy/sample-enrich` dry-run。
+- live enrich 仍保持 5 到 10 个小批量。
+- 如果下一批 COOLDOWN 比例继续超过 60%，暂停加厚并改进来源/选择规则。
+
+### Iteration 130 - 第三批 Unknown 加厚与 sample-enrich 闭环修复（2026-07-09 CST）
+
+**目标推进**：
+- 按第二目标继续执行下一批 politics/finance unknown 样本加厚。
+- 修复 live enrich 后未补跑 targeted activity score，导致 `strategy_type` 仍为 `NULL` 的闭环缺口。
+
+**dry-run 预览**：
+- request: `{"categories":["politics","finance"],"limit":20,"batchSize":20,"dryRun":true}`
+- selectedCount `20`
+- categoryCounts:
+  - `politics=20`
+- unknownStrategyReasonCounts:
+  - `insufficient_sample=17`
+  - `mixed_category_evidence=17`
+  - `sell_ratio_outside_copyable_range=12`
+  - `low_safe_price_ratio_for_directional=10`
+  - `high_tail_price_ratio=8`
+  - `insufficient_market_diversity=8`
+  - `low_average_size=3`
+  - `no_buy_sample=3`
+  - `no_sell_sample=2`
+
+**live 小批**：
+- request: `{"categories":["politics","finance"],"limit":5,"batchSize":10,"dryRun":false}`
+- selectedCandidateIds: `601,605,612,613,617`
+- paper processed `5`
+- paper filtered `5`
+- paper failed `0`
+
+**candidate deltas**：
+- `601`: trade `+2`, filtered `+1`, PnL delta `0`
+- `605`: trade `0`, filtered `+1`, PnL delta `0`
+- `612`: trade `+1`, filtered `+1`, PnL delta `-1`
+- `613`: trade `0`, filtered `+2`, PnL delta `0`
+- `617`: trade `+2`, filtered `0`, PnL delta `+5.56913835`
+
+**recheck 结果**：
+- `601`: PAPER, score `58.00000005`, blocked `score_below_80`
+- `605`: PAPER, score `45`, blocked `score_below_80`
+- `612`: COOLDOWN, copyable PnL `-1`
+- `613`: COOLDOWN, all filtered
+- `617`: PAPER, score `91.557377`, copyable PnL `31.00044713`, blocked `risk_flags_present`
+
+**发现的问题**：
+- 旧 `unknown-strategy/sample-enrich` live 分支只执行：
+  - paper process
+  - paper score
+- 没有执行 targeted activity score。
+- 结果：`601/605/612/613/617` 加厚后 `strategy_type` 仍是 `NULL`，不满足第二目标“加厚后复评机制标签”的闭环。
+
+**代码修复**：
+- `LeaderResearchUnknownStrategySampleEnrichResponse` 新增 `activityScoreResult`。
+- `LeaderResearchController.enrichUnknownStrategySamples()` 在 `dryRun=false` 时：
+  1. 执行 paper process。
+  2. 执行 targeted `scoreActivityPrescreen(force=true, states=PAPER/TRIAL_READY, candidateIds=selectedCandidateIds)`。
+  3. 执行 paper score。
+- `/optimization-daily` 最近加厚结果展示“机制复评”数量。
+- 前端类型补齐 `activityScoreResult`。
+
+**补跑修复数据**：
+- 对 `601/605/612/613/617` 执行 targeted activity score + paper score + recheck。
+- 最终 DB：
+  - `601`: PAPER, strategy `unknown`, score `58.00000005`, risk `mixed_category_evidence,small_sample`
+  - `605`: PAPER, strategy `unknown`, score `45`, risk `mixed_category_evidence,high_filtered_ratio,small_sample`
+  - `612`: COOLDOWN, strategy `unknown`, score `30`, risk `small_sample,low_market_diversity,mixed_category_evidence,scanner_pool_unverified`
+  - `613`: COOLDOWN, strategy `unknown`, score `30`, risk `small_sample,mixed_category_evidence,scanner_pool_unverified`
+  - `617`: PAPER, strategy `unknown`, score `91.557377`, risk `mixed_category_evidence`
+
+**验证**：
+- `backend ./gradlew test --tests LeaderResearchControllerTest --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchStateMachineTest` 通过。
+- `frontend npm run build` 通过。
+- `backend ./gradlew bootJar` 通过。
+- 后端已重启到 tmux `polyhermes-backend-codex`：
+  - PID `53479`
+  - `/actuator/health=UP`
+
+**下一步**：
+- 重点分析 `617` 的 `mixed_category_evidence`：它的 paper 样本、PnL、score 都强，但仍无法归入 clean human directional。
+- 判断是 market category 证据混杂、导入来源分类错误，还是需要按市场类别拆分 leader 评分。
+- 在确认前，`617` 不进入试跟配置。
+
+### Iteration 131 - Candidate 617 风险保留修复（2026-07-09 CST）
+
+**目标推进**：
+- 继续拆解上一轮高分但被 `mixed_category_evidence` 阻断的 candidate `617`。
+- 目标是判断它是否值得主策略复核，或是否应被明确阻断。
+
+**DB 活动结构**：
+- wallet: `0x9703676286b93c2eca71ca96e8757104519a69c2`
+- BUY `2619`
+- SELL `15`
+- safe price BUY `1992`
+- tail price SELL `14`
+- distinct BUY markets `289`
+- 主要 market slug 高度集中在 `fifwc-*` 世界杯市场。
+
+**结论**：
+- `617` 不是 politics / finance 主策略候选。
+- 它更像 sports / World Cup BUY-heavy 策略。
+- SELL ratio 约 `0.57%`，退出样本极弱，不满足可复制跟单条件。
+
+**发现的评分漏洞**：
+- activity score 已识别：
+  - `weak_exit_sample`
+  - `mixed_category_evidence`
+- paper score 重新保存 candidate 时覆盖了 activity 层结构风险，导致 `weak_exit_sample` 丢失。
+- 结果是 `617` 一度显示 `score=91.557377`，但只剩 `mixed_category_evidence`，容易被误读为“高质量但分类混杂”。
+
+**代码修复**：
+- `LeaderResearchScoringService` 新增 activity 风险保留：
+  - `weak_exit_sample`
+  - `buy_only_no_exit`
+  - `sell_only_no_entry`
+  - `low_market_diversity`
+  - `low_average_size`
+  - `low_safe_price_ratio`
+  - `scanner_pool_unverified`
+- paper score 根据保留风险继续做 cap：
+  - `weak_exit_sample` cap `55`
+  - `mixed_category_evidence` cap `60`
+- paper score reason 新增 `risk_cap_flags`。
+- 新增单测：
+  - `score candidate preserves activity weak exit risk and caps score`
+
+**验证**：
+- `backend ./gradlew test --tests LeaderResearchScoringServiceTest --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchStateMachineTest` 通过。
+- `backend ./gradlew bootJar` 通过。
+- 后端已重启：
+  - tmux `polyhermes-backend-codex`
+  - PID `85902`
+  - `/actuator/health=UP`
+
+**运行态修正**：
+- 对 `617` 补跑 targeted activity score + paper score + trial-ready recheck。
+- 最终 DB：
+  - state `PAPER`
+  - strategy `unknown`
+  - score `55.00000000`
+  - risk flags `weak_exit_sample,mixed_category_evidence`
+  - trades `47`
+  - filtered `14`
+  - copyable PnL `31.00044713`
+  - recheck blocker `score_below_80`
+
+**下一步**：
+- 不继续加厚 `617`。
+- 下一轮回到 politics / finance 主策略候选，继续 unknown dry-run 小批加厚。
+- 同时考虑后续新增“真实活动市场类别分布”统计，避免 sports leader 被来源证据带入 politics/finance 主线。
+
+### Iteration 132 - 真实活动市场类别分布接入（2026-07-09 CST）
+
+**目标推进**：
+- 继续修复 `617` 暴露出的主策略污染问题。
+- 第二目标要求 politics / finance 优先，不能让 sports leader 因来源证据混杂进入主线加厚和复核。
+
+**问题**：
+- 旧逻辑只根据 `source_evidence` 判断候选 category。
+- `617` 的 source evidence 同时包含 politics、sports、finance。
+- 真实 activity market slug/title 几乎全是 `fifwc-*` 世界杯市场。
+- 因此只看来源证据会把 sports leader 误带入 politics/finance loop。
+
+**代码变化**：
+- `LeaderResearchActivityMetricProjection` 新增真实活动类别计数：
+  - `politicsEvents`
+  - `financeEvents`
+  - `sportsEvents`
+  - `cryptoEvents`
+- `aggregateActivityMetrics` 与 `aggregateActivityMetricsForCandidateIds` 的 SQL 增加 market slug/title regex 分类。
+- `LeaderResearchMarketCategoryPatterns` 增加 `sports`、`crypto` pattern。
+- `LeaderResearchActivityScoringService`：
+  - 如果真实活动类别样本数 >= 20 且 dominant ratio >= 70%，优先采用真实活动类别。
+  - 来源分类和真实活动主类别冲突时加入 `activity_category_mismatch`。
+  - `activity_category_mismatch` 进入 risk flags、unknown reasons，并封顶 activity score `50`。
+  - unknown sample enrich 排除 activity category mismatch 候选，避免非主类别继续消耗 politics/finance 加厚资源。
+- `LeaderResearchScoringService`：
+  - paper score 保留 `activity_category_mismatch`。
+  - paper score 对该风险封顶 `50`。
+
+**测试**：
+- `LeaderResearchActivityScoringServiceTest` 新增：
+  - `compute uses dominant activity market category over source evidence`
+  - `plan unknown strategy sample enrichment excludes dominant non primary activity category`
+- `LeaderResearchScoringServiceTest` 扩展 activity 风险保留测试，覆盖 `activity_category_mismatch`。
+
+**验证命令**：
+- `backend ./gradlew test --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchScoringServiceTest --tests LeaderResearchControllerTest` 通过。
+- `backend ./gradlew bootJar` 通过。
+- 后端已重启：
+  - tmux `polyhermes-backend-codex`
+  - PID `12927`
+  - `/actuator/health=UP`
+
+**运行态验证：candidate 617**：
+- targeted activity score:
+  - categoryCounts: `sports=1`
+  - riskFlagCounts:
+    - `weak_exit_sample=1`
+    - `mixed_category_evidence=1`
+    - `activity_category_mismatch=1`
+  - unknownStrategyReasonCounts:
+    - `sell_ratio_outside_copyable_range=1`
+    - `mixed_category_evidence=1`
+    - `activity_category_mismatch=1`
+- paper score 后 DB：
+  - state `PAPER`
+  - strategy `unknown`
+  - score `50.00000000`
+  - risk flags `weak_exit_sample,activity_category_mismatch,mixed_category_evidence`
+  - trades `47`
+  - copyable PnL `31.00044713`
+
+**结论**：
+- `617` 已被系统明确识别为 sports 主活动候选。
+- 它不会再污染 politics / finance 主线 unknown 加厚。
+- 这类高 PnL 但非主类别、弱退出 leader 不进入 FAST_WATCH / TRIAL_READY。
+
+**下一步**：
+- 继续下一批 politics / finance unknown dry-run。
+- 观察 `activity_category_mismatch` 数量；如果频繁出现，应在导入/来源层进一步按真实活动类别重分桶。
+- 后续可在 Leader Research / Optimization Daily 页面展示真实活动类别分布。
+
+### Iteration 133 - 第四批 Unknown 加厚验证（2026-07-09 CST）
+
+**目标推进**：
+- 在真实活动市场类别分布修复后，继续执行 politics / finance unknown dry-run 和 5 个 live enrich。
+- 验证 sports 主活动候选是否还会污染主线。
+
+**运行前状态**：
+- `/actuator/health=UP`
+- PAPER/TRIAL_READY unknown 或 null：`22544`
+
+**dry-run**：
+- request: `{"categories":["politics","finance"],"limit":20,"batchSize":20,"dryRun":true}`
+- selectedCount `20`
+- categoryCounts:
+  - `politics=20`
+- `activity_category_mismatch=0`
+- unknownStrategyReasonCounts:
+  - `insufficient_sample=17`
+  - `mixed_category_evidence=14`
+  - `sell_ratio_outside_copyable_range=10`
+  - `insufficient_market_diversity=8`
+  - `high_tail_price_ratio=8`
+  - `low_safe_price_ratio_for_directional=6`
+  - `no_buy_sample=3`
+  - `low_average_size=2`
+  - `no_sell_sample=2`
+
+**结论**：
+- 真实活动类别过滤生效：本批没有 sports/crypto 主活动候选混入 politics/finance dry-run。
+- 当前 politics unknown 候选仍主要是样本不足、分类混杂、SELL 比例异常。
+
+**live 小批**：
+- selectedCandidateIds: `621,622,628,629,632`
+- paper processed `4`
+- paper filtered `6`
+- paper failed `0`
+
+**candidate deltas**：
+- `621`: trade `0`, filtered `+2`, PnL delta `0`
+- `622`: trade `+2`, filtered `+1`, PnL delta `+0.115385559`
+- `628`: trade `+2`, filtered `+1`, PnL delta `-0.497467530965`
+- `629`: trade `0`, filtered `+1`, PnL delta `0`
+- `632`: trade `0`, filtered `+1`, PnL delta `0`
+
+**recheck / DB 最终状态**：
+- `621`: COOLDOWN, score `45`, risk `scanner_pool_unverified,mixed_category_evidence,high_filtered_ratio,small_sample`, trades `0`, filtered `2`, PnL `0`
+- `622`: PAPER, score `58.23077117`, risk `scanner_pool_unverified,mixed_category_evidence,small_sample`, trades `2`, filtered `1`, PnL `0.11538556`
+- `628`: COOLDOWN, score `58.00000005`, risk `low_market_diversity,scanner_pool_unverified,mixed_category_evidence,small_sample`, trades `2`, filtered `1`, PnL `-0.49746753`
+- `629`: PAPER, score `45`, risk `low_market_diversity,scanner_pool_unverified,mixed_category_evidence,high_filtered_ratio,small_sample`, trades `0`, filtered `1`, PnL `0`
+- `632`: PAPER, score `45`, risk `low_market_diversity,low_average_size,scanner_pool_unverified,mixed_category_evidence,high_filtered_ratio,small_sample`, trades `0`, filtered `1`, PnL `0`
+
+**结论**：
+- 本轮没有产生 FAST_WATCH / TRIAL_READY。
+- 5 个 live enrich 中 2 个冷却，3 个保留 PAPER 但都低分。
+- 当前 politics unknown 队列质量偏弱；继续扩大 live batch 没有意义。
+
+**下一步**：
+- 继续小批，不扩大 batch。
+- 若后续仍大量出现 `scanner_pool_unverified + mixed_category_evidence + small_sample`，应优先调整来源选择。
+- 下一轮优先尝试 finance unknown 队列或 official leaderboard / external analytics 来源，寻找更接近 clean human directional 的候选。
+
+### Iteration 134 - Finance Unknown 小批与扫描窗口修复（2026-07-09 CST）
+
+**目标推进**：
+- 按上一轮结论从 politics unknown 队列切到 finance unknown 队列。
+- 验证 finance 队列是否更接近第二目标的主策略方向。
+
+**运行前只读检查**：
+- `/actuator/health=UP`
+- finance evidence unknown `593`
+- politics evidence unknown `403`
+
+**finance dry-run**：
+- request: `{"categories":["finance"],"limit":20,"batchSize":20,"dryRun":true}`
+- selectedCount `20`
+- categoryCounts:
+  - `finance=20`
+- `mixed_category_evidence=0`
+- `activity_category_mismatch=0`
+- unknownStrategyReasonCounts:
+  - `insufficient_sample=19`
+  - `insufficient_market_diversity=11`
+  - `high_tail_price_ratio=6`
+  - `low_safe_price_ratio_for_directional=5`
+  - `no_sell_sample=5`
+  - `sell_ratio_outside_copyable_range=3`
+  - `no_buy_sample=1`
+
+**结论**：
+- finance 队列比当前 politics unknown 队列更干净。
+- 主要问题是样本薄，而不是类别混杂。
+
+**发现的问题**：
+- 第一次 live request: `{"categories":["finance"],"limit":5,"batchSize":10,"dryRun":false}`
+- 返回 `selectedCount=0`。
+- 原因：sample enrich 用 `limit*10` 作为扫描窗口；finance 候选稀疏，`limit=5` 只扫描 50 个，扫不到 finance。
+
+**代码修复**：
+- `LeaderResearchActivityScoringService.planUnknownStrategySampleEnrichment()`：
+  - `scanLimit = max(limit * 10, 200)`
+  - 上限仍为 `500`
+- 测试同步更新 PageRequest 期望为 `200`。
+
+**验证**：
+- `backend ./gradlew test --tests LeaderResearchActivityScoringServiceTest --tests LeaderResearchControllerTest` 通过。
+- `backend ./gradlew bootJar` 通过。
+- 后端已重启：
+  - tmux `polyhermes-backend-codex`
+  - PID `46850`
+  - `/actuator/health=UP`
+
+**修复后 live 小批**：
+- request: `{"categories":["finance"],"limit":5,"batchSize":10,"dryRun":false}`
+- selectedCandidateIds: `1316,1318,1319,1321,1324`
+- activity score:
+  - scanned `5`
+  - scored `5`
+  - finance `5`
+  - `activity_category_mismatch=0`
+- paper process:
+  - processed `4`
+  - filtered `6`
+  - failed `0`
+
+**candidate deltas**：
+- `1316`: trade `0`, filtered `+3`, PnL delta `0`
+- `1318`: trade `+1`, filtered `0`, PnL delta `-0.034883719`
+- `1319`: trade `+1`, filtered `0`, PnL delta `+2.125`
+- `1321`: trade `+1`, filtered `+1`, PnL delta `+0.04666666405`
+- `1324`: trade `+1`, filtered `+2`, PnL delta `0`
+
+**最终状态**：
+- `1316`: COOLDOWN, score `45`, all filtered
+- `1318`: COOLDOWN, score `59`, copyable PnL `-0.03488372`
+- `1319`: PAPER, score `59`, copyable PnL `2.125`, positive but thin sample
+- `1321`: PAPER, score `54.09333332`, copyable PnL `0.04666666`, filtered ratio `0.5`
+- `1324`: PAPER, score `51.49999995`, filtered ratio `0.66666667`
+
+**结论**：
+- finance 小批链路已恢复正常。
+- 本批没有 FAST_WATCH / TRIAL_READY。
+- `1319` 是本批唯一值得继续观察的正向 finance 样本，但还远未达到晋级门槛。
+
+**下一步**：
+- 继续 finance 小批或切 official leaderboard / external analytics 补源。
+- 不扩大 live batch。
+- 重点寻找已有较厚 activity 样本、BUY/SELL 完整、非 scanner_pool_unverified 的 finance 候选。

@@ -236,6 +236,16 @@ data class PositionListResponse(
     val historyPositions: List<AccountPositionDto>
 )
 
+data class DailyAssetHistoryRequest(val accountId: Long)
+
+data class DailyAssetPointDto(
+    val dayStartAt: Long,
+    val availableBalance: String,
+    val positionsValue: String,
+    val totalAssets: String,
+    val capturedAt: Long
+)
+
 /**
  * 仓位卖出请求
  */

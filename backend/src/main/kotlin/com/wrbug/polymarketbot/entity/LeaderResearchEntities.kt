@@ -97,6 +97,9 @@ data class LeaderResearchCandidate(
     @Column(name = "risk_flags", columnDefinition = "TEXT")
     val riskFlags: String? = null,
 
+    @Column(name = "strategy_type", length = 50)
+    val strategyType: String? = null,
+
     @Column(name = "locked", nullable = false)
     val locked: Boolean = false,
 

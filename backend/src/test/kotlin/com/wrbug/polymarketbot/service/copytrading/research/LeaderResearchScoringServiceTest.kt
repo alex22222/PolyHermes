@@ -186,6 +186,94 @@ class LeaderResearchScoringServiceTest {
     }
 
     @Test
+    fun `score candidate preserves non copyable strategy risk`() {
+        val candidateRepository = mock<com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository>()
+        val paperSessionRepository = mock<com.wrbug.polymarketbot.repository.LeaderPaperSessionRepository>()
+        val paperTradeRepository = mock<com.wrbug.polymarketbot.repository.LeaderPaperTradeRepository>()
+        val scoreRepository = mock<com.wrbug.polymarketbot.repository.LeaderResearchScoreRepository>()
+        val localService = LeaderResearchScoringService(
+            candidateRepository = candidateRepository,
+            paperSessionRepository = paperSessionRepository,
+            paperTradeRepository = paperTradeRepository,
+            scoreRepository = scoreRepository
+        )
+        val now = System.currentTimeMillis()
+        val candidate = LeaderResearchCandidate(
+            id = 1L,
+            normalizedWallet = "0x1111111111111111111111111111111111111111",
+            strategyType = LeaderResearchStrategyTypeClassifier.LOW_PRICE_TAIL_RISK,
+            lastSourceSeenAt = now
+        )
+        val session = LeaderPaperSession(
+            id = 10L,
+            candidateId = 1L,
+            startedAt = now - 8L * 24 * 60 * 60 * 1000,
+            tradeCount = 12,
+            filteredCount = 0,
+            copyablePnl = BigDecimal("4"),
+            maxDrawdown = BigDecimal.ZERO,
+            filteredRatio = BigDecimal.ZERO
+        )
+
+        Mockito.`when`(paperSessionRepository.findTopByCandidateIdOrderByStartedAtDesc(1L)).thenReturn(session)
+        Mockito.`when`(scoreRepository.save(anyScore())).thenAnswer { it.arguments[0] }
+        Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer { it.arguments[0] }
+
+        val score = localService.scoreCandidate(candidate, runId = null)
+
+        val savedCandidate = Mockito.mockingDetails(candidateRepository).invocations
+            .last { it.method.name == "save" }
+            .arguments[0] as LeaderResearchCandidate
+        assertTrue(savedCandidate.riskFlags!!.contains("strategy_low_price_tail_risk"))
+        assertTrue(score.reason!!.contains("strategy_type=low_price_tail_risk"))
+    }
+
+    @Test
+    fun `score candidate preserves activity weak exit risk and caps score`() {
+        val candidateRepository = mock<com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository>()
+        val paperSessionRepository = mock<com.wrbug.polymarketbot.repository.LeaderPaperSessionRepository>()
+        val paperTradeRepository = mock<com.wrbug.polymarketbot.repository.LeaderPaperTradeRepository>()
+        val scoreRepository = mock<com.wrbug.polymarketbot.repository.LeaderResearchScoreRepository>()
+        val localService = LeaderResearchScoringService(
+            candidateRepository = candidateRepository,
+            paperSessionRepository = paperSessionRepository,
+            paperTradeRepository = paperTradeRepository,
+            scoreRepository = scoreRepository
+        )
+        val now = System.currentTimeMillis()
+        val candidate = LeaderResearchCandidate(
+            id = 1L,
+            normalizedWallet = "0x1111111111111111111111111111111111111111",
+            riskFlags = "weak_exit_sample,activity_category_mismatch",
+            lastSourceSeenAt = now
+        )
+        val session = LeaderPaperSession(
+            id = 10L,
+            candidateId = 1L,
+            startedAt = now - 8L * 24 * 60 * 60 * 1000,
+            tradeCount = 47,
+            filteredCount = 1,
+            copyablePnl = BigDecimal("31"),
+            maxDrawdown = BigDecimal("-1"),
+            filteredRatio = BigDecimal("0.02")
+        )
+
+        Mockito.`when`(paperSessionRepository.findTopByCandidateIdOrderByStartedAtDesc(1L)).thenReturn(session)
+        Mockito.`when`(scoreRepository.save(anyScore())).thenAnswer { it.arguments[0] }
+        Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer { it.arguments[0] }
+
+        val score = localService.scoreCandidate(candidate, runId = null)
+
+        val savedCandidate = Mockito.mockingDetails(candidateRepository).invocations
+            .last { it.method.name == "save" }
+            .arguments[0] as LeaderResearchCandidate
+        assertTrue(savedCandidate.riskFlags!!.contains("weak_exit_sample"))
+        assertTrue(savedCandidate.riskFlags!!.contains("activity_category_mismatch"))
+        assertTrue(score.totalScore <= BigDecimal("50"))
+        assertTrue(score.reason!!.contains("risk_cap_flags=weak_exit_sample,activity_category_mismatch"))
+    }
+
+    @Test
     fun `score candidate flags one quarter cross category evidence as mixed`() {
         val candidateRepository = mock<com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository>()
         val paperSessionRepository = mock<com.wrbug.polymarketbot.repository.LeaderPaperSessionRepository>()

@@ -97,7 +97,9 @@ class LeaderResearchScoringService(
             filterPassRate
         ).fold(BigDecimal.ZERO, BigDecimal::add).setScale(8, RoundingMode.HALF_UP)
         val sampleCapApplied = tradeCount < PAPER_MIN_TRADES && rawTotal > SAMPLE_INSUFFICIENT_CAP
-        val total = if (sampleCapApplied) SAMPLE_INSUFFICIENT_CAP else rawTotal
+        val sampleCappedTotal = if (sampleCapApplied) SAMPLE_INSUFFICIENT_CAP else rawTotal
+        val riskFlagsForCap = buildCandidateRiskFlags(candidate)
+        val total = applyRiskCaps(sampleCappedTotal, riskFlagsForCap)
 
         val reason = listOf(
             "score_v1=$total",
@@ -106,6 +108,8 @@ class LeaderResearchScoringService(
             "sample_cap_applied=$sampleCapApplied",
             "unknown_quote_ratio=${unknownRatio.setScale(4, RoundingMode.HALF_UP)}",
             "filtered_ratio=${filteredRatio.setScale(4, RoundingMode.HALF_UP)}",
+            "strategy_type=${candidate.strategyType ?: LeaderResearchStrategyTypeClassifier.UNKNOWN}",
+            "risk_cap_flags=${riskFlagsForCap.joinToString(",")}",
             "source_fresh=$sourceFresh"
         ).joinToString("; ")
 
@@ -133,6 +137,8 @@ class LeaderResearchScoringService(
 
     private fun buildRiskFlags(candidate: LeaderResearchCandidate, session: LeaderPaperSession?): String? {
         val flags = mutableListOf<String>()
+        flags += preservedActivityRiskFlags(candidate)
+        flags += LeaderResearchStrategyTypeClassifier.riskFlags(candidate.strategyType)
         val categoryEvidence = LeaderResearchCategoryEvidenceClassifier.classify(candidate.sourceEvidence, candidate.source)
         if (categoryEvidence.mixed) flags += "mixed_category_evidence"
         if (categoryEvidence.category == "unknown") flags += "unknown_category"
@@ -146,6 +152,41 @@ class LeaderResearchScoringService(
         if (session.unknownRatio() > BigDecimal("0.20")) flags += "high_unknown_quote_exposure"
         if (session.tradeCount < 10) flags += "small_sample"
         return flags.takeIf { it.isNotEmpty() }?.joinToString(",")
+    }
+
+    private fun buildCandidateRiskFlags(candidate: LeaderResearchCandidate): Set<String> {
+        val flags = linkedSetOf<String>()
+        flags += preservedActivityRiskFlags(candidate)
+        flags += LeaderResearchStrategyTypeClassifier.riskFlags(candidate.strategyType)
+        val categoryEvidence = LeaderResearchCategoryEvidenceClassifier.classify(candidate.sourceEvidence, candidate.source)
+        if (categoryEvidence.mixed) flags += "mixed_category_evidence"
+        if (categoryEvidence.category == "unknown") flags += "unknown_category"
+        return flags
+    }
+
+    private fun preservedActivityRiskFlags(candidate: LeaderResearchCandidate): List<String> {
+        return candidate.riskFlags.orEmpty()
+            .split(",")
+            .map { it.trim() }
+            .filter { it in PRESERVED_ACTIVITY_RISK_FLAGS }
+            .distinct()
+    }
+
+    private fun applyRiskCaps(score: BigDecimal, flags: Set<String>): BigDecimal {
+        var capped = score
+        if ("strategy_low_price_tail_risk" in flags) capped = capped.min(BigDecimal("20"))
+        if ("strategy_bot_hft" in flags) capped = capped.min(BigDecimal("55"))
+        if ("strategy_market_maker_lp" in flags) capped = capped.min(BigDecimal("55"))
+        if ("strategy_arbitrage" in flags) capped = capped.min(BigDecimal("55"))
+        if ("strategy_rebalance_churn" in flags) capped = capped.min(BigDecimal("55"))
+        if ("strategy_whale" in flags) capped = capped.min(BigDecimal("70"))
+        if ("buy_only_no_exit" in flags) capped = capped.min(BigDecimal("55"))
+        if ("sell_only_no_entry" in flags) capped = capped.min(BigDecimal("55"))
+        if ("weak_exit_sample" in flags) capped = capped.min(BigDecimal("55"))
+        if ("low_safe_price_ratio" in flags) capped = capped.min(BigDecimal("50"))
+        if ("mixed_category_evidence" in flags) capped = capped.min(BigDecimal("60"))
+        if ("activity_category_mismatch" in flags) capped = capped.min(BigDecimal("50"))
+        return capped
     }
 
     private fun isTailPriceSpray(session: LeaderPaperSession): Boolean {
@@ -187,5 +228,18 @@ class LeaderResearchScoringService(
         private const val TAIL_SPRAY_MIN_EVENTS = 10
         private const val SOURCE_FRESH_MS = 48L * 60 * 60 * 1000
         private const val PAPER_MIN_AGE_MS = 7L * 24 * 60 * 60 * 1000
+        private val PRESERVED_ACTIVITY_RISK_FLAGS = setOf(
+            "no_activity_sample",
+            "low_market_diversity",
+            "sell_only_no_entry",
+            "buy_only_no_exit",
+            "weak_exit_sample",
+            "low_average_size",
+            "low_safe_price_ratio",
+            "stale_activity",
+            "unknown_category",
+            "activity_category_mismatch",
+            "scanner_pool_unverified"
+        )
     }
 }

@@ -14,6 +14,39 @@ import org.springframework.stereotype.Repository
 @Repository
 interface BridgeTradeRecordRepository : JpaRepository<BridgeTradeRecord, Long> {
 
+    @Query(
+        value = """
+            SELECT *
+            FROM bridge_trade_record
+            WHERE (:bridgeId IS NULL OR bridge_id = :bridgeId)
+              AND (:status IS NULL OR status = :status)
+              AND (
+                  :marketKeyword IS NULL
+                  OR LOWER(COALESCE(market_title, '')) LIKE CONCAT('%', LOWER(:marketKeyword), '%')
+                  OR LOWER(market_id) LIKE CONCAT('%', LOWER(:marketKeyword), '%')
+              )
+            ORDER BY created_at DESC
+        """,
+        countQuery = """
+            SELECT COUNT(*)
+            FROM bridge_trade_record
+            WHERE (:bridgeId IS NULL OR bridge_id = :bridgeId)
+              AND (:status IS NULL OR status = :status)
+              AND (
+                  :marketKeyword IS NULL
+                  OR LOWER(COALESCE(market_title, '')) LIKE CONCAT('%', LOWER(:marketKeyword), '%')
+                  OR LOWER(market_id) LIKE CONCAT('%', LOWER(:marketKeyword), '%')
+              )
+        """,
+        nativeQuery = true
+    )
+    fun findFiltered(
+        @Param("bridgeId") bridgeId: String?,
+        @Param("status") status: String?,
+        @Param("marketKeyword") marketKeyword: String?,
+        pageable: Pageable
+    ): Page<BridgeTradeRecord>
+
     fun findByBridgeId(bridgeId: String): List<BridgeTradeRecord>
 
     fun findByBridgeIdAndStatus(bridgeId: String, status: String): List<BridgeTradeRecord>

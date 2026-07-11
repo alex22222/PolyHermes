@@ -131,6 +131,8 @@ class LeaderResearchTrialReadyRecheckService(
             BigDecimal.ZERO
         }
         if (score < TRIAL_READY_MIN_SCORE) blockers += "score_below_80"
+        LeaderResearchStrategyTypeClassifier.trialReadyBlockerCode(candidate.strategyType)?.let { blockers += it }
+        blockers += LeaderResearchProfitWindowParser.parse(candidate.sourceEvidence).blockers
         if (!candidate.riskFlags.isNullOrBlank()) blockers += "risk_flags_present"
         if (System.currentTimeMillis() - session.startedAt < PAPER_MIN_AGE_MS) blockers += "waiting_observation_age"
         if (session.tradeCount < PAPER_MIN_TRADES) blockers += "paper_trades_below_10"
@@ -153,6 +155,8 @@ class LeaderResearchTrialReadyRecheckService(
 
     private fun CandidateSessionRow.isHighQualityRecheckCandidate(): Boolean {
         return (candidate.score ?: BigDecimal.ZERO) >= TRIAL_READY_MIN_SCORE &&
+            LeaderResearchStrategyTypeClassifier.isTrialReadyCopyable(candidate.strategyType) &&
+            LeaderResearchProfitWindowParser.parse(candidate.sourceEvidence).blockers.isEmpty() &&
             candidate.riskFlags.isNullOrBlank() &&
             candidate.isSourceFresh72h() &&
             session.tradeCount >= 20 &&

@@ -210,6 +210,79 @@ class LeaderResearchStateMachineTest {
     }
 
     @Test
+    fun `non copyable strategy type blocks trial ready transition even without risk flags`() {
+        val now = System.currentTimeMillis()
+        val candidate = LeaderResearchCandidate(
+            id = 1L,
+            normalizedWallet = "0x1111111111111111111111111111111111111111",
+            researchState = LeaderResearchState.PAPER,
+            lastSourceSeenAt = now,
+            score = BigDecimal("90"),
+            strategyType = LeaderResearchStrategyTypeClassifier.LOW_PRICE_TAIL_RISK,
+            riskFlags = null
+        )
+        val session = LeaderPaperSession(
+            id = 10L,
+            candidateId = 1L,
+            startedAt = now - 8L * 24 * 60 * 60 * 1000,
+            tradeCount = 20,
+            filteredCount = 0,
+            openExposure = BigDecimal("10"),
+            copyablePnl = BigDecimal("5"),
+            maxDrawdown = BigDecimal.ZERO,
+            unknownValuationExposure = BigDecimal.ZERO,
+            filteredRatio = BigDecimal.ZERO
+        )
+        Mockito.`when`(paperSessionRepository.findTopByCandidateIdOrderByStartedAtDesc(1L)).thenReturn(session)
+        Mockito.`when`(paperTradingService.isEligibleForTrialReady(anySession(), Mockito.anyLong())).thenReturn(true)
+        Mockito.`when`(scoreRepository.findByCandidateIdOrderByCreatedAtDesc(1L)).thenReturn(
+            listOf(stableScore("90"), stableScore("91"), stableScore("92"))
+        )
+
+        val result = stateMachine.advance(candidate, runId = 99L)
+
+        assertEquals(LeaderResearchState.PAPER, result.researchState)
+        Mockito.verify(candidateRepository, Mockito.never()).save(anyCandidate())
+        Mockito.verify(poolMappingService, Mockito.never()).syncCandidate(anyCandidate())
+    }
+
+    @Test
+    fun `trial ready candidate demotes back to paper when rescored below threshold`() {
+        val now = System.currentTimeMillis()
+        val candidate = LeaderResearchCandidate(
+            id = 1L,
+            normalizedWallet = "0x1111111111111111111111111111111111111111",
+            researchState = LeaderResearchState.TRIAL_READY,
+            lastSourceSeenAt = now,
+            leaderId = 7L,
+            poolId = 8L,
+            score = BigDecimal("60"),
+            riskFlags = "mixed_category_evidence"
+        )
+        val session = LeaderPaperSession(
+            id = 10L,
+            candidateId = 1L,
+            startedAt = now - 8L * 24 * 60 * 60 * 1000,
+            tradeCount = 21,
+            filteredCount = 16,
+            openExposure = BigDecimal("10"),
+            copyablePnl = BigDecimal("8"),
+            maxDrawdown = BigDecimal.ZERO,
+            unknownValuationExposure = BigDecimal.ZERO,
+            filteredRatio = BigDecimal("0.4324")
+        )
+        Mockito.`when`(paperSessionRepository.findTopByCandidateIdOrderByStartedAtDesc(1L)).thenReturn(session)
+        Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer { it.arguments[0] }
+        Mockito.`when`(poolMappingService.syncCandidate(anyCandidate())).thenAnswer { it.arguments[0] }
+
+        val result = stateMachine.advance(candidate, runId = 99L)
+
+        assertEquals(LeaderResearchState.PAPER, result.researchState)
+        Mockito.verify(candidateRepository).save(anyCandidate())
+        Mockito.verify(poolMappingService).syncCandidate(anyCandidate())
+    }
+
+    @Test
     fun `mixed category evidence blocks trial ready transition`() {
         val now = System.currentTimeMillis()
         val candidate = LeaderResearchCandidate(
@@ -233,6 +306,87 @@ class LeaderResearchStateMachineTest {
         )
         Mockito.`when`(paperSessionRepository.findTopByCandidateIdOrderByStartedAtDesc(1L)).thenReturn(session)
         Mockito.`when`(poolMappingService.syncCandidate(anyCandidate())).thenAnswer { it.arguments[0] }
+
+        val result = stateMachine.advance(candidate, runId = 99L)
+
+        assertEquals(LeaderResearchState.PAPER, result.researchState)
+        Mockito.verify(candidateRepository, Mockito.never()).save(anyCandidate())
+    }
+
+    @Test
+    fun `unknown strategy with negative enrichment pnl enters cooldown`() {
+        val now = System.currentTimeMillis()
+        val candidate = LeaderResearchCandidate(
+            id = 1L,
+            normalizedWallet = "0x1111111111111111111111111111111111111111",
+            researchState = LeaderResearchState.PAPER,
+            strategyType = LeaderResearchStrategyTypeClassifier.UNKNOWN,
+            lastSourceSeenAt = now
+        )
+        val session = LeaderPaperSession(
+            id = 10L,
+            candidateId = 1L,
+            startedAt = now,
+            tradeCount = 2,
+            filteredCount = 0,
+            copyablePnl = BigDecimal("-0.33333333"),
+            maxDrawdown = BigDecimal("-1")
+        )
+        Mockito.`when`(paperSessionRepository.findTopByCandidateIdOrderByStartedAtDesc(1L)).thenReturn(session)
+        Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer { it.arguments[0] }
+
+        val result = stateMachine.advance(candidate, runId = 99L)
+
+        assertEquals(LeaderResearchState.COOLDOWN, result.researchState)
+        assertEquals(1, result.cooldownCount)
+    }
+
+    @Test
+    fun `unknown strategy with all filtered enrichment enters cooldown`() {
+        val now = System.currentTimeMillis()
+        val candidate = LeaderResearchCandidate(
+            id = 1L,
+            normalizedWallet = "0x1111111111111111111111111111111111111111",
+            researchState = LeaderResearchState.PAPER,
+            strategyType = LeaderResearchStrategyTypeClassifier.UNKNOWN,
+            lastSourceSeenAt = now
+        )
+        val session = LeaderPaperSession(
+            id = 10L,
+            candidateId = 1L,
+            startedAt = now,
+            tradeCount = 0,
+            filteredCount = 2,
+            copyablePnl = BigDecimal.ZERO
+        )
+        Mockito.`when`(paperSessionRepository.findTopByCandidateIdOrderByStartedAtDesc(1L)).thenReturn(session)
+        Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer { it.arguments[0] }
+
+        val result = stateMachine.advance(candidate, runId = 99L)
+
+        assertEquals(LeaderResearchState.COOLDOWN, result.researchState)
+        assertEquals(1, result.cooldownCount)
+    }
+
+    @Test
+    fun `unknown strategy with thin neutral sample stays paper`() {
+        val now = System.currentTimeMillis()
+        val candidate = LeaderResearchCandidate(
+            id = 1L,
+            normalizedWallet = "0x1111111111111111111111111111111111111111",
+            researchState = LeaderResearchState.PAPER,
+            strategyType = LeaderResearchStrategyTypeClassifier.UNKNOWN,
+            lastSourceSeenAt = now
+        )
+        val session = LeaderPaperSession(
+            id = 10L,
+            candidateId = 1L,
+            startedAt = now,
+            tradeCount = 1,
+            filteredCount = 0,
+            copyablePnl = BigDecimal.ZERO
+        )
+        Mockito.`when`(paperSessionRepository.findTopByCandidateIdOrderByStartedAtDesc(1L)).thenReturn(session)
 
         val result = stateMachine.advance(candidate, runId = 99L)
 

@@ -1,6 +1,8 @@
 package com.wrbug.polymarketbot.controller.copytrading.research
 
 import com.wrbug.polymarketbot.dto.ApiResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchApprovalPreviewRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchApprovalPreviewResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchApprovalRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchApprovalResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateDetailDto
@@ -18,6 +20,8 @@ import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardRefreshRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardRefreshResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardDiagnoseRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardDiagnoseResponse
 import com.wrbug.polymarketbot.dto.LeaderPaperSessionDto
@@ -25,6 +29,10 @@ import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchStrategyBackfillRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchStrategyBackfillResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchUnknownStrategySampleEnrichRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchUnknownStrategySampleEnrichResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessCandidateDto
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessResponse
@@ -58,6 +66,7 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivi
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivitySourceImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateNotReadyException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateLockedException
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateNotCopyableException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchDuplicateTrialConfigException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchExternalAnalyticsImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchFalconLeaderboardImportService
@@ -73,6 +82,7 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScanne
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchScoringService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPaperPromotionService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperProcessingResult
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperTradingService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPolymarketAnalyticsCopyTradeImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPolyburgTelegramImportService
@@ -197,6 +207,67 @@ class LeaderResearchController(
         }
     }
 
+    @PostMapping("/activity-score/backfill-strategy-type")
+    fun backfillStrategyType(
+        @RequestBody request: LeaderResearchStrategyBackfillRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchStrategyBackfillResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            activityScoringService.backfillUnknownStrategyTypes(request)
+        }
+    }
+
+    @PostMapping("/activity-score/unknown-strategy/sample-enrich")
+    fun enrichUnknownStrategySamples(
+        @RequestBody request: LeaderResearchUnknownStrategySampleEnrichRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchUnknownStrategySampleEnrichResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            val plan = activityScoringService.planUnknownStrategySampleEnrichment(request)
+            if (request.dryRun || plan.selectedCandidateIds.isEmpty()) {
+                plan
+            } else {
+                val effectiveBatchSize = request.batchSize.coerceIn(1, LeaderPaperTradingService.MANUAL_MAX_PROCESSING_BATCH_SIZE)
+                val processResult = paperTradingService.processPaperCandidates(
+                    runId = null,
+                    batchSize = effectiveBatchSize,
+                    candidateIds = plan.selectedCandidateIds
+                )
+                val states = listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
+                val activityScoreResult = activityScoringService.scoreActivityPrescreen(
+                    LeaderResearchActivityScoreRequest(
+                        states = states.map { it.name },
+                        force = true,
+                        candidateIds = plan.selectedCandidateIds
+                    )
+                )
+                val candidates = researchService.findCandidatesByIds(plan.selectedCandidateIds)
+                    .filter { it.researchState in states }
+                val scored = candidates.map { scoringService.scoreCandidate(it, runId = null) }
+                val foundIds = candidates.mapNotNull { it.id }.toSet()
+                plan.copy(
+                    dryRun = false,
+                    activityScoreResult = activityScoreResult,
+                    paperProcessResult = paperProcessResponse(
+                        result = processResult,
+                        requestedBatchSize = request.batchSize,
+                        effectiveBatchSize = effectiveBatchSize,
+                        truncated = request.batchSize != effectiveBatchSize
+                    ),
+                    paperScoreResult = LeaderResearchPaperScoreResponse(
+                        scoredCount = scored.size,
+                        states = states.map { it.name },
+                        scoreVersion = LeaderResearchScoringService.SCORE_VERSION,
+                        targeted = true,
+                        requestedCandidateIds = plan.selectedCandidateIds,
+                        missingCandidateIds = plan.selectedCandidateIds.filter { it !in foundIds },
+                        effectiveCandidateCount = candidates.size,
+                        maxCandidates = plan.selectedCandidateIds.size,
+                        truncated = false
+                    )
+                )
+            }
+        }
+    }
+
     @PostMapping("/activity-source/import")
     fun importActivitySource(
         @RequestBody request: LeaderResearchActivitySourceImportRequest
@@ -230,6 +301,15 @@ class LeaderResearchController(
     ): ResponseEntity<ApiResponse<LeaderResearchOfficialLeaderboardImportResponse>> {
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
             officialLeaderboardImportService.importFromOfficialLeaderboard(request)
+        }
+    }
+
+    @PostMapping("/official-leaderboard/refresh-candidates")
+    fun refreshOfficialLeaderboardCandidates(
+        @RequestBody request: LeaderResearchOfficialLeaderboardRefreshRequest
+    ): ResponseEntity<ApiResponse<LeaderResearchOfficialLeaderboardRefreshResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            officialLeaderboardImportService.refreshCandidatesFromOfficialLeaderboard(request)
         }
     }
 
@@ -335,32 +415,11 @@ class LeaderResearchController(
                 batchSize = effectiveBatchSize,
                 candidateIds = request.candidateIds
             )
-            LeaderResearchPaperProcessResponse(
-                processed = result.processed,
-                filtered = result.filtered,
-                failed = result.failed,
+            paperProcessResponse(
+                result = result,
                 requestedBatchSize = request.batchSize,
                 effectiveBatchSize = effectiveBatchSize,
-                maxBatchSize = LeaderPaperTradingService.MANUAL_MAX_PROCESSING_BATCH_SIZE,
-                truncated = request.batchSize != effectiveBatchSize,
-                candidateSummaries = result.candidateSummaries.map { item ->
-                    LeaderResearchPaperProcessCandidateDto(
-                        candidateId = item.candidateId,
-                        wallet = item.wallet,
-                        processed = item.processed,
-                        filtered = item.filtered,
-                        failed = item.failed,
-                        beforeTradeCount = item.beforeTradeCount,
-                        afterTradeCount = item.afterTradeCount,
-                        tradeCountDelta = item.afterTradeCount - item.beforeTradeCount,
-                        beforeFilteredCount = item.beforeFilteredCount,
-                        afterFilteredCount = item.afterFilteredCount,
-                        filteredCountDelta = item.afterFilteredCount - item.beforeFilteredCount,
-                        beforeCopyablePnl = item.beforeCopyablePnl.strip(),
-                        afterCopyablePnl = item.afterCopyablePnl.strip(),
-                        copyablePnlDelta = item.afterCopyablePnl.subtract(item.beforeCopyablePnl).strip()
-                    )
-                }
+                truncated = request.batchSize != effectiveBatchSize
             )
         }
     }
@@ -436,6 +495,22 @@ class LeaderResearchController(
         }
     }
 
+    @PostMapping("/approval/preview-disabled-trial-config")
+    fun previewApproval(@RequestBody request: LeaderResearchApprovalPreviewRequest): ResponseEntity<ApiResponse<LeaderResearchApprovalPreviewResponse>> {
+        if (request.candidateId <= 0) {
+            return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_INVALID, "candidateId 无效", messageSource))
+        }
+        return try {
+            approvalService.previewDisabledTrialConfig(request).fold(
+                onSuccess = { ResponseEntity.ok(ApiResponse.success(it)) },
+                onFailure = { e -> errorResponse(e, ErrorCode.SERVER_LEADER_RESEARCH_APPROVAL_FAILED) }
+            )
+        } catch (e: Exception) {
+            logger.error("Leader research approval preview failed", e)
+            ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_LEADER_RESEARCH_APPROVAL_FAILED, e.message, messageSource))
+        }
+    }
+
     private fun <T> safe(errorCode: ErrorCode, block: () -> T): ResponseEntity<ApiResponse<T>> {
         return try {
             ResponseEntity.ok(ApiResponse.success(block()))
@@ -452,6 +527,7 @@ class LeaderResearchController(
             is LeaderResearchDuplicateTrialConfigException -> ErrorCode.LEADER_RESEARCH_DUPLICATE_TRIAL_CONFIG
             is LeaderResearchRealMoneyForbiddenException -> ErrorCode.LEADER_RESEARCH_REAL_MONEY_FORBIDDEN
             is LeaderResearchCandidateLockedException -> ErrorCode.LEADER_RESEARCH_CANDIDATE_LOCKED
+            is LeaderResearchCandidateNotCopyableException -> ErrorCode.LEADER_RESEARCH_CANDIDATE_NOT_COPYABLE
             is IllegalArgumentException -> when (e.message) {
                 "账户不存在" -> ErrorCode.ACCOUNT_NOT_FOUND
                 "候选不存在" -> ErrorCode.LEADER_RESEARCH_CANDIDATE_NOT_FOUND
@@ -460,6 +536,41 @@ class LeaderResearchController(
             else -> fallback
         }
         return ResponseEntity.ok(ApiResponse.error(errorCode, null, messageSource))
+    }
+
+    private fun paperProcessResponse(
+        result: LeaderPaperProcessingResult,
+        requestedBatchSize: Int,
+        effectiveBatchSize: Int,
+        truncated: Boolean
+    ): LeaderResearchPaperProcessResponse {
+        return LeaderResearchPaperProcessResponse(
+            processed = result.processed,
+            filtered = result.filtered,
+            failed = result.failed,
+            requestedBatchSize = requestedBatchSize,
+            effectiveBatchSize = effectiveBatchSize,
+            maxBatchSize = LeaderPaperTradingService.MANUAL_MAX_PROCESSING_BATCH_SIZE,
+            truncated = truncated,
+            candidateSummaries = result.candidateSummaries.map { item ->
+                LeaderResearchPaperProcessCandidateDto(
+                    candidateId = item.candidateId,
+                    wallet = item.wallet,
+                    processed = item.processed,
+                    filtered = item.filtered,
+                    failed = item.failed,
+                    beforeTradeCount = item.beforeTradeCount,
+                    afterTradeCount = item.afterTradeCount,
+                    tradeCountDelta = item.afterTradeCount - item.beforeTradeCount,
+                    beforeFilteredCount = item.beforeFilteredCount,
+                    afterFilteredCount = item.afterFilteredCount,
+                    filteredCountDelta = item.afterFilteredCount - item.beforeFilteredCount,
+                    beforeCopyablePnl = item.beforeCopyablePnl.strip(),
+                    afterCopyablePnl = item.afterCopyablePnl.strip(),
+                    copyablePnlDelta = item.afterCopyablePnl.subtract(item.beforeCopyablePnl).strip()
+                )
+            }
+        )
     }
 
     private fun BigDecimal.strip(): String = stripTrailingZeros().toPlainString()

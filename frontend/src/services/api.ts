@@ -25,12 +25,17 @@ import type {
   LeaderResearchApprovalResponse,
   LeaderResearchActivityScoreRequest,
   LeaderResearchActivityScoreResponse,
+  LeaderResearchStrategyBackfillRequest,
+  LeaderResearchStrategyBackfillResponse,
+  LeaderResearchUnknownStrategySampleEnrichRequest,
+  LeaderResearchUnknownStrategySampleEnrichResponse,
   LeaderResearchActivitySourceImportRequest,
   LeaderResearchActivitySourceImportResponse,
   LeaderResearchCandidateDetail,
   LeaderResearchCandidateListRequest,
   LeaderResearchCandidateListResponse,
   LeaderResearchEvent,
+  LeaderResearchApprovalPreviewResponse,
   LeaderResearchExternalAnalyticsImportRequest,
   LeaderResearchExternalAnalyticsImportResponse,
   LeaderResearchFalconLeaderboardImportRequest,
@@ -44,6 +49,8 @@ import type {
   LeaderResearchOfficialLeaderboardDiagnoseResponse,
   LeaderResearchOfficialLeaderboardImportRequest,
   LeaderResearchOfficialLeaderboardImportResponse,
+  LeaderResearchOfficialLeaderboardRefreshRequest,
+  LeaderResearchOfficialLeaderboardRefreshResponse,
   LeaderResearchPaperProcessRequest,
   LeaderResearchPaperProcessResponse,
   LeaderResearchPaperPromotionRequest,
@@ -359,6 +366,9 @@ export const apiService = {
      */
     positionsList: () => 
       apiClient.post<ApiResponse<any>>('/accounts/positions/list', {}),
+
+    dailyAssets: (accountId: number) =>
+      apiClient.post<ApiResponse<import('../types').DailyAssetPoint[]>>('/accounts/positions/daily-assets', { accountId }),
     
     /**
      * 卖出仓位
@@ -566,6 +576,12 @@ export const apiService = {
     runActivityScore: (data: LeaderResearchActivityScoreRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchActivityScoreResponse>>('/copy-trading/leader-research/activity-score/run', data, { timeout: 120000 }),
 
+    backfillStrategyType: (data: LeaderResearchStrategyBackfillRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchStrategyBackfillResponse>>('/copy-trading/leader-research/activity-score/backfill-strategy-type', data, { timeout: 120000 }),
+
+    enrichUnknownStrategySamples: (data: LeaderResearchUnknownStrategySampleEnrichRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchUnknownStrategySampleEnrichResponse>>('/copy-trading/leader-research/activity-score/unknown-strategy/sample-enrich', data, { timeout: 120000 }),
+
     promoteActivityScoreToPaper: (data: LeaderResearchPaperPromotionRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchPaperPromotionResponse>>('/copy-trading/leader-research/activity-score/promote-paper', data, { timeout: 120000 }),
 
@@ -577,6 +593,9 @@ export const apiService = {
 
     importOfficialLeaderboard: (data: LeaderResearchOfficialLeaderboardImportRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchOfficialLeaderboardImportResponse>>('/copy-trading/leader-research/official-leaderboard/import', data, { timeout: 120000 }),
+
+    refreshOfficialLeaderboardCandidates: (data: LeaderResearchOfficialLeaderboardRefreshRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchOfficialLeaderboardRefreshResponse>>('/copy-trading/leader-research/official-leaderboard/refresh-candidates', data, { timeout: 120000 }),
 
     importFalconLeaderboard: (data: LeaderResearchFalconLeaderboardImportRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchFalconLeaderboardImportResponse>>('/copy-trading/leader-research/falcon-leaderboard/import', data, { timeout: 120000 }),
@@ -592,6 +611,9 @@ export const apiService = {
 
     events: (data: { page?: number; size?: number } = {}) =>
       apiClient.post<ApiResponse<LeaderResearchEvent[]>>('/copy-trading/leader-research/events/list', data),
+
+    previewDisabledTrialConfig: (data: { candidateId: number }) =>
+      apiClient.post<ApiResponse<LeaderResearchApprovalPreviewResponse>>('/copy-trading/leader-research/approval/preview-disabled-trial-config', data),
 
     createDisabledTrialConfig: (data: LeaderResearchApprovalRequest) =>
       apiClient.post<ApiResponse<LeaderResearchApprovalResponse>>('/copy-trading/leader-research/approval/create-disabled-trial-config', data)

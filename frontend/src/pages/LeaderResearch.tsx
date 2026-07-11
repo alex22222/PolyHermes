@@ -36,6 +36,7 @@ import type {
   LeaderPaperPosition,
   LeaderPaperTrade,
   LeaderResearchActivitySourceImportResponse,
+  LeaderResearchApprovalPreviewResponse,
   LeaderResearchCandidate,
   LeaderResearchCandidateDetail,
   LeaderResearchCandidateListResponse,
@@ -47,6 +48,7 @@ import type {
   LeaderResearchMarketPeerSourceImportResponse,
   LeaderResearchOfficialLeaderboardDiagnoseResponse,
   LeaderResearchOfficialLeaderboardImportResponse,
+  LeaderResearchOfficialLeaderboardSample,
   LeaderResearchPaperProcessCandidate,
   LeaderResearchPaperPromotionResponse,
   LeaderResearchPoliticsRecommendationExecutionSnapshot,
@@ -91,6 +93,39 @@ const readinessColor = (level: string) => {
   if (level === 'FAST_WATCH') return 'blue'
   return 'gold'
 }
+
+const STRATEGY_TYPE_COLORS: Record<string, string> = {
+  human_directional: 'green',
+  whale: 'volcano',
+  bot_hft: 'red',
+  market_maker_lp: 'orange',
+  arbitrage: 'orange',
+  low_price_tail_risk: 'red',
+  rebalance_churn: 'gold',
+  unknown: 'default'
+}
+
+const strategyTypeTag = (strategyType?: string) => {
+  const value = strategyType || 'unknown'
+  return <Tag color={STRATEGY_TYPE_COLORS[value] || 'default'}>{value}</Tag>
+}
+
+const officialDiagnoseBucketColor = (bucket: string) => {
+  if (bucket === 'CLEAN_HIGH' || bucket === 'READY_FOR_PAPER' || bucket === 'FAST_WATCH') return 'green'
+  if (bucket === 'STALE_HIGH_QUALITY') return 'gold'
+  if (bucket.includes('RISK') || bucket === 'HIGH_FILTERED_RATIO') return 'red'
+  if (bucket === 'CATEGORY_CONFLICT') return 'volcano'
+  if (bucket === 'STALE_ACTIVITY') return 'orange'
+  return 'default'
+}
+
+const isOfficialDisabledTrialCandidate = (item: LeaderResearchOfficialLeaderboardSample) => (
+  item.bucket === 'CLEAN_HIGH' &&
+  item.researchState === 'TRIAL_READY' &&
+  item.strategyType === 'human_directional' &&
+  item.riskFlags.length === 0 &&
+  (item.category === 'politics' || item.category === 'finance')
+)
 
 const formatDate = (timestamp?: number) => {
   if (!timestamp) return '-'
@@ -156,6 +191,7 @@ const LeaderResearch: React.FC = () => {
   const [externalImportLoading, setExternalImportLoading] = useState(false)
   const [detail, setDetail] = useState<LeaderResearchCandidateDetail | null>(null)
   const [approvalCandidate, setApprovalCandidate] = useState<LeaderResearchCandidate | null>(null)
+  const [approvalPreviewResult, setApprovalPreviewResult] = useState<LeaderResearchApprovalPreviewResponse | null>(null)
   const [approvalLoading, setApprovalLoading] = useState(false)
   const [approvalForm] = Form.useForm()
   const [externalImportForm] = Form.useForm()
@@ -660,7 +696,7 @@ const LeaderResearch: React.FC = () => {
       const response = await apiService.leaderResearch.importOfficialLeaderboard({
         dryRun,
         categories: ['politics', 'finance'],
-        timePeriods: ['MONTH'],
+        timePeriods: ['MONTH', 'ALL'],
         orderBys: ['PNL'],
         limitPerPage: 50,
         maxPagesPerQuery: 2,
@@ -795,9 +831,57 @@ const LeaderResearch: React.FC = () => {
     }
   }
 
-  const openApproval = (candidate: LeaderResearchCandidate) => {
+  const refreshOfficialLeaderboardCandidate = async (candidateId: number) => {
+    setExternalImportLoading(true)
+    try {
+      const response = await apiService.leaderResearch.refreshOfficialLeaderboardCandidates({
+        dryRun: false,
+        candidateIds: [candidateId],
+        categories: ['finance', 'politics'],
+        timePeriods: ['MONTH', 'WEEK'],
+        orderBys: ['PNL', 'VOL'],
+        limitPerPage: 50,
+        maxPagesPerQuery: 5,
+        maxItems: 50
+      })
+      if (response.data.code !== 0 || !response.data.data) {
+        message.error(response.data.msg || t('leaderResearch.fetchFailed'))
+        return
+      }
+      if (response.data.data.matchedTotal > 0) {
+        message.success(t('leaderResearch.officialSourceRefreshed'))
+      } else {
+        message.warning(t('leaderResearch.officialSourceRefreshNoMatch'))
+      }
+      await runOfficialLeaderboardDiagnose()
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      setExternalImportLoading(false)
+    }
+  }
+
+  const openApproval = async (candidate: LeaderResearchCandidate) => {
+    setApprovalLoading(true)
+    setApprovalPreviewResult(null)
     setApprovalCandidate(candidate)
-    approvalForm.setFieldsValue({ accountId: accounts[0]?.id })
+    try {
+      const response = await apiService.leaderResearch.previewDisabledTrialConfig({ candidateId: candidate.id })
+      if (response.data.code !== 0 || !response.data.data) {
+        message.error(response.data.msg || t('leaderResearch.approvalPreviewFailed'))
+        approvalForm.setFieldsValue({ accountId: accounts[0]?.id })
+        return
+      }
+      const preview = response.data.data
+      setApprovalPreviewResult(preview)
+      const availableAccount = preview.accounts.find(account => !account.duplicateConfigId)
+      approvalForm.setFieldsValue({ accountId: availableAccount?.accountId })
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.approvalPreviewFailed'))
+      approvalForm.setFieldsValue({ accountId: accounts[0]?.id })
+    } finally {
+      setApprovalLoading(false)
+    }
   }
 
   const openApprovalByCandidateId = async (candidateId: number) => {
@@ -813,7 +897,7 @@ const LeaderResearch: React.FC = () => {
         message.warning(t('leaderResearch.candidateNotTrialReadyWarning'))
         return
       }
-      openApproval(candidate)
+      await openApproval(candidate)
     } catch (error: any) {
       message.error(error.message || t('leaderResearch.fetchFailed'))
     } finally {
@@ -834,6 +918,7 @@ const LeaderResearch: React.FC = () => {
       if (response.data.code === 0) {
         message.success(t('leaderResearch.approvalCreated'))
         setApprovalCandidate(null)
+        setApprovalPreviewResult(null)
         await loadAll()
       } else {
         message.error(response.data.msg || t('leaderResearch.approvalFailed'))
@@ -882,6 +967,12 @@ const LeaderResearch: React.FC = () => {
       dataIndex: 'score',
       width: 100,
       render: (score?: string) => <Text strong>{score || '-'}</Text>
+    },
+    {
+      title: t('leaderResearch.strategyType'),
+      dataIndex: 'strategyType',
+      width: 150,
+      render: (strategyType?: string) => strategyTypeTag(strategyType)
     },
     {
       title: t('leaderResearch.paper'),
@@ -1126,6 +1217,7 @@ const LeaderResearch: React.FC = () => {
                         <Text copyable={{ text: candidate.wallet }}>{candidate.wallet.slice(0, 10)}...{candidate.wallet.slice(-6)}</Text>
                         <Space wrap size={4}>
                           <Tag color={candidate.category === 'politics' ? 'purple' : 'cyan'}>{candidate.category}</Tag>
+                          {strategyTypeTag(candidate.strategyType)}
                           <Tag color="green">{candidate.score}</Tag>
                           <Tag>{t('leaderResearch.tradeCountLabel', { count: candidate.tradeCount, trades: t('leaderResearch.trades') })}</Tag>
                         </Space>
@@ -1699,6 +1791,7 @@ const LeaderResearch: React.FC = () => {
                       <Descriptions.Item label={t('leaderResearch.wallet')}>{detail.candidate.normalizedWallet}</Descriptions.Item>
                       <Descriptions.Item label={t('common.status')}>{detail.candidate.researchState}</Descriptions.Item>
                       <Descriptions.Item label={t('leaderResearch.score')}>{detail.candidate.score || '-'}</Descriptions.Item>
+                      <Descriptions.Item label={t('leaderResearch.strategyType')}>{strategyTypeTag(detail.candidate.strategyType)}</Descriptions.Item>
                       <Descriptions.Item label={t('leaderResearch.reason')}>{detail.candidate.reason || '-'}</Descriptions.Item>
                       <Descriptions.Item label={t('leaderResearch.riskFlags')}>{detail.candidate.riskFlags.join(', ') || '-'}</Descriptions.Item>
                       <Descriptions.Item label={t('leaderResearch.sourceEvidence')}>{detail.candidate.sourceEvidence || '-'}</Descriptions.Item>
@@ -1750,9 +1843,13 @@ const LeaderResearch: React.FC = () => {
       <Modal
         open={!!approvalCandidate}
         title={t('leaderResearch.createDisabledTrial')}
-        onCancel={() => setApprovalCandidate(null)}
+        onCancel={() => {
+          setApprovalCandidate(null)
+          setApprovalPreviewResult(null)
+        }}
         onOk={submitApproval}
         confirmLoading={approvalLoading}
+        okButtonProps={{ disabled: !approvalPreviewResult?.canCreate }}
       >
         <Space direction="vertical" style={{ width: '100%' }}>
           <Alert
@@ -1761,6 +1858,18 @@ const LeaderResearch: React.FC = () => {
             message={t('leaderResearch.approvalSafetyTitle')}
             description={t('leaderResearch.approvalSafetyDesc')}
           />
+          {approvalPreviewResult && (
+            <Alert
+              type={approvalPreviewResult.canCreate ? 'success' : 'error'}
+              showIcon
+              message={approvalPreviewResult.canCreate ? t('leaderResearch.approvalPreviewCanCreate') : t('leaderResearch.approvalPreviewBlocked')}
+              description={
+                approvalPreviewResult.blockerCodes.length > 0
+                  ? approvalPreviewResult.blockerCodes.join(', ')
+                  : `${approvalPreviewResult.category} · ${approvalPreviewResult.strategyType || 'unknown'}`
+              }
+            />
+          )}
             <Form form={approvalForm} layout="vertical">
             <Descriptions bordered size="small" column={1} title={t('leaderResearch.approvalPreview')}>
               <Descriptions.Item label={t('leaderResearch.fixedAmount')}>{activeApprovalPreview.fixedAmount}</Descriptions.Item>
@@ -1771,9 +1880,16 @@ const LeaderResearch: React.FC = () => {
             </Descriptions>
             <Form.Item name="accountId" label={t('leaderPool.account')} rules={[{ required: true, message: t('leaderPool.selectAccount') }]}>
               <Select
-                options={accounts.map(account => ({
-                  value: account.id,
-                  label: `${account.accountName || account.walletAddress} (${account.proxyAddress?.slice(0, 8)}...)`
+                options={(approvalPreviewResult?.accounts || accounts.map(account => ({
+                  accountId: account.id,
+                  accountName: account.accountName,
+                  walletAddress: account.walletAddress,
+                  proxyAddress: account.proxyAddress,
+                  duplicateConfigId: undefined
+                }))).map(account => ({
+                  value: account.accountId,
+                  disabled: !!account.duplicateConfigId,
+                  label: `${account.accountName || account.walletAddress} (${account.proxyAddress?.slice(0, 8)}...)${account.duplicateConfigId ? ` · ${t('leaderResearch.duplicateTrialConfig')}` : ''}`
                 }))}
               />
             </Form.Item>
@@ -1909,13 +2025,15 @@ const LeaderResearch: React.FC = () => {
                   <Col xs={12} sm={8}><Statistic title={t('common.total')} value={officialLeaderboardDiagnose.total} /></Col>
                   <Col xs={12} sm={8}><Statistic title={t('leaderResearch.states.PAPER')} value={officialLeaderboardDiagnose.paperTotal} /></Col>
                   <Col xs={12} sm={8}><Statistic title={t('leaderResearch.cleanHighScore')} value={officialLeaderboardDiagnose.cleanHighTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.officialDisabledTrialCandidates')} value={officialLeaderboardDiagnose.disabledTrialCandidateTotal} /></Col>
                   <Col xs={12} sm={8}><Statistic title={t('leaderResearch.fastWatch')} value={officialLeaderboardDiagnose.fastWatchTotal} /></Col>
                   <Col xs={12} sm={8}><Statistic title={t('leaderResearch.readyForPaper')} value={officialLeaderboardDiagnose.readyForPaperTotal} /></Col>
+                  <Col xs={12} sm={8}><Statistic title={t('leaderResearch.staleHighQuality')} value={officialLeaderboardDiagnose.buckets.find(item => item.bucket === 'STALE_HIGH_QUALITY')?.count || 0} /></Col>
                   <Col xs={12} sm={8}><Statistic title={t('leaderResearch.noActivitySample')} value={officialLeaderboardDiagnose.buckets.find(item => item.bucket === 'NO_ACTIVITY_SAMPLE')?.count || 0} /></Col>
                 </Row>
                 <Space wrap>
                   {officialLeaderboardDiagnose.buckets.slice(0, 8).map(item => (
-                    <Tag key={item.bucket} color={item.bucket === 'CLEAN_HIGH' || item.bucket === 'READY_FOR_PAPER' ? 'green' : item.bucket.includes('RISK') || item.bucket === 'HIGH_FILTERED_RATIO' ? 'red' : 'default'}>
+                    <Tag key={item.bucket} color={officialDiagnoseBucketColor(item.bucket)}>
                       {item.bucket}: {item.count}
                     </Tag>
                   ))}
@@ -1953,7 +2071,30 @@ const LeaderResearch: React.FC = () => {
                               age: item.lastSourceAgeHours ?? '-'
                             })}</Text>
                       </Space>
-                      <Tag>{item.researchState}</Tag>
+                      <Space>
+                        <Tag color={officialDiagnoseBucketColor(item.bucket)}>{item.bucket}</Tag>
+                        <Tag>{item.researchState}</Tag>
+                        {strategyTypeTag(item.strategyType)}
+                        {item.bucket === 'STALE_HIGH_QUALITY' && (
+                          <Button
+                            size="small"
+                            loading={externalImportLoading}
+                            onClick={() => refreshOfficialLeaderboardCandidate(item.candidateId)}
+                          >
+                            {t('leaderResearch.refreshOfficialSource')}
+                          </Button>
+                        )}
+                        {isOfficialDisabledTrialCandidate(item) && (
+                          <Button
+                            size="small"
+                            type="primary"
+                            loading={approvalLoading && approvalCandidate?.id !== item.candidateId}
+                            onClick={() => openApprovalByCandidateId(item.candidateId)}
+                          >
+                            {t('leaderResearch.createDisabledTrial')}
+                          </Button>
+                        )}
+                      </Space>
                     </Space>
                   ))}
                 </Space>
@@ -2048,6 +2189,8 @@ const summaryFallback: LeaderResearchSummary = {
   retiredCount: 0,
   activePaperSessions: 0,
   pendingRiskCount: 0,
+  strategyTypeCounts: [],
+  nonCopyableStrategyBlockers: [],
   sourceLimitations: []
 }
 

@@ -1,10 +1,11 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import { Card, Table, Tag, message, Space, Input, Radio, Select, Button, Row, Col, Empty, Modal, Form, Descriptions } from 'antd'
 import { SearchOutlined, AppstoreOutlined, UnorderedListOutlined, UpOutlined, DownOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { apiService } from '../services/api'
-import type { AccountPosition, Account, PositionPushMessage, PositionSellRequest, MarketPriceResponse, RedeemablePositionsSummary, PositionRedeemRequest, BridgePositionSellRequest } from '../types'
+import type { AccountPosition, Account, PositionPushMessage, PositionSellRequest, MarketPriceResponse, RedeemablePositionsSummary, PositionRedeemRequest, BridgePositionSellRequest, DailyAssetPoint } from '../types'
+import * as echarts from 'echarts'
 import { getPositionKey } from '../types'
 import { useMediaQuery } from 'react-responsive'
 import { useWebSocketSubscription } from '../hooks/useWebSocket'
@@ -45,6 +46,57 @@ const PositionList: React.FC = () => {
   const [redeeming, setRedeeming] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
+  const [dailyAssets, setDailyAssets] = useState<DailyAssetPoint[]>([])
+  const assetChartRef = useRef<HTMLDivElement>(null)
+  const assetAccountId = selectedAccountId ?? currentPositions[0]?.accountId
+
+  useEffect(() => {
+    if (!assetAccountId) {
+      setDailyAssets([])
+      return
+    }
+    apiService.accounts.dailyAssets(assetAccountId).then(response => {
+      if (response.data.code === 0) setDailyAssets(response.data.data || [])
+    }).catch(error => console.error('获取每日总资产失败:', error))
+  }, [assetAccountId])
+
+  useEffect(() => {
+    if (!assetChartRef.current) return
+    const chart = echarts.init(assetChartRef.current)
+    chart.setOption({
+      tooltip: {
+        trigger: 'axis',
+        formatter: (params: any) => {
+          const point = dailyAssets[params?.[0]?.dataIndex]
+          if (!point) return ''
+          return `${params[0].axisValue}<br/>总资产：$${formatUSDC(point.totalAssets)}<br/>余额：$${formatUSDC(point.availableBalance)}<br/>持仓价值：$${formatUSDC(point.positionsValue)}`
+        }
+      },
+      grid: { left: 56, right: 24, top: 24, bottom: 40 },
+      xAxis: {
+        type: 'category',
+        boundaryGap: false,
+        data: dailyAssets.map(point => new Date(point.dayStartAt).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }))
+      },
+      yAxis: { type: 'value', axisLabel: { formatter: (value: number) => `$${value}` }, scale: true },
+      series: [{
+        name: '总资产',
+        type: 'line',
+        smooth: true,
+        symbolSize: 7,
+        data: dailyAssets.map(point => Number(point.totalAssets)),
+        lineStyle: { width: 3, color: '#1677ff' },
+        itemStyle: { color: '#1677ff' },
+        areaStyle: { color: 'rgba(22, 119, 255, 0.12)' }
+      }]
+    })
+    const resize = () => chart.resize()
+    window.addEventListener('resize', resize)
+    return () => {
+      window.removeEventListener('resize', resize)
+      chart.dispose()
+    }
+  }, [dailyAssets])
 
   useEffect(() => {
     fetchAccounts()
@@ -1382,6 +1434,17 @@ const PositionList: React.FC = () => {
           </div>
         )}
       </div>
+      <Card
+        title="每日总资产（00:00）"
+        extra={<span style={{ color: '#999', fontSize: 12 }}>总资产 = 可用余额 + 钱包持仓当前价值</span>}
+        style={{ marginBottom: 16 }}
+      >
+        {dailyAssets.length > 0 ? (
+          <div ref={assetChartRef} style={{ width: '100%', height: isMobile ? 260 : 320 }} />
+        ) : (
+          <Empty description="暂无每日资产快照，首次同步后开始记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        )}
+      </Card>
 
       {(isMobile || viewMode === 'card') ? (
         <Card loading={loading}>

@@ -110,6 +110,96 @@ class LeaderResearchServiceTest {
         assertTrue(politicsResponse.items.isEmpty())
     }
 
+    @Test
+    fun `fast watch excludes non copyable strategy even when risk flags are missing`() {
+        val candidate = LeaderResearchCandidate(
+            id = 43,
+            normalizedWallet = "0x2222222222222222222222222222222222222222",
+            researchState = LeaderResearchState.PAPER,
+            sourceEvidence = "category:finance",
+            score = BigDecimal("92"),
+            strategyType = LeaderResearchStrategyTypeClassifier.MARKET_MAKER_LP,
+            riskFlags = null
+        )
+        val session = LeaderPaperSession(
+            id = 101,
+            candidateId = 43,
+            startedAt = System.currentTimeMillis() - 8L * 24 * 60 * 60 * 1000,
+            tradeCount = 25,
+            filteredCount = 0,
+            copyablePnl = BigDecimal("9.50"),
+            maxDrawdown = BigDecimal.ZERO,
+            filteredRatio = BigDecimal.ZERO
+        )
+        val stableScores = (1..3).map {
+            LeaderResearchScore(
+                candidateId = 43,
+                scoreVersion = LeaderResearchScoringService.SCORE_VERSION,
+                totalScore = BigDecimal("92"),
+                createdAt = System.currentTimeMillis() - it
+            )
+        }
+
+        Mockito.`when`(candidateRepository.findByResearchStateIn(anyStates()))
+            .thenReturn(listOf(candidate))
+        Mockito.`when`(paperSessionRepository.findLatestByCandidateIds(listOf(43)))
+            .thenReturn(listOf(session))
+        Mockito.`when`(scoreRepository.findByCandidateIdOrderByCreatedAtDesc(43))
+            .thenReturn(stableScores)
+
+        val response = service.fastWatch(
+            LeaderResearchFastWatchRequest(categories = listOf("finance"), limit = 10, includeTrialReady = true)
+        )
+
+        assertEquals(0, response.total)
+        assertTrue(response.items.isEmpty())
+    }
+
+    @Test
+    fun `summary includes active strategy type distribution and non copyable blockers`() {
+        val activeCandidates = listOf(
+            LeaderResearchCandidate(
+                id = 1,
+                normalizedWallet = "0x1111111111111111111111111111111111111111",
+                researchState = LeaderResearchState.PAPER,
+                strategyType = LeaderResearchStrategyTypeClassifier.HUMAN_DIRECTIONAL
+            ),
+            LeaderResearchCandidate(
+                id = 2,
+                normalizedWallet = "0x2222222222222222222222222222222222222222",
+                researchState = LeaderResearchState.PAPER,
+                strategyType = LeaderResearchStrategyTypeClassifier.LOW_PRICE_TAIL_RISK
+            ),
+            LeaderResearchCandidate(
+                id = 3,
+                normalizedWallet = "0x3333333333333333333333333333333333333333",
+                researchState = LeaderResearchState.TRIAL_READY,
+                strategyType = null
+            )
+        )
+        Mockito.`when`(candidateRepository.findByResearchStateIn(listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)))
+            .thenReturn(activeCandidates)
+        Mockito.`when`(candidateRepository.findByResearchStateIn(listOf(LeaderResearchState.COOLDOWN)))
+            .thenReturn(emptyList())
+        Mockito.`when`(mapper.sourceLimitations()).thenReturn(emptyList())
+
+        val summary = service.summary()
+
+        assertEquals(3, summary.activePaperSessions)
+        assertEquals(
+            mapOf(
+                LeaderResearchStrategyTypeClassifier.HUMAN_DIRECTIONAL to 1L,
+                LeaderResearchStrategyTypeClassifier.LOW_PRICE_TAIL_RISK to 1L,
+                LeaderResearchStrategyTypeClassifier.UNKNOWN to 1L
+            ),
+            summary.strategyTypeCounts.associate { it.key to it.count }
+        )
+        assertEquals(
+            mapOf("strategy_not_copyable_low_price_tail_risk" to 1L),
+            summary.nonCopyableStrategyBlockers.associate { it.key to it.count }
+        )
+    }
+
     private fun anyStates(): Collection<LeaderResearchState> {
         Mockito.anyCollection<LeaderResearchState>()
         return emptyList()

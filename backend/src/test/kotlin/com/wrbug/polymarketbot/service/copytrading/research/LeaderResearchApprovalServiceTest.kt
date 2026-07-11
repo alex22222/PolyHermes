@@ -1,6 +1,7 @@
 package com.wrbug.polymarketbot.service.copytrading.research
 
 import com.wrbug.polymarketbot.dto.CopyTradingDto
+import com.wrbug.polymarketbot.dto.LeaderResearchApprovalPreviewRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchApprovalRequest
 import com.wrbug.polymarketbot.entity.Account
 import com.wrbug.polymarketbot.entity.LeaderPool
@@ -47,13 +48,7 @@ class LeaderResearchApprovalServiceTest {
 
     @Test
     fun `approval creates disabled copy trading config only`() {
-        val candidate = LeaderResearchCandidate(
-            id = 1L,
-            normalizedWallet = "0x1111111111111111111111111111111111111111",
-            leaderId = 9L,
-            poolId = 10L,
-            researchState = LeaderResearchState.TRIAL_READY
-        )
+        val candidate = copyableCandidate()
         Mockito.`when`(candidateRepository.findById(1L)).thenReturn(Optional.of(candidate))
         Mockito.`when`(accountRepository.findByIdForUpdate(2L)).thenReturn(account())
         Mockito.`when`(poolMappingService.syncCandidate(candidate)).thenReturn(candidate)
@@ -69,6 +64,34 @@ class LeaderResearchApprovalServiceTest {
         Mockito.verify(copyTradingService).createCopyTrading(captureCreateRequest(captor))
         assertFalse(captor.value.enabled)
         Mockito.verify(accountRepository).findByIdForUpdate(2L)
+    }
+
+    @Test
+    fun `approval preview returns account duplicate status without creating config`() {
+        val candidate = copyableCandidate()
+        Mockito.`when`(candidateRepository.findById(1L)).thenReturn(Optional.of(candidate))
+        Mockito.`when`(accountRepository.findAllByOrderByCreatedAtAsc()).thenReturn(listOf(account()))
+        Mockito.`when`(copyTradingRepository.findByAccountIdAndLeaderId(2L, 9L)).thenReturn(emptyList())
+
+        val result = service.previewDisabledTrialConfig(LeaderResearchApprovalPreviewRequest(candidateId = 1L))
+
+        assertTrue(result.isSuccess)
+        assertTrue(result.getOrThrow().canCreate)
+        assertTrue(result.getOrThrow().accounts.first().duplicateConfigId == null)
+        Mockito.verify(copyTradingService, Mockito.never()).createCopyTrading(anyCreateRequest())
+    }
+
+    @Test
+    fun `approval rejects trial ready candidate that is not human directional`() {
+        val candidate = copyableCandidate().copy(strategyType = "unknown")
+        Mockito.`when`(candidateRepository.findById(1L)).thenReturn(Optional.of(candidate))
+
+        val result = service.createDisabledTrialConfig(LeaderResearchApprovalRequest(candidateId = 1L, accountId = 2L, confirm = true))
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is LeaderResearchCandidateNotCopyableException)
+        Mockito.verify(accountRepository, Mockito.never()).findByIdForUpdate(2L)
+        Mockito.verify(copyTradingService, Mockito.never()).createCopyTrading(anyCreateRequest())
     }
 
     @Test
@@ -96,6 +119,18 @@ class LeaderResearchApprovalServiceTest {
         privateKey = "enc",
         walletAddress = "0x2222222222222222222222222222222222222222",
         proxyAddress = "0x3333333333333333333333333333333333333333"
+    )
+
+    private fun copyableCandidate() = LeaderResearchCandidate(
+        id = 1L,
+        normalizedWallet = "0x1111111111111111111111111111111111111111",
+        leaderId = 9L,
+        poolId = 10L,
+        researchState = LeaderResearchState.TRIAL_READY,
+        strategyType = "human_directional",
+        riskFlags = null,
+        sourceEvidence = "external_analytics:polymarket_official_leaderboard | category:finance | rank:1 | " +
+            "profit_window:30d:12 profit_window:180d:40 activity_window:7d_trades:8"
     )
 
     private fun pool() = LeaderPool(id = 10L, leaderId = 9L, researchCandidateId = 1L)

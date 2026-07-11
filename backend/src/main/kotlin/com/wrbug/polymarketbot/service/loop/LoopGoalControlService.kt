@@ -34,19 +34,11 @@ class LoopGoalControlService(
 
     private val goals = listOf(
         GoalDefinition(
-            key = GOAL_BRIDGE_RELIABILITY,
-            title = "第一目标：Bridge BUY/SELL 可靠性持续改进",
-            defaultStatus = LoopGoalStatus.COMPLETED_PENDING_RESTART,
-            priority = 2,
-            summary = "保留历史修复和 sell 成功率优化成果，当前完成归档并待后续重启。",
-            retained = true
-        ),
-        GoalDefinition(
             key = GOAL_LEADER_DISCOVERY,
-            title = "第二目标：1000+ 高质量 Leader 候选积累与评分",
+            title = "G2：可复制 Leader 的发现与验证",
             defaultStatus = LoopGoalStatus.ACTIVE,
             priority = 1,
-            summary = "当前主目标：优先扩充 politics/finance 高质量候选，持续评分、paper/backtest，并优化 paper 性能与候选交叉验证。",
+            summary = "当前主目标：覆盖 Crypto、金融和政治，持续验证赚钱机制、PAPER 深度、退出能力和 Bridge 可复制性。",
             retained = true
         )
     )
@@ -81,16 +73,7 @@ class LoopGoalControlService(
     }
 
     private fun startGoal(goalKey: String) {
-        when (goalKey) {
-            GOAL_LEADER_DISCOVERY -> {
-                writeStatus(GOAL_LEADER_DISCOVERY, LoopGoalStatus.ACTIVE)
-                writeStatus(GOAL_BRIDGE_RELIABILITY, LoopGoalStatus.COMPLETED_PENDING_RESTART)
-            }
-            GOAL_BRIDGE_RELIABILITY -> {
-                writeStatus(GOAL_BRIDGE_RELIABILITY, LoopGoalStatus.ACTIVE)
-                writeStatus(GOAL_LEADER_DISCOVERY, LoopGoalStatus.PAUSED)
-            }
-        }
+        writeStatus(goalKey, LoopGoalStatus.ACTIVE)
     }
 
     private fun goalDto(definition: GoalDefinition): LoopGoalDto {
@@ -143,7 +126,6 @@ class LoopGoalControlService(
     private fun configKey(goalKey: String) = "loop.goal.$goalKey.status"
 
     companion object {
-        const val GOAL_BRIDGE_RELIABILITY = "bridge-reliability-goal-1"
         const val GOAL_LEADER_DISCOVERY = "leader-discovery-goal-2"
     }
 }

@@ -1,6 +1,10 @@
 package com.wrbug.polymarketbot.controller.copytrading.research
 
 import com.wrbug.polymarketbot.dto.LeaderResearchApprovalRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchApprovalPreviewRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchApprovalPreviewResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportRequest
@@ -10,6 +14,8 @@ import com.wrbug.polymarketbot.dto.LeaderResearchFastWatchResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchFunnelCandidateDto
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardRefreshRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardRefreshResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardDiagnoseRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardDiagnoseResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchPaperProcessRequest
@@ -25,6 +31,8 @@ import com.wrbug.polymarketbot.dto.LeaderResearchPolyburgTelegramImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchPolyburgTelegramImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchRunRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchTrialReadinessDto
+import com.wrbug.polymarketbot.dto.LeaderResearchUnknownStrategySampleEnrichRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchUnknownStrategySampleEnrichResponse
 import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
 import com.wrbug.polymarketbot.entity.LeaderResearchRun
 import com.wrbug.polymarketbot.entity.LeaderResearchScore
@@ -38,6 +46,7 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprov
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityScoringService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivitySourceImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateLockedException
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateNotCopyableException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchExternalAnalyticsImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchFalconLeaderboardImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchJobService
@@ -264,6 +273,66 @@ class LeaderResearchControllerTest {
     }
 
     @Test
+    fun `unknown strategy sample enrich executes targeted paper process and score`() {
+        val request = LeaderResearchUnknownStrategySampleEnrichRequest(
+            categories = listOf("finance"),
+            limit = 2,
+            batchSize = 5,
+            dryRun = false
+        )
+        val plan = LeaderResearchUnknownStrategySampleEnrichResponse(
+            dryRun = false,
+            selectedCount = 2,
+            selectedCandidateIds = listOf(42L, 43L),
+            categoryCounts = mapOf("finance" to 2),
+            unknownStrategyReasonCounts = mapOf("insufficient_sample" to 2)
+        )
+        val candidate = LeaderResearchCandidate(
+            id = 42L,
+            normalizedWallet = "0x1111111111111111111111111111111111111111",
+            researchState = LeaderResearchState.PAPER
+        )
+        val score = LeaderResearchScore(
+            candidateId = 42L,
+            scoreVersion = LeaderResearchScoringService.SCORE_VERSION,
+            totalScore = BigDecimal("70")
+        )
+        Mockito.`when`(activityScoringService.planUnknownStrategySampleEnrichment(request)).thenReturn(plan)
+        Mockito.`when`(paperTradingService.processPaperCandidates(runId = null, batchSize = 5, candidateIds = listOf(42L, 43L)))
+            .thenReturn(LeaderPaperProcessingResult(processed = 3, filtered = 1, failed = 0))
+        val activityScoreRequest = LeaderResearchActivityScoreRequest(
+            states = listOf("PAPER", "TRIAL_READY"),
+            force = true,
+            candidateIds = listOf(42L, 43L)
+        )
+        val activityScoreResponse = LeaderResearchActivityScoreResponse(
+            scoreVersion = "activity-prescreen-v1",
+            scannedCount = 2,
+            scoredCount = 2,
+            skippedCount = 0,
+            riskFlagCounts = emptyMap(),
+            categoryCounts = mapOf("finance" to 2)
+        )
+        Mockito.`when`(activityScoringService.scoreActivityPrescreen(activityScoreRequest)).thenReturn(activityScoreResponse)
+        Mockito.`when`(researchService.findCandidatesByIds(listOf(42L, 43L))).thenReturn(listOf(candidate))
+        Mockito.`when`(scoringService.scoreCandidate(candidate, runId = null)).thenReturn(score)
+
+        val response = controller.enrichUnknownStrategySamples(request)
+
+        assertEquals(0, response.body!!.code)
+        val data = response.body!!.data!!
+        assertEquals(false, data.dryRun)
+        assertEquals(2, data.selectedCount)
+        assertEquals(2, data.activityScoreResult!!.scoredCount)
+        assertEquals(3, data.paperProcessResult!!.processed)
+        assertEquals(1, data.paperScoreResult!!.scoredCount)
+        assertEquals(listOf(43L), data.paperScoreResult!!.missingCandidateIds)
+        Mockito.verify(paperTradingService).processPaperCandidates(runId = null, batchSize = 5, candidateIds = listOf(42L, 43L))
+        Mockito.verify(activityScoringService).scoreActivityPrescreen(activityScoreRequest)
+        Mockito.verify(scoringService).scoreCandidate(candidate, runId = null)
+    }
+
+    @Test
     fun `paper fast watch delegates to research service`() {
         val request = LeaderResearchFastWatchRequest(categories = listOf("finance"), limit = 5)
         val result = LeaderResearchFastWatchResponse(
@@ -277,6 +346,7 @@ class LeaderResearchControllerTest {
                     candidateId = 42L,
                     wallet = "0x1111111111111111111111111111111111111111",
                     category = "finance",
+                    strategyType = "human_directional",
                     score = "90",
                     tradeCount = 25,
                     filteredRatio = "0.1",
@@ -554,6 +624,38 @@ class LeaderResearchControllerTest {
     }
 
     @Test
+    fun `official leaderboard refresh candidates delegates to service`() {
+        val request = LeaderResearchOfficialLeaderboardRefreshRequest(dryRun = true, candidateIds = listOf(1660L))
+        val importResult = LeaderResearchExternalAnalyticsImportResponse(
+            dryRun = true,
+            requestedTotal = 1,
+            selectedTotal = 1,
+            createdTotal = 0,
+            updatedTotal = 1,
+            skippedInvalidTotal = 0,
+            skippedExistingTotal = 0,
+            skippedLockedTotal = 0,
+            previewItems = emptyList()
+        )
+        val result = LeaderResearchOfficialLeaderboardRefreshResponse(
+            dryRun = true,
+            sourceName = "polymarket_official_leaderboard",
+            requestedWallets = listOf("0x5555555555555555555555555555555555555555"),
+            matchedTotal = 1,
+            fetchedTotal = 50,
+            fetches = emptyList(),
+            importResult = importResult
+        )
+        Mockito.`when`(officialLeaderboardImportService.refreshCandidatesFromOfficialLeaderboard(request)).thenReturn(result)
+
+        val response = controller.refreshOfficialLeaderboardCandidates(request)
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(1, response.body!!.data!!.matchedTotal)
+        Mockito.verify(officialLeaderboardImportService).refreshCandidatesFromOfficialLeaderboard(request)
+    }
+
+    @Test
     fun `polyburg telegram import delegates to service`() {
         val request = LeaderResearchPolyburgTelegramImportRequest(dryRun = true, rawText = "0x1111111111111111111111111111111111111111")
         val importResult = LeaderResearchExternalAnalyticsImportResponse(
@@ -625,6 +727,7 @@ class LeaderResearchControllerTest {
             cleanHighTotal = 1,
             fastWatchTotal = 1,
             readyForPaperTotal = 3,
+            disabledTrialCandidateTotal = 1,
             buckets = emptyList(),
             categories = emptyList(),
             riskFlagCounts = emptyMap(),
@@ -658,6 +761,41 @@ class LeaderResearchControllerTest {
         val response = controller.approve(LeaderResearchApprovalRequest(candidateId = 1, accountId = 2, confirm = true))
 
         assertEquals(ErrorCode.LEADER_RESEARCH_CANDIDATE_LOCKED.code, response.body!!.code)
+    }
+
+    @Test
+    fun `approval maps not copyable candidate`() {
+        Mockito.`when`(approvalService.createDisabledTrialConfig(anyApprovalRequest()))
+            .thenReturn(Result.failure(LeaderResearchCandidateNotCopyableException("strategy_not_human_directional")))
+
+        val response = controller.approve(LeaderResearchApprovalRequest(candidateId = 1, accountId = 2, confirm = true))
+
+        assertEquals(ErrorCode.LEADER_RESEARCH_CANDIDATE_NOT_COPYABLE.code, response.body!!.code)
+    }
+
+    @Test
+    fun `approval preview delegates to service`() {
+        val request = LeaderResearchApprovalPreviewRequest(candidateId = 1)
+        val result = LeaderResearchApprovalPreviewResponse(
+            candidateId = 1,
+            leaderId = 9,
+            poolId = 10,
+            category = "finance",
+            strategyType = "human_directional",
+            researchState = "TRIAL_READY",
+            riskFlags = emptyList(),
+            locked = false,
+            canCreate = true,
+            blockerCodes = emptyList(),
+            accounts = emptyList()
+        )
+        Mockito.`when`(approvalService.previewDisabledTrialConfig(request)).thenReturn(Result.success(result))
+
+        val response = controller.previewApproval(request)
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(true, response.body!!.data!!.canCreate)
+        Mockito.verify(approvalService).previewDisabledTrialConfig(request)
     }
 
     @Suppress("UNCHECKED_CAST")

@@ -11,6 +11,9 @@ import type {
   LeaderResearchCandidate,
   LeaderResearchFunnelCandidate,
   LeaderResearchPoliticsRecommendationExecutionSnapshot,
+  LeaderResearchStrategyBackfillResponse,
+  LeaderResearchUnknownStrategySampleEnrichResponse,
+  LeaderResearchSummary,
   LeaderResearchTrialReadiness,
   LoopGoal,
   LoopGoalAction,
@@ -19,6 +22,52 @@ import type {
 } from '../types'
 
 const { Title, Text } = Typography
+
+const STRATEGY_TYPE_COLORS: Record<string, string> = {
+  human_directional: 'green',
+  whale: 'volcano',
+  bot_hft: 'red',
+  market_maker_lp: 'orange',
+  arbitrage: 'orange',
+  low_price_tail_risk: 'red',
+  rebalance_churn: 'gold',
+  unknown: 'default'
+}
+
+const strategyTypeTag = (strategyType?: string) => {
+  const value = strategyType || 'unknown'
+  return <Tag color={STRATEGY_TYPE_COLORS[value] || 'default'}>{value}</Tag>
+}
+
+const strategyBlockerLabel = (key: string) => {
+  const labels: Record<string, string> = {
+    strategy_not_copyable_whale: '巨鲸大额',
+    strategy_not_copyable_bot_hft: '高频小额',
+    strategy_not_copyable_market_maker_lp: '做市/LP',
+    strategy_not_copyable_arbitrage: '套利/缺入场',
+    strategy_not_copyable_low_price_tail_risk: '低价长尾',
+    strategy_not_copyable_rebalance_churn: '反复调仓'
+  }
+  return labels[key] || key
+}
+
+const unknownStrategyReasonLabel = (key: string) => {
+  const labels: Record<string, string> = {
+    insufficient_sample: '样本不足',
+    insufficient_market_diversity: '市场分散不足',
+    no_buy_sample: '缺BUY样本',
+    no_sell_sample: '缺SELL样本',
+    sell_ratio_outside_copyable_range: 'SELL比例异常',
+    low_safe_price_ratio_for_directional: '安全价不足',
+    high_tail_price_ratio: '长尾占比高',
+    low_average_size: '均额偏小',
+    unknown_category: '分类未知',
+    mixed_category_evidence: '分类混杂',
+    stale_or_missing_activity: '活跃度过期',
+    unclassified_pattern: '模式未归类'
+  }
+  return labels[key] || key
+}
 
 type OptimizationItem = {
   key: string
@@ -309,6 +358,7 @@ const OptimizationDaily: React.FC = () => {
   const [dailyAudit, setDailyAudit] = useState<BridgeAuditResponse | null>(null)
   const [runtimeStatus, setRuntimeStatus] = useState<BridgeRuntimeStatus | null>(null)
   const [goalControl, setGoalControl] = useState<LoopGoalControlStatus | null>(null)
+  const [leaderSummary, setLeaderSummary] = useState<LeaderResearchSummary | null>(null)
   const [recommendationSnapshot, setRecommendationSnapshot] = useState<LeaderResearchPoliticsRecommendationExecutionSnapshot | null>(null)
   const [latestRecommendationSnapshots, setLatestRecommendationSnapshots] = useState<LeaderResearchPoliticsRecommendationExecutionSnapshot[]>([])
   const [recommendationSnapshots, setRecommendationSnapshots] = useState<LeaderResearchPoliticsRecommendationExecutionSnapshot[]>([])
@@ -319,18 +369,23 @@ const OptimizationDaily: React.FC = () => {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [approvalCandidate, setApprovalCandidate] = useState<LeaderResearchCandidate | null>(null)
   const [approvalLoading, setApprovalLoading] = useState(false)
+  const [strategyBackfillLoading, setStrategyBackfillLoading] = useState(false)
+  const [lastStrategyBackfill, setLastStrategyBackfill] = useState<LeaderResearchStrategyBackfillResponse | null>(null)
+  const [unknownSampleEnrichLoading, setUnknownSampleEnrichLoading] = useState(false)
+  const [lastUnknownSampleEnrich, setLastUnknownSampleEnrich] = useState<LeaderResearchUnknownStrategySampleEnrichResponse | null>(null)
   const [approvalForm] = Form.useForm()
 
   const fetchData = async () => {
     setLoading(true)
     try {
       const sinceMs = Date.now() - 24 * 60 * 60 * 1000
-      const [defaultAudit, recentAudit, latestRecommendation, recentRecommendations, accountResp] = await Promise.allSettled([
+      const [defaultAudit, recentAudit, latestRecommendation, recentRecommendations, accountResp, leaderSummaryResp] = await Promise.allSettled([
         apiService.bridgeTradeRecords.audit({ limit: 500, failureLimit: 100, portfolioTimeout: 90 }),
         apiService.bridgeTradeRecords.audit({ sinceMs, limit: 500, failureLimit: 100, portfolioTimeout: 90 }),
         apiService.leaderResearch.latestPrimaryRecommendationExecutions(),
         apiService.leaderResearch.recentPrimaryRecommendationExecutions(),
-        apiService.accounts.list()
+        apiService.accounts.list(),
+        apiService.leaderResearch.summary()
       ])
 
       let nextRuntimeStatus: BridgeRuntimeStatus | null = null
@@ -369,6 +424,12 @@ const OptimizationDaily: React.FC = () => {
 
       if (accountResp.status === 'fulfilled' && accountResp.value.data.code === 0 && accountResp.value.data.data) {
         setAccounts(accountResp.value.data.data.list || [])
+      }
+
+      if (leaderSummaryResp.status === 'fulfilled' && leaderSummaryResp.value.data.code === 0) {
+        setLeaderSummary(leaderSummaryResp.value.data.data || null)
+      } else {
+        setLeaderSummary(null)
       }
 
       setRuntimeStatus(nextRuntimeStatus || await fetchRuntimeStatus())
@@ -493,6 +554,53 @@ const OptimizationDaily: React.FC = () => {
     }
   }
 
+  const backfillStrategyType = async () => {
+    setStrategyBackfillLoading(true)
+    try {
+      const response = await apiService.leaderResearch.backfillStrategyType({
+        states: ['PAPER', 'TRIAL_READY'],
+        limit: 100,
+        force: false
+      })
+      if (response.data.code === 0 && response.data.data) {
+        const data = response.data.data
+        setLastStrategyBackfill(data)
+        message.success(`已补齐 ${data.scoreResult.scoredCount}/${data.selectedCount} 个候选机制标签`)
+        await fetchData()
+      } else {
+        message.error(response.data.msg || '补齐机制标签失败')
+      }
+    } finally {
+      setStrategyBackfillLoading(false)
+    }
+  }
+
+  const enrichUnknownSamples = async (dryRun: boolean) => {
+    setUnknownSampleEnrichLoading(true)
+    try {
+      const response = await apiService.leaderResearch.enrichUnknownStrategySamples({
+        categories: ['politics', 'finance'],
+        limit: 20,
+        batchSize: 20,
+        dryRun
+      })
+      if (response.data.code === 0 && response.data.data) {
+        const data = response.data.data
+        setLastUnknownSampleEnrich(data)
+        if (dryRun) {
+          message.success(`已筛出 ${data.selectedCount} 个可加厚 unknown 候选`)
+        } else {
+          message.success(`已加厚 ${data.selectedCount} 个 unknown 候选，处理 ${data.paperProcessResult?.processed || 0} 笔`)
+          await fetchData()
+        }
+      } else {
+        message.error(response.data.msg || '加厚 unknown 样本失败')
+      }
+    } finally {
+      setUnknownSampleEnrichLoading(false)
+    }
+  }
+
   const monitor = audit?.monitorStatus
   const dailyMonitor = dailyAudit?.monitorStatus
   const statusView = getStatusView(monitor?.status)
@@ -529,6 +637,14 @@ const OptimizationDaily: React.FC = () => {
   }, undefined)
   const latestRecommendationDurationMs = primaryRecommendationSnapshots.reduce((sum, snapshot) => sum + (snapshot.durationMs || 0), 0)
   const recommendationMode = primaryRecommendationSnapshots.length > 0 && primaryRecommendationSnapshots.every((snapshot) => snapshot.dryRun) ? 'dry-run' : (primaryRecommendationSnapshots.length > 0 ? 'mixed/live' : '-')
+  const strategyTypeCounts = leaderSummary?.strategyTypeCounts || []
+  const nonCopyableStrategyBlockers = leaderSummary?.nonCopyableStrategyBlockers || []
+  const unknownStrategyCount = strategyTypeCounts.find((item) => item.key === 'unknown')?.count || 0
+  const unknownStrategyRatio = leaderSummary?.activePaperSessions
+    ? unknownStrategyCount / leaderSummary.activePaperSessions
+    : 0
+  const latestUnknownReasonCounts = lastStrategyBackfill?.scoreResult.unknownStrategyReasonCounts || {}
+  const latestSampleEnrichReasonCounts = lastUnknownSampleEnrich?.unknownStrategyReasonCounts || {}
   const activeApprovalPreview = approvalPreview(approvalCandidate)
   const thinRounds = consecutiveThinRounds(recommendationSnapshots)
   const latestSnapshotsByCategory = primaryRecommendationSnapshots.reduce<Record<string, LeaderResearchPoliticsRecommendationExecutionSnapshot>>((acc, snapshot) => {
@@ -648,14 +764,11 @@ const OptimizationDaily: React.FC = () => {
           <Col xs={24} md={14}>
             <Space direction="vertical" size={2}>
               <Text strong>{activeGoal?.title || '暂无运行中目标'}</Text>
-              <Text type="secondary">{activeGoal?.summary || '可在目标控制中启动第二目标或恢复第一目标。'}</Text>
+              <Text type="secondary">{activeGoal?.summary || '当前没有运行中的自动化目标。'}</Text>
             </Space>
           </Col>
-          <Col xs={12} md={5}>
-            <Statistic title="第二目标" value={formatGoalStatus(sortedGoals.find((goal) => goal.goalKey === 'leader-discovery-goal-2')?.status).label} loading={loading && !goalControl} />
-          </Col>
-          <Col xs={12} md={5}>
-            <Statistic title="第一目标" value={formatGoalStatus(sortedGoals.find((goal) => goal.goalKey === 'bridge-reliability-goal-1')?.status).label} loading={loading && !goalControl} />
+          <Col xs={24} md={10}>
+            <Statistic title="G2 可复制 Leader" value={formatGoalStatus(sortedGoals.find((goal) => goal.goalKey === 'leader-discovery-goal-2')?.status).label} loading={loading && !goalControl} />
           </Col>
         </Row>
       </Card>
@@ -719,6 +832,119 @@ const OptimizationDaily: React.FC = () => {
               )
             })}
           </Row>
+          {(strategyTypeCounts.length > 0 || nonCopyableStrategyBlockers.length > 0) && (
+            <Row gutter={[12, 12]}>
+              <Col xs={24} md={12}>
+                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
+                  <Space direction="vertical" size={6} style={{ width: '100%' }}>
+	                    <Space style={{ justifyContent: 'space-between', width: '100%' }} wrap>
+	                      <Text strong>机制分布</Text>
+	                      <Space size={[6, 6]} wrap>
+	                        <Button
+	                          size="small"
+	                          icon={<ReloadOutlined />}
+	                          loading={strategyBackfillLoading}
+	                          disabled={unknownStrategyCount === 0}
+	                          onClick={backfillStrategyType}
+	                        >
+	                          补齐100个unknown
+	                        </Button>
+	                        <Button
+	                          size="small"
+	                          loading={unknownSampleEnrichLoading}
+	                          disabled={unknownStrategyCount === 0}
+	                          onClick={() => enrichUnknownSamples(true)}
+	                        >
+	                          预览加厚
+	                        </Button>
+	                        <Button
+	                          size="small"
+	                          type="primary"
+	                          loading={unknownSampleEnrichLoading}
+	                          disabled={unknownStrategyCount === 0}
+	                          onClick={() => enrichUnknownSamples(false)}
+	                        >
+	                          加厚20个样本
+	                        </Button>
+	                      </Space>
+	                    </Space>
+                    <Text type="secondary">PAPER/TRIAL_READY 候选：{leaderSummary?.activePaperSessions || 0}</Text>
+                    {unknownStrategyRatio >= 0.5 && (
+                      <Text type="warning">unknown 占比 {(unknownStrategyRatio * 100).toFixed(1)}%，应优先批量补机制标签。</Text>
+                    )}
+	                    <Space size={[8, 8]} wrap>
+	                      {strategyTypeCounts.slice(0, 8).map((item) => (
+	                        <Tag key={item.key} color={STRATEGY_TYPE_COLORS[item.key] || 'default'}>
+	                          {item.key} {item.count}
+	                        </Tag>
+	                      ))}
+	                    </Space>
+	                    {lastStrategyBackfill && (
+	                      <Space direction="vertical" size={4} style={{ width: '100%' }}>
+	                        <Text type="secondary">
+	                          最近补齐: 评分 {lastStrategyBackfill.scoreResult.scoredCount}/{lastStrategyBackfill.selectedCount}，仍 unknown 原因
+	                        </Text>
+	                        <Space size={[8, 8]} wrap>
+	                          {Object.keys(latestUnknownReasonCounts).length > 0 ? (
+	                            Object.entries(latestUnknownReasonCounts).slice(0, 8).map(([key, count]) => (
+	                              <Tag key={key} color="orange">
+	                                {unknownStrategyReasonLabel(key)} {count}
+	                              </Tag>
+	                            ))
+	                          ) : (
+	                            <Tag color="green">本轮无未归类原因</Tag>
+	                          )}
+	                        </Space>
+	                      </Space>
+	                    )}
+	                    {lastUnknownSampleEnrich && (
+	                      <Space direction="vertical" size={4} style={{ width: '100%' }}>
+	                        <Text type="secondary">
+	                          最近加厚{lastUnknownSampleEnrich.dryRun ? '预览' : '执行'}: 候选 {lastUnknownSampleEnrich.selectedCount}
+	                          {lastUnknownSampleEnrich.activityScoreResult
+	                            ? `，机制复评 ${lastUnknownSampleEnrich.activityScoreResult.scoredCount}`
+	                            : ''}
+	                          {lastUnknownSampleEnrich.paperProcessResult
+	                            ? `，处理 ${lastUnknownSampleEnrich.paperProcessResult.processed}，过滤 ${lastUnknownSampleEnrich.paperProcessResult.filtered}`
+	                            : ''}
+	                        </Text>
+	                        <Space size={[8, 8]} wrap>
+	                          {Object.keys(latestSampleEnrichReasonCounts).length > 0 ? (
+	                            Object.entries(latestSampleEnrichReasonCounts).slice(0, 8).map(([key, count]) => (
+	                              <Tag key={key} color="blue">
+	                                {unknownStrategyReasonLabel(key)} {count}
+	                              </Tag>
+	                            ))
+	                          ) : (
+	                            <Tag color="green">暂无样本缺口候选</Tag>
+	                          )}
+	                        </Space>
+	                      </Space>
+	                    )}
+	                  </Space>
+	                </div>
+              </Col>
+              <Col xs={24} md={12}>
+                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
+                  <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                    <Text strong>不可复制原因</Text>
+                    <Text type="secondary">这些机制默认不能自动进入真钱跟单。</Text>
+                    <Space size={[8, 8]} wrap>
+                      {nonCopyableStrategyBlockers.length > 0 ? (
+                        nonCopyableStrategyBlockers.slice(0, 8).map((item) => (
+                          <Tag key={item.key} color="red">
+                            {strategyBlockerLabel(item.key)} {item.count}
+                          </Tag>
+                        ))
+                      ) : (
+                        <Tag color="green">暂无机制阻断</Tag>
+                      )}
+                    </Space>
+                  </Space>
+                </div>
+              </Col>
+            </Row>
+          )}
           {primaryRecommendationSnapshots.length > 0 && (
             <Space size={[8, 8]} wrap>
               {primaryRecommendationSnapshots.map((snapshot) => (
@@ -770,6 +996,7 @@ const OptimizationDaily: React.FC = () => {
                       </Tag>
                       <Tag color={decision.color}>{decision.label}</Tag>
                       <Tag>{candidate.category}</Tag>
+                      {strategyTypeTag(candidate.strategyType)}
                       <Tag>分数 {candidate.score}</Tag>
                       <Tag>交易 {candidate.tradeCount}</Tag>
                       <Tag color={(Number(candidate.copyablePnl) || 0) > 0 ? 'green' : 'orange'}>PnL {candidate.copyablePnl}</Tag>

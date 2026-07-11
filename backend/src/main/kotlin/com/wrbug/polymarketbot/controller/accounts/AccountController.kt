@@ -5,6 +5,7 @@ import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.accounts.AccountService
 import com.wrbug.polymarketbot.service.accounts.BridgePositionSellService
 import com.wrbug.polymarketbot.service.copytrading.statistics.CopyTradingStatisticsService
+import com.wrbug.polymarketbot.repository.AccountRepository
 import com.wrbug.polymarketbot.util.toSafeBigDecimal
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -22,7 +23,9 @@ class AccountController(
     private val accountService: AccountService,
     private val messageSource: MessageSource,
     private val bridgePositionSellService: BridgePositionSellService,
-    private val statisticsService: CopyTradingStatisticsService
+    private val statisticsService: CopyTradingStatisticsService,
+    private val dailyAssetSnapshotService: com.wrbug.polymarketbot.service.accounts.DailyAssetSnapshotService,
+    private val accountRepository: AccountRepository
 ) {
 
     private val logger = LoggerFactory.getLogger(AccountController::class.java)
@@ -464,6 +467,13 @@ class AccountController(
             logger.error("查询仓位列表异常: ${e.message}", e)
             ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ACCOUNT_POSITIONS_FETCH_FAILED, e.message, messageSource))
         }
+    }
+
+    @PostMapping("/positions/daily-assets")
+    fun getDailyAssets(@RequestBody request: DailyAssetHistoryRequest): ResponseEntity<ApiResponse<List<DailyAssetPointDto>>> {
+        val account = accountRepository.findById(request.accountId).orElse(null)
+            ?: return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ACCOUNT_ID_INVALID, messageSource = messageSource))
+        return ResponseEntity.ok(ApiResponse.success(dailyAssetSnapshotService.history(account.walletAddress)))
     }
 
     /**

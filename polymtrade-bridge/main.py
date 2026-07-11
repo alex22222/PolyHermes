@@ -37,12 +37,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BTC_UPDOWN_STALE_BUFFER_SECONDS = int(os.getenv("BTC_UPDOWN_STALE_BUFFER_SECONDS", "90"))
+CRYPTO_UPDOWN_STALE_BUFFER_SECONDS = int(os.getenv("CRYPTO_UPDOWN_STALE_BUFFER_SECONDS", "60"))
 BTC_UPDOWN_5M_SECONDS = 300
 BTC_UPDOWN_5M_MIN_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MIN_BUY_PRICE", "0.20"))
 BTC_UPDOWN_5M_MAX_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MAX_BUY_PRICE", "0.65"))
 BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS = int(os.getenv("BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS", "50"))
 TAIL_RISK_MIN_BUY_PRICE = Decimal(os.getenv("TAIL_RISK_MIN_BUY_PRICE", "0.10"))
-HIGH_CONFIDENCE_MAX_BUY_PRICE = Decimal(os.getenv("HIGH_CONFIDENCE_MAX_BUY_PRICE", "0.65"))
+HIGH_CONFIDENCE_MAX_BUY_PRICE = Decimal(os.getenv("HIGH_CONFIDENCE_MAX_BUY_PRICE", "0.80"))
 LEADER_EVENT_ACTIVITY_WINDOW_SECONDS = int(
     os.getenv("LEADER_EVENT_ACTIVITY_WINDOW_SECONDS", "1800")
 )
@@ -1503,19 +1504,25 @@ def _short_cycle_market_stale_reason(
     """Return a skip reason when a short-cycle market is too close to close."""
     if side.upper() != "BUY" or not market_slug:
         return None
-    match = re.search(r"btc-updown-5m-(\d{10})", market_slug)
+    match = re.search(r"(btc|eth|xrp|sol|doge|bnb)-updown-5m-(\d{10})", market_slug)
     if not match:
         return None
 
-    started_at = int(match.group(1))
+    asset = match.group(1)
+    started_at = int(match.group(2))
     market_close_at = started_at + BTC_UPDOWN_5M_SECONDS
     now = now_seconds if now_seconds is not None else time.time()
-    cutoff = market_close_at - BTC_UPDOWN_STALE_BUFFER_SECONDS
+    buffer_seconds = (
+        BTC_UPDOWN_STALE_BUFFER_SECONDS
+        if asset == "btc"
+        else CRYPTO_UPDOWN_STALE_BUFFER_SECONDS
+    )
+    cutoff = market_close_at - buffer_seconds
     if now >= cutoff:
         seconds_to_close = market_close_at - now
         return (
             "Short-cycle market stale or closing soon, skipped "
-            f"(seconds_to_close={seconds_to_close:.1f}, buffer={BTC_UPDOWN_STALE_BUFFER_SECONDS}s)"
+            f"(seconds_to_close={seconds_to_close:.1f}, buffer={buffer_seconds}s)"
         )
     return None
 

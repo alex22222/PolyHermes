@@ -524,8 +524,15 @@ export interface LeaderResearchSummary {
   retiredCount: number
   activePaperSessions: number
   pendingRiskCount: number
+  strategyTypeCounts: LeaderResearchCount[]
+  nonCopyableStrategyBlockers: LeaderResearchCount[]
   lastRun?: LeaderResearchRun
   sourceLimitations: string[]
+}
+
+export interface LeaderResearchCount {
+  key: string
+  count: number
 }
 
 export interface LeaderResearchFunnelCategory {
@@ -541,6 +548,7 @@ export interface LeaderResearchFunnelCandidate {
   candidateId: number
   wallet: string
   category: string
+  strategyType?: string
   score: string
   tradeCount: number
   filteredRatio: string
@@ -840,6 +848,36 @@ export interface LeaderResearchActivityScoreRequest {
   candidateIds?: number[]
 }
 
+export interface LeaderResearchStrategyBackfillRequest {
+  states?: string[]
+  limit?: number
+  force?: boolean
+}
+
+export interface LeaderResearchStrategyBackfillResponse {
+  selectedCount: number
+  selectedCandidateIds: number[]
+  scoreResult: LeaderResearchActivityScoreResponse
+}
+
+export interface LeaderResearchUnknownStrategySampleEnrichRequest {
+  categories?: string[]
+  limit?: number
+  batchSize?: number
+  dryRun?: boolean
+}
+
+export interface LeaderResearchUnknownStrategySampleEnrichResponse {
+  dryRun: boolean
+  selectedCount: number
+  selectedCandidateIds: number[]
+  categoryCounts: Record<string, number>
+  unknownStrategyReasonCounts: Record<string, number>
+  activityScoreResult?: LeaderResearchActivityScoreResponse
+  paperProcessResult?: LeaderResearchPaperProcessResponse
+  paperScoreResult?: LeaderResearchPaperScoreResponse
+}
+
 export interface LeaderResearchActivityScoreResponse {
   scoreVersion: string
   scannedCount: number
@@ -847,6 +885,7 @@ export interface LeaderResearchActivityScoreResponse {
   skippedCount: number
   riskFlagCounts: Record<string, number>
   categoryCounts: Record<string, number>
+  unknownStrategyReasonCounts: Record<string, number>
 }
 
 export interface LeaderResearchPaperPromotionRequest {
@@ -1011,6 +1050,28 @@ export interface LeaderResearchOfficialLeaderboardImportResponse {
   importResult: LeaderResearchExternalAnalyticsImportResponse
 }
 
+export interface LeaderResearchOfficialLeaderboardRefreshRequest {
+  dryRun?: boolean
+  candidateIds?: number[]
+  wallets?: string[]
+  categories?: string[]
+  timePeriods?: string[]
+  orderBys?: string[]
+  limitPerPage?: number
+  maxPagesPerQuery?: number
+  maxItems?: number
+}
+
+export interface LeaderResearchOfficialLeaderboardRefreshResponse {
+  dryRun: boolean
+  sourceName: string
+  requestedWallets: string[]
+  matchedTotal: number
+  fetchedTotal: number
+  fetches: LeaderResearchOfficialLeaderboardFetch[]
+  importResult: LeaderResearchExternalAnalyticsImportResponse
+}
+
 export interface LeaderResearchFalconLeaderboardImportRequest {
   dryRun?: boolean
   sortBys?: string[]
@@ -1102,6 +1163,7 @@ export interface LeaderResearchOfficialLeaderboardSample {
   category: string
   bucket: string
   researchState: string
+  strategyType?: string
   score?: string
   riskFlags: string[]
   lastSourceAgeHours?: number
@@ -1117,6 +1179,7 @@ export interface LeaderResearchOfficialLeaderboardDiagnoseResponse {
   cleanHighTotal: number
   fastWatchTotal: number
   readyForPaperTotal: number
+  disabledTrialCandidateTotal: number
   buckets: LeaderResearchOfficialLeaderboardBucket[]
   categories: LeaderResearchOfficialLeaderboardCategory[]
   riskFlagCounts: Record<string, number>
@@ -1157,6 +1220,7 @@ export interface LeaderResearchCandidate {
   scoreVersion?: string
   reason?: string
   riskFlags: string[]
+  strategyType?: string
   locked: boolean
   agentOwned: boolean
   provenance: string
@@ -1306,6 +1370,31 @@ export interface LeaderResearchApprovalRequest {
   candidateId: number
   accountId: number
   confirm?: boolean
+}
+
+export interface LeaderResearchApprovalPreviewAccount {
+  accountId: number
+  accountName?: string
+  walletAddress: string
+  proxyAddress: string
+  enabled: boolean
+  readOnly: boolean
+  duplicateConfigId?: number
+  duplicateConfigEnabled?: boolean
+}
+
+export interface LeaderResearchApprovalPreviewResponse {
+  candidateId: number
+  leaderId?: number
+  poolId?: number
+  category: string
+  strategyType?: string
+  researchState: string
+  riskFlags: string[]
+  locked: boolean
+  canCreate: boolean
+  blockerCodes: string[]
+  accounts: LeaderResearchApprovalPreviewAccount[]
 }
 
 export interface LeaderResearchApprovalResponse {
@@ -1554,6 +1643,14 @@ export interface BridgePositionSellResponse {
   recordId?: number
   externalTradeId?: string
   status: string
+}
+
+export interface DailyAssetPoint {
+  dayStartAt: number
+  availableBalance: string
+  positionsValue: string
+  totalAssets: string
+  capturedAt: number
 }
 
 /**
@@ -2460,6 +2557,7 @@ export interface BridgeTradeRecordListResponse {
 export interface BridgeTradeRecordListRequest {
   bridgeId?: string
   status?: string
+  marketKeyword?: string
   page?: number
   size?: number
 }

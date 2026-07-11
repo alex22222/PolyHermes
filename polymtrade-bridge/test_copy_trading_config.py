@@ -9,7 +9,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from copy_trading_config import CopyTradingConfig, CopyTradingRuleEngine, infer_market_category
+from copy_trading_config import (
+    CopyTradingConfig,
+    CopyTradingRuleEngine,
+    infer_market_category,
+    is_category_allowed,
+)
 
 
 class TestInferMarketCategory(unittest.TestCase):
@@ -245,6 +250,7 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
         )
         self.assertIsNone(reason)
 
+    @patch.dict("os.environ", {"COPY_TRADING_ALLOW_PRIMARY_TO_CRYPTO": "false"})
     def test_primary_category_does_not_allow_crypto(self):
         cfg = self._base_config(leader_category="politics")
         reason = self.engine._check_filters(
@@ -258,6 +264,11 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
         )
         self.assertIsNotNone(reason)
         self.assertIn("category mismatch", reason)
+
+    @patch.dict("os.environ", {"COPY_TRADING_ALLOW_PRIMARY_TO_CRYPTO": "true"})
+    def test_primary_category_allows_crypto_when_temporarily_enabled(self):
+        self.assertTrue(is_category_allowed("politics", "crypto"))
+        self.assertTrue(is_category_allowed("finance", "crypto"))
 
     def test_sports_title_with_token_inferred_as_sports(self):
         # The leader is configured for sports; the market title contains "token" but is clearly sports
