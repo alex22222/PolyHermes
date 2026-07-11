@@ -231,6 +231,8 @@ def test_same_event_high_frequency_buy_guard():
     try:
         recent_records = [
             {
+                "side": "BUY",
+                "status": "SUCCESS",
                 "market_title": "Will the Fed decrease interest rates by 25 bps after the July 2026 meeting?",
                 "outcome": "Yes",
                 "raw_payload": '{"marketSlug":"will-the-fed-decrease-interest-rates-by-25-bps-after-the-july-2026-meeting","title":"Will the Fed decrease interest rates by 25 bps after the July 2026 meeting?","outcome":"Yes"}',
@@ -257,6 +259,8 @@ def test_same_event_multi_outcome_combo_buy_guard():
     try:
         recent_records = [
             {
+                "side": "BUY",
+                "status": "SUCCESS",
                 "market_title": "Will there be no change in Fed interest rates after the July 2026 meeting?",
                 "outcome": "Yes",
                 "raw_payload": '{"marketSlug":"will-there-be-no-change-in-fed-interest-rates-after-the-july-2026-meeting","title":"Will there be no change in Fed interest rates after the July 2026 meeting?","outcome":"Yes"}',
@@ -276,6 +280,32 @@ def test_same_event_multi_outcome_combo_buy_guard():
 
         sell = _leader_event_activity_buy_reason(signal, "SELL", now_ms=1783234800000)
         assert sell is None, sell
+    finally:
+        bridge_main.recorder = original
+
+
+def test_same_event_combo_ignores_failed_buy_records():
+    original = bridge_main.recorder
+    try:
+        recent_records = [
+            {
+                "side": "BUY",
+                "status": "FAILED",
+                "market_title": "XRP Up or Down - July 10, 9:55PM-10:00PM ET",
+                "outcome": "Up",
+                "raw_payload": '{"marketSlug":"xrp-updown-5m-1783734900","title":"XRP Up or Down - July 10, 9:55PM-10:00PM ET","outcome":"Up"}',
+            }
+        ]
+        bridge_main.recorder = FakeRecorder(recent_records=recent_records)
+        signal = SimpleNamespace(
+            leader_address="0xLeader",
+            market_slug="xrp-updown-5m-1783734900",
+            title="XRP Up or Down - July 10, 9:55PM-10:00PM ET",
+            outcome="Down",
+        )
+
+        reason = _leader_event_activity_buy_reason(signal, "BUY", now_ms=1783735027000)
+        assert reason is None, reason
     finally:
         bridge_main.recorder = original
 

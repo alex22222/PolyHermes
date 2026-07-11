@@ -316,7 +316,7 @@ const CopyTradingList: React.FC = () => {
             icon: <UnorderedListOutlined />,
             onClick: () => {
               setOrdersModalCopyTradingId(record.id.toString())
-              setOrdersModalTab('buy')
+              setOrdersModalTab('matched')
               setOrdersModalOpen(true)
             }
           },

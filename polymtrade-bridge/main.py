@@ -1707,6 +1707,10 @@ def _leader_event_activity_buy_reason(
         )
     }
     for record in records:
+        if str(record.get("side") or "").upper() != "BUY":
+            continue
+        if str(record.get("status") or "").upper() not in {"PENDING", "SUCCESS"}:
+            continue
         raw = {}
         raw_payload = record.get("raw_payload")
         if raw_payload:

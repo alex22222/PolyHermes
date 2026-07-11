@@ -101,7 +101,7 @@ const BridgeTradeRecordList: React.FC = () => {
     }
   }
 
-  const isBridgeHealthy = Boolean(bridgeStatus?.ready && bridgeStatus?.loggedIn && !bridgeStatus?.lastError)
+  const isBridgeHealthy = Boolean(bridgeStatus?.ready && bridgeStatus?.loggedIn)
 
   const renderHealthTag = (healthy: boolean, unknown = false) => {
     if (unknown) {
