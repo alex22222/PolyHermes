@@ -141,6 +141,7 @@ class LeaderResearchStateMachine(
         return (candidate.score ?: BigDecimal.ZERO) >= TRIAL_READY_MIN_SCORE &&
             LeaderResearchStrategyTypeClassifier.isTrialReadyCopyable(candidate.strategyType) &&
             candidate.riskFlags.isNullOrBlank() &&
+            LeaderResearchProfitWindowParser.parse(candidate.sourceEvidence).blockers.isEmpty() &&
             paperTradingService.isEligibleForTrialReady(session, now)
     }
 

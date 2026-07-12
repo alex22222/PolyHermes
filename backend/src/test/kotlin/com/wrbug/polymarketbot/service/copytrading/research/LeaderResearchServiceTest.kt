@@ -56,7 +56,8 @@ class LeaderResearchServiceTest {
             leaderId = 7,
             researchState = LeaderResearchState.TRIAL_READY,
             source = "EXTERNAL_ANALYTICS_SOURCE,ACTIVITY_DERIVED",
-            sourceEvidence = "external_analytics:polymarket_official_leaderboard | category:politics",
+            sourceEvidence = "external_analytics:polymarket_official_leaderboard | category:politics | " +
+                "profit_window:30d:12 profit_window:180d:40 activity_window:7d_trades:8",
             score = BigDecimal("90"),
             riskFlags = null
         )
@@ -145,6 +146,51 @@ class LeaderResearchServiceTest {
         Mockito.`when`(paperSessionRepository.findLatestByCandidateIds(listOf(43)))
             .thenReturn(listOf(session))
         Mockito.`when`(scoreRepository.findByCandidateIdOrderByCreatedAtDesc(43))
+            .thenReturn(stableScores)
+
+        val response = service.fastWatch(
+            LeaderResearchFastWatchRequest(categories = listOf("finance"), limit = 10, includeTrialReady = true)
+        )
+
+        assertEquals(0, response.total)
+        assertTrue(response.items.isEmpty())
+    }
+
+    @Test
+    fun `fast watch excludes candidate without long term profit evidence`() {
+        val candidate = LeaderResearchCandidate(
+            id = 44,
+            normalizedWallet = "0x3333333333333333333333333333333333333333",
+            researchState = LeaderResearchState.PAPER,
+            sourceEvidence = "activity_source:finance | category:finance | activity_window:14d_trades:20",
+            score = BigDecimal("92"),
+            strategyType = LeaderResearchStrategyTypeClassifier.HUMAN_DIRECTIONAL,
+            riskFlags = null
+        )
+        val session = LeaderPaperSession(
+            id = 102,
+            candidateId = 44,
+            startedAt = System.currentTimeMillis() - 8L * 24 * 60 * 60 * 1000,
+            tradeCount = 25,
+            filteredCount = 0,
+            copyablePnl = BigDecimal("9.50"),
+            maxDrawdown = BigDecimal.ZERO,
+            filteredRatio = BigDecimal.ZERO
+        )
+        val stableScores = (1..3).map {
+            LeaderResearchScore(
+                candidateId = 44,
+                scoreVersion = LeaderResearchScoringService.SCORE_VERSION,
+                totalScore = BigDecimal("92"),
+                createdAt = System.currentTimeMillis() - it
+            )
+        }
+
+        Mockito.`when`(candidateRepository.findByResearchStateIn(anyStates()))
+            .thenReturn(listOf(candidate))
+        Mockito.`when`(paperSessionRepository.findLatestByCandidateIds(listOf(44)))
+            .thenReturn(listOf(session))
+        Mockito.`when`(scoreRepository.findByCandidateIdOrderByCreatedAtDesc(44))
             .thenReturn(stableScores)
 
         val response = service.fastWatch(

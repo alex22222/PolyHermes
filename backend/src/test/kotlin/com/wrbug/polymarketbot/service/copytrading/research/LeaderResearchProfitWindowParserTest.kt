@@ -63,6 +63,18 @@ class LeaderResearchProfitWindowParserTest {
     }
 
     @Test
+    fun `uses all time leaderboard pnl as long term proxy when half year is unavailable`() {
+        val result = LeaderResearchProfitWindowParser.parse(
+            "official leaderboard period:ALL orderBy:PNL pnl:40 profit_window:all:40 activity_window:14d_trades:15",
+            2_000_000_000_000L
+        )
+
+        assertEquals(BigDecimal("40"), result.halfYearPnl)
+        assertTrue(result.blockers.contains("needs_half_year_profit_window").not())
+        assertTrue(result.blockers.contains("needs_activity_window").not())
+    }
+
+    @Test
     fun `uses latest legacy activity event as recent activity evidence`() {
         val now = 2_000_000_000_000L
         val result = LeaderResearchProfitWindowParser.parse(

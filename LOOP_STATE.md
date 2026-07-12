@@ -8641,3 +8641,65 @@
 - 继续 finance 小批或切 official leaderboard / external analytics 补源。
 - 不扩大 live batch。
 - 重点寻找已有较厚 activity 样本、BUY/SELL 完整、非 scanner_pool_unverified 的 finance 候选。
+
+## 2026-07-12 local leader pool scoring push
+
+**Goal**: 推进本地 leader 池评分，增加进入可小额试跟状态的 leader，真钱跟单保持人工启用。
+
+**Loop actions**:
+- 修复长期盈利证据口径：Polymarket official leaderboard 不支持 `180D/6M/HALF_YEAR`，仅支持 `DAY/WEEK/MONTH/ALL`；`LeaderResearchProfitWindowParser` 在无半年窗口时接受正的 `ALL` PnL 作为长期盈利代理。
+- 对齐 approval 口径：已进入 `TRIAL_READY` 的候选不再因 `needs_half_year_profit_window` / `needs_activity_window` 被拒绝创建禁用试跟配置；负长期 PnL、窗口冲突、非 human_directional、风险标记、非主分类仍然阻断。
+- scanner-pool 正式更新 `93` 个候选。
+- activity score 扫描 `4406` 个 `DISCOVERED/CANDIDATE`，实际刷新 `28` 个。
+- promote-paper 正式推进 `4` 个候选进入 `PAPER`: `1751`, `1830`, `1839`, `27075`。
+- paper/process 对这 4 个候选处理 `13` 笔、过滤 `7` 笔、失败 `0`。
+- candidate `1458` 正式进入 `TRIAL_READY`。
+- 为账户 `2` 创建禁用试跟配置 `copyTradingId=14`，leader `1233`, candidate `1458`, fixed amount `1`, `enabled=false`。
+
+**Verification**:
+- 后端测试通过：
+  - `LeaderResearchApprovalServiceTest`
+  - `LeaderResearchProfitWindowParserTest`
+  - `LeaderResearchTrialReadyRecheckServiceTest`
+- `backend ./gradlew bootJar` 通过。
+- 后端 LaunchAgent 重启后 `/actuator/health=UP`。
+- Bridge `/health={"status":"ok","executor_ready":true}`。
+- DB 对账：
+  - `leader_research_candidate.id=1458` -> `TRIAL_READY`, score `81.78183367`, strategy `human_directional`, risk flags empty。
+  - `copy_trading.id=14` -> account `2`, leader `1233`, `enabled=0`, fixed/max order/min order all `1`, max position `5`。
+  - pool status `TRIAL`, badge `DISABLED_TRIAL_CREATED`。
+
+**Next**:
+- 继续小批推进，不扩大 batch。
+- 对 `1751` 优先加厚 paper 样本；它本轮已有 `5` 笔 paper trade 且 copyable PnL `+1.0303034`，但分数回落到 `59`，仍属于薄样本观察。
+- 继续寻找有厚 activity、BUY/SELL 完整、无 mixed category/risk flags 的 politics/finance 候选。
+
+## 2026-07-12 local leader pool scoring correction
+
+**Correction**:
+- candidate `1458` / leader `0x5c0af092b533934008144d223d704b4cbebfa2c3` 不应进入小额试跟。
+- 原因：整体 PnL 为负（用户复核口径：成交额约 `441 万`，亏损约 `5.7 万`），单笔大额胜利主要来自世界杯、伊朗、政治/事件市场，不能证明有稳定正向跟单价值。
+- 上一轮把 `TRIAL_READY` 的长期盈利证据缺口放宽过度，导致只有活动/模拟证据的 leader 可以被推进。
+
+**Fix**:
+- `LeaderResearchApprovalService` 恢复硬门槛：approval preview/create 始终要求长期正 PnL 证据，不再对 `TRIAL_READY` 过滤 `needs_half_year_profit_window` / `needs_activity_window`。
+- `LeaderResearchService` 在 trial-readiness 和 fast-watch blockers 中加入长期盈利窗口检查。
+- `LeaderResearchStateMachine` 在自动晋级 `TRIAL_READY` 前检查长期盈利窗口 blockers。
+- 保留 `ALL` 正 PnL 可作为长期窗口代理；但 `ALL` 负 PnL 或缺失长期窗口会阻断。
+
+**Data remediation**:
+- candidate `1458` -> `COOLDOWN`, `risk_flags=negative_overall_pnl`。
+- pool `958` -> `COOLDOWN`, badge `REJECTED_NEGATIVE_OVERALL_PNL`。
+- copy config `14` 保持 `enabled=0`，config name 标记 `[REJECTED_NEGATIVE_PNL]`。
+
+**Verification**:
+- 测试与打包通过：
+  - `LeaderResearchApprovalServiceTest`
+  - `LeaderResearchProfitWindowParserTest`
+  - `LeaderResearchStateMachineTest`
+  - `LeaderResearchServiceTest`
+  - `LeaderResearchTrialReadyRecheckServiceTest`
+  - `bootJar`
+- 后端 LaunchAgent 重启后 `/actuator/health=UP`。
+- Bridge `/health={"status":"ok","executor_ready":true}`。
+- Approval preview for candidate `1458`: `canCreate=false`, `researchState=COOLDOWN`, blockers include `not_trial_ready`, `half_year_pnl_negative`, `risk_flags_not_empty`。

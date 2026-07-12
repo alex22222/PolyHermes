@@ -284,6 +284,7 @@ class LeaderResearchService(
         if (score < TRIAL_READY_MIN_SCORE) blockers += "研究评分低于 80"
         LeaderResearchStrategyTypeClassifier.trialReadyBlocker(candidate.strategyType)?.let { blockers += it }
         if (!candidate.riskFlags.isNullOrBlank()) blockers += "风险标记未清空：${candidate.riskFlags}"
+        blockers += profitWindowBlockerLabels(candidate.sourceEvidence)
         if (ageMs < PAPER_MIN_AGE_MS) blockers += "PAPER 观察不足 7 天：当前 ${ageHours} 小时"
         if (session.tradeCount < PAPER_MIN_TRADES) blockers += "通过模拟交易少于 10 笔：当前 ${session.tradeCount}"
         if (totalTrades < PAPER_MIN_TRADES) blockers += "模拟总样本少于 10 笔：当前 $totalTrades"
@@ -342,6 +343,7 @@ class LeaderResearchService(
         if (score < FAST_WATCH_MIN_SCORE) blockers += "快速观察要求评分 >= 85"
         LeaderResearchStrategyTypeClassifier.trialReadyBlocker(candidate.strategyType)?.let { blockers += it }
         if (!candidate.riskFlags.isNullOrBlank()) blockers += "风险标记未清空：${candidate.riskFlags}"
+        blockers += profitWindowBlockerLabels(candidate.sourceEvidence)
         if (ageMs < FAST_WATCH_MIN_AGE_MS) blockers += "快速观察至少需要 48 小时：当前 ${ageMs / HOUR_MS} 小时"
         if (session.tradeCount < FAST_WATCH_MIN_TRADES) blockers += "快速观察通过交易少于 ${FAST_WATCH_MIN_TRADES} 笔：当前 ${session.tradeCount}"
         if (totalTrades < FAST_WATCH_MIN_TRADES) blockers += "快速观察总样本少于 ${FAST_WATCH_MIN_TRADES} 笔：当前 $totalTrades"
@@ -353,6 +355,20 @@ class LeaderResearchService(
             blockers += "最近稳定高分不足 ${TRIAL_READY_STABLE_SCORE_WINDOW} 次：当前 $stableHighScoreCount"
         }
         return blockers
+    }
+
+    private fun profitWindowBlockerLabels(sourceEvidence: String?): List<String> {
+        return LeaderResearchProfitWindowParser.parse(sourceEvidence).blockers.map { blocker ->
+            when (blocker) {
+                "needs_half_year_profit_window" -> "缺少长期盈利窗口证据"
+                "needs_activity_window" -> "缺少近期活动窗口证据"
+                "half_year_pnl_negative" -> "长期盈利窗口为负"
+                "multi_window_profit_inconsistent" -> "盈利窗口不一致"
+                "recent_pnl_negative" -> "近期盈利窗口为负"
+                "inactive_recently" -> "近期活动不足"
+                else -> blocker
+            }
+        }
     }
 
     private fun latestStableHighScoreCount(candidate: LeaderResearchCandidate): Int {

@@ -113,7 +113,8 @@ class LeaderResearchStateMachineTest {
             normalizedWallet = "0x1111111111111111111111111111111111111111",
             researchState = LeaderResearchState.PAPER,
             lastSourceSeenAt = now,
-            score = BigDecimal("83")
+            score = BigDecimal("83"),
+            sourceEvidence = "profit_window:30d:12 profit_window:180d:40 activity_window:7d_trades:8"
         )
         val session = LeaderPaperSession(
             id = 10L,
@@ -139,6 +140,41 @@ class LeaderResearchStateMachineTest {
 
         assertEquals(LeaderResearchState.TRIAL_READY, result.researchState)
         Mockito.verify(poolMappingService).syncCandidate(anyCandidate())
+    }
+
+    @Test
+    fun `trial ready requires positive long term profit evidence`() {
+        val now = System.currentTimeMillis()
+        val candidate = LeaderResearchCandidate(
+            id = 1L,
+            normalizedWallet = "0x1111111111111111111111111111111111111111",
+            researchState = LeaderResearchState.PAPER,
+            lastSourceSeenAt = now,
+            score = BigDecimal("83"),
+            sourceEvidence = "activity_source:politics | category:politics | activity_window:14d_trades:20"
+        )
+        val session = LeaderPaperSession(
+            id = 10L,
+            candidateId = 1L,
+            startedAt = now - 8L * 24 * 60 * 60 * 1000,
+            tradeCount = 12,
+            filteredCount = 0,
+            openExposure = BigDecimal("10"),
+            copyablePnl = BigDecimal("5"),
+            maxDrawdown = BigDecimal.ZERO,
+            unknownValuationExposure = BigDecimal.ZERO,
+            filteredRatio = BigDecimal.ZERO
+        )
+        Mockito.`when`(paperSessionRepository.findTopByCandidateIdOrderByStartedAtDesc(1L)).thenReturn(session)
+        Mockito.`when`(paperTradingService.isEligibleForTrialReady(anySession(), Mockito.anyLong())).thenReturn(true)
+        Mockito.`when`(scoreRepository.findByCandidateIdOrderByCreatedAtDesc(1L)).thenReturn(
+            listOf(stableScore("83"), stableScore("84"), stableScore("82"))
+        )
+
+        val result = stateMachine.advance(candidate, runId = 99L)
+
+        assertEquals(LeaderResearchState.PAPER, result.researchState)
+        Mockito.verify(poolMappingService, Mockito.never()).syncCandidate(anyCandidate())
     }
 
     @Test

@@ -9,7 +9,7 @@ data class LeaderResearchProfitWindowSnapshot(
     val blockers: List<String>
 ) {
     val halfYearPnl: BigDecimal?
-        get() = pnlByWindow["180d"] ?: pnlByWindow["6m"] ?: pnlByWindow["6-month"]
+        get() = pnlByWindow["180d"] ?: pnlByWindow["6m"] ?: pnlByWindow["6-month"] ?: pnlByWindow["all"]
 
     val recentPnl: BigDecimal?
         get() = pnlByWindow["7d"] ?: pnlByWindow["14d"] ?: pnlByWindow["30d"]
@@ -57,7 +57,7 @@ object LeaderResearchProfitWindowParser {
             .maxOrNull()
         val blockers = mutableListOf<String>()
 
-        val halfYearPnl = pnl["180d"] ?: pnl["6m"] ?: pnl["6-month"]
+        val halfYearPnl = pnl["180d"] ?: pnl["6m"] ?: pnl["6-month"] ?: pnl["all"]
         if (halfYearPnl == null) blockers += "needs_half_year_profit_window"
         else if (halfYearPnl <= BigDecimal.ZERO) blockers += "half_year_pnl_negative"
 

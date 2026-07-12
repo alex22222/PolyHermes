@@ -82,6 +82,38 @@ class LeaderResearchApprovalServiceTest {
     }
 
     @Test
+    fun `approval preview rejects trial ready candidate with profit evidence gaps`() {
+        val candidate = copyableCandidate().copy(
+            sourceEvidence = "activity_source:politics | category:politics | activity_window:14d_trades:20"
+        )
+        Mockito.`when`(candidateRepository.findById(1L)).thenReturn(Optional.of(candidate))
+        Mockito.`when`(accountRepository.findAllByOrderByCreatedAtAsc()).thenReturn(listOf(account()))
+        Mockito.`when`(copyTradingRepository.findByAccountIdAndLeaderId(2L, 9L)).thenReturn(emptyList())
+
+        val result = service.previewDisabledTrialConfig(LeaderResearchApprovalPreviewRequest(candidateId = 1L))
+
+        assertTrue(result.isSuccess)
+        assertFalse(result.getOrThrow().canCreate)
+        assertTrue(result.getOrThrow().blockerCodes.contains("needs_half_year_profit_window"))
+    }
+
+    @Test
+    fun `approval preview still rejects negative long term evidence`() {
+        val candidate = copyableCandidate().copy(
+            sourceEvidence = "activity_source:politics | category:politics | profit_window:180d:-1 activity_window:14d_trades:20"
+        )
+        Mockito.`when`(candidateRepository.findById(1L)).thenReturn(Optional.of(candidate))
+        Mockito.`when`(accountRepository.findAllByOrderByCreatedAtAsc()).thenReturn(listOf(account()))
+        Mockito.`when`(copyTradingRepository.findByAccountIdAndLeaderId(2L, 9L)).thenReturn(emptyList())
+
+        val result = service.previewDisabledTrialConfig(LeaderResearchApprovalPreviewRequest(candidateId = 1L))
+
+        assertTrue(result.isSuccess)
+        assertFalse(result.getOrThrow().canCreate)
+        assertTrue(result.getOrThrow().blockerCodes.contains("half_year_pnl_negative"))
+    }
+
+    @Test
     fun `approval rejects trial ready candidate that is not human directional`() {
         val candidate = copyableCandidate().copy(strategyType = "unknown")
         Mockito.`when`(candidateRepository.findById(1L)).thenReturn(Optional.of(candidate))
