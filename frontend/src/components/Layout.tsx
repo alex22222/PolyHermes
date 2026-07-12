@@ -179,6 +179,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       label: t('menu.positions')
     },
     {
+      key: '/mobile-portfolio',
+      icon: <WalletOutlined />,
+      label: '移动投资组合'
+    },
+    {
       key: '/bridge-trade-records',
       icon: <SwapOutlined />,
       label: t('menu.bridgeTradeRecords') || '桥接交易记录'
@@ -307,9 +312,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     // 移动端布局
     return (
       <AntLayout style={{ minHeight: '100vh' }}>
-        <Header style={{ 
-          background: '#001529', 
-          padding: '0 16px',
+        <Header style={{
+          background: '#001529',
+          padding: 'env(safe-area-inset-top) 16px 0',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between'
@@ -382,8 +387,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             />
           </div>
         </Header>
-        <Content style={{ 
-          padding: '12px 8px', 
+        <Content style={{
+          padding: '12px 8px calc(12px + env(safe-area-inset-bottom))',
           background: '#f0f2f5',
           minHeight: 'calc(100vh - 64px)'
         }}>

@@ -1,0 +1,28 @@
+{
+  "name": "PolyHermes",
+  "short_name": "PolyHermes",
+  "description": "PolyHermes 移动投资组合",
+  "start_url": "/mobile-portfolio",
+  "display": "standalone",
+  "background_color": "#f0f2f5",
+  "theme_color": "#001529",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ]
+}
