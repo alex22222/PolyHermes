@@ -1231,7 +1231,12 @@ async def handle_signal(signal: LeaderTradeSignal):
                         reason=tail_risk_reason,
                     )
                     continue
-                high_confidence_reason = _high_confidence_buy_reason(side_upper, price_dec)
+                high_confidence_reason = _high_confidence_buy_reason(
+                    side=side_upper,
+                    price=price_dec,
+                    title=signal.title,
+                    market_slug=signal.market_slug,
+                )
                 if high_confidence_reason:
                     logger.info(
                         f"Config {cfg.id}: BUY skipped for {signal.transaction_hash}: "
@@ -1737,9 +1742,22 @@ def _tail_risk_low_price_buy_reason(side: str, price: Decimal) -> Optional[str]:
     return None
 
 
-def _high_confidence_buy_reason(side: str, price: Decimal) -> Optional[str]:
-    """Return a skip reason for high-price BUYs with poor copy-trading payoff."""
+def _is_crypto_market(title: Optional[str], market_slug: Optional[str] = None) -> bool:
+    if infer_market_category(title) == "crypto":
+        return True
+    return bool(market_slug and re.search(r"(btc|eth|xrp|sol|doge|bnb)-updown-", market_slug, re.IGNORECASE))
+
+
+def _high_confidence_buy_reason(
+    side: str,
+    price: Decimal,
+    title: Optional[str] = None,
+    market_slug: Optional[str] = None,
+) -> Optional[str]:
+    """Return a skip reason for high-price crypto BUYs with poor copy-trading payoff."""
     if side.upper() != "BUY":
+        return None
+    if not _is_crypto_market(title, market_slug):
         return None
     if price > HIGH_CONFIDENCE_MAX_BUY_PRICE:
         max_upside = Decimal("1") - price

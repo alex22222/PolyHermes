@@ -158,15 +158,38 @@ def test_tail_risk_low_price_buy_guard():
 
 
 def test_high_confidence_buy_guard():
-    allowed = _high_confidence_buy_reason("BUY", Decimal("0.55"))
+    allowed = _high_confidence_buy_reason(
+        "BUY",
+        Decimal("0.55"),
+        title="XRP Up or Down - July 12, 3:40AM-3:45AM ET",
+        market_slug="xrp-updown-5m-1783842000",
+    )
     assert allowed is None, allowed
 
-    high_price = _high_confidence_buy_reason("BUY", Decimal("0.5501"))
+    high_price = _high_confidence_buy_reason(
+        "BUY",
+        Decimal("0.5501"),
+        title="XRP Up or Down - July 12, 3:40AM-3:45AM ET",
+        market_slug="xrp-updown-5m-1783842000",
+    )
     assert high_price is not None, high_price
     assert "High-price low-upside BUY skipped" in high_price
     assert "max=0.55" in high_price
 
-    sell = _high_confidence_buy_reason("SELL", Decimal("0.96"))
+    finance = _high_confidence_buy_reason(
+        "BUY",
+        Decimal("0.88"),
+        title="Will the Fed decrease interest rates by 25 bps after the July 2026 meeting?",
+        market_slug="fed-decision-in-july-181",
+    )
+    assert finance is None, finance
+
+    sell = _high_confidence_buy_reason(
+        "SELL",
+        Decimal("0.96"),
+        title="XRP Up or Down - July 12, 3:40AM-3:45AM ET",
+        market_slug="xrp-updown-5m-1783842000",
+    )
     assert sell is None, sell
 
 
