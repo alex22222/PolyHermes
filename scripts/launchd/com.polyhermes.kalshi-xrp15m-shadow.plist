@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polyhermes.kalshi-xrp15m-shadow</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.14/bin/python3</string>
+        <string>/Users/henry/projects/polyhermes/scripts/kalshi_xrp15m_shadow.py</string>
+        <string>snapshot</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/henry/projects/polyhermes</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/henry/projects/polyhermes/logs/kalshi-xrp15m-shadow.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/henry/projects/polyhermes/logs/kalshi-xrp15m-shadow.log</string>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

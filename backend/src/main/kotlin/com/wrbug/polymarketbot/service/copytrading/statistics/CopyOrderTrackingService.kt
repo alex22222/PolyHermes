@@ -25,6 +25,8 @@ import com.wrbug.polymarketbot.service.common.PolymarketClobService
 import com.wrbug.polymarketbot.service.accounts.AccountExecutionModeService
 import com.wrbug.polymarketbot.service.bridge.BridgeWebhookClient
 import com.wrbug.polymarketbot.service.system.TelegramNotificationService
+import com.wrbug.polymarketbot.service.risk.BackendBuyRiskCandidate
+import com.wrbug.polymarketbot.service.risk.BackendBuyRiskGateway
 import com.wrbug.polymarketbot.util.CryptoUtils
 import org.springframework.context.ApplicationContext
 import org.springframework.context.ApplicationContextAware
@@ -32,6 +34,7 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.math.BigDecimal
 import java.time.Instant
+import java.util.UUID
 import kotlin.math.max
 
 /**
@@ -59,6 +62,8 @@ open class CopyOrderTrackingService(
     private val copyScoreService: CopyScoreService,  // 统一跟单评分服务
     private val accountExecutionModeService: AccountExecutionModeService,
     private val bridgeWebhookClient: BridgeWebhookClient,
+    private val buyRiskGateway: BackendBuyRiskGateway,
+    private val modelTradeCandidateService: ModelTradeCandidateService,
     private val telegramNotificationService: TelegramNotificationService? = null  // 可选，避免循环依赖
 ) : ApplicationContextAware {
 
@@ -108,7 +113,8 @@ open class CopyOrderTrackingService(
         leader: Leader,
         trade: TradeResponse,
         marketId: String,
-        reason: String
+        reason: String,
+        modelCandidateId: String?
     ) {
         notificationScope.launch {
             try {
@@ -120,6 +126,7 @@ open class CopyOrderTrackingService(
                         accountId = copyTrading.accountId,
                         leaderId = copyTrading.leaderId,
                         leaderTradeId = trade.id,
+                        modelCandidateId = modelCandidateId,
                         marketId = marketId,
                         marketTitle = market?.title ?: marketId,
                         marketSlug = market?.slug,
@@ -161,7 +168,8 @@ open class CopyOrderTrackingService(
     private suspend fun sendBridgeFallback(
         copyTrading: CopyTrading,
         account: Account,
-        trade: TradeResponse
+        trade: TradeResponse,
+        modelCandidateId: String? = null
     ): Boolean {
         if (!accountExecutionModeService.shouldFallbackToBridge(account)) {
             return false
@@ -186,7 +194,7 @@ open class CopyOrderTrackingService(
             logger.warn(
                 "Bridge fallback 跳过研究高风险 Leader 买入: copyTradingId=${copyTrading.id}, leaderId=${leader.id}, tradeId=${trade.id}, reason=$reason"
             )
-            recordResearchRiskFilteredOrder(copyTrading, account, leader, trade, marketId, reason)
+            recordResearchRiskFilteredOrder(copyTrading, account, leader, trade, marketId, reason, modelCandidateId)
             return true
         }
 
@@ -200,6 +208,8 @@ open class CopyOrderTrackingService(
                 leaderAddress = leader.leaderAddress,
                 leaderName = leader.leaderName,
                 transactionHash = trade.id,
+                modelCandidateId = modelCandidateId,
+                copyTradingId = copyTrading.id,
                 conditionId = marketId,
                 marketSlug = market?.eventSlug ?: market?.slug,
                 title = market?.title,
@@ -420,10 +430,18 @@ open class CopyOrderTrackingService(
                         continue
                     }
 
+                    val modelCandidate = modelTradeCandidateService.observe(
+                        leaderId = leaderId,
+                        copyTradingId = copyTrading.id ?: continue,
+                        accountId = account.id ?: continue,
+                        trade = trade,
+                        source = source
+                    )
+
                     // Bridge/Magic 账户通常没有 CLOB API 凭证，不能在这里静默跳过；
                     // 需要转发到 Web Bridge，让桥接交易记录落 SUCCESS/FAILED。
                     if (!accountExecutionModeService.hasClobApiCredentials(account)) {
-                        if (sendBridgeFallback(copyTrading, account, trade)) {
+                        if (sendBridgeFallback(copyTrading, account, trade, modelCandidate.candidateId)) {
                             continue
                         }
                         logger.warn("账户未配置API凭证，跳过创建订单: accountId=${account.id}, copyTradingId=${copyTrading.id}")
@@ -477,7 +495,7 @@ open class CopyOrderTrackingService(
                         logger.warn(
                             "跳过研究高风险 Leader 买入: copyTradingId=${copyTrading.id}, leaderId=${leader.id}, tradeId=${trade.id}, reason=$researchRiskReason"
                         )
-                        recordResearchRiskFilteredOrder(copyTrading, account, leader, trade, effectiveMarketId, researchRiskReason)
+                        recordResearchRiskFilteredOrder(copyTrading, account, leader, trade, effectiveMarketId, researchRiskReason, modelCandidate.candidateId)
                         continue
                     }
 
@@ -557,6 +575,7 @@ open class CopyOrderTrackingService(
                                     accountId = copyTrading.accountId,
                                     leaderId = copyTrading.leaderId,
                                     leaderTradeId = trade.id,
+                                    modelCandidateId = modelCandidate.candidateId,
                                     marketId = effectiveMarketId,
                                     marketTitle = marketTitle,
                                     marketSlug = marketSlug,
@@ -640,6 +659,7 @@ open class CopyOrderTrackingService(
                                         accountId = copyTrading.accountId,
                                         leaderId = copyTrading.leaderId,
                                         leaderTradeId = trade.id,
+                                        modelCandidateId = modelCandidate.candidateId,
                                         marketId = effectiveMarketId,
                                         marketTitle = marketTitle,
                                         marketSlug = marketSlug,
@@ -829,6 +849,20 @@ open class CopyOrderTrackingService(
                     val exchangeContract = orderSigningService.getExchangeContract(negRisk)
                     if (negRisk) logger.debug("市场为 Neg Risk，使用 Neg Risk Exchange 签约: conditionId=$effectiveMarketId")
 
+                    val riskMarket = runCatching { marketService.getMarket(effectiveMarketId) }.getOrNull()
+                    val riskCorrelationId = "legacy-copy:${copyTrading.id}:${trade.id}:${UUID.randomUUID()}"
+                    val riskCandidate = BackendBuyRiskCandidate(
+                        accountId = account.id!!,
+                        modelCandidateId = modelCandidate.candidateId,
+                        amount = buyPrice.multi(finalBuyQuantity).toPlainString(),
+                        marketId = effectiveMarketId,
+                        marketTitle = riskMarket?.title ?: marketTitle,
+                        eventSlug = riskMarket?.eventSlug ?: riskMarket?.slug,
+                        category = leader.category,
+                        leaderAddress = leader.leaderAddress
+                    )
+                    buyRiskGateway.precheck(riskCorrelationId, riskCandidate)
+
                     // 调用API创建订单（带重试机制）
                     // 重试策略：最多重试 MAX_RETRY_ATTEMPTS 次，每次重试前等待 RETRY_DELAY_MS 毫秒
                     // 每次重试都会重新生成salt并重新签名，确保签名唯一性
@@ -845,8 +879,12 @@ open class CopyOrderTrackingService(
                         owner = apiKey,
                         copyTradingId = copyTrading.id!!,
                         tradeId = trade.id,
-                        signatureType = orderSigningService.getSignatureTypeForWalletType(account.walletType)
+                        signatureType = orderSigningService.getSignatureTypeForWalletType(account.walletType),
+                        riskCorrelationId = riskCorrelationId,
+                        riskCandidate = riskCandidate
                     )
+                    runCatching { buyRiskGateway.complete(riskCorrelationId, createOrderResult.isSuccess) }
+                        .onFailure { logger.error("旧跟单 BUY 风险预占收尾失败: correlationId=$riskCorrelationId", it) }
 
                     // 处理订单创建失败
                     if (createOrderResult.isFailure) {
@@ -911,6 +949,7 @@ open class CopyOrderTrackingService(
                         outcomeIndex = effectiveOutcomeIndex,  // 新增字段
                         buyOrderId = realOrderId,  // 使用真实订单ID
                         leaderBuyTradeId = trade.id,
+                        modelCandidateId = modelCandidate.candidateId,
                         leaderBuyQuantity = trade.size.toSafeBigDecimal(),  // 存储 Leader 买入数量（用于固定金额模式计算卖出比例）
                         quantity = finalBuyQuantity,  // 使用最终数量（可能已调整），临时值
                         price = buyPrice,  // 使用下单价格，临时值
@@ -1451,7 +1490,9 @@ open class CopyOrderTrackingService(
         owner: String,
         copyTradingId: Long,
         tradeId: String,
-        signatureType: Int
+        signatureType: Int,
+        riskCorrelationId: String? = null,
+        riskCandidate: BackendBuyRiskCandidate? = null
     ): Result<String> {
         var lastError: Exception? = null
 
@@ -1485,6 +1526,12 @@ open class CopyOrderTrackingService(
                     owner = owner,
                     orderType = "FAK"  // Fill-And-Kill
                 )
+
+                // BUY 的 FINAL 必须尽量靠近真实 CLOB 调用；SELL 不进入 BUY 风控。
+                if (attempt == 1 && side.equals("BUY", ignoreCase = true)) {
+                    require(!riskCorrelationId.isNullOrBlank() && riskCandidate != null) { "BUY 缺少组合风控上下文" }
+                    buyRiskGateway.finalCheck(riskCorrelationId, riskCandidate)
+                }
 
                 // 调用 API 创建订单
                 val orderResponse = clobApi.createOrder(orderRequest)

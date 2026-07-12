@@ -79,7 +79,8 @@ class BridgeExecutorClient(
         @SerializedName("condition_id") val conditionId: String? = null,
         @SerializedName("size_shares") val sizeShares: Double? = null,
         @SerializedName("outcome_index") val outcomeIndex: Int? = null,
-        @SerializedName("market_title") val marketTitle: String? = null
+        @SerializedName("market_title") val marketTitle: String? = null,
+        @SerializedName("external_trade_id") val externalTradeId: String? = null
     )
 
     /**

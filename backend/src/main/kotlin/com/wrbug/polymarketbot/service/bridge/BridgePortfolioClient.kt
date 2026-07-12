@@ -232,7 +232,14 @@ class BridgePortfolioClient(
 
     data class BridgePortfolioResponse(
         @SerializedName("positions") val positions: List<BridgePortfolioPosition> = emptyList(),
-        @SerializedName("synced_at") val syncedAt: Long? = null
+        @SerializedName("synced_at") val syncedAt: Long? = null,
+        @SerializedName("wallet_address") val walletAddress: String? = null,
+        @SerializedName("available_balance") val availableBalance: Double? = null,
+        @SerializedName("portfolio_complete") val portfolioComplete: Boolean = false,
+        @SerializedName("empty_state_confirmed") val emptyStateConfirmed: Boolean = false,
+        @SerializedName("pending_redeem_value") val pendingRedeemValue: Double? = null,
+        @SerializedName("redeemable_position_count") val redeemablePositionCount: Int? = null,
+        @SerializedName("redeem_valuation_status") val redeemValuationStatus: String = "UNKNOWN"
     )
 
     data class BridgePortfolioPosition(
@@ -245,7 +252,8 @@ class BridgePortfolioClient(
         @SerializedName("marketIcon") val marketIcon: String? = null,
         @SerializedName("conditionId") val conditionId: String? = null,
         @SerializedName("marketSlug") val marketSlug: String? = null,
-        @SerializedName("eventSlug") val eventSlug: String? = null
+        @SerializedName("eventSlug") val eventSlug: String? = null,
+        @SerializedName("redeemable") val redeemable: Boolean = false
     )
 
     data class BridgeBalanceResponse(

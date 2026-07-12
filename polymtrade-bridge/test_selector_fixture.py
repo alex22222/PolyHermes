@@ -275,6 +275,7 @@ BTC_UPDOWN_HTML = """
 <body>
   <main>
     <section class="event-card">
+      <div role="button">Up Or Down</div>
       <h1>Bitcoin Up or Down - June 24, 6:25AM-6:30AM ET</h1>
       <div>5 minute crypto market</div>
       <div class="trade-buttons">
@@ -739,6 +740,46 @@ BALANCE_HTML = """
 </html>
 """
 
+
+STALE_BINARY_PORTFOLIO_HTML = """
+<!doctype html>
+<html>
+<style>
+  aside { position: absolute; left: 0; top: 0; width: 240px; }
+  main { position: absolute; left: 600px; top: 0; width: 500px; }
+</style>
+<body>
+  <aside>
+    <div>Ethereum Up or Down - July 12, 4:05AM-4:10AM ET</div>
+  </aside>
+  <main>
+    <h1>Bitcoin Up or Down - July 12, 3AM ET</h1>
+    <div role="button">Up</div>
+    <div role="button">Down</div>
+    <div>Rules</div>
+  </main>
+</body>
+</html>
+"""
+
+
+ACTIVE_BINARY_PORTFOLIO_HTML = """
+<!doctype html>
+<html>
+<style>
+  main { position: absolute; left: 600px; top: 0; width: 500px; }
+</style>
+<body>
+  <main>
+    <h1>Ethereum Up or Down - July 12, 4:05AM-4:10AM ET</h1>
+    <div role="button">Up</div>
+    <div role="button">Down</div>
+    <div>Rules</div>
+  </main>
+</body>
+</html>
+"""
+
 INLINE_BUY_FORM_HTML = """
 <!doctype html>
 <html>
@@ -1113,6 +1154,25 @@ async def _run_trade_form_fixture() -> None:
             await page.set_content(PORTFOLIO_WITH_PM_BUY_HTML)
             is_open = await executor._is_buy_dialog_open(timeout=0.5)
             assert is_open is False, "Portfolio PM buy button must not count as an open buy dialog"
+
+            target_title = "Ethereum Up or Down - July 12, 4:05AM-4:10AM ET"
+            await page.set_content(STALE_BINARY_PORTFOLIO_HTML)
+            is_target_visible = await executor._is_target_event_visible(
+                "Up",
+                market_slug="eth-updown-5m-1783843500",
+                market_title=target_title,
+                timeout=0.5,
+            )
+            assert is_target_visible is False, "A sidebar market title must not count as the active trade panel"
+
+            await page.set_content(ACTIVE_BINARY_PORTFOLIO_HTML)
+            is_target_visible = await executor._is_target_event_visible(
+                "Up",
+                market_slug="eth-updown-5m-1783843500",
+                market_title=target_title,
+                timeout=0.5,
+            )
+            assert is_target_visible is True, "The active ETH trade panel should be recognized"
 
             await page.set_content(SELL_POSITION_WITH_PM_WALLET_HTML)
             is_open = await executor._is_sell_dialog_open(timeout=0.5)

@@ -356,6 +356,12 @@ export const apiService = {
       apiClient.post<ApiResponse<any>>('/accounts/bridge-current', {}),
 
     /**
+     * 将 Bridge 当前浏览器会话账户关联为无私钥只读账户
+     */
+    linkBridgeCurrent: (data: { walletAddress: string; walletType?: string; accountName?: string }) =>
+      apiClient.post<ApiResponse<any>>('/accounts/bridge-link', data),
+
+    /**
      * 将账户设为 Bridge 当前操作账户
      */
     selectBridgeCurrent: (accountId: number) =>
@@ -369,6 +375,39 @@ export const apiService = {
 
     dailyAssets: (accountId: number) =>
       apiClient.post<ApiResponse<import('../types').DailyAssetPoint[]>>('/accounts/positions/daily-assets', { accountId }),
+
+    portfolioExposures: (accountId: number) =>
+      apiClient.post<ApiResponse<import('../types').PortfolioExposureResponse>>('/accounts/positions/exposures', { accountId }),
+
+    portfolioRelations: (accountId: number) =>
+      apiClient.post<ApiResponse<import('../types').PortfolioRelationResponse>>('/risk/portfolio/relations', { accountId }),
+
+    portfolioHistoricalReplay: (accountId: number, since?: number) =>
+      apiClient.post<ApiResponse<import('../types').PortfolioRiskHistoricalReplay>>('/risk/portfolio/historical-replay', { accountId, since }),
+
+    portfolioBuyControl: (accountId: number) =>
+      apiClient.post<ApiResponse<import('../types').PortfolioBuyControl>>('/risk/portfolio/buy-control', { accountId }),
+
+    updatePortfolioBuyControl: (data: { accountId: number; paused: boolean; reason?: string }) =>
+      apiClient.post<ApiResponse<import('../types').PortfolioBuyControl>>('/risk/portfolio/buy-control/update', data),
+
+    previewPortfolioReduction: (data: { accountId: number; positionKey: string; quantity: string }) =>
+      apiClient.post<ApiResponse<import('../types').PortfolioReductionPreview>>('/risk/portfolio/reduction/preview', data),
+
+    portfolioReductionDraft: (draftId: string) =>
+      apiClient.post<ApiResponse<import('../types').PortfolioReductionPreview>>('/risk/portfolio/reduction/draft', { draftId }),
+
+    confirmPortfolioReduction: (draftId: string) =>
+      apiClient.post<ApiResponse<import('../types').PortfolioReductionPreview>>('/risk/portfolio/reduction/confirm', { draftId }),
+
+    executePortfolioReduction: (draftId: string) =>
+      apiClient.post<ApiResponse<import('../types').PortfolioReductionPreview>>('/risk/portfolio/reduction/execute', { draftId }),
+
+    refreshPortfolioReduction: (draftId: string) =>
+      apiClient.post<ApiResponse<import('../types').PortfolioReductionPreview>>('/risk/portfolio/reduction/refresh', { draftId }),
+
+    portfolioReductionDrafts: (accountId: number) =>
+      apiClient.post<ApiResponse<import('../types').PortfolioReductionPreview[]>>('/risk/portfolio/reduction/list', { accountId }),
     
     /**
      * 卖出仓位

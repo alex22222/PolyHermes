@@ -10,8 +10,10 @@ import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import kotlinx.coroutines.runBlocking
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Bridge 持仓同步服务
@@ -25,11 +27,13 @@ class BridgePortfolioSyncService(
     private val bridgePositionSnapshotRepository: BridgePositionSnapshotRepository,
     private val marketRepository: MarketRepository,
     private val accountRepository: AccountRepository,
-    private val dailyAssetSnapshotService: DailyAssetSnapshotService
+    private val dailyAssetSnapshotService: DailyAssetSnapshotService,
+    private val pendingRedeemValuationService: PendingRedeemValuationService
 ) {
 
     private val logger = LoggerFactory.getLogger(BridgePortfolioSyncService::class.java)
     private val bridgeId = "polymtrade-bridge"
+    private val consecutiveEmptyPortfolios = ConcurrentHashMap<String, Int>()
 
     /**
      * 每 30 秒同步一次 Bridge 持仓
@@ -39,13 +43,9 @@ class BridgePortfolioSyncService(
     fun sync() {
         val response = bridgePortfolioClient.fetchPositions() ?: return
         val positions = response.positions
-        if (positions.isEmpty()) {
-            logger.debug("Bridge /portfolio 返回空持仓，跳过同步")
-            return
-        }
 
-        val runtimeAccount = bridgePortfolioClient.fetchAccount()
-        val walletAddress = runtimeAccount?.walletAddress?.lowercase()?.takeIf { it.isNotBlank() } ?: run {
+        val walletAddress = response.walletAddress?.lowercase()?.takeIf { it.isNotBlank() }
+            ?: bridgePortfolioClient.fetchAccount()?.walletAddress?.lowercase()?.takeIf { it.isNotBlank() } ?: run {
             logger.warn("Bridge 持仓同步跳过：无法获取当前登录钱包地址")
             return
         }
@@ -54,25 +54,50 @@ class BridgePortfolioSyncService(
         if (validPositions.size < positions.size) {
             logger.warn("Bridge /portfolio 返回 ${positions.size} 条持仓，过滤掉 ${positions.size - validPositions.size} 条非法数据")
         }
-        if (validPositions.isEmpty()) {
+        if (positions.isNotEmpty() && validPositions.isEmpty()) {
+            consecutiveEmptyPortfolios.remove(walletAddress)
             logger.debug("Bridge /portfolio 无有效持仓，跳过同步")
             return
         }
 
         val syncedAt = response.syncedAt ?: System.currentTimeMillis()
+        val availableBalance = response.availableBalance ?: bridgePortfolioClient.fetchBalance()?.availableBalance
+        if (positions.isEmpty()) {
+            if (!response.portfolioComplete || !response.emptyStateConfirmed) {
+                consecutiveEmptyPortfolios.remove(walletAddress)
+                logger.warn("Bridge /portfolio 空列表缺少页面空仓完成态，保留旧持仓: wallet=$walletAddress")
+                return
+            }
+            if (availableBalance == null) {
+                consecutiveEmptyPortfolios.remove(walletAddress)
+                logger.warn("Bridge /portfolio 返回空持仓但余额不可用，拒绝确认纯现金状态: wallet=$walletAddress")
+                return
+            }
+            val emptyCount = consecutiveEmptyPortfolios.merge(walletAddress, 1, Int::plus) ?: 1
+            if (emptyCount < EMPTY_PORTFOLIO_CONFIRMATIONS) {
+                logger.warn("Bridge /portfolio 首次返回空持仓，等待再次确认后再清理: wallet=$walletAddress")
+                return
+            }
+        } else {
+            consecutiveEmptyPortfolios.remove(walletAddress)
+        }
+
+        val openPositions = validPositions.filterNot { it.redeemable }
+
         val existing = bridgePositionSnapshotRepository.findByBridgeIdAndWalletAddress(bridgeId, walletAddress)
             .associateBy { it.marketTitle to it.side.uppercase() }
             .toMutableMap()
 
-        val availableBalance = bridgePortfolioClient.fetchBalance()?.availableBalance
-
-        val incomingTitles = validPositions.map { it.marketTitle }.distinct()
-        val markets = marketRepository.findByTitleIn(incomingTitles)
-            .associateBy { it.title }
+        val incomingTitles = openPositions.map { it.marketTitle }.distinct()
+        val markets = if (incomingTitles.isEmpty()) {
+            emptyMap()
+        } else {
+            marketRepository.findByTitleIn(incomingTitles).associateBy { it.title }
+        }
 
         val now = System.currentTimeMillis()
 
-        for (position in validPositions) {
+        for (position in openPositions) {
             val side = position.side.uppercase()
             val market = markets[position.marketTitle]
             val snapshot = existing.remove(position.marketTitle to side)
@@ -99,17 +124,28 @@ class BridgePortfolioSyncService(
             bridgePositionSnapshotRepository.save(snapshot)
         }
 
-        if (availableBalance != null) {
-            val positionsValue = validPositions.fold(BigDecimal.ZERO) { total, position ->
-                total.add(position.currentValue?.let(BigDecimal::valueOf) ?: BigDecimal.ZERO)
-            }
-            dailyAssetSnapshotService.captureIfAbsent(
-                walletAddress = walletAddress,
-                availableBalance = BigDecimal.valueOf(availableBalance),
-                positionsValue = positionsValue,
-                capturedAt = syncedAt
-            )
+        val positionsValue = openPositions.fold(BigDecimal.ZERO) { total, position ->
+            total.add(position.currentValue?.let(BigDecimal::valueOf) ?: BigDecimal.ZERO)
         }
+        val unknownPositionCount = openPositions.count { it.currentValue == null }
+        val pendingRedeem = if (response.redeemValuationStatus == "COMPLETE") {
+            PendingRedeemValuation(
+                value = response.pendingRedeemValue?.let(BigDecimal::valueOf) ?: BigDecimal.ZERO,
+                positionCount = response.redeemablePositionCount ?: 0,
+                status = "COMPLETE"
+            )
+        } else {
+            runBlocking { pendingRedeemValuationService.fetch(walletAddress) }
+        }
+        dailyAssetSnapshotService.captureIfAbsent(
+            walletAddress = walletAddress,
+            availableBalance = availableBalance?.let(BigDecimal::valueOf),
+            positionsValue = positionsValue,
+            capturedAt = syncedAt,
+            unknownPositionCount = unknownPositionCount,
+            pendingRedeemValue = pendingRedeem.value,
+            redeemablePositionCount = pendingRedeem.positionCount
+        )
 
         // 删除已不在持仓列表中的旧快照
         if (existing.isNotEmpty()) {
@@ -120,7 +156,7 @@ class BridgePortfolioSyncService(
         // 更新该钱包对应账户的最后同步时间
         updateAccountLastBridgeSyncAt(walletAddress, syncedAt, now)
 
-        logger.info("Bridge 持仓同步完成: count=${validPositions.size}, syncedAt=$syncedAt, wallet=$walletAddress")
+        logger.info("Bridge 持仓同步完成: count=${openPositions.size}, syncedAt=$syncedAt, wallet=$walletAddress")
     }
 
     /**
@@ -156,5 +192,9 @@ class BridgePortfolioSyncService(
         } catch (e: Exception) {
             logger.warn("更新账户最后 Bridge 同步时间失败: wallet=$walletAddress", e)
         }
+    }
+
+    companion object {
+        private const val EMPTY_PORTFOLIO_CONFIRMATIONS = 2
     }
 }

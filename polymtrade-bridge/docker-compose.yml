@@ -2,12 +2,14 @@ version: '3.8'
 
 services:
   polymtrade-bridge:
+    image: ${BRIDGE_IMAGE:-polyhermes-bridge:linux-amd64}
     build:
       context: .
       dockerfile: Dockerfile
     container_name: polymtrade-bridge
     ports:
-      - "${BRIDGE_PORT:-8080}:8080"
+      - "127.0.0.1:${BRIDGE_PORT:-8080}:8080"
+      - "127.0.0.1:${NOVNC_PORT:-6080}:6080"
     env_file:
       - ../.env
     environment:
@@ -28,4 +30,4 @@ volumes:
 networks:
   polyhermes-network:
     external: true
-
+    name: ${POLYHERMES_DOCKER_NETWORK:-polyhermes_polyhermes-network}

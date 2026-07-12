@@ -9,7 +9,10 @@ import jakarta.servlet.http.HttpServletResponse
 import org.slf4j.LoggerFactory
 import org.springframework.http.MediaType
 import org.springframework.stereotype.Component
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.web.servlet.HandlerInterceptor
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 
 /**
  * JWT认证拦截器
@@ -17,7 +20,8 @@ import org.springframework.web.servlet.HandlerInterceptor
 @Component
 class JwtAuthenticationInterceptor(
     private val jwtUtils: JwtUtils,
-    private val userRepository: UserRepository
+    private val userRepository: UserRepository,
+    @Value("\${risk.internal.secret:}") private val internalRiskSecret: String
 ) : HandlerInterceptor {
     
     private val logger = LoggerFactory.getLogger(JwtAuthenticationInterceptor::class.java)
@@ -45,6 +49,16 @@ class JwtAuthenticationInterceptor(
 
         // 只拦截 /api/** 路径
         if (!path.startsWith("/api/")) {
+            return true
+        }
+
+        if (path in INTERNAL_RISK_PATHS) {
+            val supplied = request.getHeader(INTERNAL_RISK_HEADER).orEmpty()
+            if (internalRiskSecret.isBlank() || !secureEquals(supplied, internalRiskSecret)) {
+                sendAuthError(response, "Bridge 风险接口认证失败")
+                return false
+            }
+            request.setAttribute("internalBridgeRisk", true)
             return true
         }
 
@@ -122,5 +136,17 @@ class JwtAuthenticationInterceptor(
         response.writer.write(json)
         response.writer.flush()
     }
-}
 
+    private fun secureEquals(left: String, right: String): Boolean = MessageDigest.isEqual(
+        left.toByteArray(StandardCharsets.UTF_8),
+        right.toByteArray(StandardCharsets.UTF_8)
+    )
+
+    companion object {
+        private val INTERNAL_RISK_PATHS = setOf(
+            "/api/internal/risk/portfolio/evaluate",
+            "/api/internal/risk/portfolio/complete"
+        )
+        private const val INTERNAL_RISK_HEADER = "X-Bridge-Risk-Secret"
+    }
+}

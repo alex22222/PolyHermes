@@ -158,13 +158,13 @@ def test_tail_risk_low_price_buy_guard():
 
 
 def test_high_confidence_buy_guard():
-    allowed = _high_confidence_buy_reason("BUY", Decimal("0.80"))
+    allowed = _high_confidence_buy_reason("BUY", Decimal("0.55"))
     assert allowed is None, allowed
 
-    high_price = _high_confidence_buy_reason("BUY", Decimal("0.8001"))
+    high_price = _high_confidence_buy_reason("BUY", Decimal("0.5501"))
     assert high_price is not None, high_price
     assert "High-price low-upside BUY skipped" in high_price
-    assert "max=0.80" in high_price
+    assert "max=0.55" in high_price
 
     sell = _high_confidence_buy_reason("SELL", Decimal("0.96"))
     assert sell is None, sell

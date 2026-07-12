@@ -42,6 +42,12 @@ class BridgeMetrics:
     outcome_selection_failures: int = 0
     amount_input_failures: int = 0
 
+    # Portfolio risk checks
+    portfolio_risk_checks: int = 0
+    portfolio_risk_unavailable: int = 0
+    portfolio_risk_would_block: int = 0
+    portfolio_risk_denied: int = 0
+
     def to_dict(self) -> Dict[str, int]:
         return {
             "signals_received": self.signals_received,
@@ -62,6 +68,10 @@ class BridgeMetrics:
             "portfolio_errors": self.portfolio_errors,
             "outcome_selection_failures": self.outcome_selection_failures,
             "amount_input_failures": self.amount_input_failures,
+            "portfolio_risk_checks": self.portfolio_risk_checks,
+            "portfolio_risk_unavailable": self.portfolio_risk_unavailable,
+            "portfolio_risk_would_block": self.portfolio_risk_would_block,
+            "portfolio_risk_denied": self.portfolio_risk_denied,
         }
 
 

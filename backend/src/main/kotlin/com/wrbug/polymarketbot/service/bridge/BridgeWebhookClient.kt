@@ -184,6 +184,8 @@ class BridgeWebhookClient(
         val leaderAddress: String,
         val leaderName: String?,
         val transactionHash: String,
+        val modelCandidateId: String? = null,
+        val copyTradingId: Long? = null,
         val conditionId: String,
         val marketSlug: String?,
         val title: String?,

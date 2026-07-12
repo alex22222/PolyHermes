@@ -21,8 +21,22 @@ data class DailyAssetSnapshot(
     val availableBalance: BigDecimal,
     @Column(name = "positions_value", nullable = false, precision = 20, scale = 8)
     val positionsValue: BigDecimal,
-    @Column(name = "total_assets", nullable = false, precision = 20, scale = 8)
-    val totalAssets: BigDecimal,
+    @Column(name = "pending_redeem_value", precision = 20, scale = 8)
+    val pendingRedeemValue: BigDecimal?,
+    @Column(name = "redeemable_position_count")
+    val redeemablePositionCount: Int?,
+    @Column(name = "redeem_valuation_status", nullable = false, length = 20)
+    val redeemValuationStatus: String,
+    @Column(name = "total_assets", precision = 20, scale = 8)
+    val totalAssets: BigDecimal?,
+    @Column(name = "unknown_position_count", nullable = false)
+    val unknownPositionCount: Int = 0,
+    @Column(name = "valuation_status", nullable = false, length = 20)
+    val valuationStatus: String = "COMPLETE",
+    @Column(name = "snapshot_type", nullable = false, length = 32)
+    val snapshotType: String = "DAILY_FIRST_SUCCESS",
+    @Column(name = "capture_offset_ms", nullable = false)
+    val captureOffsetMs: Long = 0,
     @Column(name = "captured_at", nullable = false)
     val capturedAt: Long,
     @Column(name = "created_at", nullable = false)

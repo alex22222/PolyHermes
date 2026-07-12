@@ -88,3 +88,11 @@ tasks.withType<Test> {
     useJUnitPlatform()
 }
 
+val checkFlywayMigrationImmutability by tasks.registering(Exec::class) {
+    workingDir = rootProject.projectDir.parentFile
+    commandLine("bash", "scripts/check-applied-migrations.sh")
+}
+
+tasks.named("processResources") {
+    dependsOn(checkFlywayMigrationImmutability)
+}

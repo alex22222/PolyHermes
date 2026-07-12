@@ -76,12 +76,12 @@ echo "✅ 后端服务已启动 (PID: $BACKEND_PID, Port: 8000)"
 
 # 3. 等待后端服务启动
 echo "⏳ 等待后端服务就绪..."
-for i in {1..60}; do
+for i in {1..180}; do
     if curl -f http://localhost:8000/api/system/health > /dev/null 2>&1; then
         echo "✅ 后端服务健康检查通过"
         break
     fi
-    if [ $i -eq 60 ]; then
+    if [ $i -eq 180 ]; then
         echo "❌ 后端服务启动超时"
         exit 1
     fi

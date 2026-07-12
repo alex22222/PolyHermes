@@ -49,13 +49,18 @@ cd backend
 
 ```bash
 mkdir -p ~/Library/LaunchAgents
-cp scripts/launchd/com.polyhermes.backend.plist ~/Library/LaunchAgents/
-cp scripts/launchd/com.polyhermes.bridge.plist ~/Library/LaunchAgents/
+cp scripts/launchd/com.polyhermes.backend-local.plist ~/Library/LaunchAgents/
+cp scripts/launchd/com.polyhermes.backend-watchdog.plist ~/Library/LaunchAgents/
 
-# 编辑 plist，把 SET_FROM_ENVIRONMENT 替换为真实值
-launchctl load ~/Library/LaunchAgents/com.polyhermes.backend.plist
-launchctl load ~/Library/LaunchAgents/com.polyhermes.bridge.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.polyhermes.backend-local.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.polyhermes.backend-watchdog.plist
 ```
+
+`backend-local` 通过 `run_backend_local.sh` 加载项目 `.env` 并持续监督 Java 进程。
+`backend-watchdog` 每分钟同时检查 Actuator 和一个实际访问数据库仓库的业务接口，连续失败三次后重启 Backend。
+
+已提交的 `V*.sql` Flyway 迁移不可修改。需要调整数据库时必须添加新版本迁移；Backend 构建阶段会运行
+`scripts/check-applied-migrations.sh`，检测到旧迁移被修改或删除时拒绝生成新 jar。运行中的 launchd 仍可使用上一个已验证 jar 自动恢复。
 
 ---
 
@@ -82,7 +87,14 @@ curl http://localhost:8000/actuator/health
 # {"status":"UP"}
 ```
 
-所有守护方案都建议把该端点作为存活检查（liveness probe）。
+业务级探针：
+
+```bash
+curl -X POST http://localhost:8000/api/auth/check-first-use
+# {"code":0,"data":{"isFirstUse":false},"msg":""}
+```
+
+Actuator 用于进程存活检查，业务探针覆盖 Spring MVC、拦截器和数据库 Repository。两者都正常才视为 Backend 可用。
 
 ---
 
@@ -177,3 +189,30 @@ POLYBURG_PYTHON_BIN=/Library/Frameworks/Python.framework/Versions/3.14/bin/pytho
 ```bash
 cat scripts/polyburg-sync.env.example
 ```
+
+---
+
+## 6. Kalshi XRP 15m Shadow 验证
+
+每分钟追加一次只读盘口快照：
+
+```bash
+python3 scripts/kalshi_xrp15m_shadow.py snapshot
+```
+
+运行无未来数据泄漏的七天历史验证：
+
+```bash
+python3 scripts/kalshi_xrp15m_shadow.py backtest --lookback-days 7
+```
+
+报告写入 `reports/kalshi-xrp15m/latest.md`，原始对齐样本写入同目录的 `latest.json`。安装每分钟采集任务：
+
+```bash
+mkdir -p logs data ~/Library/LaunchAgents
+cp scripts/launchd/com.polyhermes.kalshi-xrp15m-shadow.plist ~/Library/LaunchAgents/
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.polyhermes.kalshi-xrp15m-shadow.plist 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.polyhermes.kalshi-xrp15m-shadow.plist
+```
+
+该任务只写 `data/kalshi-xrp15m-shadow.jsonl`，不会调用交易接口。

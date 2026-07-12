@@ -1899,42 +1899,7 @@ class AccountService(
             val positionsResult = getAllPositions()
             positionsResult.fold(
                 onSuccess = { positionListResponse ->
-                    // 筛选可赎回的仓位
-                    val redeemablePositions = positionListResponse.currentPositions.filter { it.redeemable }
-
-                    // 如果指定了账户ID，进一步筛选
-                    val filteredPositions = if (accountId != null) {
-                        redeemablePositions.filter { it.accountId == accountId }
-                    } else {
-                        redeemablePositions
-                    }
-
-                    // 计算总价值（赎回是1:1，所以价值等于数量）
-                    val totalValue = filteredPositions.fold(BigDecimal.ZERO) { sum, pos ->
-                        sum.add(pos.quantity.toSafeBigDecimal())
-                    }
-
-                    // 转换为可赎回仓位信息列表
-                    val redeemableInfoList = filteredPositions.map { pos ->
-                        com.wrbug.polymarketbot.dto.RedeemablePositionInfo(
-                            accountId = pos.accountId,
-                            accountName = pos.accountName,
-                            marketId = pos.marketId,
-                            marketTitle = pos.marketTitle,
-                            side = pos.side,
-                            outcomeIndex = pos.outcomeIndex ?: 0,
-                            quantity = pos.quantity,
-                            value = pos.quantity  // 赎回价值等于数量（1:1）
-                        )
-                    }
-
-                    Result.success(
-                        com.wrbug.polymarketbot.dto.RedeemablePositionsSummary(
-                            totalCount = redeemableInfoList.size,
-                            totalValue = totalValue.toPlainString(),
-                            positions = redeemableInfoList
-                        )
-                    )
+                    Result.success(RedeemablePositionSummaryCalculator.calculate(positionListResponse, accountId))
                 },
                 onFailure = { e ->
                     Result.failure(Exception("查询仓位失败: ${e.message}"))

@@ -114,9 +114,14 @@ class BridgePositionSellService(
                     conditionId = request.marketId,
                     sizeShares = sellQuantity.toDouble(),
                     outcomeIndex = request.outcomeIndex,
-                    marketTitle = position.marketTitle
+                    marketTitle = position.marketTitle,
+                    externalTradeId = request.externalTradeId
                 )
             )
+
+            if (bridgeResponse == null) {
+                return Result.failure(IllegalStateException("Bridge 未确认接收卖出请求"))
+            }
 
             logger.info(
                 "已转发 Bridge 卖出指令: accountId=${request.accountId}, market=${request.marketId}, " +
@@ -126,9 +131,9 @@ class BridgePositionSellService(
 
             Result.success(
                 BridgePositionSellResponse(
-                    recordId = bridgeResponse?.recordId,
-                    externalTradeId = bridgeResponse?.externalTradeId,
-                    status = bridgeResponse?.status ?: "accepted"
+                    recordId = bridgeResponse.recordId,
+                    externalTradeId = bridgeResponse.externalTradeId,
+                    status = bridgeResponse.status ?: "accepted"
                 )
             )
         } catch (e: Exception) {

@@ -4,7 +4,7 @@ import { SearchOutlined, AppstoreOutlined, UnorderedListOutlined, UpOutlined, Do
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { apiService } from '../services/api'
-import type { AccountPosition, Account, PositionPushMessage, PositionSellRequest, MarketPriceResponse, RedeemablePositionsSummary, PositionRedeemRequest, BridgePositionSellRequest, DailyAssetPoint } from '../types'
+import type { AccountPosition, Account, PositionPushMessage, PositionSellRequest, MarketPriceResponse, RedeemablePositionsSummary, PositionRedeemRequest, BridgePositionSellRequest, DailyAssetPoint, PortfolioExposureResponse, PortfolioExposureBucket, PortfolioRelationResponse, PortfolioPositionRelation, PortfolioRelationType, PortfolioBuyControl, PortfolioReductionPreview, PortfolioRiskHistoricalReplay } from '../types'
 import * as echarts from 'echarts'
 import { getPositionKey } from '../types'
 import { useMediaQuery } from 'react-responsive'
@@ -47,18 +47,315 @@ const PositionList: React.FC = () => {
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const [dailyAssets, setDailyAssets] = useState<DailyAssetPoint[]>([])
+  const [portfolioExposure, setPortfolioExposure] = useState<PortfolioExposureResponse | null>(null)
+  const [portfolioRelations, setPortfolioRelations] = useState<PortfolioRelationResponse | null>(null)
+  const [portfolioBuyControl, setPortfolioBuyControl] = useState<PortfolioBuyControl | null>(null)
+  const [buyControlModalVisible, setBuyControlModalVisible] = useState(false)
+  const [buyControlReason, setBuyControlReason] = useState('')
+  const [buyControlSubmitting, setBuyControlSubmitting] = useState(false)
+  const [exposurePositionKeys, setExposurePositionKeys] = useState<string[]>([])
+  const [reductionModalVisible, setReductionModalVisible] = useState(false)
+  const [reductionRelation, setReductionRelation] = useState<PortfolioPositionRelation | null>(null)
+  const [reductionPositionKey, setReductionPositionKey] = useState('')
+  const [reductionQuantity, setReductionQuantity] = useState('')
+  const [reductionPreview, setReductionPreview] = useState<PortfolioReductionPreview | null>(null)
+  const [reductionLoading, setReductionLoading] = useState(false)
+  const [reductionConfirming, setReductionConfirming] = useState(false)
+  const [reductionExecuting, setReductionExecuting] = useState(false)
+  const [reductionDrafts, setReductionDrafts] = useState<PortfolioReductionPreview[]>([])
+  const [historicalReplay, setHistoricalReplay] = useState<PortfolioRiskHistoricalReplay | null>(null)
   const assetChartRef = useRef<HTMLDivElement>(null)
   const assetAccountId = selectedAccountId ?? currentPositions[0]?.accountId
 
   useEffect(() => {
+    setExposurePositionKeys([])
     if (!assetAccountId) {
       setDailyAssets([])
+      setPortfolioExposure(null)
+      setPortfolioRelations(null)
+      setPortfolioBuyControl(null)
+      setReductionDrafts([])
+      setHistoricalReplay(null)
       return
     }
     apiService.accounts.dailyAssets(assetAccountId).then(response => {
       if (response.data.code === 0) setDailyAssets(response.data.data || [])
     }).catch(error => console.error('获取每日总资产失败:', error))
+    apiService.accounts.portfolioExposures(assetAccountId).then(response => {
+      if (response.data.code === 0) setPortfolioExposure(response.data.data || null)
+    }).catch(error => console.error('获取组合暴露失败:', error))
+    apiService.accounts.portfolioRelations(assetAccountId).then(response => {
+      if (response.data.code === 0) setPortfolioRelations(response.data.data || null)
+    }).catch(error => console.error('获取仓位关系失败:', error))
+    apiService.accounts.portfolioBuyControl(assetAccountId).then(response => {
+      if (response.data.code === 0) setPortfolioBuyControl(response.data.data || null)
+    }).catch(error => console.error('获取 BUY 控制状态失败:', error))
+    apiService.accounts.portfolioReductionDrafts(assetAccountId).then(response => {
+      if (response.data.code === 0) setReductionDrafts(response.data.data || [])
+    }).catch(error => console.error('获取减仓草案失败:', error))
+    apiService.accounts.portfolioHistoricalReplay(assetAccountId).then(response => {
+      if (response.data.code === 0) setHistoricalReplay(response.data.data || null)
+    }).catch(error => console.error('获取历史回放报告失败:', error))
   }, [assetAccountId])
+
+  const updateBuyControl = async (paused: boolean, reason?: string) => {
+    if (!assetAccountId || buyControlSubmitting) return
+    setBuyControlSubmitting(true)
+    try {
+      const response = await apiService.accounts.updatePortfolioBuyControl({ accountId: assetAccountId, paused, reason })
+      if (response.data.code === 0 && response.data.data) {
+        setPortfolioBuyControl(response.data.data)
+        setBuyControlModalVisible(false)
+        setBuyControlReason('')
+        message.success(paused ? '已暂停该账户新增 BUY，SELL 不受影响' : '已恢复该账户新增 BUY')
+      } else {
+        message.error(response.data.msg || '更新 BUY 控制失败')
+      }
+    } catch (error: any) {
+      message.error(error.message || '更新 BUY 控制失败')
+    } finally {
+      setBuyControlSubmitting(false)
+    }
+  }
+
+  const confirmResumeBuy = () => {
+    Modal.confirm({
+      title: '恢复该账户新增 BUY？',
+      content: '恢复后所有通过现有组合风控的 BUY 入口将重新允许执行；SELL 始终不受此开关影响。',
+      okText: '确认恢复',
+      cancelText: '取消',
+      onOk: () => updateBuyControl(false, '人工确认恢复 BUY')
+    })
+  }
+
+  const relationMeta: Record<PortfolioRelationType, { label: string; color: string }> = {
+    DUPLICATE: { label: '重复', color: 'red' },
+    TRUE_HEDGE: { label: '真对冲', color: 'green' },
+    PSEUDO_HEDGE: { label: '伪对冲', color: 'volcano' },
+    RELATED: { label: '相关', color: 'blue' },
+    LONG_OCCUPIED: { label: '长期占资', color: 'gold' },
+    UNKNOWN: { label: '未知', color: 'orange' }
+  }
+
+  const openReductionPreview = (relation: PortfolioPositionRelation) => {
+    const firstKey = relation.positionKeys[0] || ''
+    setReductionRelation(relation)
+    setReductionPositionKey(firstKey)
+    setReductionQuantity('')
+    setReductionPreview(null)
+    setReductionModalVisible(true)
+  }
+
+  const openReductionDraft = (draft: PortfolioReductionPreview) => {
+    setReductionRelation(portfolioRelations?.relations.find(item => item.positionKeys.includes(draft.positionKey)) || null)
+    setReductionPositionKey(draft.positionKey)
+    setReductionQuantity(draft.requestedQuantity)
+    setReductionPreview(draft)
+    setReductionModalVisible(true)
+  }
+
+  const createReductionPreview = async () => {
+    if (!assetAccountId || !reductionPositionKey || !reductionQuantity) return
+    setReductionLoading(true)
+    try {
+      const response = await apiService.accounts.previewPortfolioReduction({
+        accountId: assetAccountId,
+        positionKey: reductionPositionKey,
+        quantity: reductionQuantity
+      })
+      if (response.data.code === 0 && response.data.data) {
+        setReductionPreview(response.data.data)
+        setReductionDrafts(items => [response.data.data!, ...items.filter(item => item.draftId !== response.data.data!.draftId)])
+        message.success('减仓预览草案已保存；尚未执行 SELL')
+      } else {
+        message.error(response.data.msg || '生成减仓预览失败')
+      }
+    } catch (error: any) {
+      message.error(error.message || '生成减仓预览失败')
+    } finally {
+      setReductionLoading(false)
+    }
+  }
+
+  const confirmReductionDraft = () => {
+    if (!reductionPreview || reductionConfirming) return
+    Modal.confirm({
+      title: '确认这份减仓草案？',
+      content: '系统会重新校验真实持仓和可用数量，并记录你的逐笔确认。本步仍不执行 SELL。',
+      okText: '确认草案',
+      cancelText: '取消',
+      onOk: async () => {
+        setReductionConfirming(true)
+        try {
+          const response = await apiService.accounts.confirmPortfolioReduction(reductionPreview.draftId)
+          if (response.data.code === 0 && response.data.data) {
+            setReductionPreview(response.data.data)
+            setReductionDrafts(items => items.map(item => item.draftId === response.data.data!.draftId ? response.data.data! : item))
+            message.success('草案已逐笔确认；仍未执行 SELL')
+          } else {
+            message.error(response.data.msg || '确认减仓草案失败')
+          }
+        } catch (error: any) {
+          message.error(error.message || '确认减仓草案失败')
+        } finally {
+          setReductionConfirming(false)
+        }
+      }
+    })
+  }
+
+  const executeReductionDraft = () => {
+    if (!reductionPreview || !reductionPreview.executionEnabled || reductionExecuting) return
+    Modal.confirm({
+      title: '最终确认：立即执行真实 SELL？',
+      content: `将通过 Bridge 市价卖出 ${reductionPreview.requestedQuantity} 份 ${reductionPreview.outcome}。这是真实资金操作，提交后不能撤销。`,
+      okText: '确认真实卖出',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        setReductionExecuting(true)
+        try {
+          const response = await apiService.accounts.executePortfolioReduction(reductionPreview.draftId)
+          if (response.data.code === 0 && response.data.data) {
+            setReductionPreview(response.data.data)
+            setReductionDrafts(items => items.map(item => item.draftId === response.data.data!.draftId ? response.data.data! : item))
+            if (response.data.data.status === 'SUBMITTED') {
+              message.success('SELL 已幂等提交到 Bridge，请在桥接记录中跟踪终态')
+            } else {
+              message.error(response.data.data.executionError || `执行状态：${response.data.data.status}`)
+            }
+          } else {
+            message.error(response.data.msg || '提交减仓 SELL 失败')
+          }
+        } catch (error: any) {
+          message.error(error.message || '提交减仓 SELL 失败')
+        } finally {
+          setReductionExecuting(false)
+        }
+      }
+    })
+  }
+
+  const refreshReductionDraft = async () => {
+    if (!reductionPreview || reductionLoading) return
+    setReductionLoading(true)
+    try {
+      const response = await apiService.accounts.refreshPortfolioReduction(reductionPreview.draftId)
+      if (response.data.code === 0 && response.data.data) {
+        setReductionPreview(response.data.data)
+        setReductionDrafts(items => items.map(item => item.draftId === response.data.data!.draftId ? response.data.data! : item))
+        message.success(`已刷新 Bridge 终态：${response.data.data.status}`)
+      } else {
+        message.error(response.data.msg || '刷新 Bridge 终态失败')
+      }
+    } catch (error: any) {
+      message.error(error.message || '刷新 Bridge 终态失败')
+    } finally {
+      setReductionLoading(false)
+    }
+  }
+
+  const relationColumns = useMemo(() => [
+    {
+      title: '关系', dataIndex: 'type', key: 'type', width: 100,
+      render: (value: PortfolioRelationType) => <Tag color={relationMeta[value].color}>{relationMeta[value].label}</Tag>
+    },
+    {
+      title: '领域 / 实体', key: 'entity', width: 150,
+      render: (_: unknown, row: PortfolioPositionRelation) => `${row.category || '未知'} / ${row.entityKey || '未识别'}`
+    },
+    {
+      title: '仓位', key: 'positions',
+      render: (_: unknown, row: PortfolioPositionRelation) => (
+        <Button type="link" size="small" style={{ padding: 0 }} onClick={() => {
+          setExposurePositionKeys(row.positionKeys)
+          setPositionFilter('current')
+          setCurrentPage(1)
+        }}>
+          查看 {row.positionKeys.length} 个仓位
+        </Button>
+      )
+    },
+    {
+      title: '关联 / 未对冲价值', key: 'value', align: 'right' as const, width: 180,
+      render: (_: unknown, row: PortfolioPositionRelation) => (
+        <span>${formatUSDC(row.relatedValue || '0')} / {row.unmatchedValue == null ? '—' : `$${formatUSDC(row.unmatchedValue)}`}</span>
+      )
+    },
+    {
+      title: '证据', key: 'evidence',
+      render: (_: unknown, row: PortfolioPositionRelation) => (
+        <Space size={4} wrap><Tag>{row.confidence}</Tag><span>{row.rationale}</span></Space>
+      )
+    },
+    {
+      title: '处置', key: 'action', width: 150,
+      render: (_: unknown, row: PortfolioPositionRelation) => <Button size="small" onClick={() => openReductionPreview(row)}>减仓预览</Button>
+    }
+  ], [assetAccountId, portfolioRelations])
+
+  const exposureColumns = useMemo(() => [
+    {
+      title: '归属',
+      dataIndex: 'label',
+      key: 'label',
+      render: (value: string, row: PortfolioExposureBucket) => (
+        <Button type="link" size="small" style={{ padding: 0 }} onClick={() => {
+          setExposurePositionKeys(row.positionKeys)
+          setPositionFilter('current')
+          setCurrentPage(1)
+        }}>
+          {row.key.startsWith('UNKNOWN') ? <Tag color="orange">{value}</Tag> : value}
+        </Button>
+      )
+    },
+    {
+      title: '归因证据',
+      dataIndex: 'attributionSource',
+      key: 'attributionSource',
+      render: (value: string, row: PortfolioExposureBucket) => (
+        <Space size={4}>
+          <Tag color={row.attributionQuality === 'EXACT' ? 'green' : row.attributionQuality === 'INFERRED' ? 'blue' : 'orange'}>
+            {value} / {row.attributionQuality}
+          </Tag>
+          {row.leaderId != null && <Button size="small" onClick={() => navigate(`/copy-trading?leaderId=${row.leaderId}`)}>跟单配置</Button>}
+        </Space>
+      )
+    },
+    {
+      title: '成本 / 未实现盈亏',
+      key: 'costAndPnl',
+      align: 'right' as const,
+      render: (_: unknown, row: PortfolioExposureBucket) => row.costBasis == null || row.unrealizedPnl == null
+        ? '未知'
+        : <span>${formatUSDC(row.costBasis)} / <span style={{ color: Number(row.unrealizedPnl) >= 0 ? '#3f8600' : '#cf1322' }}>{Number(row.unrealizedPnl) >= 0 ? '+' : ''}${formatUSDC(row.unrealizedPnl)}</span></span>
+    },
+    {
+      title: '已观察占资',
+      dataIndex: 'firstObservedAt',
+      key: 'firstObservedAt',
+      render: (value: number | null) => {
+        if (value == null) return '未知'
+        const hours = Math.max(0, Math.floor((Date.now() - value) / 3600000))
+        return hours >= 24 ? `${Math.floor(hours / 24)}天 ${hours % 24}小时` : `${hours}小时`
+      }
+    },
+    {
+      title: '暴露价值',
+      dataIndex: 'value',
+      key: 'value',
+      align: 'right' as const,
+      render: (value: string) => `$${formatUSDC(value)}`
+    },
+    {
+      title: '总资产占比',
+      dataIndex: 'percentOfTotalAssets',
+      key: 'percentOfTotalAssets',
+      align: 'right' as const,
+      render: (value: string | null) => value == null ? '未知' : `${Number(value).toFixed(2)}%`
+    },
+    { title: '仓位', dataIndex: 'positionCount', key: 'positionCount', align: 'right' as const }
+  ], [navigate])
 
   useEffect(() => {
     if (!assetChartRef.current) return
@@ -69,7 +366,19 @@ const PositionList: React.FC = () => {
         formatter: (params: any) => {
           const point = dailyAssets[params?.[0]?.dataIndex]
           if (!point) return ''
-          return `${params[0].axisValue}<br/>总资产：$${formatUSDC(point.totalAssets)}<br/>余额：$${formatUSDC(point.availableBalance)}<br/>持仓价值：$${formatUSDC(point.positionsValue)}`
+          const total = point.totalAssets == null ? '估值不完整' : `$${formatUSDC(point.totalAssets)}`
+          const quality = point.valuationStatus === 'INCOMPLETE'
+            ? `<br/>未知估值持仓：${point.unknownPositionCount}`
+            : point.valuationStatus === 'REDEEM_VALUE_UNKNOWN'
+              ? '<br/>待赎回价值：数据源不可用'
+              : ''
+          const redeemValue = point.pendingRedeemValue == null
+            ? '未知'
+            : `$${formatUSDC(point.pendingRedeemValue)}（${point.redeemablePositionCount ?? 0} 个）`
+          const captureLabel = point.snapshotType === 'MIDNIGHT'
+            ? `零点采样（偏移 ${Math.round(point.captureOffsetMs / 1000)} 秒）`
+            : `当日首次采样（${new Date(point.capturedAt).toLocaleTimeString('zh-CN')}）`
+          return `${params[0].axisValue}<br/>${captureLabel}<br/>总资产：${total}<br/>余额：$${formatUSDC(point.availableBalance)}<br/>开放持仓价值：$${formatUSDC(point.positionsValue)}<br/>待赎回价值：${redeemValue}${quality}`
         }
       },
       grid: { left: 56, right: 24, top: 24, bottom: 40 },
@@ -84,7 +393,7 @@ const PositionList: React.FC = () => {
         type: 'line',
         smooth: true,
         symbolSize: 7,
-        data: dailyAssets.map(point => Number(point.totalAssets)),
+        data: dailyAssets.map(point => point.totalAssets == null ? null : Number(point.totalAssets)),
         lineStyle: { width: 3, color: '#1677ff' },
         itemStyle: { color: '#1677ff' },
         areaStyle: { color: 'rgba(22, 119, 255, 0.12)' }
@@ -387,6 +696,11 @@ const PositionList: React.FC = () => {
       filtered = filtered.filter(p => p.accountId === selectedAccountId)
     }
 
+    if (exposurePositionKeys.length > 0) {
+      const keys = new Set(exposurePositionKeys)
+      filtered = filtered.filter(position => keys.has(`${position.marketId || position.marketTitle}|${position.side.toUpperCase()}`))
+    }
+
     // 2. 最后按关键词搜索
     if (searchKeyword.trim()) {
       const keyword = searchKeyword.trim().toLowerCase()
@@ -420,7 +734,7 @@ const PositionList: React.FC = () => {
     }
 
     return filtered
-  }, [basePositions, searchKeyword, selectedAccountId])
+  }, [basePositions, searchKeyword, selectedAccountId, exposurePositionKeys])
 
   // 分页后的数据
   const paginatedPositions = useMemo(() => {
@@ -1435,8 +1749,8 @@ const PositionList: React.FC = () => {
         )}
       </div>
       <Card
-        title="每日总资产（00:00）"
-        extra={<span style={{ color: '#999', fontSize: 12 }}>总资产 = 可用余额 + 钱包持仓当前价值</span>}
+        title="每日总资产快照"
+        extra={<span style={{ color: '#999', fontSize: 12 }}>完整总资产 = 可用余额 + 开放持仓价值 + 待赎回价值；未知项不按 0 计算</span>}
         style={{ marginBottom: 16 }}
       >
         {dailyAssets.length > 0 ? (
@@ -1445,6 +1759,230 @@ const PositionList: React.FC = () => {
           <Empty description="暂无每日资产快照，首次同步后开始记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         )}
       </Card>
+
+      <Card title="组合风险暴露" style={{ marginBottom: 16 }}>
+        {portfolioExposure ? (
+          <>
+            {exposurePositionKeys.length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <Tag color="blue" closable onClose={() => setExposurePositionKeys([])}>
+                  正在下钻查看 {exposurePositionKeys.length} 个仓位
+                </Tag>
+              </div>
+            )}
+            <Descriptions bordered size="small" column={isMobile ? 1 : 4} style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="账户总资产">
+                {portfolioExposure.account.totalAssets == null ? '估值不完整' : `$${formatUSDC(portfolioExposure.account.totalAssets)}`}
+              </Descriptions.Item>
+              <Descriptions.Item label="开放持仓">${formatUSDC(portfolioExposure.account.openPositionsValue)}</Descriptions.Item>
+              <Descriptions.Item label="待赎回">
+                {portfolioExposure.account.pendingRedeemValue == null ? '未知' : `$${formatUSDC(portfolioExposure.account.pendingRedeemValue)}`}
+              </Descriptions.Item>
+              <Descriptions.Item label="数据状态">
+                <Tag color={portfolioExposure.account.valuationStatus === 'COMPLETE' ? 'green' : 'orange'}>
+                  {portfolioExposure.account.valuationStatus}
+                </Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="持仓成本">
+                {portfolioExposure.account.positionCostBasis == null ? '未知' : `$${formatUSDC(portfolioExposure.account.positionCostBasis)}`}
+              </Descriptions.Item>
+              <Descriptions.Item label="未实现盈亏">
+                {portfolioExposure.account.unrealizedPnl == null ? '未知' : (
+                  <span style={{ color: Number(portfolioExposure.account.unrealizedPnl) >= 0 ? '#3f8600' : '#cf1322' }}>
+                    {Number(portfolioExposure.account.unrealizedPnl) >= 0 ? '+' : ''}${formatUSDC(portfolioExposure.account.unrealizedPnl)}
+                  </span>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="最早观察时间">
+                {portfolioExposure.account.firstObservedAt == null ? '未知' : new Date(portfolioExposure.account.firstObservedAt).toLocaleString('zh-CN')}
+              </Descriptions.Item>
+            </Descriptions>
+            <Space wrap style={{ marginBottom: 16 }}>
+              <Tag>总仓位 {portfolioExposure.coverage.totalPositions}</Tag>
+              <Tag color={portfolioExposure.coverage.unknownLeaderPositions ? 'orange' : 'green'}>Leader 未归属 {portfolioExposure.coverage.unknownLeaderPositions}</Tag>
+              <Tag color={portfolioExposure.coverage.unknownCategoryPositions ? 'orange' : 'green'}>领域未分类 {portfolioExposure.coverage.unknownCategoryPositions}</Tag>
+              <Tag color={portfolioExposure.coverage.unknownEventPositions ? 'orange' : 'green'}>事件未归属 {portfolioExposure.coverage.unknownEventPositions}</Tag>
+              <Tag color={portfolioExposure.coverage.unknownValuePositions ? 'red' : 'green'}>估值未知 {portfolioExposure.coverage.unknownValuePositions}</Tag>
+            </Space>
+            <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+              {([
+                ['Leader', portfolioExposure.coverage.leader],
+                ['领域', portfolioExposure.coverage.category],
+                ['事件', portfolioExposure.coverage.event]
+              ] as const).map(([label, coverage]) => (
+                <Col xs={24} md={8} key={label}>
+                  <Card size="small" title={`${label}归因质量`}>
+                    <Space direction="vertical" size={4}>
+                      <span>已知价值覆盖率：{coverage.knownValueCoveragePercent == null ? '未知' : `${Number(coverage.knownValueCoveragePercent).toFixed(2)}%`}</span>
+                      <span>已知 ${formatUSDC(coverage.knownValue)} / 未知 ${formatUSDC(coverage.unknownValue)}</span>
+                      <Tag color={coverage.shadowEligible ? 'green' : 'orange'}>
+                        {coverage.status}（Shadow 门槛 {coverage.minimumShadowCoveragePercent}%）
+                      </Tag>
+                    </Space>
+                  </Card>
+                </Col>
+              ))}
+            </Row>
+            <Row gutter={[16, 16]}>
+              <Col xs={24} xl={8}>
+                <Card size="small" title="按 Leader">
+                  <Table rowKey="key" size="small" pagination={false} dataSource={portfolioExposure.leaders} columns={exposureColumns} scroll={{ x: 640 }} />
+                </Card>
+              </Col>
+              <Col xs={24} xl={8}>
+                <Card size="small" title="按领域">
+                  <Table rowKey="key" size="small" pagination={false} dataSource={portfolioExposure.categories} columns={exposureColumns} scroll={{ x: 640 }} />
+                </Card>
+              </Col>
+              <Col xs={24} xl={8}>
+                <Card size="small" title="按事件">
+                  <Table rowKey="key" size="small" pagination={false} dataSource={portfolioExposure.events} columns={exposureColumns} scroll={{ x: 640 }} />
+                </Card>
+              </Col>
+            </Row>
+          </>
+        ) : (
+          <Empty description="暂无组合暴露数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        )}
+      </Card>
+
+      <Card
+        title="G3 历史回放与 Shadow 数据质量"
+        extra={<span style={{ color: '#999', fontSize: 12 }}>只读报告；不改变 BUY/SELL 规则</span>}
+        style={{ marginBottom: 16 }}
+      >
+        {historicalReplay ? (
+          <>
+            <Space wrap style={{ marginBottom: 16 }}>
+              <Tag color="green">BUY 成功 {historicalReplay.buySuccess}</Tag>
+              <Tag color="red">BUY 失败 {historicalReplay.buyFailed}</Tag>
+              <Tag color="green">SELL 成功 {historicalReplay.sellSuccess}</Tag>
+              <Tag color="red">SELL 失败 {historicalReplay.sellFailed}</Tag>
+              <Tag>账户归属记录 {historicalReplay.scopedBridgeRecords}</Tag>
+              {historicalReplay.unscopedBridgeRecords > 0 && <Tag color="orange">未归属 Bridge 记录 {historicalReplay.unscopedBridgeRecords}</Tag>}
+            </Space>
+            <Table
+              size="small"
+              pagination={false}
+              rowKey="code"
+              dataSource={historicalReplay.metrics}
+              columns={[
+                { title: '指标', dataIndex: 'code', width: 220 },
+                { title: '数值', dataIndex: 'value', width: 150, render: value => value ?? '—' },
+                { title: '数据状态', dataIndex: 'status', width: 160, render: value => <Tag color={value === 'AVAILABLE' ? 'green' : 'orange'}>{value}</Tag> },
+                { title: '口径/说明', dataIndex: 'rationale' }
+              ]}
+            />
+            {historicalReplay.blockers.length > 0 && (
+              <div style={{ marginTop: 16, padding: 12, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8 }}>
+                <div style={{ marginBottom: 4, fontWeight: 500 }}>当前不可用于 Enforced 评审的数据缺口</div>
+                {historicalReplay.blockers.map(item => <div key={item} style={{ fontSize: 12, color: '#8c6d1f' }}>{item}</div>)}
+              </div>
+            )}
+          </>
+        ) : (
+          <Empty description="暂无历史回放数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        )}
+      </Card>
+
+      <Card
+        title="重复、对冲与相关仓位"
+        extra={<span style={{ color: '#999', fontSize: 12 }}>只读识别；相反 outcome 不会自动按全额抵消，任何处置都需人工预览和逐笔确认</span>}
+        style={{ marginBottom: 16 }}
+      >
+        {portfolioRelations ? (
+          <>
+            <div style={{ marginBottom: 16, padding: 12, borderRadius: 8, background: portfolioBuyControl?.paused ? '#fff2f0' : '#f6ffed', border: `1px solid ${portfolioBuyControl?.paused ? '#ffccc7' : '#b7eb8f'}` }}>
+              <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
+                <Space wrap>
+                  <Tag color={portfolioBuyControl?.paused ? 'red' : 'green'}>
+                    {portfolioBuyControl?.paused ? '新增 BUY 已暂停' : '新增 BUY 正常'}
+                  </Tag>
+                  <span>该人工开关覆盖 Bridge、自动策略和手工 BUY；SELL 始终优先且不受影响。</span>
+                  {portfolioBuyControl?.paused && <span style={{ color: '#cf1322' }}>原因：{portfolioBuyControl.reason}</span>}
+                  {portfolioBuyControl?.updatedAt && (
+                    <span style={{ color: '#999', fontSize: 12 }}>
+                      {portfolioBuyControl.updatedBy} · {new Date(portfolioBuyControl.updatedAt).toLocaleString('zh-CN')}
+                    </span>
+                  )}
+                </Space>
+                {portfolioBuyControl?.paused ? (
+                  <Button onClick={confirmResumeBuy} loading={buyControlSubmitting}>恢复 BUY</Button>
+                ) : (
+                  <Button danger onClick={() => setBuyControlModalVisible(true)}>暂停新增 BUY</Button>
+                )}
+              </Space>
+            </div>
+            <Space wrap style={{ marginBottom: 16 }}>
+              {(Object.keys(relationMeta) as PortfolioRelationType[]).map(type => {
+                const count = portfolioRelations.countsByType[type] || 0
+                if (count === 0) return null
+                return (
+                  <Tag color={relationMeta[type].color} key={type}>
+                    {relationMeta[type].label} {count} 组 · ${formatUSDC(portfolioRelations.relatedValueByType[type] || '0')}
+                  </Tag>
+                )
+              })}
+              <span style={{ color: '#999', fontSize: 12 }}>
+                识别时间：{new Date(portfolioRelations.generatedAt).toLocaleString('zh-CN')}
+              </span>
+            </Space>
+            {portfolioRelations.relations.length > 0 ? (
+              <Table
+                rowKey={(row) => `${row.type}:${row.positionKeys.join('|')}`}
+                size="small"
+                pagination={{ pageSize: 10, hideOnSinglePage: true }}
+                dataSource={portfolioRelations.relations}
+                columns={relationColumns}
+                scroll={{ x: 900 }}
+              />
+            ) : (
+              <Empty description="当前没有识别到重复、对冲、相关或长期占资关系" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            )}
+            {reductionDrafts.some(item => item.status !== 'EXPIRED') && (
+              <Card size="small" title="人工减仓队列" style={{ marginTop: 16 }}>
+                <Table
+                  size="small"
+                  rowKey="draftId"
+                  pagination={{ pageSize: 5, hideOnSinglePage: true }}
+                  dataSource={reductionDrafts.filter(item => item.status !== 'EXPIRED')}
+                  columns={[
+                    { title: '市场', dataIndex: 'marketTitle', ellipsis: true },
+                    { title: '方向', dataIndex: 'outcome', width: 90, render: value => <Tag>{value}</Tag> },
+                    { title: '数量', dataIndex: 'requestedQuantity', width: 110 },
+                    { title: '状态', dataIndex: 'status', width: 120, render: value => <Tag color={value === 'FAILED' ? 'red' : value === 'EXECUTED' ? 'green' : 'blue'}>{value}</Tag> },
+                    { title: '尝试', dataIndex: 'executionAttempt', width: 80, render: value => value || '—' },
+                    { title: '操作', width: 100, render: (_, row) => <Button size="small" onClick={() => openReductionDraft(row)}>查看</Button> }
+                  ]}
+                />
+              </Card>
+            )}
+          </>
+        ) : (
+          <Empty description="请选择账户查看仓位关系" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        )}
+      </Card>
+
+      <Modal
+        title="暂停该账户新增 BUY"
+        open={buyControlModalVisible}
+        okText="确认暂停"
+        cancelText="取消"
+        okButtonProps={{ danger: true, disabled: buyControlReason.trim().length === 0 }}
+        confirmLoading={buyControlSubmitting}
+        onCancel={() => !buyControlSubmitting && setBuyControlModalVisible(false)}
+        onOk={() => updateBuyControl(true, buyControlReason.trim())}
+      >
+        <p>暂停立即覆盖 Bridge、后端 Gateway、自动策略和手工 BUY，不影响 SELL、赎回和安全退出。</p>
+        <Input.TextArea
+          value={buyControlReason}
+          onChange={event => setBuyControlReason(event.target.value)}
+          placeholder="必须填写暂停原因，写入审计记录"
+          rows={4}
+          maxLength={500}
+          showCount
+        />
+      </Modal>
 
       {(isMobile || viewMode === 'card') ? (
         <Card loading={loading}>
@@ -1754,6 +2292,98 @@ const PositionList: React.FC = () => {
               </div>
             )}
           </Form>
+        )}
+      </Modal>
+
+      <Modal
+        title="人工减仓预览（不执行 SELL）"
+        open={reductionModalVisible}
+        onCancel={() => setReductionModalVisible(false)}
+        width={isMobile ? '95%' : 900}
+        destroyOnClose
+        footer={[
+          <Button key="close" onClick={() => setReductionModalVisible(false)}>关闭</Button>,
+          <Button key="preview" type="primary" loading={reductionLoading} disabled={!reductionPositionKey || !reductionQuantity} onClick={createReductionPreview}>
+            生成新预览草案
+          </Button>
+        ]}
+      >
+        <div style={{ marginBottom: 16, padding: 12, background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 8 }}>
+          本页只计算并保存可过期草案，不会下单。草案有效期 10 分钟，后续执行必须逐笔人工确认。
+        </div>
+        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+          <Select
+            style={{ width: '100%' }}
+            value={reductionPositionKey || undefined}
+            placeholder="选择需要减仓的真实持仓"
+            onChange={(value) => {
+              setReductionPositionKey(value)
+              setReductionQuantity('')
+              setReductionPreview(null)
+            }}
+            options={(reductionRelation?.positionKeys || []).map(key => {
+              const position = portfolioRelations?.positions.find(item => item.positionKey === key)
+              return { value: key, label: position ? `${position.marketTitle} · ${position.outcome} · 可用 ${position.quantity}` : key }
+            })}
+          />
+          <Input
+            value={reductionQuantity}
+            onChange={event => {
+              setReductionQuantity(event.target.value)
+              setReductionPreview(null)
+            }}
+            placeholder="输入减仓数量"
+          />
+        </Space>
+        {reductionPreview && (
+          <>
+            <Descriptions bordered size="small" column={isMobile ? 1 : 2} style={{ marginTop: 20 }}>
+              <Descriptions.Item label="草案 ID">{reductionPreview.draftId}</Descriptions.Item>
+              <Descriptions.Item label="状态"><Tag color="blue">{reductionPreview.status}</Tag></Descriptions.Item>
+              <Descriptions.Item label="减仓数量">{reductionPreview.requestedQuantity} / {reductionPreview.availableQuantity}</Descriptions.Item>
+              <Descriptions.Item label="预计回收现金">${formatUSDC(reductionPreview.estimatedProceeds)}</Descriptions.Item>
+              <Descriptions.Item label="可用余额">${formatUSDC(reductionPreview.beforeAvailableBalance)} → ${formatUSDC(reductionPreview.afterAvailableBalance)}</Descriptions.Item>
+              <Descriptions.Item label="开放持仓价值">${formatUSDC(reductionPreview.beforeOpenPositionsValue)} → ${formatUSDC(reductionPreview.afterOpenPositionsValue)}</Descriptions.Item>
+              <Descriptions.Item label="总资产">${formatUSDC(reductionPreview.beforeTotalAssets)} → ${formatUSDC(reductionPreview.afterTotalAssets)}</Descriptions.Item>
+              <Descriptions.Item label="过期时间">{new Date(reductionPreview.expiresAt).toLocaleString('zh-CN')}</Descriptions.Item>
+              {reductionPreview.confirmedAt && <Descriptions.Item label="确认记录">{reductionPreview.confirmedBy} · {new Date(reductionPreview.confirmedAt).toLocaleString('zh-CN')}</Descriptions.Item>}
+              {reductionPreview.executionExternalTradeId && <Descriptions.Item label="执行幂等键">{reductionPreview.executionExternalTradeId}</Descriptions.Item>}
+              {reductionPreview.executionRecordId && <Descriptions.Item label="Bridge 记录">#{reductionPreview.executionRecordId}</Descriptions.Item>}
+              {reductionPreview.executionAttempt > 0 && <Descriptions.Item label="执行尝试">#{reductionPreview.executionAttempt}</Descriptions.Item>}
+              {reductionPreview.executionError && <Descriptions.Item label="执行错误"><span style={{ color: '#cf1322' }}>{reductionPreview.executionError}</span></Descriptions.Item>}
+            </Descriptions>
+            <Table
+              style={{ marginTop: 16 }}
+              size="small"
+              pagination={false}
+              rowKey={row => `${row.dimension}:${row.key}`}
+              dataSource={reductionPreview.impacts}
+              columns={[
+                { title: '维度', dataIndex: 'dimension' },
+                { title: '归属', dataIndex: 'label' },
+                { title: '价值前 → 后', render: (_, row) => `$${formatUSDC(row.beforeValue)} → $${formatUSDC(row.afterValue)}` },
+                { title: '占比前 → 后', render: (_, row) => `${row.beforePercent ?? '—'}% → ${row.afterPercent ?? '—'}%` },
+                { title: '计算质量', render: (_, row) => <Tag color={row.calculationQuality === 'EXACT' ? 'green' : 'orange'}>{row.calculationQuality}</Tag> }
+              ]}
+            />
+            {reductionPreview.status === 'DRAFT' ? (
+              <Button block type="primary" loading={reductionConfirming} style={{ marginTop: 16 }} onClick={confirmReductionDraft}>
+                逐笔确认草案（不执行 SELL）
+              </Button>
+            ) : reductionPreview.status === 'SUBMITTED' || reductionPreview.status === 'EXECUTING' ? (
+              <Button block loading={reductionLoading} style={{ marginTop: 16 }} onClick={refreshReductionDraft}>
+                刷新 Bridge 执行终态
+              </Button>
+            ) : reductionPreview.executionEnabled ? (
+              <Button block danger type="primary" loading={reductionExecuting} style={{ marginTop: 16 }} onClick={executeReductionDraft}>
+                {reductionPreview.status === 'FAILED' ? '幂等重试真实 SELL' : '最终确认并执行真实 SELL'}
+              </Button>
+            ) : (
+              <Button block disabled style={{ marginTop: 16 }}>
+                草案状态：{reductionPreview.status}
+              </Button>
+            )}
+          </>
         )}
       </Modal>
 

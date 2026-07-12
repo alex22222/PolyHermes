@@ -25,6 +25,9 @@ data class FilteredOrder(
     
     @Column(name = "leader_trade_id", nullable = false, length = 100)
     val leaderTradeId: String,  // Leader 的交易ID
+
+    @Column(name = "model_candidate_id", length = 36)
+    val modelCandidateId: String? = null,
     
     @Column(name = "market_id", nullable = false, length = 100)
     val marketId: String,
@@ -62,4 +65,3 @@ data class FilteredOrder(
     @Column(name = "created_at", nullable = false)
     val createdAt: Long = System.currentTimeMillis()
 )
-

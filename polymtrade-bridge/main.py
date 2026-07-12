@@ -27,6 +27,7 @@ from bridge_reliability_audit import (
     save_reconciliations,
 )
 from bridge_metrics import metrics
+from portfolio_risk_client import PortfolioRiskCheck, PortfolioRiskClient
 
 # Configure logging
 logging.basicConfig(
@@ -43,7 +44,7 @@ BTC_UPDOWN_5M_MIN_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MIN_BUY_PRICE", "
 BTC_UPDOWN_5M_MAX_BUY_PRICE = Decimal(os.getenv("BTC_UPDOWN_5M_MAX_BUY_PRICE", "0.65"))
 BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS = int(os.getenv("BTC_UPDOWN_5M_DAILY_MAX_SUCCESS_BUYS", "50"))
 TAIL_RISK_MIN_BUY_PRICE = Decimal(os.getenv("TAIL_RISK_MIN_BUY_PRICE", "0.10"))
-HIGH_CONFIDENCE_MAX_BUY_PRICE = Decimal(os.getenv("HIGH_CONFIDENCE_MAX_BUY_PRICE", "0.80"))
+HIGH_CONFIDENCE_MAX_BUY_PRICE = Decimal(os.getenv("HIGH_CONFIDENCE_MAX_BUY_PRICE", "0.55"))
 LEADER_EVENT_ACTIVITY_WINDOW_SECONDS = int(
     os.getenv("LEADER_EVENT_ACTIVITY_WINDOW_SECONDS", "1800")
 )
@@ -109,12 +110,15 @@ def release_singleton_lock():
 
 
 class LeaderTradeSignal(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     event: str = "leader_trade"
     timestamp: int
     leader_id: Optional[int] = Field(None, alias="leaderId")
     leader_address: str = Field(..., alias="leaderAddress")
     leader_name: Optional[str] = Field(None, alias="leaderName")
     transaction_hash: str = Field(..., alias="transactionHash")
+    model_candidate_id: Optional[str] = Field(None, alias="modelCandidateId")
     condition_id: str = Field(..., alias="conditionId")
     market_slug: Optional[str] = Field(None, alias="marketSlug")
     title: Optional[str] = None
@@ -139,6 +143,7 @@ class ExecuteRequest(BaseModel):
     size_shares: Optional[float] = Field(None, alias="sizeShares")
     outcome_index: Optional[int] = Field(None, alias="outcomeIndex")
     market_title: Optional[str] = Field(None, alias="marketTitle")
+    external_trade_id: Optional[str] = Field(None, alias="externalTradeId")
 
 
 class AuditReconciliationRequest(BaseModel):
@@ -165,6 +170,7 @@ executor: Optional[PolymtradeExecutor] = None
 rule_engine: Optional[CopyTradingRuleEngine] = None
 recorder: Optional[BridgeTradeRecorder] = None
 position_ledger: Optional[PositionLedger] = None
+portfolio_risk_client = PortfolioRiskClient()
 _trade_lock = asyncio.Lock()
 _portfolio_lock = asyncio.Lock()
 
@@ -177,6 +183,8 @@ def bridge_runtime_status() -> dict[str, Any]:
         "copy_trading_account_id": rule_engine.active_account_id if rule_engine else None,
         "copy_trading_config_count": rule_engine.config_count if rule_engine else 0,
         "synced_at": executor.last_portfolio_synced_at if executor else None,
+        "portfolio_risk_configured": bool(portfolio_risk_client.secret),
+        "portfolio_risk_mode": portfolio_risk_client.enforcement_mode,
     }
 
 
@@ -540,15 +548,31 @@ async def portfolio_positions():
     await require_logged_in()
 
     metrics.portfolio_requests += 1
+    wallet_address = None
+    active_account_id = rule_engine.active_account_id if rule_engine else None
+    if active_account_id and rule_engine:
+        wallet_address = await asyncio.to_thread(
+            rule_engine.resolve_wallet_address_by_account_id,
+            active_account_id,
+        )
     # Serialize with trades as well as other portfolio scrapes. The executor has
     # one active page pointer; navigating it during post-submit confirmation can
     # destroy the trade page context and create false FAILED records.
     async with _trade_lock:
         async with _portfolio_lock:
             result = await executor.fetch_portfolio_positions()
+            available_balance = None
+            for balance_attempt in range(3):
+                available_balance = await executor._get_usdc_balance()
+                if available_balance is not None:
+                    break
+                if balance_attempt < 2:
+                    await asyncio.sleep(0.5)
     if "error" in result:
         metrics.portfolio_errors += 1
         raise HTTPException(status_code=500, detail=result["error"])
+    result["wallet_address"] = wallet_address.lower() if wallet_address else None
+    result["available_balance"] = available_balance
     return result
 
 
@@ -808,7 +832,20 @@ async def execute_trade(request: ExecuteRequest, background_tasks: BackgroundTas
     if side_upper not in ("BUY", "SELL"):
         raise HTTPException(status_code=400, detail="side must be BUY or SELL")
 
-    external_trade_id = f"manual-{uuid.uuid4()}"
+    external_trade_id = request.external_trade_id or f"manual-{uuid.uuid4()}"
+    if len(external_trade_id) > 100 or not re.fullmatch(r"[A-Za-z0-9:_-]+", external_trade_id):
+        raise HTTPException(status_code=400, detail="invalid external_trade_id")
+    if recorder.exists(external_trade_id):
+        return {
+            "status": "duplicate",
+            "record_id": None,
+            "external_trade_id": external_trade_id,
+            "request": request.model_dump(by_alias=True),
+        }
+    manual_payload = request.model_dump(by_alias=True)
+    manual_payload["copyTradingAccountId"] = rule_engine.active_account_id if rule_engine else None
+    manual_payload["copyTradingId"] = None
+    manual_payload["portfolioRiskCorrelationId"] = f"bridge:{external_trade_id}:manual"
 
     # 记录 PENDING，后续由后台任务更新为 SUCCESS/FAILED
     record_id = recorder.record_pending(
@@ -820,8 +857,8 @@ async def execute_trade(request: ExecuteRequest, background_tasks: BackgroundTas
         outcome_index=request.outcome_index,
         quantity=Decimal(str(request.size_shares)) if request.size_shares is not None else Decimal("0"),
         price=Decimal("0"),
-        amount=Decimal("0"),
-        raw_payload=request.model_dump(by_alias=True),
+        amount=Decimal(str(request.amount_usdc)) if side_upper == "BUY" else Decimal("0"),
+        raw_payload=manual_payload,
     )
 
     background_tasks.add_task(
@@ -841,8 +878,16 @@ async def execute_trade(request: ExecuteRequest, background_tasks: BackgroundTas
 
 async def _execute_and_record(record_id: int, request: ExecuteRequest, external_trade_id: str):
     """执行交易并更新 bridge_trade_record 状态。"""
+    manual_risk_correlation = f"bridge:{external_trade_id}:manual"
     try:
         side_upper = request.side.upper()
+        if side_upper == "BUY":
+            precheck = await _evaluate_manual_buy_risk(request, external_trade_id, "precheck")
+            if not precheck.execution_allowed:
+                reason = f"Portfolio risk blocked manual BUY: {precheck.outcome or precheck.error}"
+                recorder.update_status(record_id, "FAILED", error_message=reason)
+                await _complete_manual_buy_risk(manual_risk_correlation, "FAILED")
+                return
         before_quantity: Optional[Decimal] = None
         can_verify_live_sell = side_upper == "SELL" and bool(
             request.condition_id or request.market_title
@@ -876,6 +921,11 @@ async def _execute_and_record(record_id: int, request: ExecuteRequest, external_
                     "condition_id and market_title are missing"
                 )
 
+            if side_upper == "BUY":
+                final_risk = await _evaluate_manual_buy_risk(request, external_trade_id, "final")
+                if not final_risk.execution_allowed:
+                    raise RuntimeError(f"Portfolio risk blocked manual BUY: {final_risk.outcome or final_risk.error}")
+
             result = await executor.execute_trade(
                 market_slug=request.market_slug,
                 side=side_upper,
@@ -900,13 +950,51 @@ async def _execute_and_record(record_id: int, request: ExecuteRequest, external_
 
         logger.info(f"Manual trade executed: {external_trade_id}, result={result}")
         recorder.update_status(record_id, "SUCCESS")
+        if side_upper == "BUY":
+            await _complete_manual_buy_risk(manual_risk_correlation, "SUCCESS")
     except Exception as e:
         logger.error(f"Manual trade failed: {external_trade_id}, error={e}", exc_info=True)
         recorder.update_status(record_id, "FAILED", error_message=str(e))
+        if request.side.upper() == "BUY":
+            await _complete_manual_buy_risk(manual_risk_correlation, "FAILED")
+
+
+async def _evaluate_manual_buy_risk(
+    request: ExecuteRequest,
+    external_trade_id: str,
+    stage: str,
+) -> PortfolioRiskCheck:
+    account_id = rule_engine.active_account_id if rule_engine else None
+    if not account_id:
+        return PortfolioRiskCheck(
+            available=False,
+            execution_allowed=portfolio_risk_client.enforcement_mode != "ENFORCED",
+            error="manual BUY has no active account id",
+        )
+    correlation_id = f"bridge:{external_trade_id}:manual"
+    return await portfolio_risk_client.evaluate_buy({
+        "accountId": account_id,
+        "side": "BUY",
+        "amount": str(request.amount_usdc),
+        "marketId": request.condition_id or request.market_slug,
+        "marketTitle": request.market_title,
+        "category": infer_market_category(request.market_title),
+        "requestId": f"{correlation_id}:{stage}",
+        "correlationId": correlation_id,
+        "stage": stage.upper(),
+    })
+
+
+async def _complete_manual_buy_risk(correlation_id: str, status: str):
+    result = await portfolio_risk_client.complete(correlation_id, status)
+    if not result.available:
+        logger.warning("Manual portfolio risk completion failed: correlation_id=%s error=%s", correlation_id, result.error)
+    return result
 
 
 def _record_failed_signal(
     signal: LeaderTradeSignal,
+    cfg,
     side: str,
     quantity: Optional[Decimal],
     price: Decimal,
@@ -927,11 +1015,82 @@ def _record_failed_signal(
             quantity=quantity or Decimal("0"),
             price=price,
             amount=amount or Decimal("0"),
-            raw_payload=signal.model_dump(by_alias=True),
+            raw_payload=_execution_raw_payload(signal, cfg),
         )
         recorder.update_status(skip_id, "FAILED", reason)
     except Exception as rec_err:
         logger.warning(f"Failed to record skipped signal: {rec_err}")
+
+
+async def _evaluate_portfolio_buy_risk(
+    cfg,
+    signal: LeaderTradeSignal,
+    amount: Decimal,
+    stage: str,
+) -> PortfolioRiskCheck:
+    correlation_id = f"bridge:{signal.transaction_hash}:{cfg.id}"
+    request_id = f"{correlation_id}:{stage}"
+    result = await portfolio_risk_client.evaluate_buy({
+        "accountId": cfg.account_id,
+        "modelCandidateId": signal.model_candidate_id,
+        "side": "BUY",
+        "amount": str(amount),
+        "marketId": signal.condition_id or signal.market_slug,
+        "marketTitle": signal.title,
+        "leaderAddress": signal.leader_address,
+        "category": infer_market_category(signal.title),
+        "requestId": request_id,
+        "correlationId": correlation_id,
+        "stage": stage.upper(),
+    })
+    metrics.portfolio_risk_checks += 1
+    if result.available:
+        if result.outcome == "WOULD_BLOCK":
+            metrics.portfolio_risk_would_block += 1
+        if not result.execution_allowed:
+            metrics.portfolio_risk_denied += 1
+        logger.info(
+            "Portfolio risk %s: config=%s request_id=%s decision_id=%s mode=%s "
+            "outcome=%s execution_allowed=%s",
+            stage,
+            cfg.id,
+            request_id,
+            result.decision_id,
+            result.mode,
+            result.outcome,
+            result.execution_allowed,
+        )
+    else:
+        metrics.portfolio_risk_unavailable += 1
+        logger.warning(
+            "Portfolio risk %s unavailable: config=%s request_id=%s error=%s "
+            "execution_allowed=%s",
+            stage,
+            cfg.id,
+            request_id,
+            result.error,
+            result.execution_allowed,
+        )
+    return result
+
+
+async def _complete_portfolio_buy_risk(cfg, signal: LeaderTradeSignal, status: str):
+    correlation_id = f"bridge:{signal.transaction_hash}:{cfg.id}"
+    result = await portfolio_risk_client.complete(correlation_id, status)
+    if result.available:
+        logger.info("Portfolio risk reservation completed: correlation_id=%s status=%s", correlation_id, result.status)
+    else:
+        logger.warning("Portfolio risk reservation completion failed: correlation_id=%s error=%s", correlation_id, result.error)
+    return result
+
+
+def _execution_raw_payload(signal: LeaderTradeSignal, cfg=None) -> dict[str, Any]:
+    payload = signal.model_dump(by_alias=True)
+    payload["copyTradingAccountId"] = getattr(cfg, "account_id", None) or (rule_engine.active_account_id if rule_engine else None)
+    payload["copyTradingId"] = getattr(cfg, "id", None) or signal.copy_trading_id
+    config_id = payload["copyTradingId"]
+    payload["portfolioRiskCorrelationId"] = f"bridge:{signal.transaction_hash}:{config_id}" if config_id is not None else None
+    return payload
 
 
 def _proportional_risk_small_buyback_reason(
@@ -1016,6 +1175,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                 if not has_executable_config and not filtered_signal_recorded:
                     _record_failed_signal(
                         signal=signal,
+                        cfg=cfg,
                         side=side_upper,
                         quantity=Decimal("0"),
                         price=price_dec,
@@ -1046,6 +1206,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                     logger.info(f"Config {cfg.id}: {reason}")
                     _record_failed_signal(
                         signal=signal,
+                        cfg=cfg,
                         side=side_upper,
                         quantity=Decimal("0"),
                         price=price_dec,
@@ -1062,6 +1223,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                     )
                     _record_failed_signal(
                         signal=signal,
+                        cfg=cfg,
                         side=side_upper,
                         quantity=quantity,
                         price=price_dec,
@@ -1077,6 +1239,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                     )
                     _record_failed_signal(
                         signal=signal,
+                        cfg=cfg,
                         side=side_upper,
                         quantity=quantity,
                         price=price_dec,
@@ -1095,6 +1258,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                     )
                     _record_failed_signal(
                         signal=signal,
+                        cfg=cfg,
                         side=side_upper,
                         quantity=quantity,
                         price=price_dec,
@@ -1115,6 +1279,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                     )
                     _record_failed_signal(
                         signal=signal,
+                        cfg=cfg,
                         side=side_upper,
                         quantity=quantity,
                         price=price_dec,
@@ -1133,6 +1298,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                     )
                     _record_failed_signal(
                         signal=signal,
+                        cfg=cfg,
                         side=side_upper,
                         quantity=quantity,
                         price=price_dec,
@@ -1162,7 +1328,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                                 quantity=quantity,
                                 price=price_dec,
                                 amount=amount,
-                                raw_payload=signal.model_dump(by_alias=True),
+                                raw_payload=_execution_raw_payload(signal, cfg),
                             )
                             recorder.update_status(skip_id, "FAILED", price_band_reason)
                         except Exception as rec_err:
@@ -1189,7 +1355,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                                 quantity=quantity,
                                 price=price_dec,
                                 amount=amount,
-                                raw_payload=signal.model_dump(by_alias=True),
+                                raw_payload=_execution_raw_payload(signal, cfg),
                             )
                             recorder.update_status(skip_id, "FAILED", global_duplicate_reason)
                         except Exception as rec_err:
@@ -1217,7 +1383,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                                 quantity=quantity,
                                 price=price_dec,
                                 amount=amount,
-                                raw_payload=signal.model_dump(by_alias=True),
+                                raw_payload=_execution_raw_payload(signal, cfg),
                             )
                             recorder.update_status(skip_id, "FAILED", daily_limit_reason)
                         except Exception as rec_err:
@@ -1245,7 +1411,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                                 quantity=quantity,
                                 price=price_dec,
                                 amount=amount,
-                                raw_payload=signal.model_dump(by_alias=True),
+                                raw_payload=_execution_raw_payload(signal, cfg),
                             )
                             recorder.update_status(skip_id, "FAILED", duplicate_reason)
                         except Exception as rec_err:
@@ -1264,6 +1430,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                     )
                     _record_failed_signal(
                         signal=signal,
+                        cfg=cfg,
                         side=side_upper,
                         quantity=quantity,
                         price=price_dec,
@@ -1280,6 +1447,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                     logger.info(f"Config {cfg.id}: {reason}")
                     _record_failed_signal(
                         signal=signal,
+                        cfg=cfg,
                         side=side_upper,
                         quantity=Decimal("0"),
                         price=price_dec,
@@ -1339,7 +1507,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                                 quantity=quantity,
                                 price=price_dec,
                                 amount=amount,
-                                raw_payload=signal.model_dump(by_alias=True),
+                                raw_payload=_execution_raw_payload(signal, cfg),
                             )
                             recorder.update_status(
                                 skip_id,
@@ -1374,7 +1542,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                                 quantity=quantity,
                                 price=price_dec,
                                 amount=amount,
-                                raw_payload=signal.model_dump(by_alias=True),
+                                raw_payload=_execution_raw_payload(signal, cfg),
                             )
                             recorder.update_status(
                                 skip_id,
@@ -1399,6 +1567,19 @@ async def handle_signal(signal: LeaderTradeSignal):
                         f"sell_quantity={quantity}"
                     )
 
+            if side_upper == "BUY":
+                precheck_risk = await _evaluate_portfolio_buy_risk(
+                    cfg=cfg,
+                    signal=signal,
+                    amount=amount,
+                    stage="precheck",
+                )
+                if not precheck_risk.execution_allowed:
+                    reason = f"Portfolio risk blocked BUY: {precheck_risk.outcome or precheck_risk.error}"
+                    _record_failed_signal(signal, cfg, side_upper, quantity, price_dec, amount, reason)
+                    await _complete_portfolio_buy_risk(cfg, signal, "FAILED")
+                    continue
+
             record_id = None
             if recorder:
                 try:
@@ -1412,7 +1593,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                         quantity=quantity,
                         price=price_dec,
                         amount=amount,
-                        raw_payload=signal.model_dump(by_alias=True),
+                        raw_payload=_execution_raw_payload(signal, cfg),
                     )
                 except Exception as rec_err:
                     logger.warning(f"Failed to record pending trade: {rec_err}")
@@ -1432,8 +1613,23 @@ async def handle_signal(signal: LeaderTradeSignal):
                         )
                         if record_id and recorder:
                             recorder.update_status(record_id, "FAILED", stale_reason)
+                        if side_upper == "BUY":
+                            await _complete_portfolio_buy_risk(cfg, signal, "FAILED")
                         continue
                     if side_upper == "BUY":
+                        final_risk = await _evaluate_portfolio_buy_risk(
+                            cfg=cfg,
+                            signal=signal,
+                            amount=amount,
+                            stage="final",
+                        )
+                        if not final_risk.execution_allowed:
+                            reason = f"Portfolio risk blocked BUY: {final_risk.outcome or final_risk.error}"
+                            logger.warning("Config %s: %s", cfg.id, reason)
+                            if record_id and recorder:
+                                recorder.update_status(record_id, "FAILED", reason)
+                            await _complete_portfolio_buy_risk(cfg, signal, "FAILED")
+                            continue
                         await executor.execute_trade(
                             market_slug=signal.market_slug,
                             side="BUY",
@@ -1476,6 +1672,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                     recorder.update_status(record_id, "SUCCESS")
                 if side_upper == "BUY":
                     metrics.trades_buy_success += 1
+                    await _complete_portfolio_buy_risk(cfg, signal, "SUCCESS")
                 else:
                     metrics.trades_sell_success += 1
             except Exception as exec_err:
@@ -1484,6 +1681,7 @@ async def handle_signal(signal: LeaderTradeSignal):
                 err_msg = str(exec_err).lower()
                 if side_upper == "BUY":
                     metrics.trades_buy_failed += 1
+                    await _complete_portfolio_buy_risk(cfg, signal, "FAILED")
                     if "outcome" in err_msg:
                         metrics.outcome_selection_failures += 1
                     if "enter trade amount" in err_msg:

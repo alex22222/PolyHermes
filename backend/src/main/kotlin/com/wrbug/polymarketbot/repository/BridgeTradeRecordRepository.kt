@@ -136,4 +136,34 @@ interface BridgeTradeRecordRepository : JpaRepository<BridgeTradeRecord, Long> {
         @Param("side") side: String,
         @Param("status") status: String
     ): Long
+
+    @Query(
+        value = """
+            SELECT COUNT(*) FROM bridge_trade_record
+            WHERE bridge_id = :bridgeId AND side = 'BUY' AND status = 'SUCCESS'
+              AND COALESCE(executed_at, created_at) >= :since
+              AND raw_payload IS NOT NULL AND JSON_VALID(raw_payload) = 1
+              AND CAST(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.copyTradingAccountId')) AS UNSIGNED) = :accountId
+        """,
+        nativeQuery = true
+    )
+    fun countScopedSuccessBuysSince(
+        @Param("bridgeId") bridgeId: String,
+        @Param("accountId") accountId: Long,
+        @Param("since") since: Long
+    ): Long
+
+    @Query(
+        value = """
+            SELECT COUNT(*) FROM bridge_trade_record
+            WHERE bridge_id = :bridgeId AND side = 'BUY' AND status = 'SUCCESS'
+              AND COALESCE(executed_at, created_at) >= :since
+              AND (
+                raw_payload IS NULL OR JSON_VALID(raw_payload) = 0
+                OR JSON_EXTRACT(raw_payload, '$.copyTradingAccountId') IS NULL
+              )
+        """,
+        nativeQuery = true
+    )
+    fun countUnscopedSuccessBuysSince(@Param("bridgeId") bridgeId: String, @Param("since") since: Long): Long
 }

@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS portfolio_risk_decision (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    request_id VARCHAR(100) NOT NULL,
+    account_id BIGINT NOT NULL,
+    policy_version VARCHAR(50) NOT NULL,
+    mode VARCHAR(20) NOT NULL,
+    side VARCHAR(20) NOT NULL,
+    outcome VARCHAR(40) NOT NULL,
+    execution_allowed BOOLEAN NOT NULL,
+    market_id VARCHAR(100) NULL,
+    event_slug VARCHAR(200) NULL,
+    leader_address VARCHAR(100) NULL,
+    category VARCHAR(50) NULL,
+    request_json TEXT NOT NULL,
+    rules_json TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    CONSTRAINT uk_portfolio_risk_request_id UNIQUE (request_id),
+    INDEX idx_portfolio_risk_account_created (account_id, created_at),
+    INDEX idx_portfolio_risk_outcome_created (outcome, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='G3 组合风险决策审计';

@@ -19,6 +19,8 @@ import com.wrbug.polymarketbot.service.binance.BinanceKlineAutoSpreadService
 import com.wrbug.polymarketbot.service.binance.BinanceKlineService
 import com.wrbug.polymarketbot.service.common.PolymarketClobService
 import com.wrbug.polymarketbot.service.copytrading.orders.OrderSigningService
+import com.wrbug.polymarketbot.service.risk.BackendBuyRiskCandidate
+import com.wrbug.polymarketbot.service.risk.BackendBuyRiskGateway
 import com.wrbug.polymarketbot.util.CryptoUtils
 import com.wrbug.polymarketbot.util.RetrofitFactory
 import com.wrbug.polymarketbot.util.div
@@ -35,6 +37,7 @@ import jakarta.annotation.PreDestroy
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.util.concurrent.ConcurrentHashMap
+import java.util.UUID
 import java.util.regex.Pattern
 
 /** 加密价差策略固定下单价格（最高价 0.99），不再在触发时拉取最优价 */
@@ -81,7 +84,8 @@ class CryptoTailStrategyExecutionService(
     private val orderSigningService: OrderSigningService,
     private val cryptoUtils: CryptoUtils,
     private val binanceKlineService: BinanceKlineService,
-    private val binanceKlineAutoSpreadService: BinanceKlineAutoSpreadService
+    private val binanceKlineAutoSpreadService: BinanceKlineAutoSpreadService,
+    private val buyRiskGateway: BackendBuyRiskGateway
 ) {
 
     private val logger = LoggerFactory.getLogger(CryptoTailStrategyExecutionService::class.java)
@@ -394,23 +398,7 @@ class CryptoTailStrategyExecutionService(
                 // 最小价差模式：固定价格 0.99
                 BigDecimal(TRIGGER_FIXED_PRICE)
             }
-            val priceStr = price.toPlainString()
-            val size = computeSize(amountUsdc, price)
-            val signedOrder = orderSigningService.createAndSignOrder(
-                privateKey = ctx.decryptedPrivateKey,
-                makerAddress = ctx.account.proxyAddress,
-                tokenId = tokenId,
-                side = "BUY",
-                price = priceStr,
-                size = size,
-                signatureType = ctx.signatureType
-            )
-            val orderRequest = NewOrderRequest(
-                order = signedOrder,
-                owner = ctx.account.apiKey!!,
-                orderType = "FAK"
-            )
-            submitOrderAndSaveRecord(
+            signAndSubmitAutoOrder(
                 ctx.clobApi,
                 strategy,
                 periodStartUnix,
@@ -418,8 +406,12 @@ class CryptoTailStrategyExecutionService(
                 outcomeIndex,
                 triggerPrice,
                 amountUsdc,
-                orderRequest,
-                triggerType = "AUTO"
+                price,
+                tokenId,
+                ctx.decryptedPrivateKey,
+                ctx.account.proxyAddress,
+                ctx.account.apiKey!!,
+                ctx.signatureType
             )
             return
         }
@@ -436,10 +428,13 @@ class CryptoTailStrategyExecutionService(
         triggerPrice: BigDecimal,
         amountUsdc: BigDecimal,
         orderRequest: NewOrderRequest,
+        correlationId: String,
+        riskCandidate: BackendBuyRiskCandidate,
         triggerType: String = "AUTO"
     ) {
         var failReason: String? = null
         try {
+            buyRiskGateway.finalCheck(correlationId, riskCandidate)
             val response = clobApi.createOrder(orderRequest)
             if (response.isSuccessful && response.body() != null) {
                 val body = response.body()!!
@@ -456,6 +451,8 @@ class CryptoTailStrategyExecutionService(
                         null,
                         triggerType = triggerType
                     )
+                    runCatching { buyRiskGateway.complete(correlationId, true) }
+                        .onFailure { logger.error("加密价差策略成功订单风险预占收尾失败: correlationId=$correlationId", it) }
                     logger.info("加密价差策略下单成功: strategyId=${strategy.id}, periodStartUnix=$periodStartUnix, outcomeIndex=$outcomeIndex, orderId=${body.orderId}, triggerType=$triggerType")
                     return
                 }
@@ -468,6 +465,7 @@ class CryptoTailStrategyExecutionService(
             failReason = e.message ?: e.toString()
             logger.error("加密价差策略下单异常: strategyId=${strategy.id}, periodStartUnix=$periodStartUnix", e)
         }
+        runCatching { buyRiskGateway.complete(correlationId, false) }
         saveTriggerRecord(
             strategy,
             periodStartUnix,
@@ -572,9 +570,6 @@ class CryptoTailStrategyExecutionService(
             // 最小价差模式：固定价格 0.99
             BigDecimal(TRIGGER_FIXED_PRICE)
         }
-        val priceStr = price.toPlainString()
-        val size = computeSize(amountUsdc, price)
-
         if (account.privateKey == null) {
             logger.warn("账户未配置私钥，跳过触发: accountId=${account.id}")
             saveTriggerRecord(
@@ -620,21 +615,7 @@ class CryptoTailStrategyExecutionService(
         val clobApi = retrofitFactory.createClobApi(account.apiKey, apiSecret, apiPassphrase, account.walletAddress)
         val signatureType = orderSigningService.getSignatureTypeForWalletType(account.walletType)
 
-        val signedOrder = orderSigningService.createAndSignOrder(
-            privateKey = decryptedKey,
-            makerAddress = account.proxyAddress,
-            tokenId = tokenId,
-            side = "BUY",
-            price = priceStr,
-            size = size,
-            signatureType = signatureType
-        )
-        val orderRequest = NewOrderRequest(
-            order = signedOrder,
-            owner = account.apiKey!!,
-            orderType = "FAK"
-        )
-        submitOrderAndSaveRecord(
+        signAndSubmitAutoOrder(
             clobApi,
             strategy,
             periodStartUnix,
@@ -642,8 +623,81 @@ class CryptoTailStrategyExecutionService(
             outcomeIndex,
             triggerPrice,
             amountUsdc,
-            orderRequest
+            price,
+            tokenId,
+            decryptedKey,
+            account.proxyAddress,
+            account.apiKey!!,
+            signatureType
         )
+    }
+
+    private suspend fun signAndSubmitAutoOrder(
+        clobApi: PolymarketClobApi,
+        strategy: CryptoTailStrategy,
+        periodStartUnix: Long,
+        marketTitle: String?,
+        outcomeIndex: Int,
+        triggerPrice: BigDecimal,
+        amountUsdc: BigDecimal,
+        orderPrice: BigDecimal,
+        tokenId: String,
+        privateKey: String,
+        makerAddress: String,
+        owner: String,
+        signatureType: Int
+    ) {
+        val correlationId = "crypto-tail:auto:${strategy.id}:$periodStartUnix:${UUID.randomUUID()}"
+        val riskCandidate = BackendBuyRiskCandidate(
+            accountId = strategy.accountId,
+            amount = amountUsdc.toPlainString(),
+            marketTitle = marketTitle,
+            eventSlug = "${strategy.marketSlugPrefix}-$periodStartUnix",
+            category = "crypto"
+        )
+        try {
+            buyRiskGateway.precheck(correlationId, riskCandidate)
+            val signedOrder = orderSigningService.createAndSignOrder(
+                privateKey = privateKey,
+                makerAddress = makerAddress,
+                tokenId = tokenId,
+                side = "BUY",
+                price = orderPrice.toPlainString(),
+                size = computeSize(amountUsdc, orderPrice),
+                signatureType = signatureType
+            )
+            val orderRequest = NewOrderRequest(
+                order = signedOrder,
+                owner = owner,
+                orderType = "FAK"
+            )
+            submitOrderAndSaveRecord(
+                clobApi,
+                strategy,
+                periodStartUnix,
+                marketTitle,
+                outcomeIndex,
+                triggerPrice,
+                amountUsdc,
+                orderRequest,
+                correlationId,
+                riskCandidate
+            )
+        } catch (e: Exception) {
+            runCatching { buyRiskGateway.complete(correlationId, false) }
+            saveTriggerRecord(
+                strategy,
+                periodStartUnix,
+                marketTitle,
+                outcomeIndex,
+                triggerPrice,
+                amountUsdc,
+                null,
+                "fail",
+                e.message ?: e.toString()
+            )
+            logger.error("加密价差策略风控或签名失败: strategyId=${strategy.id}, periodStartUnix=$periodStartUnix", e)
+        }
     }
 
     private suspend fun fetchEventBySlug(slug: String): Result<GammaEventBySlugResponse> {
@@ -749,33 +803,48 @@ class CryptoTailStrategyExecutionService(
 
                     val priceStr = priceRounded.toPlainString()
                     val sizeStr = size.toPlainString()
-
-                    val signedOrder = orderSigningService.createAndSignOrder(
-                        privateKey = ctx.decryptedPrivateKey,
-                        makerAddress = ctx.account.proxyAddress,
-                        tokenId = tokenId,
-                        side = "BUY",
-                        price = priceStr,
-                        size = sizeStr,
-                        signatureType = ctx.signatureType
+                    val correlationId = "crypto-tail:manual:${strategy.id}:${request.periodStartUnix}:${UUID.randomUUID()}"
+                    val riskCandidate = BackendBuyRiskCandidate(
+                        accountId = strategy.accountId,
+                        amount = amountUsdc.toPlainString(),
+                        marketTitle = request.marketTitle.ifBlank { null },
+                        eventSlug = "${strategy.marketSlugPrefix}-${request.periodStartUnix}",
+                        category = "crypto"
                     )
+                    buyRiskGateway.precheck(correlationId, riskCandidate)
 
-                    val orderRequest = NewOrderRequest(
-                        order = signedOrder,
-                        owner = ctx.account.apiKey!!,
-                        orderType = "FAK"
-                    )
+                    val orderResult = try {
+                        val signedOrder = orderSigningService.createAndSignOrder(
+                            privateKey = ctx.decryptedPrivateKey,
+                            makerAddress = ctx.account.proxyAddress,
+                            tokenId = tokenId,
+                            side = "BUY",
+                            price = priceStr,
+                            size = sizeStr,
+                            signatureType = ctx.signatureType
+                        )
 
-                    val orderResult = submitOrderForManualOrder(
-                        ctx.clobApi,
-                        strategy,
-                        request.periodStartUnix,
-                        request.marketTitle,
-                        outcomeIndex,
-                        priceRounded,
-                        amountUsdc,
-                        orderRequest
-                    )
+                        val orderRequest = NewOrderRequest(
+                            order = signedOrder,
+                            owner = ctx.account.apiKey!!,
+                            orderType = "FAK"
+                        )
+
+                        buyRiskGateway.finalCheck(correlationId, riskCandidate)
+                        submitOrderForManualOrder(
+                            ctx.clobApi,
+                            strategy,
+                            request.periodStartUnix,
+                            request.marketTitle,
+                            outcomeIndex,
+                            priceRounded,
+                            amountUsdc,
+                            orderRequest
+                        ).also { buyRiskGateway.complete(correlationId, it.isSuccess) }
+                    } catch (e: Exception) {
+                        buyRiskGateway.complete(correlationId, false)
+                        throw e
+                    }
 
                     orderResult.fold(
                         onSuccess = { orderId ->

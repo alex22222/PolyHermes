@@ -67,7 +67,6 @@ const CopyTradingList: React.FC = () => {
   useEffect(() => {
     fetchAccounts()
     fetchLeaders()
-    fetchCopyTradings()
   }, [])
 
   useEffect(() => {

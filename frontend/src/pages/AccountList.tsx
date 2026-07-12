@@ -33,6 +33,7 @@ const AccountList: React.FC = () => {
   const [wrapLoading, setWrapLoading] = useState<Record<number, boolean>>({})
   const [bridgeStatus, setBridgeStatus] = useState<any | null>(null)
   const [bridgeStatusLoading, setBridgeStatusLoading] = useState(false)
+  const [bridgeLinkLoading, setBridgeLinkLoading] = useState(false)
   const [bridgeSelectLoading, setBridgeSelectLoading] = useState<Record<number, boolean>>({})
   const [migrationGuideVisible, setMigrationGuideVisible] = useState(false)
 
@@ -99,6 +100,29 @@ const AccountList: React.FC = () => {
     if (!bridgeStatus?.walletAddress) return false
     const wallet = bridgeStatus.walletAddress.toLowerCase()
     return wallet === account.walletAddress?.toLowerCase() || wallet === account.proxyAddress?.toLowerCase()
+  }
+
+  const handleLinkBridgeAccount = async () => {
+    if (!bridgeStatus?.walletAddress || bridgeStatus?.matched) return
+
+    setBridgeLinkLoading(true)
+    try {
+      const response = await apiService.accounts.linkBridgeCurrent({
+        walletAddress: bridgeStatus.walletAddress,
+        walletType: bridgeStatus.walletType || 'magic'
+      })
+      if (response.data.code === 0) {
+        message.success('Bridge 当前账户已关联，无需私钥')
+        await fetchAccounts()
+        await fetchBridgeStatus()
+      } else {
+        message.error(response.data.msg || '关联 Bridge 当前账户失败')
+      }
+    } catch (error: any) {
+      message.error(error.message || '关联 Bridge 当前账户失败')
+    } finally {
+      setBridgeLinkLoading(false)
+    }
   }
 
   const formatLastSyncTime = (ts?: number) => {
@@ -727,9 +751,16 @@ const AccountList: React.FC = () => {
         type={bridgeStatus?.matched ? 'success' : 'warning'}
         showIcon
         action={
-          <Button size="small" icon={<ReloadOutlined />} onClick={fetchBridgeStatus} loading={bridgeStatusLoading}>
-            刷新
-          </Button>
+          <Space>
+            {bridgeStatus?.walletAddress && !bridgeStatus?.matched && (
+              <Button size="small" type="primary" onClick={handleLinkBridgeAccount} loading={bridgeLinkLoading}>
+                无私钥关联当前账户
+              </Button>
+            )}
+            <Button size="small" icon={<ReloadOutlined />} onClick={fetchBridgeStatus} loading={bridgeStatusLoading}>
+              刷新
+            </Button>
+          </Space>
         }
         style={{ marginBottom: 16, ...(isMobile ? { margin: '0 8px 12px' } : {}) }}
       />

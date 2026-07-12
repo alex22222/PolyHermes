@@ -1649,8 +1649,181 @@ export interface DailyAssetPoint {
   dayStartAt: number
   availableBalance: string
   positionsValue: string
-  totalAssets: string
+  pendingRedeemValue: string | null
+  redeemablePositionCount: number | null
+  redeemValuationStatus: 'COMPLETE' | 'UNKNOWN'
+  totalAssets: string | null
+  unknownPositionCount: number
+  valuationStatus: 'COMPLETE' | 'INCOMPLETE' | 'REDEEM_VALUE_UNKNOWN'
+  snapshotType: 'DAILY_FIRST_SUCCESS' | 'MIDNIGHT'
+  captureOffsetMs: number
   capturedAt: number
+}
+
+export interface PortfolioExposureBucket {
+  key: string
+  label: string
+  value: string
+  percentOfTotalAssets: string | null
+  positionCount: number
+  attributionSource: 'TRADE_LEDGER' | 'MARKET_METADATA' | 'TITLE_PATTERN' | 'EVENT_SLUG' | 'UNKNOWN' | 'MIXED'
+  attributionQuality: 'EXACT' | 'INFERRED' | 'UNKNOWN' | 'MIXED'
+  leaderId: number | null
+  costBasis: string | null
+  unrealizedPnl: string | null
+  firstObservedAt: number | null
+  positionKeys: string[]
+}
+
+export interface PortfolioExposureDimensionCoverage {
+  knownValue: string
+  unknownValue: string
+  knownValueCoveragePercent: string | null
+  minimumShadowCoveragePercent: string
+  status: 'READY_FOR_SHADOW' | 'INSUFFICIENT_ATTRIBUTION' | 'VALUATION_INCOMPLETE'
+  shadowEligible: boolean
+}
+
+export interface PortfolioExposureResponse {
+  account: {
+    accountId: number
+    accountName?: string | null
+    walletAddress: string
+    availableBalance: string | null
+    openPositionsValue: string
+    pendingRedeemValue: string | null
+    totalAssets: string | null
+    valuationStatus: string
+    positionCostBasis: string | null
+    unrealizedPnl: string | null
+    firstObservedAt: number | null
+    positionCount: number
+    asOf: number | null
+  }
+  leaders: PortfolioExposureBucket[]
+  categories: PortfolioExposureBucket[]
+  events: PortfolioExposureBucket[]
+  markets: PortfolioExposureBucket[]
+  coverage: {
+    totalPositions: number
+    unknownValuePositions: number
+    unknownLeaderPositions: number
+    unknownCategoryPositions: number
+    unknownEventPositions: number
+    unknownMarketPositions: number
+    leader: PortfolioExposureDimensionCoverage
+    category: PortfolioExposureDimensionCoverage
+    event: PortfolioExposureDimensionCoverage
+    market: PortfolioExposureDimensionCoverage
+  }
+}
+
+export type PortfolioRelationType = 'DUPLICATE' | 'TRUE_HEDGE' | 'PSEUDO_HEDGE' | 'RELATED' | 'LONG_OCCUPIED' | 'UNKNOWN'
+
+export interface PortfolioPositionRelation {
+  type: PortfolioRelationType
+  category: string | null
+  entityKey: string | null
+  positionKeys: string[]
+  relatedValue: string | null
+  unmatchedValue: string | null
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW'
+  rationale: string
+}
+
+export interface PortfolioRelationResponse {
+  accountId: number
+  asOf: number | null
+  positions: Array<{
+    positionKey: string
+    marketId: string | null
+    eventSlug: string | null
+    outcome: string
+    category: string | null
+    marketTitle: string
+    currentValue: string | null
+    quantity: string
+    firstObservedAt: number
+    marketEndAt: number | null
+  }>
+  relations: PortfolioPositionRelation[]
+  countsByType: Partial<Record<PortfolioRelationType, number>>
+  relatedValueByType: Partial<Record<PortfolioRelationType, string>>
+  generatedAt: number
+}
+
+export interface PortfolioBuyControl {
+  accountId: number
+  paused: boolean
+  reason: string | null
+  updatedBy: string | null
+  updatedAt: number | null
+  changed: boolean
+  audit: Array<{ action: 'PAUSE' | 'RESUME'; reason: string | null; actor: string; createdAt: number }>
+}
+
+export interface PortfolioRiskReplayMetric {
+  code: string
+  value: string | null
+  status: 'AVAILABLE' | 'UNAVAILABLE' | 'INSUFFICIENT_DATA'
+  rationale: string
+}
+
+export interface PortfolioRiskHistoricalReplay {
+  accountId: number
+  requestedSince: number
+  generatedAt: number
+  scopedBridgeRecords: number
+  unscopedBridgeRecords: number
+  buySuccess: number
+  buyFailed: number
+  sellSuccess: number
+  sellFailed: number
+  failureTaxonomy: Record<string, number>
+  metrics: PortfolioRiskReplayMetric[]
+  blockers: string[]
+}
+
+export interface PortfolioReductionDimensionImpact {
+  dimension: 'LEADER' | 'CATEGORY' | 'EVENT' | 'MARKET'
+  key: string
+  label: string
+  beforeValue: string
+  afterValue: string
+  beforePercent: string | null
+  afterPercent: string | null
+  calculationQuality: 'EXACT' | 'ESTIMATED_PRO_RATA'
+}
+
+export interface PortfolioReductionPreview {
+  draftId: string
+  accountId: number
+  positionKey: string
+  marketTitle: string
+  outcome: string
+  requestedQuantity: string
+  availableQuantity: string
+  estimatedProceeds: string
+  beforeAvailableBalance: string
+  afterAvailableBalance: string
+  beforeOpenPositionsValue: string
+  afterOpenPositionsValue: string
+  beforeTotalAssets: string
+  afterTotalAssets: string
+  impacts: PortfolioReductionDimensionImpact[]
+  status: 'DRAFT' | 'EXPIRED' | 'CONFIRMED' | 'EXECUTING' | 'SUBMITTED' | 'EXECUTED' | 'FAILED'
+  executionEnabled: boolean
+  createdBy: string
+  confirmedBy: string | null
+  confirmedAt: number | null
+  executionRequestedBy: string | null
+  executionRequestedAt: number | null
+  executionExternalTradeId: string | null
+  executionRecordId: number | null
+  executionError: string | null
+  executionAttempt: number
+  createdAt: number
+  expiresAt: number
 }
 
 /**

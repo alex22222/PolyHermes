@@ -89,10 +89,12 @@ const BridgeTradeRecordList: React.FC = () => {
         marketKeyword: marketFilter || undefined
       })
       if (response.data.code === 0 && response.data.data) {
-        setRecords(response.data.data.list || [])
+        const payload = response.data.data
+        const list = Array.isArray(payload) ? payload : payload.list || []
+        setRecords(list)
         setRecordsPagination((prev) => ({
           ...prev,
-          total: response.data.data?.total || 0
+          total: Array.isArray(payload) ? list.length : payload.total || 0
         }))
       } else {
         message.error(response.data.msg || t('bridgeTradeRecord.fetchFailed') || '获取桥接交易记录失败')
@@ -179,10 +181,12 @@ const BridgeTradeRecordList: React.FC = () => {
         status: webhookStatusFilter || undefined
       })
       if (response.data.code === 0 && response.data.data) {
-        setWebhookLogs(response.data.data.list || [])
+        const payload = response.data.data
+        const list = Array.isArray(payload) ? payload : payload.list || []
+        setWebhookLogs(list)
         setWebhookLogsPagination((prev) => ({
           ...prev,
-          total: response.data.data?.total || 0
+          total: Array.isArray(payload) ? list.length : payload.total || 0
         }))
       } else {
         message.error(response.data.msg || t('bridgeWebhookLog.fetchFailed') || '获取 Webhook 日志失败')
@@ -434,6 +438,8 @@ const BridgeTradeRecordList: React.FC = () => {
       render: (_title: string | undefined, record: BridgeTradeRecord) => {
         const marketTitle = resolveMarketTitle(record)
         const marketUrl = resolveMarketUrl(record)
+        const marketId = String(record.marketId || '')
+        const externalTradeId = record.externalTradeId ? String(record.externalTradeId) : ''
         return (
           <Space direction="vertical" size={0}>
             {marketUrl ? (
@@ -444,11 +450,11 @@ const BridgeTradeRecordList: React.FC = () => {
               <Typography.Text strong>{marketTitle}</Typography.Text>
             )}
           <Typography.Text style={{ fontFamily: 'monospace', fontSize: '12px', color: '#888' }}>
-            {record.marketId.slice(0, 16)}...
+            {marketId ? `${marketId.slice(0, 16)}...` : '-'}
           </Typography.Text>
-          {record.externalTradeId && (
+          {externalTradeId && (
             <Typography.Text style={{ fontSize: '11px', color: '#aaa' }}>
-              {record.externalTradeId.slice(0, 20)}...
+              {externalTradeId.slice(0, 20)}...
             </Typography.Text>
           )}
           </Space>
@@ -540,9 +546,9 @@ const BridgeTradeRecordList: React.FC = () => {
       render: (_name: string | undefined, record: BridgeWebhookLog) => (
         <Space direction="vertical" size={0}>
           <Typography.Text strong>{record.leaderName || '-'}</Typography.Text>
-          {record.leaderAddress && (
+          {record.leaderAddress && String(record.leaderAddress) && (
             <Typography.Text style={{ fontFamily: 'monospace', fontSize: '12px', color: '#888' }}>
-              {record.leaderAddress.slice(0, 16)}...
+              {String(record.leaderAddress).slice(0, 16)}...
             </Typography.Text>
           )}
         </Space>
@@ -555,9 +561,9 @@ const BridgeTradeRecordList: React.FC = () => {
       render: (_slug: string | undefined, record: BridgeWebhookLog) => (
         <Space direction="vertical" size={0}>
           <Typography.Text>{record.marketSlug || '-'}</Typography.Text>
-          {record.conditionId && (
+          {record.conditionId && String(record.conditionId) && (
             <Typography.Text style={{ fontFamily: 'monospace', fontSize: '12px', color: '#888' }}>
-              {record.conditionId.slice(0, 16)}...
+              {String(record.conditionId).slice(0, 16)}...
             </Typography.Text>
           )}
         </Space>

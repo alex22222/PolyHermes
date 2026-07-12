@@ -137,11 +137,10 @@ const EditModal: React.FC<EditModalProps> = ({
           position: balance.positionBalance || '0'
         })
       } else {
-        message.error(response.data.msg || t('copyTradingAdd.fetchAssetInfoFailed') || '获取资产信息失败')
+        console.warn('获取 Leader 资产信息失败:', response.data.msg)
       }
     } catch (error: any) {
-      console.error('获取 Leader 资产失败:', error)
-      message.error(error.message || t('copyTradingAdd.fetchAssetInfoFailed') || '获取资产信息失败')
+      console.warn('获取 Leader 资产失败:', error)
     } finally {
       setLoadingAssetInfo(false)
     }
@@ -383,7 +382,11 @@ const EditModal: React.FC<EditModalProps> = ({
                   />
                 </Col>
               </Row>
-            ) : null}
+            ) : (
+              <div style={{ color: '#999', textAlign: 'center', padding: '12px' }}>
+                {t('copyTradingEdit.assetInfoUnavailable') || '资产信息暂不可用，不影响编辑配置'}
+              </div>
+            )}
           </Card>
           
           <Divider>{t('copyTradingEdit.basicConfig') || '基础配置'}</Divider>

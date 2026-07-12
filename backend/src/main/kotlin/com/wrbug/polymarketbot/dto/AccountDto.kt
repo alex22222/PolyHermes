@@ -242,7 +242,14 @@ data class DailyAssetPointDto(
     val dayStartAt: Long,
     val availableBalance: String,
     val positionsValue: String,
-    val totalAssets: String,
+    val pendingRedeemValue: String?,
+    val redeemablePositionCount: Int?,
+    val redeemValuationStatus: String,
+    val totalAssets: String?,
+    val unknownPositionCount: Int,
+    val valuationStatus: String,
+    val snapshotType: String,
+    val captureOffsetMs: Long,
     val capturedAt: Long
 )
 
@@ -272,7 +279,8 @@ data class BridgePositionSellRequest(
     val outcomeIndex: Int? = null, // 结果索引（推荐提供）
     val orderType: String,         // 当前只支持 MARKET
     val quantity: String? = null,  // 卖出数量（shares，与 percent 二选一）
-    val percent: String? = null    // 卖出百分比（0-100，与 quantity 二选一）
+    val percent: String? = null,   // 卖出百分比（0-100，与 quantity 二选一）
+    val externalTradeId: String? = null // 调用方幂等键；人工减仓使用 reduction-{draftId}
 )
 
 /**

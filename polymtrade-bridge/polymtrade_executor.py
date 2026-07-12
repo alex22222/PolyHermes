@@ -426,6 +426,7 @@ class PolymtradeExecutor:
                         marketIcon: img ? img.src : null,
                         href: href,
                         cardData: allData,
+                        redeemable: String(allData['data-redeemable'] || '').toLowerCase() === 'true',
                     });
                 }
                 return positions;
@@ -446,6 +447,12 @@ class PolymtradeExecutor:
 
             # Filter out positions with missing critical fields to avoid phantom holdings.
             valid_positions = [pos for pos in positions if validate_portfolio_position(pos)]
+            empty_state_confirmed = bool(rendered and not positions)
+            portfolio_complete = bool(valid_positions) or empty_state_confirmed
+            redeemable_positions = [pos for pos in valid_positions if pos.get("redeemable")]
+            pending_redeem_value = sum(
+                float(pos.get("quantity") or 0) for pos in redeemable_positions
+            )
 
             synced_at = int(time.time() * 1000)
             self._last_portfolio_synced_at = synced_at
@@ -455,6 +462,11 @@ class PolymtradeExecutor:
                 "positions": valid_positions,
                 "synced_at": synced_at,
                 "wallet_address": wallet_address,
+                "portfolio_complete": portfolio_complete,
+                "empty_state_confirmed": empty_state_confirmed,
+                "pending_redeem_value": pending_redeem_value if portfolio_complete else None,
+                "redeemable_position_count": len(redeemable_positions) if portfolio_complete else None,
+                "redeem_valuation_status": "COMPLETE" if portfolio_complete else "UNKNOWN",
             }
         except Exception as e:
             logger.exception(f"Failed to fetch portfolio positions: {e}")
@@ -1247,10 +1259,11 @@ class PolymtradeExecutor:
             try:
                 result = await self._evaluate_with_navigation_retry(
                     """(args) => {
-                        const [keywords, sideLabels, binaryOutcomeMode] = args;
+                        const [keywords, sideLabels, binaryOutcomeMode, marketTitle] = args;
                         const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
                         const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
                         const bodyText = norm(textOf(document.body));
+                        const targetTitle = norm(marketTitle || "");
 
                         const keywordHits = keywords.filter(kw => bodyText.includes(kw.toLowerCase())).length;
                         const hasKeyword = keywords.length === 0 || keywordHits > 0;
@@ -1270,6 +1283,57 @@ class PolymtradeExecutor:
                         const hasSide = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"], .cursor-pointer')).some(isTradeAction);
 
                         const hasOutcome = sideLabels.some(l => bodyText.includes(l.toLowerCase()));
+                        if (binaryOutcomeMode && targetTitle) {
+                            const isVisible = (el) => {
+                                const rect = el.getBoundingClientRect();
+                                return rect.width > 0 && rect.height > 0;
+                            };
+                            const center = (el) => {
+                                const rect = el.getBoundingClientRect();
+                                return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+                            };
+                            const titleNodes = Array.from(document.querySelectorAll('*'))
+                                .filter(el => isVisible(el) && norm(textOf(el)) === targetTitle);
+                            const detailNodes = Array.from(document.querySelectorAll('*'))
+                                .filter(el => {
+                                    if (!isVisible(el)) return false;
+                                    const text = norm(textOf(el));
+                                    return text === 'rules' || text === 'market closes' || text === 'start date';
+                                });
+                            const tradeButtons = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"], .cursor-pointer'))
+                                .filter(el => isVisible(el) && isTradeAction(el));
+                            const activeTarget = titleNodes.some(title => {
+                                const titleCenter = center(title);
+                                const hasNearbyDetail = detailNodes.some(detail => {
+                                    const detailCenter = center(detail);
+                                    return Math.abs(detailCenter.x - titleCenter.x) < 300;
+                                });
+                                const hasNearbyTrade = tradeButtons.some(button => {
+                                    const buttonCenter = center(button);
+                                    return Math.abs(buttonCenter.x - titleCenter.x) < 350
+                                        && Math.abs(buttonCenter.y - titleCenter.y) < 500;
+                                });
+                                return hasNearbyDetail && hasNearbyTrade;
+                            });
+                            if (!activeTarget) {
+                                return {
+                                    visible: false,
+                                    keywordHits,
+                                    hasSide,
+                                    hasOutcome,
+                                    strictTargetTitle: targetTitle,
+                                    url: window.location.href,
+                                };
+                            }
+                            return {
+                                visible: true,
+                                keywordHits,
+                                hasSide,
+                                hasOutcome,
+                                strictTargetTitle: targetTitle,
+                                url: window.location.href,
+                            };
+                        }
                         const rows = Array.from(document.querySelectorAll('article, section, li, [role="listitem"], [class*="market"], [class*="outcome"], [class*="row"], div'));
                         const hasTargetTradeRow = rows.some(row => {
                             const rect = row.getBoundingClientRect();
@@ -1312,7 +1376,7 @@ class PolymtradeExecutor:
                             url: window.location.href,
                         };
                     }""",
-                    [keywords, side_labels, binary_updown],
+                    [keywords, side_labels, binary_updown, market_title or ""],
                     label="target_event_visible.evaluate",
                 )
                 if result and result.get("visible"):
@@ -2181,6 +2245,18 @@ class PolymtradeExecutor:
                 if (t.length > 40) return false;
                 for (const label of sideLabels) {
                     const l = label.toLowerCase();
+                    // On binary markets, "Up Or Down" is a navigation/category
+                    // label, not the tradable "Up" outcome.  Only accept the
+                    // bare outcome or an outcome followed immediately by a
+                    // quoted price (for example "Up 66¢").
+                    if (binaryOutcomeMode && (l === 'up' || l === 'down')) {
+                        if (t === l) return true;
+                        if (t.startsWith(l + ' ')) {
+                            const suffix = t.slice(l.length).trim();
+                            return /^[\\d$¢]/.test(suffix);
+                        }
+                        continue;
+                    }
                     if (t === l || t.startsWith(l + " ") || t.endsWith(" " + l) || t.includes(" " + l + " ")) {
                         return true;
                     }

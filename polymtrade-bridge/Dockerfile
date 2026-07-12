@@ -24,6 +24,11 @@ RUN apt-get update && apt-get install -y \
     libcairo2 \
     libasound2 \
     libatspi2.0-0 \
+    xvfb \
+    fluxbox \
+    x11vnc \
+    novnc \
+    websockify \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python packages
@@ -32,14 +37,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright browsers
 RUN playwright install chromium
-RUN playwright install-deps chromium
 
-# Copy application code
-COPY *.py ./
+# Copy application code and the optional local-only noVNC launcher.
+COPY *.py bridge-entrypoint.sh ./
+RUN chmod +x /app/bridge-entrypoint.sh
 
 # Create profile directory
 RUN mkdir -p /app/browser_profile
 
 EXPOSE 8080
+EXPOSE 6080
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["/app/bridge-entrypoint.sh"]

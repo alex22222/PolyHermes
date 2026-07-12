@@ -9,6 +9,7 @@ import com.wrbug.polymarketbot.service.bridge.BridgePortfolioClient
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito.*
+import kotlinx.coroutines.runBlocking
 import java.math.BigDecimal
 
 class BridgePortfolioSyncServiceTest {
@@ -18,14 +19,24 @@ class BridgePortfolioSyncServiceTest {
     private val marketRepository = mock(MarketRepository::class.java)
     private val accountRepository = mock(AccountRepository::class.java)
     private val dailyAssetSnapshotService = mock(DailyAssetSnapshotService::class.java)
+    private val pendingRedeemValuationService = mock(PendingRedeemValuationService::class.java)
 
     private val service = BridgePortfolioSyncService(
         bridgePortfolioClient,
         snapshotRepository,
         marketRepository,
         accountRepository,
-        dailyAssetSnapshotService
+        dailyAssetSnapshotService,
+        pendingRedeemValuationService
     )
+
+    init {
+        runBlocking {
+            `when`(pendingRedeemValuationService.fetch(anyString())).thenReturn(
+                PendingRedeemValuation(BigDecimal.ZERO, 0, "COMPLETE")
+            )
+        }
+    }
 
     @Test
     fun `sync skips when wallet address is missing`() {
@@ -149,5 +160,160 @@ class BridgePortfolioSyncServiceTest {
         verify(snapshotRepository).save(argThat { snapshot ->
             snapshot.availableBalance == null
         })
+    }
+
+    @Test
+    fun `sync captures cash-only account and clears stale positions when portfolio is empty`() {
+        val stalePosition = BridgePositionSnapshot(
+            id = 9L,
+            bridgeId = "polymtrade-bridge",
+            walletAddress = "0xccc",
+            marketTitle = "Closed market",
+            side = "YES",
+            quantity = BigDecimal.TEN
+        )
+        `when`(bridgePortfolioClient.fetchPositions()).thenReturn(
+            BridgePortfolioClient.BridgePortfolioResponse(
+                positions = emptyList(),
+                syncedAt = 5000L,
+                portfolioComplete = true,
+                emptyStateConfirmed = true
+            )
+        )
+        `when`(bridgePortfolioClient.fetchAccount()).thenReturn(
+            BridgePortfolioClient.BridgeAccountResponse(walletAddress = "0xCCC", walletType = "magic")
+        )
+        `when`(bridgePortfolioClient.fetchBalance()).thenReturn(
+            BridgePortfolioClient.BridgeBalanceResponse(availableBalance = 100.0, syncedAt = 5000L)
+        )
+        `when`(snapshotRepository.findByBridgeIdAndWalletAddress("polymtrade-bridge", "0xccc"))
+            .thenReturn(listOf(stalePosition))
+        val account = Account(id = 4L, walletAddress = "0xccc", proxyAddress = "0x444444")
+        `when`(accountRepository.findByWalletAddressIgnoreCase("0xccc")).thenReturn(account)
+
+        service.sync()
+
+        verifyNoInteractions(dailyAssetSnapshotService)
+        verify(snapshotRepository, never()).deleteAll(any<Iterable<BridgePositionSnapshot>>())
+
+        service.sync()
+
+        verify(dailyAssetSnapshotService).captureIfAbsent(
+            walletAddress = "0xccc",
+            availableBalance = BigDecimal("100.0"),
+            positionsValue = BigDecimal.ZERO,
+            unknownPositionCount = 0,
+            capturedAt = 5000L
+        )
+        verify(snapshotRepository).deleteAll(argThat { snapshots ->
+            snapshots.toList() == listOf(stalePosition)
+        })
+        verify(accountRepository).save(argThat { it.lastBridgeSyncAt == 5000L })
+    }
+
+    @Test
+    fun `sync reports unknown position values instead of folding them into zero`() {
+        `when`(bridgePortfolioClient.fetchPositions()).thenReturn(
+            BridgePortfolioClient.BridgePortfolioResponse(
+                positions = listOf(
+                    BridgePortfolioClient.BridgePortfolioPosition(
+                        marketTitle = "Known",
+                        side = "Yes",
+                        quantity = 2.0,
+                        currentValue = 1.5
+                    ),
+                    BridgePortfolioClient.BridgePortfolioPosition(
+                        marketTitle = "Unknown",
+                        side = "No",
+                        quantity = 3.0,
+                        currentValue = null
+                    )
+                ),
+                syncedAt = 6000L
+            )
+        )
+        `when`(bridgePortfolioClient.fetchAccount()).thenReturn(
+            BridgePortfolioClient.BridgeAccountResponse(walletAddress = "0xDDD", walletType = "magic")
+        )
+        `when`(bridgePortfolioClient.fetchBalance()).thenReturn(
+            BridgePortfolioClient.BridgeBalanceResponse(availableBalance = 10.0, syncedAt = 6000L)
+        )
+        `when`(snapshotRepository.findByBridgeIdAndWalletAddress(anyString(), anyString())).thenReturn(emptyList())
+        `when`(marketRepository.findByTitleIn(anyList())).thenReturn(emptyList())
+
+        service.sync()
+
+        verify(dailyAssetSnapshotService).captureIfAbsent(
+            walletAddress = "0xddd",
+            availableBalance = BigDecimal("10.0"),
+            positionsValue = BigDecimal("1.5"),
+            unknownPositionCount = 1,
+            capturedAt = 6000L
+        )
+    }
+
+    @Test
+    fun `sync prefers atomic portfolio wallet and balance`() {
+        `when`(bridgePortfolioClient.fetchPositions()).thenReturn(
+            BridgePortfolioClient.BridgePortfolioResponse(
+                positions = listOf(
+                    BridgePortfolioClient.BridgePortfolioPosition(
+                        marketTitle = "Atomic market",
+                        side = "Yes",
+                        quantity = 2.0,
+                        currentValue = 1.25
+                    )
+                ),
+                syncedAt = 7000L,
+                walletAddress = "0xEEE",
+                availableBalance = 8.75
+            )
+        )
+        `when`(snapshotRepository.findByBridgeIdAndWalletAddress(anyString(), anyString())).thenReturn(emptyList())
+        `when`(marketRepository.findByTitleIn(anyList())).thenReturn(emptyList())
+
+        service.sync()
+
+        verify(bridgePortfolioClient, never()).fetchAccount()
+        verify(bridgePortfolioClient, never()).fetchBalance()
+        verify(dailyAssetSnapshotService).captureIfAbsent(
+            walletAddress = "0xeee",
+            availableBalance = BigDecimal("8.75"),
+            positionsValue = BigDecimal("1.25"),
+            capturedAt = 7000L,
+            unknownPositionCount = 0,
+            pendingRedeemValue = BigDecimal.ZERO,
+            redeemablePositionCount = 0
+        )
+    }
+
+    @Test
+    fun `sync never clears stale positions for unconfirmed empty portfolio`() {
+        val stalePosition = BridgePositionSnapshot(
+            id = 10L,
+            bridgeId = "polymtrade-bridge",
+            walletAddress = "0xfff",
+            marketTitle = "Still open",
+            side = "YES",
+            quantity = BigDecimal.ONE
+        )
+        `when`(bridgePortfolioClient.fetchPositions()).thenReturn(
+            BridgePortfolioClient.BridgePortfolioResponse(
+                positions = emptyList(),
+                syncedAt = 8000L,
+                walletAddress = "0xFFF",
+                availableBalance = 10.0,
+                portfolioComplete = false,
+                emptyStateConfirmed = false
+            )
+        )
+        `when`(snapshotRepository.findByBridgeIdAndWalletAddress(anyString(), anyString()))
+            .thenReturn(listOf(stalePosition))
+
+        service.sync()
+        service.sync()
+
+        verify(snapshotRepository, never()).deleteAll(any<Iterable<BridgePositionSnapshot>>())
+        verifyNoInteractions(dailyAssetSnapshotService)
     }
 }
