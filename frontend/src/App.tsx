@@ -21,6 +21,7 @@ import LeaderAdd from './pages/LeaderAdd'
 import LeaderEdit from './pages/LeaderEdit'
 import ConfigPage from './pages/ConfigPage'
 import PositionList from './pages/PositionList'
+import MobilePortfolio from './pages/MobilePortfolio'
 import Statistics from './pages/Statistics'
 import OptimizationDaily from './pages/OptimizationDaily'
 import SystemFlow from './pages/SystemFlow'
@@ -293,6 +294,7 @@ function App() {
           <Route path="/bridge-trade-records" element={<ProtectedRoute><BridgeTradeRecordList /></ProtectedRoute>} />
           <Route path="/config" element={<ProtectedRoute><ConfigPage /></ProtectedRoute>} />
           <Route path="/positions" element={<ProtectedRoute><PositionList /></ProtectedRoute>} />
+          <Route path="/mobile-portfolio" element={<ProtectedRoute><MobilePortfolio /></ProtectedRoute>} />
           <Route path="/statistics" element={<ProtectedRoute><Statistics /></ProtectedRoute>} />
           <Route path="/optimization-daily" element={<ProtectedRoute><OptimizationDaily /></ProtectedRoute>} />
           <Route path="/system-flow" element={<ProtectedRoute><SystemFlow /></ProtectedRoute>} />

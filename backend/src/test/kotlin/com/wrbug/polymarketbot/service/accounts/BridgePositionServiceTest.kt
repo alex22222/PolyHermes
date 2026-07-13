@@ -120,4 +120,20 @@ class BridgePositionServiceTest {
         // initialValue = 3 - 1 = 2; percentPnl = 1 / 2 * 100 = 50
         assertEquals("50.00", dto.percentPnl)
     }
+
+    @Test
+    fun `empty snapshot does not expose historical trade records as current positions`() = runBlocking {
+        val account = Account(
+            id = 4L,
+            walletAddress = "0x456",
+            proxyAddress = "0x789"
+        )
+        `when`(snapshotRepository.findByBridgeIdAndWalletAddress("polymtrade-bridge", "0x456"))
+            .thenReturn(emptyList())
+
+        val positions = service.getPositionsForAccount(account)
+
+        assertTrue(positions.isEmpty())
+        verifyNoInteractions(tradeRecordRepository)
+    }
 }

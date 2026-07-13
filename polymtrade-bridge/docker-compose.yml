@@ -16,6 +16,10 @@ services:
       - POLYMTRADE_URL=https://polym.trade
       - BROWSER_PROFILE_DIR=/app/browser_profile
       - PYTHONUNBUFFERED=1
+      # Reach the backend risk gate through the shared Docker network.
+      # ENFORCED makes an unavailable risk service fail closed for BUYs.
+      - PORTFOLIO_RISK_URL=http://polyhermes:8000/api/internal/risk/portfolio/evaluate
+      - PORTFOLIO_RISK_ENFORCEMENT_MODE=ENFORCED
     volumes:
       - polymtrade-browser-profile:/app/browser_profile
       # Mount docker socket so log watcher can read PolyHermes logs

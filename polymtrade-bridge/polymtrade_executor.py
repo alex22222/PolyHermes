@@ -386,7 +386,11 @@ class PolymtradeExecutor:
 
                     const title = lines[0];
                     const currentValue = parseMoney(lines[1]);
-                    const sideQtyLine = lines.find(l => l.includes('份'));
+                    // Polymtrade renders this as either "Yes • 1.22 shares"
+                    // or the localized "Yes • 1.22 份".  Match the bullet,
+                    // not one particular language, so the live row is not
+                    // discarded when the browser locale changes.
+                    const sideQtyLine = lines.find(l => l.includes('•'));
                     let side = '';
                     let quantity = null;
                     if (sideQtyLine) {
@@ -1294,26 +1298,16 @@ class PolymtradeExecutor:
                             };
                             const titleNodes = Array.from(document.querySelectorAll('*'))
                                 .filter(el => isVisible(el) && norm(textOf(el)) === targetTitle);
-                            const detailNodes = Array.from(document.querySelectorAll('*'))
-                                .filter(el => {
-                                    if (!isVisible(el)) return false;
-                                    const text = norm(textOf(el));
-                                    return text === 'rules' || text === 'market closes' || text === 'start date';
-                                });
                             const tradeButtons = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"], .cursor-pointer'))
                                 .filter(el => isVisible(el) && isTradeAction(el));
                             const activeTarget = titleNodes.some(title => {
                                 const titleCenter = center(title);
-                                const hasNearbyDetail = detailNodes.some(detail => {
-                                    const detailCenter = center(detail);
-                                    return Math.abs(detailCenter.x - titleCenter.x) < 300;
-                                });
                                 const hasNearbyTrade = tradeButtons.some(button => {
                                     const buttonCenter = center(button);
                                     return Math.abs(buttonCenter.x - titleCenter.x) < 350
                                         && Math.abs(buttonCenter.y - titleCenter.y) < 500;
                                 });
-                                return hasNearbyDetail && hasNearbyTrade;
+                                return hasNearbyTrade;
                             });
                             if (!activeTarget) {
                                 return {
@@ -1367,7 +1361,7 @@ class PolymtradeExecutor:
                             };
                         }
                         return {
-                            visible: hasKeyword && hasSide && hasOutcome,
+                            visible: false,
                             keywordHits,
                             hasSide,
                             hasOutcome,

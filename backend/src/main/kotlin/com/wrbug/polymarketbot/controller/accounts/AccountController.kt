@@ -4,6 +4,7 @@ import com.wrbug.polymarketbot.dto.*
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.accounts.AccountService
 import com.wrbug.polymarketbot.service.accounts.BridgePositionSellService
+import com.wrbug.polymarketbot.service.bridge.BridgePortfolioClient
 import com.wrbug.polymarketbot.service.copytrading.statistics.CopyTradingStatisticsService
 import com.wrbug.polymarketbot.repository.AccountRepository
 import com.wrbug.polymarketbot.util.toSafeBigDecimal
@@ -25,7 +26,8 @@ class AccountController(
     private val bridgePositionSellService: BridgePositionSellService,
     private val statisticsService: CopyTradingStatisticsService,
     private val dailyAssetSnapshotService: com.wrbug.polymarketbot.service.accounts.DailyAssetSnapshotService,
-    private val accountRepository: AccountRepository
+    private val accountRepository: AccountRepository,
+    private val bridgePortfolioClient: BridgePortfolioClient
 ) {
 
     private val logger = LoggerFactory.getLogger(AccountController::class.java)
@@ -416,6 +418,17 @@ class AccountController(
             logger.error("查询 Bridge 当前账户异常: ${e.message}", e)
             ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, e.message, messageSource))
         }
+    }
+
+    /**
+     * 返回 Bridge 当前投资组合，用于移动端只读展示。
+     * Bridge 端口不直接暴露给公网，统一通过已有认证 API 转发。
+     */
+    @PostMapping("/bridge-portfolio")
+    fun getBridgePortfolio(): ResponseEntity<ApiResponse<BridgePortfolioClient.BridgePortfolioResponse>> {
+        val portfolio = bridgePortfolioClient.fetchPositions()
+            ?: return ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, "Bridge 投资组合暂时不可用", messageSource))
+        return ResponseEntity.ok(ApiResponse.success(portfolio))
     }
 
     /**

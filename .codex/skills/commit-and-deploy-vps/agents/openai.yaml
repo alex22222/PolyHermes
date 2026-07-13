@@ -1,0 +1,4 @@
+interface:
+  display_name: "提交并部署 VPS"
+  short_description: "安全提交 PolyHermes 代码并部署到 Vultr VPS"
+  default_prompt: "使用此技能检查改动、运行验证、创建有意义的 Git 提交，并将 PolyHermes 部署到配置的 Vultr VPS，最后执行健康检查。"

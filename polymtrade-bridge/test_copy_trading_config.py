@@ -181,19 +181,36 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
 
     def test_research_risky_leader_buy_is_filtered(self):
         cfg = self._base_config(
+            leader_category="finance",
             leader_research_tag="RISKY",
             leader_research_risk_flags="negative_pnl,zero_win_rate",
         )
         reason = self.engine._check_filters(
             cfg,
             side="BUY",
-            title="NBA Finals",
+            title="Fed rate decision",
+            price=Decimal("0.5"),
+            market_end_date_ms=None,
+            signal_timestamp_ms=None,
+            market_category="finance",
+        )
+        self.assertEqual(reason, "leader research tag RISKY")
+
+    def test_research_risky_sports_buy_is_allowed(self):
+        cfg = self._base_config(
+            leader_research_tag="RISKY",
+            leader_research_risk_flags="negative_pnl,zero_win_rate",
+        )
+        reason = self.engine._check_filters(
+            cfg,
+            side="BUY",
+            title="WTA Rome match",
             price=Decimal("0.5"),
             market_end_date_ms=None,
             signal_timestamp_ms=None,
             market_category="sports",
         )
-        self.assertEqual(reason, "leader research tag RISKY")
+        self.assertIsNone(reason)
 
     def test_research_risky_leader_sell_is_not_filtered(self):
         cfg = self._base_config(
@@ -212,15 +229,18 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
         self.assertIsNone(reason)
 
     def test_research_hard_risk_flag_buy_is_filtered(self):
-        cfg = self._base_config(leader_research_risk_flags="buy_only_no_exit")
+        cfg = self._base_config(
+            leader_category="finance",
+            leader_research_risk_flags="buy_only_no_exit",
+        )
         reason = self.engine._check_filters(
             cfg,
             side="BUY",
-            title="NBA Finals",
+            title="Fed rate decision",
             price=Decimal("0.5"),
             market_end_date_ms=None,
             signal_timestamp_ms=None,
-            market_category="sports",
+            market_category="finance",
         )
         self.assertEqual(reason, "leader research risk flags: buy_only_no_exit")
 
@@ -264,6 +284,20 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
         )
         self.assertIsNotNone(reason)
         self.assertIn("category mismatch", reason)
+
+    def test_primary_category_allows_clear_sports_market(self):
+        self.assertTrue(is_category_allowed("politics", "sports"))
+        self.assertTrue(is_category_allowed("finance", "sports"))
+
+        cfg = self._base_config(leader_category="politics")
+        self.engine._configs = [cfg]
+        matches = self.engine.get_matching_configs(
+            "0xabc",
+            "BUY",
+            "Counter-Strike: Bushido Wildcats vs MOUZ NXT (BO3) - ESL Challenger League",
+            Decimal("0.60"),
+        )
+        self.assertEqual(matches, [(cfg, None)])
 
     @patch.dict("os.environ", {"COPY_TRADING_ALLOW_PRIMARY_TO_CRYPTO": "true"})
     def test_primary_category_allows_crypto_when_temporarily_enabled(self):

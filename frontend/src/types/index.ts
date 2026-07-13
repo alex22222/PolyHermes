@@ -1595,6 +1595,31 @@ export interface PositionListResponse {
   historyPositions: AccountPosition[]
 }
 
+export interface BridgePortfolioPosition {
+  marketTitle: string
+  side: string
+  quantity: number
+  currentValue?: number | null
+  pnl?: number | null
+  percentPnl?: number | null
+  marketIcon?: string | null
+  marketSlug?: string | null
+  eventSlug?: string | null
+  redeemable: boolean
+}
+
+export interface BridgePortfolioResponse {
+  positions: BridgePortfolioPosition[]
+  syncedAt?: number | null
+  walletAddress?: string | null
+  availableBalance?: number | null
+  portfolioComplete: boolean
+  emptyStateConfirmed: boolean
+  pendingRedeemValue?: number | null
+  redeemablePositionCount?: number | null
+  redeemValuationStatus: string
+}
+
 /**
  * 仓位卖出请求
  */

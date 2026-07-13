@@ -128,6 +128,35 @@ BTC_UPDOWN_PORTFOLIO_HTML = """
 """
 
 
+FED_PORTFOLIO_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <h2>持仓 订单 历史</h2>
+    <button>买入 $PM</button>
+    <div class="portfolio-row cursor-pointer" role="button">
+      <span>Will there be no change in Fed interest rates after the July 2026 meeting?</span>
+      <span>No - 61.1 份</span>
+      <span>$12.5</span>
+    </div>
+    <div class="portfolio-row cursor-pointer" role="button">
+      <span>Will the Republican Party control the Senate after the 2026 Midterm elections?</span>
+      <span>Yes - 22.2 份</span>
+      <span>$12.1</span>
+    </div>
+  </main>
+  <script>
+    window.clickedLabels = [];
+    document.addEventListener("click", (event) => {
+      window.clickedLabels.push((event.target.innerText || event.target.textContent || "").trim());
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 async def _make_executor(page):
     executor = PolymtradeExecutor()
     executor.page = page
@@ -328,6 +357,34 @@ async def test_binary_updown_portfolio_row_is_not_trade_visible_and_can_open():
             await browser.close()
 
 
+async def test_non_binary_portfolio_row_is_not_trade_visible_and_can_open():
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(FED_PORTFOLIO_HTML)
+
+            executor = await _make_executor(page)
+            visible = await executor._is_target_event_visible(
+                outcome="No",
+                market_slug="fed-decision-in-july-181",
+                market_title="Will there be no change in Fed interest rates after the July 2026 meeting?",
+                timeout=1.0,
+            )
+            assert visible is False
+
+            clicked = await executor._open_target_market_from_portfolio_row(
+                market_slug="fed-decision-in-july-181",
+                market_title="Will there be no change in Fed interest rates after the July 2026 meeting?",
+            )
+            assert clicked is True
+            clicked_labels = await page.evaluate("window.clickedLabels")
+            assert clicked_labels, clicked_labels
+            assert "Fed interest rates" in clicked_labels[0]
+        finally:
+            await browser.close()
+
+
 async def test_wait_for_page_ready_succeeds_without_event_id_in_url():
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -461,6 +518,7 @@ if __name__ == "__main__":
     asyncio.run(test_is_target_event_visible_false_when_side_buttons_missing())
     asyncio.run(test_binary_updown_visible_only_with_trade_buttons())
     asyncio.run(test_binary_updown_portfolio_row_is_not_trade_visible_and_can_open())
+    asyncio.run(test_non_binary_portfolio_row_is_not_trade_visible_and_can_open())
     asyncio.run(test_wait_for_page_ready_succeeds_without_event_id_in_url())
     asyncio.run(test_wait_for_page_ready_fails_when_content_missing())
     asyncio.run(test_wait_for_page_ready_retries_navigation_race())

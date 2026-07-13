@@ -16,8 +16,8 @@ import java.math.RoundingMode
  * Bridge 仓位计算服务
  *
  * 对于没有私钥的 Bridge 只读账户，优先使用 Bridge 抓取的真实持仓快照
- * （bridge_position_snapshot）。当快照不存在时回退到 bridge_trade_record
- * 自行计算净仓位，作为兜底展示。
+ * （bridge_position_snapshot）。没有实时快照时不把历史成交记录伪装成当前仓位，
+ * 避免已结算/已过期市场被错误展示为仍持有。
  */
 @Service
 class BridgePositionService(
@@ -40,8 +40,8 @@ class BridgePositionService(
             if (snapshotPositions.isNotEmpty()) {
                 snapshotPositions
             } else {
-                logger.info("Bridge 持仓快照为空，回退到 trade record 计算: accountId=${account.id}")
-                calculateFromTradeRecords(account)
+                logger.warn("Bridge 持仓快照为空，当前仓位返回空列表，不使用历史 trade record 回退: accountId=${account.id}")
+                emptyList()
             }
         } catch (e: Exception) {
             logger.error("计算 Bridge 仓位失败: accountId=${account.id}", e)

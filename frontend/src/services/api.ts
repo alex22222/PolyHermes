@@ -355,6 +355,9 @@ export const apiService = {
     bridgeCurrent: () =>
       apiClient.post<ApiResponse<any>>('/accounts/bridge-current', {}),
 
+    bridgePortfolio: () =>
+      apiClient.post<ApiResponse<import('../types').BridgePortfolioResponse>>('/accounts/bridge-portfolio', {}),
+
     /**
      * 将 Bridge 当前浏览器会话账户关联为无私钥只读账户
      */

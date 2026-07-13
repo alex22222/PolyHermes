@@ -18,6 +18,7 @@ COPY_MODE_FIXED = "FIXED"
 COPY_MODE_PROPORTIONAL_RISK = "PROPORTIONAL_RISK"
 PRIMARY_CATEGORIES = {"politics", "finance"}
 CRYPTO_CATEGORY = "crypto"
+SPORTS_CATEGORY = "sports"
 MAX_LEADER_VALUE_AMPLIFICATION = Decimal(
     os.getenv("COPY_TRADING_MAX_LEADER_VALUE_AMPLIFICATION", "1")
 )
@@ -40,6 +41,11 @@ def is_category_allowed(leader_category: Optional[str], market_category: Optiona
         and leader_category in PRIMARY_CATEGORIES
         and market_category == CRYPTO_CATEGORY
     ):
+        return True
+    # Leader metadata can lag behind the actual market classification. Allow
+    # clearly identified sports/esports markets from the primary leader pools;
+    # keep crypto isolated unless the explicit crypto flag above is enabled.
+    if market_category == SPORTS_CATEGORY and leader_category in PRIMARY_CATEGORIES:
         return True
     return leader_category in PRIMARY_CATEGORIES and market_category in PRIMARY_CATEGORIES
 
@@ -301,7 +307,7 @@ class CopyTradingRuleEngine:
         if side == "SELL" and not cfg.support_sell:
             return "support_sell=false"
 
-        if side == "BUY":
+        if side == "BUY" and market_category != SPORTS_CATEGORY:
             risk_reason = self._leader_research_risk_reason(cfg)
             if risk_reason:
                 return risk_reason
