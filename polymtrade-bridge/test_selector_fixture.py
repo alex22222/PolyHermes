@@ -340,6 +340,41 @@ ESPORTS_MATCH_MARKET_HTML = """
 """
 
 
+IRAN_BLOCKADE_MULTIDATE_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <section id="iran-event">
+      <h1>Will the US announce a blockade on Iran?</h1>
+      <div class="market-row">
+        <div>12月31日</div>
+        <div role="button">是\nx1.00\n99.8¢</div>
+        <div role="button">否\nx200.00\n0.5¢</div>
+      </div>
+      <div class="market-row">
+        <div>8月31日</div>
+        <div role="button">是\nx1.00\n99.9¢</div>
+        <div role="button">否\nx111.11\n0.9¢</div>
+      </div>
+      <div class="market-row">
+        <div>7月31日</div>
+        <div role="button">是\nx1.01\n99¢</div>
+        <div role="button">否\nx90.91\n1.1¢</div>
+      </div>
+    </section>
+  </main>
+  <script>
+    window.clickedLabels = [];
+    document.addEventListener("click", (event) => {
+      window.clickedLabels.push((event.target.innerText || event.target.textContent || "").trim());
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 async def _run_selector_fixture() -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -675,6 +710,32 @@ async def _run_selector_fixture() -> None:
                 )
                 clicked_labels = await page.evaluate("window.clickedLabels")
                 assert clicked_labels == [expected_label], (outcome, clicked_labels)
+
+            # Multi-date event pages localize the row date.  The selector must
+            # use the date in the target title ("by July 31") to click the 7月31日
+            # row, not the first Yes card in the outer event container.
+            page = await browser.new_page()
+            await page.set_content(IRAN_BLOCKADE_MULTIDATE_HTML)
+            keywords = PolymtradeExecutor._extract_market_keywords(
+                "us-announces-blockade-on-iran-byptptpt-20260622191049039",
+                "Will the US announce a blockade on Iran by July 31?",
+            )
+            assert "7月31日" in keywords, keywords
+            hormuz_keywords = PolymtradeExecutor._extract_market_keywords(
+                "strait-of-hormuz-traffic-returns-to-normal-by-august-31-20260702154212320",
+                "Strait of Hormuz traffic returns to normal by August 31?",
+            )
+            assert "8月31日" in hormuz_keywords, hormuz_keywords
+            result = await page.evaluate(
+                PolymtradeExecutor._select_outcome_script(),
+                ["Yes", ["是", "Yes", "Buy Yes", "Long"], keywords],
+            )
+            clicked_labels = await page.evaluate("window.clickedLabels")
+            assert result["clicked"] is True, result
+            assert "7月31日" in result["rowText"], result
+            assert "99¢" in result["label"], result
+            assert "99.8¢" not in result["label"], result
+            assert clicked_labels == [result["label"]], clicked_labels
         finally:
             await browser.close()
 

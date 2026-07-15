@@ -113,7 +113,15 @@ class PolymtradeExecutor:
         self._ready = False
 
     def is_ready(self) -> bool:
-        return self._ready and self.page is not None
+        if not self._ready or self.page is None or self.context is None:
+            return False
+        try:
+            if self.page.is_closed():
+                return False
+            return bool(self.context.pages)
+        except Exception as e:
+            logger.warning(f"Browser readiness check failed: {e}")
+            return False
 
     def is_logged_in(self) -> bool:
         return self._logged_in
@@ -2160,6 +2168,29 @@ class PolymtradeExecutor:
                 return
             seen.add(k)
             keywords.append(k)
+
+        if raw:
+            month_aliases = {
+                "january": "1",
+                "february": "2",
+                "march": "3",
+                "april": "4",
+                "may": "5",
+                "june": "6",
+                "july": "7",
+                "august": "8",
+                "september": "9",
+                "october": "10",
+                "november": "11",
+                "december": "12",
+            }
+            title_for_dates = unicodedata.normalize("NFKD", raw).lower()
+            title_for_dates = "".join(c for c in title_for_dates if not unicodedata.combining(c))
+            for month_name, month_num in month_aliases.items():
+                for match in re.finditer(rf"\b{month_name}\s+(\d{{1,2}})\b", title_for_dates):
+                    day = str(int(match.group(1)))
+                    add(f"{month_num}月{day}日")
+                    add(f"{month_num}月{day}")
 
         # Extract tokens; expand known country codes and country names.
         for t in tokens:

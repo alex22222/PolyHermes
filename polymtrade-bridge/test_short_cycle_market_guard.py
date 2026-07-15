@@ -11,6 +11,7 @@ import main as bridge_main  # noqa: E402
 from main import (  # noqa: E402
     _high_confidence_buy_reason,
     _generic_repeat_buy_reason,
+    _crypto_exit_shadow_decision,
     _leader_event_activity_buy_reason,
     _near_expiry_news_buy_reason,
     _short_cycle_daily_limit_buy_reason,
@@ -88,6 +89,58 @@ def test_eth_updown_5m_buy_is_skipped_in_last_minute():
     assert near_close is not None, near_close
     assert "Short-cycle market stale" in near_close
     assert "buffer=60s" in near_close
+
+
+def test_crypto_exit_shadow_take_profit_and_stop_loss():
+    take_profit = _crypto_exit_shadow_decision(
+        market_slug="xrp-updown-5m-1782304500",
+        market_title="XRP Up or Down - test",
+        entry_price=Decimal("0.50"),
+        current_price=Decimal("0.80"),
+        entry_created_at_ms=1782304500000,
+        now_seconds=1782304550,
+    )
+    assert take_profit is not None
+    assert take_profit["action"] == "TAKE_PROFIT", take_profit
+    assert take_profit["trigger"] == "take_profit", take_profit
+
+    stop_loss = _crypto_exit_shadow_decision(
+        market_slug="xrp-updown-5m-1782304500",
+        market_title="XRP Up or Down - test",
+        entry_price=Decimal("0.50"),
+        current_price=Decimal("0.25"),
+        entry_created_at_ms=1782304500000,
+        now_seconds=1782304550,
+    )
+    assert stop_loss is not None
+    assert stop_loss["action"] == "STOP_LOSS", stop_loss
+    assert stop_loss["trigger"] == "stop_loss", stop_loss
+
+
+def test_crypto_exit_shadow_respects_hold_and_close_windows():
+    min_hold = _crypto_exit_shadow_decision(
+        market_slug="xrp-updown-5m-1782304500",
+        market_title="XRP Up or Down - test",
+        entry_price=Decimal("0.50"),
+        current_price=Decimal("0.80"),
+        entry_created_at_ms=1782304500000,
+        now_seconds=1782304510,
+    )
+    assert min_hold is not None
+    assert min_hold["action"] == "HOLD", min_hold
+    assert min_hold["blocked_reason"] == "min_hold_seconds=20", min_hold
+
+    near_close = _crypto_exit_shadow_decision(
+        market_slug="xrp-updown-5m-1782304500",
+        market_title="XRP Up or Down - test",
+        entry_price=Decimal("0.50"),
+        current_price=Decimal("0.25"),
+        entry_created_at_ms=1782304500000,
+        now_seconds=1782304770,
+    )
+    assert near_close is not None
+    assert near_close["action"] == "HOLD", near_close
+    assert near_close["blocked_reason"] == "no_exit_last_seconds=35", near_close
 
 
 def test_btc_updown_5m_duplicate_buy_guard():

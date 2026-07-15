@@ -127,3 +127,51 @@ class PositionLedger:
             )
             return net
         return desired_quantity
+
+    def latest_success_buy_entry(
+        self,
+        market_id: Optional[str],
+        market_slug: Optional[str],
+        market_title: Optional[str],
+        outcome: Optional[str],
+    ) -> Optional[dict]:
+        """Return the latest successful Bridge BUY matching a live position."""
+        outcome_norm = (outcome or "").strip().lower()
+        if not outcome_norm:
+            return None
+        sql = """
+        SELECT id, market_id, market_title, outcome, outcome_index, quantity, price, amount,
+               raw_payload, created_at
+        FROM bridge_trade_record
+        WHERE bridge_id = %s
+          AND side = 'BUY'
+          AND status = 'SUCCESS'
+          AND LOWER(outcome) = %s
+          AND (
+            (%s IS NOT NULL AND market_id = %s)
+            OR (%s IS NOT NULL AND raw_payload LIKE %s)
+            OR (%s IS NOT NULL AND market_title = %s)
+          )
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql,
+                        (
+                            self.bridge_id,
+                            outcome_norm,
+                            market_id,
+                            market_id,
+                            market_slug,
+                            f'%"{market_slug}"%' if market_slug else None,
+                            market_title,
+                            market_title,
+                        ),
+                    )
+                    return cur.fetchone()
+        except Exception as e:
+            logger.warning(f"Failed to query latest success BUY entry: {e}")
+            return None

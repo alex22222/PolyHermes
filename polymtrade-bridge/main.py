@@ -61,6 +61,11 @@ PROPORTIONAL_RISK_BUYBACK_WINDOW_SECONDS = int(
 PROPORTIONAL_RISK_SMALL_BUYBACK_RATIO = Decimal(
     os.getenv("PROPORTIONAL_RISK_SMALL_BUYBACK_RATIO", "0.25")
 )
+CRYPTO_EXIT_RULE_MODE = os.getenv("CRYPTO_EXIT_RULE_MODE", "SHADOW").upper()
+CRYPTO_EXIT_TAKE_PROFIT_PCT = Decimal(os.getenv("CRYPTO_EXIT_TAKE_PROFIT_PCT", "0.60"))
+CRYPTO_EXIT_STOP_LOSS_PCT = Decimal(os.getenv("CRYPTO_EXIT_STOP_LOSS_PCT", "0.50"))
+CRYPTO_EXIT_MIN_HOLD_SECONDS = int(os.getenv("CRYPTO_EXIT_MIN_HOLD_SECONDS", "20"))
+CRYPTO_EXIT_NO_EXIT_LAST_SECONDS = int(os.getenv("CRYPTO_EXIT_NO_EXIT_LAST_SECONDS", "35"))
 
 # Singleton PID lock to prevent multiple bridge instances from competing for the
 # same browser profile and opening multiple Chrome windows.
@@ -311,10 +316,13 @@ app = FastAPI(title="PolyHermes → Polymtrade Bridge", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "executor_ready": executor.is_ready() if executor else False,
-    }
+    executor_ready = executor.is_ready() if executor else False
+    if not executor_ready:
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "degraded", "executor_ready": False},
+        )
+    return {"status": "ok", "executor_ready": True}
 
 
 @app.get("/status")
@@ -571,6 +579,7 @@ async def portfolio_positions():
     if "error" in result:
         metrics.portfolio_errors += 1
         raise HTTPException(status_code=500, detail=result["error"])
+    result["crypto_exit_rule"] = _annotate_crypto_exit_shadow(result.get("positions") or [])
     result["wallet_address"] = wallet_address.lower() if wallet_address else None
     result["available_balance"] = available_balance
     return result
@@ -1746,6 +1755,152 @@ def _is_crypto_market(title: Optional[str], market_slug: Optional[str] = None) -
     if infer_market_category(title) == "crypto":
         return True
     return bool(market_slug and re.search(r"(btc|eth|xrp|sol|doge|bnb)-updown-", market_slug, re.IGNORECASE))
+
+
+def _is_crypto_5m_market(market_slug: Optional[str], market_title: Optional[str] = None) -> bool:
+    raw = " ".join(part for part in [market_slug, market_title] if part).lower()
+    return bool(re.search(r"(btc|eth|xrp|sol|doge|bnb)-updown-5m-\d{10}", raw))
+
+
+def _crypto_5m_market_close_seconds(market_slug: Optional[str]) -> Optional[int]:
+    if not market_slug:
+        return None
+    match = re.search(r"(btc|eth|xrp|sol|doge|bnb)-updown-5m-(\d{10})", market_slug.lower())
+    if not match:
+        return None
+    return int(match.group(2)) + BTC_UPDOWN_5M_SECONDS
+
+
+def _crypto_exit_shadow_decision(
+    *,
+    market_slug: Optional[str],
+    market_title: Optional[str],
+    entry_price: Decimal,
+    current_price: Decimal,
+    entry_created_at_ms: Optional[int],
+    now_seconds: Optional[float] = None,
+) -> Optional[dict]:
+    """Return a shadow take-profit/stop-loss decision for crypto 5m positions."""
+    if not _is_crypto_5m_market(market_slug, market_title):
+        return None
+    if entry_price <= 0 or current_price <= 0:
+        return None
+
+    now = now_seconds if now_seconds is not None else time.time()
+    age_seconds = None
+    if entry_created_at_ms:
+        age_seconds = max(0, now - (int(entry_created_at_ms) / 1000))
+
+    close_seconds = _crypto_5m_market_close_seconds(market_slug)
+    seconds_to_close = None
+    if close_seconds is not None:
+        seconds_to_close = close_seconds - now
+
+    take_profit_price = entry_price * (Decimal("1") + CRYPTO_EXIT_TAKE_PROFIT_PCT)
+    stop_loss_price = entry_price * (Decimal("1") - CRYPTO_EXIT_STOP_LOSS_PCT)
+    pnl_pct = (current_price - entry_price) / entry_price
+
+    blocked_reason = None
+    if age_seconds is not None and age_seconds < CRYPTO_EXIT_MIN_HOLD_SECONDS:
+        blocked_reason = f"min_hold_seconds={CRYPTO_EXIT_MIN_HOLD_SECONDS}"
+    elif seconds_to_close is not None and seconds_to_close <= CRYPTO_EXIT_NO_EXIT_LAST_SECONDS:
+        blocked_reason = f"no_exit_last_seconds={CRYPTO_EXIT_NO_EXIT_LAST_SECONDS}"
+
+    action = "HOLD"
+    trigger = None
+    if blocked_reason is None:
+        if current_price >= take_profit_price:
+            action = "TAKE_PROFIT"
+            trigger = "take_profit"
+        elif current_price <= stop_loss_price:
+            action = "STOP_LOSS"
+            trigger = "stop_loss"
+
+    return {
+        "mode": CRYPTO_EXIT_RULE_MODE,
+        "action": action,
+        "trigger": trigger,
+        "entry_price": str(entry_price),
+        "current_price": str(current_price),
+        "pnl_pct": str(pnl_pct),
+        "take_profit_price": str(take_profit_price),
+        "stop_loss_price": str(stop_loss_price),
+        "take_profit_pct": str(CRYPTO_EXIT_TAKE_PROFIT_PCT),
+        "stop_loss_pct": str(CRYPTO_EXIT_STOP_LOSS_PCT),
+        "age_seconds": float(age_seconds) if age_seconds is not None else None,
+        "seconds_to_close": float(seconds_to_close) if seconds_to_close is not None else None,
+        "blocked_reason": blocked_reason,
+    }
+
+
+def _annotate_crypto_exit_shadow(positions: list[dict]) -> dict:
+    """Annotate live portfolio positions with crypto 5m TP/SL shadow decisions."""
+    summary = {
+        "mode": CRYPTO_EXIT_RULE_MODE,
+        "take_profit_pct": str(CRYPTO_EXIT_TAKE_PROFIT_PCT),
+        "stop_loss_pct": str(CRYPTO_EXIT_STOP_LOSS_PCT),
+        "evaluated": 0,
+        "take_profit": 0,
+        "stop_loss": 0,
+    }
+    if not position_ledger:
+        return summary
+
+    for pos in positions:
+        market_slug = pos.get("marketSlug")
+        market_title = pos.get("marketTitle")
+        if not _is_crypto_5m_market(market_slug, market_title):
+            continue
+        try:
+            quantity = Decimal(str(pos.get("quantity") or "0"))
+            current_value = Decimal(str(pos.get("currentValue") or "0"))
+        except Exception:
+            continue
+        if quantity <= 0 or current_value <= 0:
+            continue
+
+        current_price = current_value / quantity
+        outcome = pos.get("side")
+        entry = position_ledger.latest_success_buy_entry(
+            market_id=pos.get("conditionId") or market_slug,
+            market_slug=market_slug,
+            market_title=market_title,
+            outcome=outcome,
+        )
+        if not entry:
+            continue
+
+        entry_price = Decimal(str(entry.get("price") or "0"))
+        decision = _crypto_exit_shadow_decision(
+            market_slug=market_slug,
+            market_title=market_title,
+            entry_price=entry_price,
+            current_price=current_price,
+            entry_created_at_ms=entry.get("created_at"),
+        )
+        if not decision:
+            continue
+
+        decision["entry_record_id"] = entry.get("id")
+        pos["cryptoExitShadow"] = decision
+        summary["evaluated"] += 1
+        if decision["action"] == "TAKE_PROFIT":
+            summary["take_profit"] += 1
+        elif decision["action"] == "STOP_LOSS":
+            summary["stop_loss"] += 1
+        if decision["action"] != "HOLD":
+            logger.info(
+                "Crypto exit shadow %s: title=%s side=%s entry=%s current=%s pnl_pct=%s mode=%s",
+                decision["action"],
+                market_title,
+                outcome,
+                decision["entry_price"],
+                decision["current_price"],
+                decision["pnl_pct"],
+                decision["mode"],
+            )
+
+    return summary
 
 
 def _high_confidence_buy_reason(
