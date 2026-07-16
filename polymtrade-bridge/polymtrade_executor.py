@@ -1,11 +1,13 @@
 import asyncio
 import base64
+import contextvars
 import json
 import logging
 import os
 import re
 import time
 import urllib.parse
+from contextlib import asynccontextmanager, contextmanager
 from typing import Optional, Tuple
 
 import httpx
@@ -18,12 +20,35 @@ logger = logging.getLogger(__name__)
 _EVALUATE_ARG_MISSING = object()
 
 
+class LastMilePriceDriftError(RuntimeError):
+    def __init__(
+        self,
+        signal_price: float,
+        quoted_price: float,
+        max_price_drift: float,
+    ):
+        self.signal_price = signal_price
+        self.quoted_price = quoted_price
+        self.drift = quoted_price - signal_price
+        self.max_price_drift = max_price_drift
+        super().__init__(
+            "Last-mile price drift blocked BUY before submit: "
+            f"signal={signal_price:.4f} quoted={quoted_price:.4f} "
+            f"drift={self.drift:.4f} max={max_price_drift:.4f}"
+        )
+
+
 class PolymtradeExecutor:
     def __init__(self):
         self.playwright = None
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
+        self._default_page: Optional[Page] = None
+        self._page_override: contextvars.ContextVar[Optional[Page]] = contextvars.ContextVar(
+            f"polymtrade_page_{id(self)}",
+            default=None,
+        )
+        self.portfolio_page: Optional[Page] = None
         self.base_url = os.getenv("POLYMTRADE_URL", "https://polym.trade")
         self.proxy = os.getenv("BROWSER_PROXY")  # e.g. http://host.docker.internal:7890
         self.profile_dir = os.path.abspath(os.getenv("BROWSER_PROFILE_DIR", "./browser_profile"))
@@ -37,6 +62,94 @@ class PolymtradeExecutor:
         # Wallet address changes rarely; cache aggressively to keep /account fast
         # and avoid blocking behind /portfolio scrapes.
         self._wallet_cache_ttl_ms: int = 300000
+        self._position_metadata_cache: dict[str, tuple[float, dict]] = {}
+        self._position_metadata_inflight: dict[str, asyncio.Task] = {}
+        self._metadata_cache_ttl_seconds = 21600.0
+        self._metadata_negative_cache_ttl_seconds = 300.0
+        self._metadata_cache_max_entries = 2048
+        self._event_cache: dict[str, tuple[float, Tuple[str, str]]] = {}
+        self._event_inflight: dict[str, asyncio.Task] = {}
+        self._event_cache_ttl_seconds = 21600.0
+        self._event_cache_max_entries = 2048
+        self._http_client: Optional[httpx.AsyncClient] = None
+        self._portfolio_page_idle_close_seconds = float(
+            os.getenv("BRIDGE_PORTFOLIO_PAGE_IDLE_CLOSE_SECONDS", "120")
+        )
+        self._short_cycle_page_ready_timeout_seconds = float(
+            os.getenv("BRIDGE_SHORT_CYCLE_PAGE_READY_TIMEOUT_SECONDS", "6")
+        )
+        self._short_cycle_buy_page_ready_timeout_seconds = float(
+            os.getenv("BRIDGE_SHORT_CYCLE_BUY_PAGE_READY_TIMEOUT_SECONDS", "0.6")
+        )
+        self._short_cycle_page_ready_poll_seconds = float(
+            os.getenv("BRIDGE_SHORT_CYCLE_PAGE_READY_POLL_SECONDS", "0.15")
+        )
+        self._short_cycle_target_visible_timeout_seconds = float(
+            os.getenv("BRIDGE_SHORT_CYCLE_TARGET_VISIBLE_TIMEOUT_SECONDS", "1.2")
+        )
+        self._short_cycle_event_url_timeout_seconds = float(
+            os.getenv("BRIDGE_SHORT_CYCLE_EVENT_URL_TIMEOUT_SECONDS", "2")
+        )
+        self._short_cycle_dialog_detect_timeout_seconds = float(
+            os.getenv("BRIDGE_SHORT_CYCLE_DIALOG_DETECT_TIMEOUT_SECONDS", "1.25")
+        )
+        self._short_cycle_confirm_timeout_seconds = float(
+            os.getenv("BRIDGE_SHORT_CYCLE_CONFIRM_TIMEOUT_SECONDS", "1.25")
+        )
+        self._short_cycle_submit_button_timeout_seconds = float(
+            os.getenv("BRIDGE_SHORT_CYCLE_SUBMIT_BUTTON_TIMEOUT_SECONDS", "2")
+        )
+        self._short_cycle_post_outcome_settle_seconds = float(
+            os.getenv("BRIDGE_SHORT_CYCLE_POST_OUTCOME_SETTLE_SECONDS", "0.15")
+        )
+        self._short_cycle_retry_navigation_settle_seconds = float(
+            os.getenv("BRIDGE_SHORT_CYCLE_RETRY_NAVIGATION_SETTLE_SECONDS", "0.25")
+        )
+        self._short_cycle_portfolio_row_settle_seconds = float(
+            os.getenv("BRIDGE_SHORT_CYCLE_PORTFOLIO_ROW_SETTLE_SECONDS", "0.35")
+        )
+        self._short_cycle_buy_attempts = max(
+            1,
+            int(os.getenv("BRIDGE_SHORT_CYCLE_BUY_ATTEMPTS", "3")),
+        )
+        self._short_cycle_sell_dialog_attempts = max(
+            1,
+            int(os.getenv("BRIDGE_SHORT_CYCLE_SELL_DIALOG_ATTEMPTS", "2")),
+        )
+        self._portfolio_page_idle_close_task: Optional[asyncio.Task] = None
+        self._portfolio_page_last_used_at: float = 0.0
+
+    @property
+    def page(self) -> Optional[Page]:
+        return self._page_override.get() or self._default_page
+
+    @page.setter
+    def page(self, value: Optional[Page]):
+        self._default_page = value
+
+    @contextmanager
+    def _page_scope(self, page: Page):
+        token = self._page_override.set(page)
+        try:
+            yield
+        finally:
+            self._page_override.reset(token)
+
+    @asynccontextmanager
+    async def _http_client_context(self):
+        if self._http_client is None or self._http_client.is_closed:
+            limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+            transport = httpx.AsyncHTTPTransport(proxy=self.proxy, limits=limits)
+            self._http_client = httpx.AsyncClient(
+                transport=transport,
+                timeout=20.0,
+                trust_env=False,
+            )
+        yield self._http_client
+
+    async def _close_http_client(self):
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
 
     async def start(self):
         """Start browser and load Polymtrade."""
@@ -71,7 +184,13 @@ class PolymtradeExecutor:
                 ),
             )
 
-            self.page = await self.context.new_page()
+            restored_pages = list(self.context.pages)
+            self.page = restored_pages[0] if restored_pages else await self.context.new_page()
+            for extra_page in restored_pages[1:]:
+                try:
+                    await extra_page.close()
+                except Exception as close_error:
+                    logger.debug(f"Could not close restored browser page: {close_error}")
             await self._goto_with_retry(self.base_url, max_retries=4, timeout_ms=60000)
             # Give dynamic content / websockets a moment to settle
             await asyncio.sleep(3)
@@ -105,11 +224,14 @@ class PolymtradeExecutor:
             finally:
                 self.context = None
                 self.page = None
+                self.portfolio_page = None
+                self._cancel_portfolio_page_idle_close()
         if self.playwright:
             try:
                 await self.playwright.stop()
             finally:
                 self.playwright = None
+        await self._close_http_client()
         self._ready = False
 
     def is_ready(self) -> bool:
@@ -122,6 +244,57 @@ class PolymtradeExecutor:
         except Exception as e:
             logger.warning(f"Browser readiness check failed: {e}")
             return False
+
+    def browser_diagnostics(self) -> dict:
+        """Return cheap page-level diagnostics without navigating or reading DOM."""
+        page_infos = []
+        try:
+            pages = list(self.context.pages) if self.context else []
+        except Exception as e:
+            return {"page_count": None, "error": str(e)}
+
+        for page in pages:
+            try:
+                page_infos.append({
+                    "url": page.url,
+                    "closed": page.is_closed(),
+                    "role": (
+                        "portfolio"
+                        if page is self.portfolio_page
+                        else "default"
+                        if page is self._default_page
+                        else "other"
+                    ),
+                })
+            except Exception as e:
+                page_infos.append({"url": None, "closed": None, "role": "unknown", "error": str(e)})
+
+        return {
+            "page_count": len(pages),
+            "default_page_closed": self._default_page.is_closed() if self._default_page else None,
+            "portfolio_page_closed": self.portfolio_page.is_closed() if self.portfolio_page else None,
+            "pages": page_infos,
+        }
+
+    async def close_known_unmanaged_pages(self) -> int:
+        """Close browser tabs that are known to be unrelated to execution."""
+        if not self.context:
+            return 0
+
+        closed_count = 0
+        for page in list(self.context.pages):
+            if page is self._default_page or page is self.portfolio_page:
+                continue
+            try:
+                hostname = urllib.parse.urlparse(page.url).hostname or ""
+                if hostname != "docs.polym.trade":
+                    continue
+                await page.close()
+                closed_count += 1
+                logger.info("Closed unmanaged Polymtrade docs browser page")
+            except Exception as e:
+                logger.debug(f"Could not close unmanaged browser page: {e}")
+        return closed_count
 
     def is_logged_in(self) -> bool:
         return self._logged_in
@@ -201,26 +374,32 @@ class PolymtradeExecutor:
         """Extract the currently logged-in wallet address from the portfolio page."""
         if not self.page or not self._logged_in:
             return None
-        try:
-            await self._goto_with_retry(f"{self.base_url}/portfolio", max_retries=5, timeout_ms=30000)
-            await asyncio.sleep(1)
-            text = await self.page.inner_text("body", timeout=5000)
-            ref_match = re.search(r'[?&]ref=(0x[a-fA-F0-9]{40})', text)
-            if ref_match:
-                address = ref_match.group(1).lower()
-                self._cached_wallet_address = address
-                self._cached_wallet_at = int(time.time() * 1000)
-                return address
-            addresses = re.findall(r'0x[a-fA-F0-9]{40}', text)
-            if addresses:
-                address = addresses[0].lower()
-                self._cached_wallet_address = address
-                self._cached_wallet_at = int(time.time() * 1000)
-                return address
+        page = await self._ensure_portfolio_page()
+        if not page:
             return None
+        try:
+            with self._page_scope(page):
+                await self._goto_with_retry(f"{self.base_url}/portfolio", max_retries=5, timeout_ms=30000)
+                await asyncio.sleep(1)
+                text = await self.page.inner_text("body", timeout=5000)
+                ref_match = re.search(r'[?&]ref=(0x[a-fA-F0-9]{40})', text)
+                if ref_match:
+                    address = ref_match.group(1).lower()
+                    self._cached_wallet_address = address
+                    self._cached_wallet_at = int(time.time() * 1000)
+                    return address
+                addresses = re.findall(r'0x[a-fA-F0-9]{40}', text)
+                if addresses:
+                    address = addresses[0].lower()
+                    self._cached_wallet_address = address
+                    self._cached_wallet_at = int(time.time() * 1000)
+                    return address
+                return None
         except Exception as e:
             logger.warning(f"Failed to extract wallet address: {e}")
             return None
+        finally:
+            self._schedule_portfolio_page_idle_close()
 
     async def click_by_text(self, text: str) -> dict:
         """Click the first element containing the given text and return page info."""
@@ -347,7 +526,78 @@ class PolymtradeExecutor:
             f"{label}: navigation race persisted after {max_retries} attempts: {last_error}"
         ) from last_error
 
+    async def _ensure_portfolio_page(self) -> Optional[Page]:
+        self._cancel_portfolio_page_idle_close()
+        if self.portfolio_page and not self.portfolio_page.is_closed():
+            self._portfolio_page_last_used_at = time.monotonic()
+            return self.portfolio_page
+        if not self.context:
+            return self.page
+        self.portfolio_page = await self.context.new_page()
+        self._portfolio_page_last_used_at = time.monotonic()
+        return self.portfolio_page
+
+    def _cancel_portfolio_page_idle_close(self) -> None:
+        task = self._portfolio_page_idle_close_task
+        if task and not task.done():
+            task.cancel()
+        self._portfolio_page_idle_close_task = None
+
+    def _schedule_portfolio_page_idle_close(self) -> None:
+        if self._portfolio_page_idle_close_seconds <= 0 or not self.portfolio_page:
+            return
+        self._portfolio_page_last_used_at = time.monotonic()
+        self._cancel_portfolio_page_idle_close()
+        self._portfolio_page_idle_close_task = asyncio.create_task(
+            self._close_portfolio_page_after_idle(
+                self.portfolio_page,
+                self._portfolio_page_last_used_at,
+            )
+        )
+
+    async def _close_portfolio_page_after_idle(self, page: Page, last_used_at: float) -> None:
+        try:
+            await asyncio.sleep(self._portfolio_page_idle_close_seconds)
+            if page is not self.portfolio_page:
+                return
+            if self._portfolio_page_last_used_at != last_used_at:
+                return
+            if page.is_closed():
+                self.portfolio_page = None
+                return
+            await page.close()
+            if page is self.portfolio_page:
+                self.portfolio_page = None
+            logger.info("Closed idle portfolio page after %.1fs", self._portfolio_page_idle_close_seconds)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to close idle portfolio page: {e}")
+        finally:
+            if asyncio.current_task() is self._portfolio_page_idle_close_task:
+                self._portfolio_page_idle_close_task = None
+
+    async def get_portfolio_balance(self) -> Optional[float]:
+        page = await self._ensure_portfolio_page()
+        if not page:
+            return None
+        try:
+            with self._page_scope(page):
+                return await self._get_usdc_balance()
+        finally:
+            self._schedule_portfolio_page_idle_close()
+
     async def fetch_portfolio_positions(self) -> dict:
+        page = await self._ensure_portfolio_page()
+        if not page:
+            return {"error": "page not initialized"}
+        try:
+            with self._page_scope(page):
+                return await self._fetch_portfolio_positions_on_active_page()
+        finally:
+            self._schedule_portfolio_page_idle_close()
+
+    async def _fetch_portfolio_positions_on_active_page(self) -> dict:
         """Scrape current open positions from the Polymtrade portfolio page.
 
         Returns a dict with {"positions": [...], "synced_at": timestamp}.
@@ -362,10 +612,7 @@ class PolymtradeExecutor:
             if not rendered:
                 logger.warning("Portfolio rows did not render before scrape; continuing with best effort")
 
-            # 多次滚动页面到底部，触发 Polymtrade 的懒加载/分页，确保所有持仓都被渲染
-            for _ in range(5):
-                await self.page.evaluate("() => { window.scrollTo(0, document.body.scrollHeight); }")
-                await asyncio.sleep(0.8)
+            await self._scroll_portfolio_until_stable()
 
             js = r"""
             () => {
@@ -484,6 +731,36 @@ class PolymtradeExecutor:
             logger.exception(f"Failed to fetch portfolio positions: {e}")
             return {"error": str(e)}
 
+    async def _scroll_portfolio_until_stable(
+        self,
+        max_scrolls: int = 8,
+        settle_seconds: float = 0.3,
+    ) -> None:
+        last_state = None
+        stable_samples = 0
+        for _ in range(max_scrolls):
+            state = await self.page.evaluate(
+                """
+                () => {
+                    window.scrollTo(0, document.body.scrollHeight);
+                    const selector = 'li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer';
+                    return {
+                        height: document.body.scrollHeight,
+                        rows: document.querySelectorAll(selector).length,
+                    };
+                }
+                """
+            )
+            if state == last_state:
+                stable_samples += 1
+                if stable_samples >= 2:
+                    return
+            else:
+                stable_samples = 0
+                last_state = state
+            if settle_seconds > 0:
+                await asyncio.sleep(settle_seconds)
+
     async def _wait_for_portfolio_rows(self, timeout: float = 12.0) -> bool:
         """Wait until portfolio rows or an explicit empty state is rendered."""
         deadline = time.time() + timeout
@@ -518,7 +795,44 @@ class PolymtradeExecutor:
         logger.warning(f"Timed out waiting for portfolio rows: {last_state}")
         return False
 
+    def _position_metadata_cache_key(self, position: dict) -> str:
+        return "|".join(
+            str(position.get(field) or "").strip().lower()
+            for field in ("marketTitle", "conditionId", "marketSlug", "eventSlug", "href")
+        )
+
     async def _enrich_position(self, position: dict) -> dict:
+        key = self._position_metadata_cache_key(position)
+        now = time.monotonic()
+        cached = self._position_metadata_cache.get(key)
+        if cached and cached[0] > now:
+            metrics.gamma_metadata_cache_hits += 1
+            return dict(cached[1])
+
+        inflight = self._position_metadata_inflight.get(key)
+        if inflight:
+            metrics.gamma_metadata_cache_hits += 1
+            return dict(await inflight)
+
+        metrics.gamma_metadata_cache_misses += 1
+        task = asyncio.create_task(self._resolve_position_metadata(position))
+        self._position_metadata_inflight[key] = task
+        try:
+            metadata = await task
+            ttl = (
+                self._metadata_cache_ttl_seconds
+                if metadata
+                else self._metadata_negative_cache_ttl_seconds
+            )
+            self._position_metadata_cache[key] = (time.monotonic() + ttl, dict(metadata))
+            while len(self._position_metadata_cache) > self._metadata_cache_max_entries:
+                self._position_metadata_cache.pop(next(iter(self._position_metadata_cache)))
+            return dict(metadata)
+        finally:
+            if self._position_metadata_inflight.get(key) is task:
+                self._position_metadata_inflight.pop(key, None)
+
+    async def _resolve_position_metadata(self, position: dict) -> dict:
         """Map a portfolio market title to conditionId/slugs.
 
         First tries to use identifiers already present in the scraped card
@@ -945,9 +1259,7 @@ class PolymtradeExecutor:
         max_retries: int = 3,
     ) -> list:
         """Search Gamma markets API by market title."""
-        proxy_url = self.proxy
-        transport = httpx.AsyncHTTPTransport(proxy=proxy_url) if proxy_url else None
-        async with httpx.AsyncClient(transport=transport, timeout=20.0) as client:
+        async with self._http_client_context() as client:
             return await self._gamma_request_with_retry(
                 client,
                 "https://gamma-api.polymarket.com/markets",
@@ -961,9 +1273,7 @@ class PolymtradeExecutor:
         max_retries: int = 3,
     ) -> list:
         """Search Gamma markets API by exact market slug."""
-        proxy_url = self.proxy
-        transport = httpx.AsyncHTTPTransport(proxy=proxy_url) if proxy_url else None
-        async with httpx.AsyncClient(transport=transport, timeout=20.0) as client:
+        async with self._http_client_context() as client:
             return await self._gamma_request_with_retry(
                 client,
                 "https://gamma-api.polymarket.com/markets",
@@ -977,9 +1287,7 @@ class PolymtradeExecutor:
         max_retries: int = 3,
     ) -> list:
         """Search Gamma events API by event title."""
-        proxy_url = self.proxy
-        transport = httpx.AsyncHTTPTransport(proxy=proxy_url) if proxy_url else None
-        async with httpx.AsyncClient(transport=transport, timeout=20.0) as client:
+        async with self._http_client_context() as client:
             return await self._gamma_request_with_retry(
                 client,
                 "https://gamma-api.polymarket.com/events",
@@ -993,9 +1301,7 @@ class PolymtradeExecutor:
         max_retries: int = 3,
     ) -> list:
         """Search Gamma events API by event slug."""
-        proxy_url = self.proxy
-        transport = httpx.AsyncHTTPTransport(proxy=proxy_url) if proxy_url else None
-        async with httpx.AsyncClient(transport=transport, timeout=20.0) as client:
+        async with self._http_client_context() as client:
             return await self._gamma_request_with_retry(
                 client,
                 "https://gamma-api.polymarket.com/events",
@@ -1008,45 +1314,87 @@ class PolymtradeExecutor:
         market_slug: Optional[str] = None,
         condition_id: Optional[str] = None,
     ) -> Tuple[str, str]:
+        key = f"{market_slug or ''}|{condition_id or ''}"
+        now = time.monotonic()
+        cached = self._event_cache.get(key)
+        if cached and cached[0] > now:
+            metrics.event_cache_hits += 1
+            return cached[1]
+
+        inflight = self._event_inflight.get(key)
+        if inflight:
+            metrics.event_cache_hits += 1
+            return await inflight
+
+        metrics.event_cache_misses += 1
+        task = asyncio.create_task(
+            self._resolve_event_uncached(
+                market_slug=market_slug,
+                condition_id=condition_id,
+            )
+        )
+        self._event_inflight[key] = task
+        try:
+            result = await task
+            self._event_cache[key] = (time.monotonic() + self._event_cache_ttl_seconds, result)
+            while len(self._event_cache) > self._event_cache_max_entries:
+                self._event_cache.pop(next(iter(self._event_cache)))
+            return result
+        finally:
+            if self._event_inflight.get(key) is task:
+                self._event_inflight.pop(key, None)
+
+    async def _resolve_event_uncached(
+        self,
+        market_slug: Optional[str] = None,
+        condition_id: Optional[str] = None,
+    ) -> Tuple[str, str]:
         """Resolve Polymtrade event id/slug from market slug or condition id."""
-        proxy_url = self.proxy
-        transport = httpx.AsyncHTTPTransport(proxy=proxy_url) if proxy_url else None
-        async with httpx.AsyncClient(transport=transport, timeout=20.0) as client:
+        if self._is_short_cycle_market_slug(market_slug):
+            logger.info("Using short-cycle market slug directly as Polymtrade event slug: %s", market_slug)
+            return "", str(market_slug)
+
+        async with self._http_client_context() as client:
             slug_to_use = market_slug
 
-            # 1) Try treating the slug as a Gamma event slug
+            # Short-cycle slugs identify Gamma markets, so avoid an unnecessary
+            # events request on the first trade for each new 5m/15m window.
             if slug_to_use:
-                try:
-                    resp = await client.get(
-                        "https://gamma-api.polymarket.com/events",
-                        params={"slug": slug_to_use, "limit": 5},
-                    )
-                    resp.raise_for_status()
-                    events = resp.json()
-                    if events and events[0].get("id"):
-                        event = events[0]
-                        logger.info(f"Resolved event via Gamma events slug: {event['id']}")
-                        return str(event["id"]), event["slug"]
-                except Exception as e:
-                    logger.warning(f"Failed to resolve event via Gamma events slug: {e}")
+                short_cycle_slug = bool(
+                    re.search(r"-(?:5|15)m-\d{10}$", slug_to_use, re.IGNORECASE)
+                )
+                endpoint_order = (
+                    ("markets", "events") if short_cycle_slug else ("events", "markets")
+                )
+                for endpoint in endpoint_order:
+                    try:
+                        resp = await client.get(
+                            f"https://gamma-api.polymarket.com/{endpoint}",
+                            params={"slug": slug_to_use, "limit": 5},
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        event = None
+                        if data:
+                            if endpoint == "events":
+                                event = data[0]
+                            else:
+                                event = (data[0].get("events") or [None])[0]
+                        if event and event.get("id"):
+                            logger.info(
+                                "Resolved event via Gamma %s slug: %s",
+                                endpoint,
+                                event["id"],
+                            )
+                            return str(event["id"]), event["slug"]
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to resolve event via Gamma %s slug: %s",
+                            endpoint,
+                            e,
+                        )
 
-            # 2) Try treating the slug as a Gamma market slug
-            if slug_to_use:
-                try:
-                    resp = await client.get(
-                        "https://gamma-api.polymarket.com/markets",
-                        params={"slug": slug_to_use, "limit": 5},
-                    )
-                    resp.raise_for_status()
-                    markets = resp.json()
-                    if markets and markets[0].get("events"):
-                        event = markets[0]["events"][0]
-                        logger.info(f"Resolved event via Gamma markets slug: {event['id']}")
-                        return str(event["id"]), event["slug"]
-                except Exception as e:
-                    logger.warning(f"Failed to resolve event via Gamma markets slug: {e}")
-
-            # 3) Fallback: condition_id -> CLOB market slug -> Gamma event.
+            # Fallback: condition_id -> CLOB market slug -> Gamma event.
             # Gamma's conditionId filters are unreliable (they often return
             # unrelated results), so we use CLOB to get the canonical market_slug
             # and then resolve the event from Gamma using that slug.
@@ -1087,6 +1435,13 @@ class PolymtradeExecutor:
                 f"Could not resolve Polymtrade event for slug={market_slug}, condition_id={condition_id}"
             )
 
+    @staticmethod
+    def _is_short_cycle_market_slug(market_slug: Optional[str]) -> bool:
+        return bool(
+            market_slug
+            and re.search(r"-(?:5|15)m-\d{10}$", market_slug, re.IGNORECASE)
+        )
+
     async def execute_trade(
         self,
         market_slug: str,
@@ -1096,6 +1451,9 @@ class PolymtradeExecutor:
         condition_id: Optional[str] = None,
         size_shares: Optional[float] = None,
         market_title: Optional[str] = None,
+        verify: bool = True,
+        signal_price: Optional[float] = None,
+        max_price_drift: Optional[float] = None,
     ):
         """Execute a trade on Polymtrade.
 
@@ -1115,24 +1473,35 @@ class PolymtradeExecutor:
             raise ValueError(f"Invalid side: {side}")
 
         try:
+            resolve_started_at = time.perf_counter()
             event_id, event_slug = await self._resolve_event(
                 market_slug=market_slug, condition_id=condition_id
+            )
+            metrics.observe_latency(
+                f"event_resolve_{self._latency_bucket_for_market(market_slug)}_ms",
+                (time.perf_counter() - resolve_started_at) * 1000,
+                side=side,
+                market_slug=market_slug or "",
+                used_event_id=bool(event_id),
             )
 
             if side == "BUY":
                 result = await self._execute_buy(
                     event_id, event_slug, outcome, amount_usdc,
-                    market_slug=market_slug, market_title=market_title
+                    market_slug=market_slug, market_title=market_title,
+                    signal_price=signal_price, max_price_drift=max_price_drift,
                 )
                 # Post-trade verification: confirm the buy actually affected the account.
                 baseline = result.get("baseline") or {}
-                verified = await self._verify_buy_executed(
-                    outcome=outcome,
-                    amount_usdc=amount_usdc,
-                    baseline=baseline,
-                    market_slug=market_slug,
-                    market_title=market_title,
-                )
+                verified = None
+                if verify:
+                    verified = await self._verify_buy_executed(
+                        outcome=outcome,
+                        amount_usdc=amount_usdc,
+                        baseline=baseline,
+                        market_slug=market_slug,
+                        market_title=market_title,
+                    )
                 result["verified"] = verified
             else:
                 result = await self._execute_sell(
@@ -1141,21 +1510,26 @@ class PolymtradeExecutor:
                 )
                 # Post-trade verification: confirm the sell actually affected the account.
                 baseline = result.get("baseline") or {}
-                verified = await self._verify_sell_executed(
-                    outcome=outcome,
-                    size_shares=size_shares,
-                    baseline=baseline,
-                    market_slug=market_slug,
-                    market_title=market_title,
-                )
+                verified = None
+                if verify:
+                    verified = await self._verify_sell_executed(
+                        outcome=outcome,
+                        size_shares=size_shares,
+                        baseline=baseline,
+                        market_slug=market_slug,
+                        market_title=market_title,
+                    )
                 result["verified"] = verified
 
             logger.info(f"Trade executed: {result}")
             return result
 
         except Exception as e:
-            self.last_error = str(e)
-            logger.exception(f"Trade execution failed: {e}")
+            if isinstance(e, LastMilePriceDriftError):
+                logger.warning(f"Trade blocked by last-mile price drift: {e}")
+            else:
+                self.last_error = str(e)
+                logger.exception(f"Trade execution failed: {e}")
             try:
                 safe_slug = (market_slug or condition_id or "unknown").replace("/", "_")
                 screenshot_path = f"/tmp/trade_error_{safe_slug}.png"
@@ -1170,6 +1544,8 @@ class PolymtradeExecutor:
         timeout: float = 15.0,
         market_title: Optional[str] = None,
         event_id: Optional[str] = None,
+        market_slug: Optional[str] = None,
+        outcome: Optional[str] = None,
     ):
         """Wait until the event page has rendered market rows.
 
@@ -1183,6 +1559,8 @@ class PolymtradeExecutor:
             keywords = self._extract_market_keywords(market_title=market_title)
             # Keep only the shortest/most specific keywords for a quick check.
             keywords = [k for k in keywords if len(k) <= 20][:4]
+        binary_updown = self._is_binary_updown_market(market_slug, market_title)
+        outcome_norm = (outcome or "").strip().lower()
 
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -1190,6 +1568,8 @@ class PolymtradeExecutor:
                 has_content = await self._evaluate_with_navigation_retry(
                     """(args) => {
                         const keywords = args[0];
+                        const binaryUpdown = args[1];
+                        const outcome = args[2];
                         const sideLabels = ['是', '否', 'Yes', 'No', 'Buy Yes', 'Buy No', 'Long', 'Short', '买入', '卖出', 'Buy', 'Sell'];
                         const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
                         const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
@@ -1203,7 +1583,22 @@ class PolymtradeExecutor:
                                 return t === lnorm || t.startsWith(lnorm + " ") || t.endsWith(" " + lnorm) || t.includes(" " + lnorm + " ");
                             });
                         };
+                        const isBinaryAction = (el) => {
+                            const t = norm(textOf(el));
+                            if (!outcome || t.length > 40) return false;
+                            if (t === outcome) return true;
+                            if (t.startsWith(outcome + " ")) {
+                                const suffix = t.slice(outcome.length).trim();
+                                if (/(^|\\s)(up|down|涨|跌|上涨|下跌)(\\s|$)/.test(suffix)) return false;
+                                return /^[\\d$¢]/.test(suffix);
+                            }
+                            return false;
+                        };
                         const hasSideButtons = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"]')).some(isTradeAction);
+                        if (binaryUpdown) {
+                            const hasBinaryButton = Array.from(document.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"]')).some(isBinaryAction);
+                            if (hasBinaryButton) return true;
+                        }
                         if (keywords.length > 0) {
                             const bodyLower = norm(bodyText);
                             const hasKeyword = keywords.some(kw => bodyLower.includes(kw.toLowerCase()));
@@ -1221,14 +1616,14 @@ class PolymtradeExecutor:
                         }
                         return (hasMarkets || hasSideButtons) && bodyText.length > 200;
                     }""",
-                    [keywords],
+                    [keywords, binary_updown, outcome_norm],
                     label="wait_for_page_ready.evaluate",
                 )
                 if has_content:
                     return True
             except Exception:
                 pass
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(self._page_ready_poll_seconds_for_market(market_slug))
         return False
 
     async def _wait_for_event_url(self, event_id: str, timeout: float = 8.0) -> bool:
@@ -1244,6 +1639,111 @@ class PolymtradeExecutor:
                 pass
             await asyncio.sleep(0.2)
         return False
+
+    def _is_short_cycle_updown_market(self, market_slug: Optional[str]) -> bool:
+        return bool(
+            market_slug
+            and re.search(r"(btc|eth|xrp|sol|doge|bnb)-updown-(5|15)m-\d+", market_slug, re.IGNORECASE)
+        )
+
+    def _page_ready_timeout_for_market(self, market_slug: Optional[str]) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_page_ready_timeout_seconds
+        return 15.0
+
+    def _buy_page_ready_timeout_for_market(self, market_slug: Optional[str]) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_buy_page_ready_timeout_seconds
+        return self._page_ready_timeout_for_market(market_slug)
+
+    def _page_ready_poll_seconds_for_market(self, market_slug: Optional[str]) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_page_ready_poll_seconds
+        return 0.5
+
+    def _target_visible_timeout_for_market(self, market_slug: Optional[str]) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_target_visible_timeout_seconds
+        return 8.0
+
+    def _target_visible_poll_seconds_for_market(self, market_slug: Optional[str]) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_page_ready_poll_seconds
+        return 0.3
+
+    def _event_url_timeout_for_market(self, market_slug: Optional[str], default: float) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_event_url_timeout_seconds
+        return default
+
+    def _navigation_wait_until_for_market(self, market_slug: Optional[str]) -> str:
+        if self._is_short_cycle_updown_market(market_slug):
+            return "commit"
+        return "domcontentloaded"
+
+    def _dialog_detect_timeout_for_market(self, market_slug: Optional[str]) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_dialog_detect_timeout_seconds
+        return 3.0
+
+    def _confirm_timeout_for_market(self, market_slug: Optional[str]) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_confirm_timeout_seconds
+        return 15.0
+
+    def _submit_button_timeout_for_market(self, market_slug: Optional[str]) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_submit_button_timeout_seconds
+        return 10.0
+
+    def _post_outcome_settle_seconds_for_market(self, market_slug: Optional[str]) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_post_outcome_settle_seconds
+        return 0.8
+
+    def _retry_navigation_settle_seconds_for_market(self, market_slug: Optional[str]) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_retry_navigation_settle_seconds
+        return 1.0
+
+    def _portfolio_row_settle_seconds_for_market(self, market_slug: Optional[str]) -> float:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_portfolio_row_settle_seconds
+        return 1.5
+
+    def _latency_bucket_for_market(self, market_slug: Optional[str]) -> str:
+        if not market_slug:
+            return "other"
+        match = re.match(r"^(btc|eth|xrp|sol|doge|bnb)-updown-(5m|15m)-\d+$", market_slug)
+        if match:
+            return match.group(2)
+        return "other"
+
+    def _observe_trade_stage(
+        self,
+        side: str,
+        market_slug: Optional[str],
+        stage: str,
+        started_at: float,
+    ) -> None:
+        bucket = self._latency_bucket_for_market(market_slug)
+        metrics.observe_latency(
+            f"{side.lower()}_{bucket}_{stage}_ms",
+            (time.perf_counter() - started_at) * 1000,
+            side=side.upper(),
+            market_slug=market_slug or "",
+            stage=stage,
+        )
+
+    def _buy_attempts_for_market(self, market_slug: Optional[str]) -> int:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_buy_attempts
+        return 6
+
+    def _sell_dialog_attempts_for_market(self, market_slug: Optional[str]) -> int:
+        if self._is_short_cycle_updown_market(market_slug):
+            return self._short_cycle_sell_dialog_attempts
+        return 5
 
     async def _is_target_event_visible(
         self,
@@ -1385,7 +1885,7 @@ class PolymtradeExecutor:
                     return True
             except Exception:
                 pass
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(self._target_visible_poll_seconds_for_market(market_slug))
         return False
 
     def _side_labels_for_outcome(
@@ -1524,8 +2024,14 @@ class PolymtradeExecutor:
             except Exception:
                 pass
             for selector in selectors:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
                 try:
-                    el = await self.page.wait_for_selector(selector, timeout=500)
+                    el = await self.page.wait_for_selector(
+                        selector,
+                        timeout=max(1, int(min(0.5, remaining) * 1000)),
+                    )
                     if el and await el.is_visible():
                         in_trade_form = await el.evaluate(
                             "el => !!el.closest('[role=\"dialog\"], .trade-dialog, [class*=\"trade\"], [class*=\"modal\"], [data-test*=\"trade\" i], [data-testid*=\"trade\" i]')"
@@ -1553,8 +2059,14 @@ class PolymtradeExecutor:
         deadline = time.time() + timeout
         while time.time() < deadline:
             for selector in selectors:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
                 try:
-                    el = await self.page.wait_for_selector(selector, timeout=500)
+                    el = await self.page.wait_for_selector(
+                        selector,
+                        timeout=max(1, int(min(0.5, remaining) * 1000)),
+                    )
                     if el and await el.is_visible():
                         return True
                 except Exception:
@@ -1667,6 +2179,8 @@ class PolymtradeExecutor:
         amount_usdc: float,
         market_slug: Optional[str] = None,
         market_title: Optional[str] = None,
+        signal_price: Optional[float] = None,
+        max_price_drift: Optional[float] = None,
     ):
         """Execute a BUY order on the Polymtrade event page.
 
@@ -1680,19 +2194,18 @@ class PolymtradeExecutor:
             raise RuntimeError("Browser context not initialized")
 
         trade_page = await self.context.new_page()
-        original_page = self.page
-        self.page = trade_page
         try:
-            return await self._execute_buy_on_page(
-                event_id, event_slug, outcome, amount_usdc,
-                market_slug=market_slug, market_title=market_title
-            )
+            with self._page_scope(trade_page):
+                return await self._execute_buy_on_page(
+                    event_id, event_slug, outcome, amount_usdc,
+                    market_slug=market_slug, market_title=market_title,
+                    signal_price=signal_price, max_price_drift=max_price_drift,
+                )
         finally:
             try:
                 await trade_page.close()
             except Exception:
                 pass
-            self.page = original_page
 
     async def _execute_buy_on_page(
         self,
@@ -1702,12 +2215,10 @@ class PolymtradeExecutor:
         amount_usdc: float,
         market_slug: Optional[str] = None,
         market_title: Optional[str] = None,
+        signal_price: Optional[float] = None,
+        max_price_drift: Optional[float] = None,
     ):
         """Internal BUY implementation that operates on ``self.page``."""
-        market_url = (
-            f"{self.base_url}/portfolio?eventId={event_id}"
-            f"&eventSlug={event_slug}&eventSource=polymarket"
-        )
         # Fallback URL without eventId. Polymtrade redirects this to the canonical
         # event URL and it can be more reliable when the portfolio carousel would
         # otherwise rotate away from an event where we have no open position.
@@ -1715,16 +2226,38 @@ class PolymtradeExecutor:
             f"{self.base_url}/portfolio?eventSlug={event_slug}"
             f"&eventSource=polymarket"
         )
+        market_url = (
+            f"{self.base_url}/portfolio?eventId={event_id}"
+            f"&eventSlug={event_slug}&eventSource=polymarket"
+            if event_id
+            else fallback_url
+        )
         logger.info(f"Navigating to {market_url}")
-        await self._goto_with_retry(market_url)
-        await asyncio.sleep(3)
-        if not await self._wait_for_page_ready(timeout=15.0, market_title=market_title, event_id=event_id):
+        stage_started_at = time.perf_counter()
+        await self._goto_with_retry(
+            market_url,
+            wait_until=self._navigation_wait_until_for_market(market_slug),
+        )
+        self._observe_trade_stage("BUY", market_slug, "navigate", stage_started_at)
+        page_ready_timeout = self._buy_page_ready_timeout_for_market(market_slug)
+        target_visible_timeout = self._target_visible_timeout_for_market(market_slug)
+        stage_started_at = time.perf_counter()
+        if not await self._wait_for_page_ready(
+            timeout=page_ready_timeout,
+            market_title=market_title,
+            event_id=event_id,
+            market_slug=market_slug,
+            outcome=outcome,
+        ):
             logger.warning("Event page content did not render in time; proceeding anyway")
+        self._observe_trade_stage("BUY", market_slug, "page_ready", stage_started_at)
 
         # Pre-flight balance check: fail fast if we can read the balance and it
         # is clearly insufficient. This avoids entering the modal retry loop when
         # the account simply cannot afford the trade.
+        stage_started_at = time.perf_counter()
         balance = await self._get_usdc_balance()
+        self._observe_trade_stage("BUY", market_slug, "balance_check", stage_started_at)
         if balance is not None and balance < amount_usdc * 1.05:
             raise RuntimeError(
                 f"Insufficient balance for BUY: available {balance:.4f} USDC, "
@@ -1737,43 +2270,68 @@ class PolymtradeExecutor:
         # coming back, the account likely lacks sufficient deposit balance.
         buy_dialog_open = False
         outcome_selected = False
-        for attempt in range(6):
+        selected_quote = None
+        buy_attempts = self._buy_attempts_for_market(market_slug)
+        dialog_detect_timeout = self._dialog_detect_timeout_for_market(market_slug)
+        for attempt in range(buy_attempts):
             # The portfolio page auto-rotates through the user's position events.
             # Instead of waiting for the exact eventId to appear in the URL, we
             # verify the target market/outcome content is actually rendered. If
             # the carousel rotated away, we re-navigate to bring it back.
+            stage_started_at = time.perf_counter()
             if not await self._is_target_event_visible(
-                outcome, market_slug=market_slug, market_title=market_title, timeout=8.0
+                outcome, market_slug=market_slug, market_title=market_title, timeout=target_visible_timeout
             ):
+                self._observe_trade_stage("BUY", market_slug, "target_visible", stage_started_at)
                 current_url = self.page.url if self.page else ""
                 logger.warning(
                     f"Target market content not visible (attempt {attempt + 1}); "
                     f"current URL: {current_url}"
                 )
-                if attempt < 5:
+                if attempt < buy_attempts - 1:
                     if await self._open_target_market_from_portfolio_row(
                         market_slug=market_slug, market_title=market_title
                     ):
-                        await asyncio.sleep(1.5)
+                        await asyncio.sleep(self._portfolio_row_settle_seconds_for_market(market_slug))
                         continue
                     target_url = fallback_url if attempt % 2 else market_url
                     logger.info(f"Re-navigating to {target_url}")
-                    await self._goto_with_retry(target_url)
-                    await asyncio.sleep(1.0)
+                    await self._goto_with_retry(
+                        target_url,
+                        wait_until=self._navigation_wait_until_for_market(market_slug),
+                    )
+                    await asyncio.sleep(self._retry_navigation_settle_seconds_for_market(market_slug))
                     continue
                 raise RuntimeError(
                     f"Target market content never appeared for {market_title or market_slug}"
                 )
+            self._observe_trade_stage("BUY", market_slug, "target_visible", stage_started_at)
 
             try:
-                await self._select_polymtrade_outcome(
+                stage_started_at = time.perf_counter()
+                selection_result = await self._select_polymtrade_outcome(
                     outcome, market_slug=market_slug, market_title=market_title
                 )
+                self._observe_trade_stage("BUY", market_slug, "select_outcome", stage_started_at)
+                if isinstance(selection_result, dict):
+                    quoted_price = self._extract_quoted_price(
+                        selection_result.get("label", "")
+                    )
+                    if quoted_price is not None:
+                        selected_quote = quoted_price
+                        if signal_price is not None and max_price_drift is not None:
+                            quote_drift = selected_quote - signal_price
+                            if quote_drift > max_price_drift:
+                                raise LastMilePriceDriftError(
+                                    signal_price=signal_price,
+                                    quoted_price=selected_quote,
+                                    max_price_drift=max_price_drift,
+                                )
                 outcome_selected = True
             except RuntimeError as e:
                 if "Could not select outcome" in str(e):
                     logger.warning(f"Outcome selection failed (attempt {attempt + 1}): {e}")
-                    if attempt < 5:
+                    if attempt < buy_attempts - 1:
                         # Categorical pages sometimes render rows lazily; wait
                         # a bit and try again without reloading first.
                         await asyncio.sleep(1.5)
@@ -1781,7 +2339,7 @@ class PolymtradeExecutor:
                     raise
                 raise
 
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(self._post_outcome_settle_seconds_for_market(market_slug))
 
             if await self._is_network_modal_open():
                 logger.info(f"Network modal open after outcome click (attempt {attempt + 1}), handling")
@@ -1799,10 +2357,13 @@ class PolymtradeExecutor:
                 await asyncio.sleep(0.5)
                 continue
 
-            if await self._is_buy_dialog_open(timeout=3.0):
+            stage_started_at = time.perf_counter()
+            if await self._is_buy_dialog_open(timeout=dialog_detect_timeout):
+                self._observe_trade_stage("BUY", market_slug, "dialog_detect", stage_started_at)
                 logger.info("Buy dialog detected after outcome click")
                 buy_dialog_open = True
                 break
+            self._observe_trade_stage("BUY", market_slug, "dialog_detect", stage_started_at)
 
             logger.warning(f"Buy dialog not detected after outcome click (attempt {attempt + 1}), retrying")
             # Page may have navigated; give it a moment to settle before retrying.
@@ -1843,18 +2404,28 @@ class PolymtradeExecutor:
                 raise RuntimeError("Network/deposit modal blocked trade")
 
         # Capture pre-trade baseline for post-execution verification.
+        stage_started_at = time.perf_counter()
         baseline = await self._capture_buy_baseline(
             outcome, market_slug=market_slug, market_title=market_title
         )
+        self._observe_trade_stage("BUY", market_slug, "baseline", stage_started_at)
 
         # Enter amount in the buy dialog
+        stage_started_at = time.perf_counter()
         await self._enter_amount(amount_usdc)
+        self._observe_trade_stage("BUY", market_slug, "enter_amount", stage_started_at)
 
         # Submit the buy order
-        await self._click_buy_button()
+        stage_started_at = time.perf_counter()
+        await self._click_buy_button(
+            timeout=self._submit_button_timeout_for_market(market_slug),
+        )
+        self._observe_trade_stage("BUY", market_slug, "click_submit", stage_started_at)
 
         # Wait for confirmation
-        await self._confirm_trade()
+        stage_started_at = time.perf_counter()
+        await self._confirm_trade(timeout=self._confirm_timeout_for_market(market_slug))
+        self._observe_trade_stage("BUY", market_slug, "submit_confirm", stage_started_at)
 
         return {
             "status": "executed",
@@ -1864,6 +2435,7 @@ class PolymtradeExecutor:
             "event_id": event_id,
             "event_slug": event_slug,
             "baseline": baseline,
+            "submitted_quote": selected_quote,
         }
 
     async def _execute_sell(
@@ -1885,15 +2457,35 @@ class PolymtradeExecutor:
         market_url = (
             f"{self.base_url}/portfolio?eventId={event_id}"
             f"&eventSlug={event_slug}&eventSource=polymarket"
+            if event_id
+            else f"{self.base_url}/portfolio?eventSlug={event_slug}&eventSource=polymarket"
         )
         logger.info(f"Navigating to event page for SELL: {market_url}")
-        await self._goto_with_retry(market_url)
-        await asyncio.sleep(3)
-        if not await self._wait_for_page_ready(timeout=15.0, market_title=market_title, event_id=event_id):
+        stage_started_at = time.perf_counter()
+        await self._goto_with_retry(
+            market_url,
+            wait_until=self._navigation_wait_until_for_market(market_slug),
+        )
+        self._observe_trade_stage("SELL", market_slug, "navigate", stage_started_at)
+        page_ready_timeout = self._page_ready_timeout_for_market(market_slug)
+        initial_event_url_timeout = self._event_url_timeout_for_market(market_slug, 8.0)
+        retry_event_url_timeout = self._event_url_timeout_for_market(market_slug, 6.0)
+        stage_started_at = time.perf_counter()
+        if not await self._wait_for_page_ready(
+            timeout=page_ready_timeout,
+            market_title=market_title,
+            event_id=event_id,
+            market_slug=market_slug,
+            outcome=outcome,
+        ):
             logger.warning("Event page content did not render in time for SELL; proceeding anyway")
+        self._observe_trade_stage("SELL", market_slug, "page_ready", stage_started_at)
 
-        if not await self._wait_for_event_url(event_id, timeout=8.0):
-            logger.warning(f"Target event {event_id} URL did not appear for SELL; proceeding anyway")
+        if event_id:
+            stage_started_at = time.perf_counter()
+            if not await self._wait_for_event_url(event_id, timeout=initial_event_url_timeout):
+                logger.warning(f"Target event {event_id} URL did not appear for SELL; proceeding anyway")
+            self._observe_trade_stage("SELL", market_slug, "event_url", stage_started_at)
 
         # Dismiss any network/token modal before trying to open the sell dialog.
         if await self._is_network_modal_open():
@@ -1913,21 +2505,29 @@ class PolymtradeExecutor:
         # Open the sell dialog for the position matching the outcome, retrying if
         # a modal or lazy rendering interferes.
         sell_dialog_open = False
-        for attempt in range(5):
-            if not await self._wait_for_event_url(event_id, timeout=6.0):
-                logger.warning(f"Target event {event_id} did not appear in URL before SELL attempt {attempt + 1}")
-                if attempt < 4:
-                    await asyncio.sleep(1.0)
-                    continue
-                raise RuntimeError(f"Target event {event_id} URL never appeared for SELL")
+        sell_dialog_attempts = self._sell_dialog_attempts_for_market(market_slug)
+        dialog_detect_timeout = self._dialog_detect_timeout_for_market(market_slug)
+        for attempt in range(sell_dialog_attempts):
+            if event_id:
+                stage_started_at = time.perf_counter()
+                if not await self._wait_for_event_url(event_id, timeout=retry_event_url_timeout):
+                    self._observe_trade_stage("SELL", market_slug, "event_url_retry", stage_started_at)
+                    logger.warning(f"Target event {event_id} did not appear in URL before SELL attempt {attempt + 1}")
+                    if attempt < sell_dialog_attempts - 1:
+                        await asyncio.sleep(1.0)
+                        continue
+                    raise RuntimeError(f"Target event {event_id} URL never appeared for SELL")
+                self._observe_trade_stage("SELL", market_slug, "event_url_retry", stage_started_at)
 
             try:
+                stage_started_at = time.perf_counter()
                 await self._open_sell_dialog(
                     outcome, market_slug=market_slug, market_title=market_title
                 )
+                self._observe_trade_stage("SELL", market_slug, "open_dialog", stage_started_at)
             except RuntimeError as e:
                 logger.warning(f"Open sell dialog failed (attempt {attempt + 1}): {e}")
-                if attempt < 4:
+                if attempt < sell_dialog_attempts - 1:
                     await asyncio.sleep(1.5)
                     continue
                 raise
@@ -1949,10 +2549,13 @@ class PolymtradeExecutor:
                 await asyncio.sleep(0.5)
                 continue
 
-            if await self._is_sell_dialog_open(timeout=3.0):
+            stage_started_at = time.perf_counter()
+            if await self._is_sell_dialog_open(timeout=dialog_detect_timeout):
+                self._observe_trade_stage("SELL", market_slug, "dialog_detect", stage_started_at)
                 logger.info("Sell dialog detected")
                 sell_dialog_open = True
                 break
+            self._observe_trade_stage("SELL", market_slug, "dialog_detect", stage_started_at)
 
             logger.warning(f"Sell dialog not detected after open attempt {attempt + 1}, retrying")
             await asyncio.sleep(1.0)
@@ -1990,9 +2593,11 @@ class PolymtradeExecutor:
                 raise RuntimeError("Network/deposit modal blocked SELL")
 
         # Capture pre-trade baseline for post-execution verification.
+        stage_started_at = time.perf_counter()
         baseline = await self._capture_sell_baseline(
             outcome, market_slug=market_slug, market_title=market_title
         )
+        self._observe_trade_stage("SELL", market_slug, "baseline", stage_started_at)
         live_position_qty = baseline.get("position_quantity")
         if (
             live_position_qty is not None
@@ -2006,6 +2611,7 @@ class PolymtradeExecutor:
             size_shares = live_position_qty
 
         # The sell dialog works in shares, not USDC.
+        stage_started_at = time.perf_counter()
         if size_shares is not None and size_shares > 0:
             entered = await self._enter_sell_shares(size_shares)
             if not entered:
@@ -2021,11 +2627,15 @@ class PolymtradeExecutor:
                 logger.info("Selected full position sell (100%)")
             except Exception:
                 logger.info("Full-sell button not found, using default amount")
+        self._observe_trade_stage("SELL", market_slug, "enter_amount", stage_started_at)
 
         # Submit the sell order, retrying the button click if it is transiently stale.
+        stage_started_at = time.perf_counter()
         for attempt in range(3):
             try:
-                await self._click_sell_button()
+                await self._click_sell_button(
+                    timeout=self._submit_button_timeout_for_market(market_slug),
+                )
                 break
             except RuntimeError as e:
                 logger.warning(f"Click sell button failed (attempt {attempt + 1}): {e}")
@@ -2033,9 +2643,12 @@ class PolymtradeExecutor:
                     await asyncio.sleep(1.0)
                     continue
                 raise
+        self._observe_trade_stage("SELL", market_slug, "click_submit", stage_started_at)
 
         # Wait for confirmation
-        await self._confirm_trade()
+        stage_started_at = time.perf_counter()
+        await self._confirm_trade(timeout=self._confirm_timeout_for_market(market_slug))
+        self._observe_trade_stage("SELL", market_slug, "submit_confirm", stage_started_at)
 
         return {
             "status": "executed",
@@ -2380,6 +2993,38 @@ class PolymtradeExecutor:
                 return s;
             }
 
+            // Fast path for single-market binary Up/Down pages. These short-
+            // cycle markets do not need categorical row anchoring, and avoiding
+            // scroll/lazy-row discovery keeps the submit path tight.
+            if (binaryOutcomeMode) {
+                const binaryButtons = Array.from(document.querySelectorAll("button, [role='button'], a, div, span"))
+                    .filter(el => isClickable(el) && !isInNoise(el));
+                for (const sideLabel of sideLabels) {
+                    const l = sideLabel.toLowerCase();
+                    const target = binaryButtons.find(b => {
+                        const t = norm(textOf(b));
+                        if (t.length > 40) return false;
+                        if (t === l) return true;
+                        if (t.startsWith(l + " ")) {
+                            const suffix = t.slice(l.length).trim();
+                            if (/(^|\\s)(up|down|涨|跌|上涨|下跌)(\\s|$)/.test(suffix)) return false;
+                            return /^[\\d$¢]/.test(suffix);
+                        }
+                        return false;
+                    });
+                    if (target) {
+                        const clicked = clickTarget(target);
+                        return {
+                            clicked: true,
+                            label: textOf(clicked),
+                            rowScore: 0,
+                            rowText: textOf(clicked).slice(0, 80),
+                            strategy: "binary-fast"
+                        };
+                    }
+                }
+            }
+
             // Strategy 1: anchor on the smallest visible text element that
             // contains a keyword, then walk up to the nearest row with side
             // buttons. This is the primary path for categorical pages.
@@ -2523,6 +3168,21 @@ class PolymtradeExecutor:
         """
 
     @staticmethod
+    def _extract_quoted_price(label: str) -> Optional[float]:
+        """Extract a 0..1 probability from a short outcome button label."""
+        if not label:
+            return None
+        cents = re.search(r"(\d+(?:\.\d+)?)\s*¢", label)
+        if cents:
+            value = float(cents.group(1)) / 100.0
+            return value if 0 <= value <= 1 else None
+        dollars = re.search(r"\$\s*(0(?:\.\d+)?|1(?:\.0+)?)", label)
+        if dollars:
+            value = float(dollars.group(1))
+            return value if 0 <= value <= 1 else None
+        return None
+
+    @staticmethod
     def _is_binary_updown_market(
         market_slug: Optional[str] = None,
         market_title: Optional[str] = None,
@@ -2582,19 +3242,20 @@ class PolymtradeExecutor:
 
         for attempt in range(max_attempts):
             # Lazy rows may need a moment; scroll the page to trigger rendering.
-            try:
-                await self._evaluate_with_navigation_retry(
-                    "() => { window.scrollTo(0, 0); }",
-                    label="select_outcome.scroll_top",
-                )
-                await asyncio.sleep(0.2)
-                await self._evaluate_with_navigation_retry(
-                    "() => { window.scrollTo(0, document.body.scrollHeight); }",
-                    label="select_outcome.scroll_bottom",
-                )
-                await asyncio.sleep(0.2)
-            except Exception:
-                pass
+            if not (binary_updown and attempt == 0):
+                try:
+                    await self._evaluate_with_navigation_retry(
+                        "() => { window.scrollTo(0, 0); }",
+                        label="select_outcome.scroll_top",
+                    )
+                    await asyncio.sleep(0.2)
+                    await self._evaluate_with_navigation_retry(
+                        "() => { window.scrollTo(0, document.body.scrollHeight); }",
+                        label="select_outcome.scroll_bottom",
+                    )
+                    await asyncio.sleep(0.2)
+                except Exception:
+                    pass
 
             result = await self._evaluate_with_navigation_retry(
                 self._select_outcome_script(),
@@ -2607,24 +3268,25 @@ class PolymtradeExecutor:
                 # Scroll the clicked element into view and use Playwright click
                 # as a second confirmation. If the element is gone, the JS click
                 # already fired, so we still treat it as success.
-                try:
-                    # Try to find the button that was clicked by its label text.
-                    label = result.get("label", "")
-                    if label:
-                        clicked_el = await self.page.wait_for_selector(
-                            f"text={label}", timeout=1000
-                        )
-                        if clicked_el:
-                            await clicked_el.scroll_into_view_if_needed()
-                            await asyncio.sleep(0.1)
-                except Exception:
-                    pass
+                if not binary_updown:
+                    try:
+                        # Try to find the button that was clicked by its label text.
+                        label = result.get("label", "")
+                        if label:
+                            clicked_el = await self.page.wait_for_selector(
+                                f"text={label}", timeout=1000
+                            )
+                            if clicked_el:
+                                await clicked_el.scroll_into_view_if_needed()
+                                await asyncio.sleep(0.1)
+                    except Exception:
+                        pass
                 logger.info(
                     f"Selected outcome: {outcome} -> {result.get('label')} "
                     f"(rowScore={result.get('rowScore')}, strategy={result.get('strategy')}, "
                     f"keywords={keywords}, attempt={attempt + 1})"
                 )
-                return
+                return result
 
             logger.warning(
                 f"Outcome selection failed (attempt {attempt + 1}/{max_attempts}): "
@@ -2879,7 +3541,8 @@ class PolymtradeExecutor:
             const rows = Array.from(document.querySelectorAll('li, [role="listitem"], section, article, div'))
                 .map(row => {
                     const text = (row.innerText || '').trim();
-                    return {row, text, lower: norm(text), score: score(text), len: text.length};
+                    const className = norm(row.getAttribute('class') || '');
+                    return {row, text, lower: norm(text), className, score: score(text), len: text.length};
                 })
                 .filter(item => item.text && item.len < (hasMarketContext ? 520 : 1200))
                 .sort((a, b) => b.score - a.score || a.len - b.len);
@@ -2910,6 +3573,7 @@ class PolymtradeExecutor:
                 const lower = row.lower;
                 if (keywords.length && row.score <= 0) continue;
                 if (!lower.includes(outcomeNorm)) continue;
+                if (!/(holding|portfolio|position|open-position)/.test(row.className)) continue;
                 const m = text.match(/([0-9,]+\\.?[0-9]*)\\s*(?:shares?|份)/i);
                 if (m) return {text: m[0], value: parseFloat(m[1].replace(/,/g, ''))};
             }
@@ -3080,6 +3744,37 @@ class PolymtradeExecutor:
         """Focus, clear and fill a Playwright input element robustly."""
         tag_name = ""
         is_custom_editable = False
+        try:
+            fast_result = await input_el.evaluate(
+                """(el, value) => {
+                    const tag = el.tagName;
+                    if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
+                        return {filled: false, reason: 'unsupported_tag', tag};
+                    }
+                    if (el.disabled || el.readOnly) {
+                        return {filled: false, reason: 'disabled_or_readonly', tag};
+                    }
+                    const proto = tag === 'TEXTAREA'
+                        ? window.HTMLTextAreaElement.prototype
+                        : window.HTMLInputElement.prototype;
+                    const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (!descriptor || !descriptor.set) {
+                        return {filled: false, reason: 'missing_value_setter', tag};
+                    }
+                    el.focus();
+                    descriptor.set.call(el, '');
+                    el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContent'}));
+                    descriptor.set.call(el, value);
+                    el.dispatchEvent(new InputEvent('input', {bubbles: true, data: value, inputType: 'insertText'}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    return {filled: String(el.value || '') === String(value), value: el.value, tag};
+                }""",
+                value,
+            )
+            if fast_result and fast_result.get("filled"):
+                return True
+        except Exception as e:
+            logger.debug(f"fast input fill failed: {e}")
         try:
             await input_el.scroll_into_view_if_needed()
             await input_el.click(timeout=3000)
@@ -3420,7 +4115,7 @@ class PolymtradeExecutor:
             await asyncio.sleep(0.5)
         return False
 
-    async def _click_buy_button(self):
+    async def _click_buy_button(self, timeout: float = 10.0):
         """Click the buy button in the trade dialog."""
         selectors = [
             "button[data-test='trade-buy-button']",
@@ -3433,18 +4128,26 @@ class PolymtradeExecutor:
             "[role='dialog'] button:has-text('Review')",
             "[role='dialog'] button:has-text('Place')",
         ]
-        deadline = time.time() + 10.0
+        deadline = time.time() + max(0.0, timeout)
         while time.time() < deadline:
             for selector in selectors:
+                remaining_ms = max(0, int((deadline - time.time()) * 1000))
+                if remaining_ms <= 0:
+                    break
                 try:
-                    await self.page.click(selector, timeout=750)
+                    await self.page.click(selector, timeout=min(750, remaining_ms))
                     logger.info("Clicked buy button")
                     return
                 except Exception:
                     continue
+            if time.time() >= deadline:
+                break
             if await self._click_trade_submit_button("BUY"):
                 return
-            await asyncio.sleep(0.35)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.35, remaining))
         try:
             screenshot_path = "/tmp/trade_buy_submit_button_error.png"
             await self.page.screenshot(path=screenshot_path)
@@ -3673,7 +4376,7 @@ class PolymtradeExecutor:
             raise RuntimeError(f"Could not open sell dialog for outcome: {outcome} (keywords={keywords}, sellButtons={result.get('sellButtons') if result else None})")
         logger.info(f"Opened sell dialog for outcome: {outcome} -> {result.get('label')} (score={result.get('score')})")
 
-    async def _click_sell_button(self):
+    async def _click_sell_button(self, timeout: float = 10.0):
         """Click the sell button in the sell dialog."""
         if not await self._is_sell_dialog_open(timeout=0.75):
             try:
@@ -3696,18 +4399,26 @@ class PolymtradeExecutor:
             "[role='dialog'] button:has-text('Review')",
             "[role='dialog'] button:has-text('Place')",
         ]
-        deadline = time.time() + 10.0
+        deadline = time.time() + max(0.0, timeout)
         while time.time() < deadline:
             for selector in selectors:
+                remaining_ms = max(0, int((deadline - time.time()) * 1000))
+                if remaining_ms <= 0:
+                    break
                 try:
-                    await self.page.click(selector, timeout=750)
+                    await self.page.click(selector, timeout=min(750, remaining_ms))
                     logger.info("Clicked sell button")
                     return
                 except Exception:
                     continue
+            if time.time() >= deadline:
+                break
             if await self._click_trade_submit_button("SELL"):
                 return
-            await asyncio.sleep(0.35)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.35, remaining))
         try:
             screenshot_path = "/tmp/trade_sell_submit_button_error.png"
             await self.page.screenshot(path=screenshot_path)
@@ -3880,27 +4591,14 @@ class PolymtradeExecutor:
         except Exception as e:
             logger.debug(f"Failed to capture trade submit diagnostics: {e}")
 
-    async def _confirm_trade(self):
+    async def _confirm_trade(self, timeout: float = 15.0):
         """Wait for trade confirmation.
 
         Polymtrade shows a brief toast and/or closes the dialog. We wait for
         either the dialog to disappear or a success/toast text to appear.
         """
-        await asyncio.sleep(1)
-
-        success_selectors = [
-            "text=Order submitted",
-            "text=Success",
-            "text=Confirmed",
-            "text=Order placed",
-            "text=订单已提交",
-            "text=成功",
-            "text=卖出成功",
-            "text=买入成功",
-        ]
-
-        # Wait up to 15 seconds for the dialog to close or a success marker.
-        for _ in range(30):
+        deadline = time.time() + max(0.0, timeout)
+        while time.time() < deadline:
             try:
                 dialog = await self.page.query_selector("[role='dialog']")
             except Exception as e:
@@ -3916,16 +4614,36 @@ class PolymtradeExecutor:
                 logger.info("Trade dialog closed; trade likely confirmed")
                 return
 
-            for selector in success_selectors:
-                try:
-                    el = await self.page.wait_for_selector(selector, timeout=200, state="visible")
-                    if el:
-                        logger.info("Trade confirmed")
-                        return
-                except Exception:
-                    continue
+            try:
+                has_success_text = await self.page.evaluate(
+                    """
+                    () => {
+                        const body = document.body ? (document.body.innerText || '') : '';
+                        const markers = [
+                            'Order submitted', 'Success', 'Confirmed', 'Order placed',
+                            '订单已提交', '成功', '卖出成功', '买入成功'
+                        ];
+                        return markers.some(marker => body.includes(marker));
+                    }
+                    """
+                )
+            except Exception as e:
+                message = str(e).lower()
+                if self._is_navigation_race_error(e) or "target page" in message or "context or browser has been closed" in message:
+                    logger.warning(
+                        "Trade confirmation page changed after submit; treating as submitted "
+                        f"and deferring to post-trade verification: {e}"
+                    )
+                    return
+                raise
+            if has_success_text:
+                logger.info("Trade confirmed")
+                return
 
-            await asyncio.sleep(0.5)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.25, remaining))
 
         logger.warning("Could not detect explicit confirmation, but trade may have been submitted")
 

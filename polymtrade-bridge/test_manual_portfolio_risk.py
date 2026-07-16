@@ -26,17 +26,22 @@ class TestManualPortfolioRisk(unittest.IsolatedAsyncioTestCase):
         recorder = MagicMock()
         check = AsyncMock(return_value=PortfolioRiskCheck(True, True, "d", "WOULD_BLOCK", "SHADOW"))
         complete = AsyncMock()
+        verify_buy = AsyncMock()
 
         with (
             patch.object(main, "executor", executor),
             patch.object(main, "recorder", recorder),
             patch.object(main, "_evaluate_manual_buy_risk", check),
             patch.object(main, "_complete_manual_buy_risk", complete),
+            patch.object(main, "_verify_submitted_buy", verify_buy, create=True),
         ):
             await main._execute_and_record(1, self.request(), "manual-1")
+            await main._stop_verification_tasks()
 
         self.assertEqual([call.args[2] for call in check.await_args_list], ["precheck", "final"])
         executor.execute_trade.assert_awaited_once()
+        self.assertFalse(executor.execute_trade.await_args.kwargs["verify"])
+        verify_buy.assert_awaited_once()
         complete.assert_awaited_once_with("bridge:manual-1:manual", "SUCCESS")
         recorder.update_status.assert_called_with(1, "SUCCESS")
 
@@ -53,9 +58,11 @@ class TestManualPortfolioRisk(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "_wait_for_live_position_decrease", AsyncMock(return_value=main.Decimal("1"))),
         ):
             await main._execute_and_record(1, self.request("SELL"), "manual-sell")
+            await main._stop_verification_tasks()
 
         check.assert_not_awaited()
         executor.execute_trade.assert_awaited_once()
+        self.assertFalse(executor.execute_trade.await_args.kwargs["verify"])
 
     async def test_manual_buy_denial_finishes_reservation_without_ui_execution(self):
         executor = SimpleNamespace(execute_trade=AsyncMock())

@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV="$SCRIPT_DIR/.venv"
 LOG_DIR="${LOG_DIR:-/tmp}"
+source "$SCRIPT_DIR/supervisor_health.sh"
 
 # Load project-wide .env first, then bridge-local .env (local wins).
 if [[ -f "$PROJECT_ROOT/.env" ]]; then
@@ -24,10 +25,19 @@ fi
 
 export BROWSER_PROXY="${BROWSER_PROXY:-http://127.0.0.1:7890}"
 export BRIDGE_PORT="${BRIDGE_PORT:-8080}"
+export BRIDGE_CODE_SHA="${BRIDGE_CODE_SHA:-$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 
 source "$VENV/bin/activate"
 cd "$SCRIPT_DIR"
 mkdir -p "$LOG_DIR"
+export BRIDGE_HEALTH_EVENT_LOG="${BRIDGE_HEALTH_EVENT_LOG:-$LOG_DIR/polymtrade-health-events.jsonl}"
+export BRIDGE_CODE_FINGERPRINT="${BRIDGE_CODE_FINGERPRINT:-$(
+    find "$SCRIPT_DIR" -maxdepth 1 -type f \( -name '*.py' -o -name '*.sh' \) -print \
+        | LC_ALL=C sort \
+        | while IFS= read -r file; do shasum "$file"; done \
+        | shasum \
+        | awk '{print $1}'
+)}"
 
 # Port ownership check: fail fast if BRIDGE_PORT is held by a non-Bridge process.
 # This prevents a silent mis-routing where backend calls /portfolio hit the wrong service.
@@ -46,7 +56,18 @@ if [[ -n "$PORT_PIDS" ]]; then
     done
 fi
 
+request_admission_drain() {
+    local headers=()
+    if [[ -n "${BRIDGE_ADMIN_SECRET:-}" ]]; then
+        headers=(-H "X-Bridge-Admin-Secret: ${BRIDGE_ADMIN_SECRET}")
+    fi
+    curl -fsS --max-time 2 -X POST "${headers[@]}" \
+        "http://127.0.0.1:${BRIDGE_PORT}/admin/drain?reason=planned_restart" \
+        >/dev/null 2>&1 || true
+}
+
 stop_children() {
+    request_admission_drain
     if [[ -f "$LOG_DIR/polymtrade-bridge.pid" ]]; then
         kill "$(cat "$LOG_DIR/polymtrade-bridge.pid")" 2>/dev/null || true
     fi
@@ -98,6 +119,11 @@ echo "Polymtrade Bridge started (pid $(cat "$LOG_DIR/polymtrade-bridge.pid"))"
 echo "Logs: $LOG_DIR/polymtrade-bridge.log"
 
 STARTED_AT=$(date +%s)
+HEALTH_FAILURES=0
+HEALTH_FAILURE_THRESHOLD="${BRIDGE_HEALTH_FAILURE_THRESHOLD:-3}"
+STARTUP_GRACE_SECONDS="${BRIDGE_STARTUP_GRACE_SECONDS:-240}"
+LAST_HEALTH_OK_EVENT_AT=0
+record_health_event service_start
 
 # Keep this script alive so launchd can supervise the child.
 # If the child dies, exit so launchd can restart the job.
@@ -108,6 +134,7 @@ while true; do
     fi
     PID="$(cat "$LOG_DIR/polymtrade-bridge.pid" 2>/dev/null || true)"
     if [[ -z "$PID" ]] || ! kill -0 "$PID" 2>/dev/null; then
+        record_health_event child_exit
         echo "Bridge process (pid $PID) is no longer running"
         break
     fi
@@ -115,11 +142,22 @@ while true; do
     # can die while the HTTP server remains up. After startup grace, make the
     # launchd job restart the child when the fail-closed health probe fails.
     NOW=$(date +%s)
-    if (( NOW - STARTED_AT >= 90 )); then
-        if ! curl -fsS --max-time 5 "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1; then
-            echo "Bridge health probe failed; stopping child so launchd can restart it"
-            kill "$PID" 2>/dev/null || true
-            break
+    if (( NOW - STARTED_AT >= STARTUP_GRACE_SECONDS )); then
+        if curl -fsS --max-time 5 "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1; then
+            record_health_probe success
+            if (( NOW - LAST_HEALTH_OK_EVENT_AT >= 3600 )); then
+                record_health_event health_ok
+                LAST_HEALTH_OK_EVENT_AT=$NOW
+            fi
+        else
+            record_health_probe failure
+            echo "Bridge health probe failed (${HEALTH_FAILURES}/${HEALTH_FAILURE_THRESHOLD})"
+            if health_restart_required; then
+                record_health_event restart_threshold
+                echo "Bridge health probe failure threshold reached; stopping child so launchd can restart it"
+                kill "$PID" 2>/dev/null || true
+                break
+            fi
         fi
     fi
     sleep 5

@@ -41,26 +41,42 @@ class PortfolioRiskClient:
         )
         self.timeout_seconds = timeout_seconds
         self._client = client
+        self._owns_client = client is None
         self.enforcement_mode = os.getenv("PORTFOLIO_RISK_ENFORCEMENT_MODE", "SHADOW").strip().upper()
 
-    async def evaluate_buy(self, payload: dict[str, Any]) -> PortfolioRiskCheck:
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            limits = httpx.Limits(max_connections=10, max_keepalive_connections=5)
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                limits=limits,
+                trust_env=False,
+            )
+            self._owns_client = True
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._owns_client and self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+        if self._owns_client:
+            self._client = None
+
+    async def evaluate_buy(
+        self,
+        payload: dict[str, Any],
+        timeout_seconds: Optional[float] = None,
+    ) -> PortfolioRiskCheck:
         if not self.secret:
             return self._unavailable("risk shared secret is not configured")
+        timeout = timeout_seconds if timeout_seconds is not None else self.timeout_seconds
         try:
-            if self._client is not None:
-                response = await self._client.post(
-                    self.url,
-                    json=payload,
-                    headers={"X-Bridge-Risk-Secret": self.secret},
-                    timeout=self.timeout_seconds,
-                )
-            else:
-                async with httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=False) as client:
-                    response = await client.post(
-                        self.url,
-                        json=payload,
-                        headers={"X-Bridge-Risk-Secret": self.secret},
-                    )
+            client = await self._get_client()
+            response = await client.post(
+                self.url,
+                json=payload,
+                headers={"X-Bridge-Risk-Secret": self.secret},
+                timeout=timeout,
+            )
             response.raise_for_status()
             body = response.json()
             data = body.get("data") if isinstance(body, dict) and body.get("code") == 0 else None
@@ -82,13 +98,13 @@ class PortfolioRiskClient:
         url = self.url.rsplit("/", 1)[0] + "/complete"
         try:
             payload = {"correlationId": correlation_id, "status": status}
-            if self._client is not None:
-                response = await self._client.post(
-                    url, json=payload, headers={"X-Bridge-Risk-Secret": self.secret}, timeout=self.timeout_seconds
-                )
-            else:
-                async with httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=False) as client:
-                    response = await client.post(url, json=payload, headers={"X-Bridge-Risk-Secret": self.secret})
+            client = await self._get_client()
+            response = await client.post(
+                url,
+                json=payload,
+                headers={"X-Bridge-Risk-Secret": self.secret},
+                timeout=self.timeout_seconds,
+            )
             response.raise_for_status()
             body = response.json()
             data = body.get("data") if isinstance(body, dict) and body.get("code") == 0 else None

@@ -702,13 +702,14 @@ async def _run_selector_fixture() -> None:
                 await page.set_content(BTC_UPDOWN_HTML)
                 executor = PolymtradeExecutor()
                 executor.page = page
-                await executor._select_polymtrade_outcome(
+                result = await executor._select_polymtrade_outcome(
                     outcome,
                     market_slug="btc-updown-5m-1782296700",
                     market_title="Bitcoin Up or Down - June 24, 6:25AM-6:30AM ET",
                     max_attempts=1,
                 )
                 clicked_labels = await page.evaluate("window.clickedLabels")
+                assert result["strategy"] == "binary-fast", (outcome, result)
                 assert clicked_labels == [expected_label], (outcome, clicked_labels)
 
             # Multi-date event pages localize the row date.  The selector must
@@ -854,6 +855,15 @@ INLINE_BUY_FORM_HTML = """
       <button>确认买入</button>
     </section>
   </main>
+  <script>
+    window.amountEvents = [];
+    document.addEventListener("input", (event) => {
+      window.amountEvents.push(["input", event.target.value]);
+    });
+    document.addEventListener("change", (event) => {
+      window.amountEvents.push(["change", event.target.value]);
+    });
+  </script>
 </body>
 </html>
 """
@@ -1173,6 +1183,9 @@ async def _run_trade_form_fixture() -> None:
             await executor._enter_amount(2.0)
             value = await page.eval_on_selector("input", "el => el.value")
             assert value == "2.0", value
+            events = await page.evaluate("window.amountEvents")
+            assert ["input", "2.0"] in events, events
+            assert ["change", "2.0"] in events, events
 
             await page.set_content(CONTENTEDITABLE_BUY_FORM_HTML)
             is_open = await executor._is_buy_dialog_open(timeout=0.5)

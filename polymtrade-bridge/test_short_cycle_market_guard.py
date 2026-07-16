@@ -76,7 +76,30 @@ def test_btc_updown_5m_buy_is_skipped_near_close():
     assert "buffer=90s" in near_close
 
     sell = _short_cycle_market_stale_reason(slug, "SELL", now_seconds=1782304770)
-    assert sell is None, sell
+    assert sell is not None, sell
+    assert "Short-cycle market stale" in sell
+
+
+def test_crypto_updown_15m_buy_and_sell_are_skipped_near_close():
+    slug = "xrp-updown-15m-1782304500"
+
+    early_buy = _short_cycle_market_stale_reason(slug, "BUY", now_seconds=1782305339)
+    assert early_buy is None, early_buy
+
+    near_close_buy = _short_cycle_market_stale_reason(slug, "BUY", now_seconds=1782305340)
+    assert near_close_buy is not None, near_close_buy
+    assert "buffer=60s" in near_close_buy
+
+    near_close_sell = _short_cycle_market_stale_reason(slug, "SELL", now_seconds=1782305340)
+    assert near_close_sell is not None, near_close_sell
+    assert "Short-cycle market stale" in near_close_sell
+
+    non_short_cycle = _short_cycle_market_stale_reason(
+        "fed-decision-in-july-181",
+        "SELL",
+        now_seconds=1782305340,
+    )
+    assert non_short_cycle is None, non_short_cycle
 
 
 def test_eth_updown_5m_buy_is_skipped_in_last_minute():
@@ -459,6 +482,7 @@ def test_btc_updown_5m_daily_limit_guard():
 
 def main() -> int:
     test_btc_updown_5m_buy_is_skipped_near_close()
+    test_crypto_updown_15m_buy_and_sell_are_skipped_near_close()
     test_btc_updown_5m_duplicate_buy_guard()
     test_btc_updown_5m_price_band_buy_guard()
     test_tail_risk_low_price_buy_guard()

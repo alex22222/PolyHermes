@@ -329,6 +329,43 @@ async def test_binary_updown_visible_only_with_trade_buttons():
             await browser.close()
 
 
+async def test_binary_updown_page_ready_uses_outcome_buttons():
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(BTC_UPDOWN_EVENT_HTML)
+
+            executor = await _make_executor(page)
+            ready = await executor._wait_for_page_ready(
+                timeout=1.0,
+                market_title="Bitcoin Up or Down - June 24, 7:15AM-7:20AM ET",
+                event_id="",
+                market_slug="btc-updown-5m-1782299700",
+                outcome="Up",
+            )
+            assert ready is True
+
+            await page.set_content("""
+            <main>
+              <section>
+                <h1>Bitcoin Up or Down - June 24, 7:15AM-7:20AM ET</h1>
+                <div role="button">Up Or Down</div>
+              </section>
+            </main>
+            """)
+            ready = await executor._wait_for_page_ready(
+                timeout=0.5,
+                market_title="Bitcoin Up or Down - June 24, 7:15AM-7:20AM ET",
+                event_id="",
+                market_slug="btc-updown-5m-1782299700",
+                outcome="Up",
+            )
+            assert ready is False
+        finally:
+            await browser.close()
+
+
 async def test_binary_updown_portfolio_row_is_not_trade_visible_and_can_open():
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -517,6 +554,7 @@ if __name__ == "__main__":
     asyncio.run(test_is_target_event_visible_false_on_wrong_event())
     asyncio.run(test_is_target_event_visible_false_when_side_buttons_missing())
     asyncio.run(test_binary_updown_visible_only_with_trade_buttons())
+    asyncio.run(test_binary_updown_page_ready_uses_outcome_buttons())
     asyncio.run(test_binary_updown_portfolio_row_is_not_trade_visible_and_can_open())
     asyncio.run(test_non_binary_portfolio_row_is_not_trade_visible_and_can_open())
     asyncio.run(test_wait_for_page_ready_succeeds_without_event_id_in_url())

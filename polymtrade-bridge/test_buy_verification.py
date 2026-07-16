@@ -93,6 +93,25 @@ EVENT_PAGE_WITH_TARGET_PORTFOLIO_POSITION_HTML = """
 """
 
 
+EVENT_PAGE_WITH_BUY_DIALOG_PREVIEW_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <h1>Bitcoin Up or Down - June 24, 8:35AM-8:40AM ET</h1>
+    <section class="market">
+      <button>Up 55c</button>
+      <div role="dialog">
+        <div>Up - 1.82 shares</div>
+        <div>You pay 1.00 USDC</div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
 async def _make_executor(page):
     executor = PolymtradeExecutor()
     executor.page = page
@@ -145,6 +164,16 @@ async def test_get_event_page_position_quantity():
                 market_title="Bitcoin Up or Down - June 24, 8:35AM-8:40AM ET",
             )
             assert qty5 == 1.04, f"Expected 1.04, got {qty5}"
+
+            page6 = await browser.new_page()
+            await page6.set_content(EVENT_PAGE_WITH_BUY_DIALOG_PREVIEW_HTML)
+            executor.page = page6
+            qty6 = await executor._get_event_page_position_quantity(
+                "Up",
+                market_slug="btc-updown-5m-1782304500",
+                market_title="Bitcoin Up or Down - June 24, 8:35AM-8:40AM ET",
+            )
+            assert qty6 is None, f"Expected BUY preview shares to be ignored, got {qty6}"
         finally:
             await browser.close()
     print("test_get_event_page_position_quantity passed")
