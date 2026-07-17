@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Form, Input, Button, Space, Select } from 'antd'
+import { Form, Input, Button, Space, Select, message } from 'antd'
 import { apiService } from '../services/api'
 import { useMediaQuery } from 'react-responsive'
 import { useTranslation } from 'react-i18next'
@@ -42,6 +42,7 @@ const LeaderAddForm: React.FC<LeaderAddFormProps> = ({
         return Promise.reject(new Error(response.data.msg || t('leaderAdd.addFailed') || '添加 Leader 失败'))
       }
     } catch (error: any) {
+      message.error(error.message || t('leaderAdd.addFailed') || '添加 Leader 失败')
       return Promise.reject(error)
     } finally {
       setLoading(false)

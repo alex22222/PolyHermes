@@ -8,8 +8,6 @@ import type {
   BridgeAuditResponse,
   BridgeRuntimeStatus,
   BridgeTradeRecord,
-  BridgeWebhookLogListRequest,
-  BridgeWebhookLogListResponse,
   BridgeTradeRecordListRequest,
   BridgeTradeRecordListResponse,
   BridgeTradeStatistics,
@@ -1242,17 +1240,6 @@ export const apiService = {
      */
     byCopyTrading: (data: { copyTradingId: number; page: number; size: number }) =>
       apiClient.post<ApiResponse<BridgeTradeRecordListResponse>>('/bridge/trades/by-copy-trading', data)
-  },
-
-  /**
-   * Webhook 日志 API
-   */
-  bridgeWebhookLogs: {
-    /**
-     * 查询 Webhook 调用日志列表
-     */
-    list: (data: BridgeWebhookLogListRequest) =>
-      apiClient.post<ApiResponse<BridgeWebhookLogListResponse>>('/bridge/webhook-logs/list', data)
   }
 }
 

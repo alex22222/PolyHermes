@@ -286,6 +286,8 @@ def test_generic_repeat_same_market_buy_guard():
             leader_address="0xLeader",
             condition_id="0xmarket",
             market_slug="same-market",
+            outcome="Yes",
+            outcome_index=0,
         )
         duplicate = _generic_repeat_buy_reason(signal, "BUY", now_ms=1783234800000)
         assert duplicate is not None, duplicate
@@ -293,6 +295,119 @@ def test_generic_repeat_same_market_buy_guard():
 
         sell = _generic_repeat_buy_reason(signal, "SELL", now_ms=1783234800000)
         assert sell is None, sell
+    finally:
+        bridge_main.recorder = original
+
+
+def test_generic_repeat_allows_safe_opposite_hedge_buy():
+    original = bridge_main.recorder
+    try:
+        bridge_main.recorder = FakeRecorder(
+            recent_records=[
+                {
+                    "market_id": "0xmarket",
+                    "side": "BUY",
+                    "status": "SUCCESS",
+                    "outcome": "No",
+                    "outcome_index": 1,
+                    "quantity": Decimal("2.139843"),
+                    "price": Decimal("0.467324"),
+                    "amount": Decimal("1"),
+                    "raw_payload": '{"marketSlug":"same-market","outcome":"No"}',
+                }
+            ]
+        )
+        signal = SimpleNamespace(
+            leader_address="0xLeader",
+            condition_id="0xmarket",
+            market_slug="same-market",
+            outcome="Yes",
+            outcome_index=0,
+        )
+        reason = _generic_repeat_buy_reason(
+            signal,
+            "BUY",
+            price=Decimal("0.345476"),
+            amount=Decimal("1"),
+            now_ms=1783234800000,
+        )
+        assert reason is None, reason
+    finally:
+        bridge_main.recorder = original
+
+
+def test_generic_repeat_blocks_unsafe_opposite_hedge_buy():
+    original = bridge_main.recorder
+    try:
+        bridge_main.recorder = FakeRecorder(
+            recent_records=[
+                {
+                    "market_id": "0xmarket",
+                    "side": "BUY",
+                    "status": "SUCCESS",
+                    "outcome": "No",
+                    "outcome_index": 1,
+                    "quantity": Decimal("2.139843"),
+                    "price": Decimal("0.467324"),
+                    "amount": Decimal("1"),
+                    "raw_payload": '{"marketSlug":"same-market","outcome":"No"}',
+                }
+            ]
+        )
+        signal = SimpleNamespace(
+            leader_address="0xLeader",
+            condition_id="0xmarket",
+            market_slug="same-market",
+            outcome="Yes",
+            outcome_index=0,
+        )
+        reason = _generic_repeat_buy_reason(
+            signal,
+            "BUY",
+            price=Decimal("0.527492"),
+            amount=Decimal("1"),
+            now_ms=1783234800000,
+        )
+        assert reason is not None, reason
+        assert "Repeat same-market BUY skipped" in reason
+    finally:
+        bridge_main.recorder = original
+
+
+def test_generic_repeat_blocks_opposite_hedge_when_prior_buy_is_pending():
+    original = bridge_main.recorder
+    try:
+        bridge_main.recorder = FakeRecorder(
+            recent_records=[
+                {
+                    "market_id": "0xmarket",
+                    "side": "BUY",
+                    "status": "PENDING",
+                    "outcome": "No",
+                    "outcome_index": 1,
+                    "quantity": Decimal("2.139843"),
+                    "price": Decimal("0.467324"),
+                    "amount": Decimal("1"),
+                    "raw_payload": '{"marketSlug":"same-market","outcome":"No"}',
+                }
+            ]
+        )
+        signal = SimpleNamespace(
+            leader_address="0xLeader",
+            condition_id="0xmarket",
+            market_slug="same-market",
+            outcome="Yes",
+            outcome_index=0,
+        )
+        reason = _generic_repeat_buy_reason(
+            signal,
+            "BUY",
+            price=Decimal("0.345476"),
+            amount=Decimal("1"),
+            now_ms=1783234800000,
+        )
+        assert reason is not None, reason
+        assert "Repeat same-market BUY skipped" in reason
     finally:
         bridge_main.recorder = original
 
@@ -488,6 +603,9 @@ def main() -> int:
     test_tail_risk_low_price_buy_guard()
     test_high_confidence_buy_guard()
     test_generic_repeat_same_market_buy_guard()
+    test_generic_repeat_allows_safe_opposite_hedge_buy()
+    test_generic_repeat_blocks_unsafe_opposite_hedge_buy()
+    test_generic_repeat_blocks_opposite_hedge_when_prior_buy_is_pending()
     test_near_expiry_small_news_buy_guard()
     test_same_event_high_frequency_buy_guard()
     test_same_event_multi_outcome_combo_buy_guard()

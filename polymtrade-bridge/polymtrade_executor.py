@@ -1521,6 +1521,7 @@ class PolymtradeExecutor:
                     )
                 result["verified"] = verified
 
+            self.last_error = None
             logger.info(f"Trade executed: {result}")
             return result
 

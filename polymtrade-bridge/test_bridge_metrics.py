@@ -18,6 +18,12 @@ class TestBridgeMetrics(unittest.TestCase):
         self.assertEqual(50.5, summary["p50"])
         self.assertEqual(95.05, summary["p95"])
 
+    def test_trade_lock_timeout_counter_is_exposed(self):
+        metrics = BridgeMetrics()
+        metrics.signals_trade_lock_timeout += 1
+
+        self.assertEqual(1, metrics.to_dict()["signals_trade_lock_timeout"])
+
     def test_event_writer_persists_latency_without_caller_file_io(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bridge-performance.jsonl"

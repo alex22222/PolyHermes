@@ -447,6 +447,61 @@ interface LeaderActivityEventRepository : JpaRepository<LeaderActivityEvent, Lon
     ): List<LeaderResearchMarketPeerSourceProjection>
 
     @Query(
+        value = """
+        select
+          e.normalized_wallet as normalizedWallet,
+          count(e.id) as totalEvents,
+          count(distinct e.market_id) as distinctMarkets,
+          coalesce(sum(case when upper(e.side) = 'BUY' then 1 else 0 end), 0) as buyEvents,
+          coalesce(sum(case when upper(e.side) = 'SELL' then 1 else 0 end), 0) as sellEvents,
+          coalesce(sum(case
+            when e.price >= 0.10000000
+             and e.price <= 0.80000000
+             and e.size > 0
+             and e.market_id is not null
+            then 1 else 0 end), 0) as safePriceEvents,
+          coalesce(sum(case
+            when e.price < 0.05000000 or e.price > 0.95000000
+            then 1 else 0 end), 0) as tailPriceEvents,
+          avg(coalesce(e.amount, e.price * e.size)) as avgAmount,
+          coalesce(sum(coalesce(e.amount, e.price * e.size, 0)), 0) as totalAmount,
+          max(e.event_time) as lastEventTime,
+          substring_index(group_concat(distinct coalesce(e.market_slug, e.market_title, e.market_id) order by coalesce(e.amount, e.price * e.size, 0) desc separator ','), ',', 5) as topMarkets
+        from leader_activity_event e
+        where e.normalized_wallet in (:wallets)
+          and e.event_time >= :since
+          and (
+            lower(coalesce(e.market_slug, '')) regexp :marketPattern
+            or lower(coalesce(e.market_title, '')) regexp :marketPattern
+          )
+        group by e.normalized_wallet
+        having totalEvents >= :minEvents
+           and distinctMarkets >= :minDistinctMarkets
+           and buyEvents >= :minBuyEvents
+           and sellEvents >= :minSellEvents
+           and safePriceEvents / nullif(totalEvents, 0) >= :minSafePriceRatio
+           and tailPriceEvents / nullif(totalEvents, 0) <= :maxTailPriceRatio
+        order by
+          sellEvents desc,
+          safePriceEvents desc,
+          distinctMarkets desc,
+          totalAmount desc
+        """,
+        nativeQuery = true
+    )
+    fun discoverWalletsFromMarketPeerSourceForWallets(
+        @Param("wallets") wallets: Collection<String>,
+        @Param("since") since: Long,
+        @Param("marketPattern") marketPattern: String,
+        @Param("minEvents") minEvents: Int,
+        @Param("minDistinctMarkets") minDistinctMarkets: Int,
+        @Param("minBuyEvents") minBuyEvents: Int,
+        @Param("minSellEvents") minSellEvents: Int,
+        @Param("minSafePriceRatio") minSafePriceRatio: BigDecimal,
+        @Param("maxTailPriceRatio") maxTailPriceRatio: BigDecimal
+    ): List<LeaderResearchMarketPeerSourceProjection>
+
+    @Query(
         """
         select e from LeaderActivityEvent e
         where e.paperProcessingStatus in :statuses

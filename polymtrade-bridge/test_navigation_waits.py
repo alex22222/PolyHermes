@@ -36,6 +36,31 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(executor.last_error)
 
+    async def test_successful_trade_clears_stale_last_error(self):
+        executor = PolymtradeExecutor()
+        executor._logged_in = True
+        executor.last_error = "Target market content never appeared"
+
+        with (
+            patch.object(executor, "is_ready", return_value=True),
+            patch.object(executor, "_resolve_event", AsyncMock(return_value=("", "btc-updown-5m-1"))),
+            patch.object(
+                executor,
+                "_execute_buy",
+                AsyncMock(return_value={"baseline": {}, "submitted_quote": 0.5}),
+            ),
+        ):
+            result = await executor.execute_trade(
+                market_slug="btc-updown-5m-1",
+                side="BUY",
+                outcome="Up",
+                amount_usdc=1.0,
+                verify=False,
+            )
+
+        self.assertIsNone(executor.last_error)
+        self.assertIsNone(result["verified"])
+
     async def test_buy_submit_button_respects_overall_timeout(self):
         class SlowMissingButtonPage:
             def __init__(self):

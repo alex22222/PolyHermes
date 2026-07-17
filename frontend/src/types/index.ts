@@ -2755,6 +2755,7 @@ export interface BridgeTradeRecordListResponse {
 export interface BridgeTradeRecordListRequest {
   bridgeId?: string
   status?: string
+  side?: string
   marketKeyword?: string
   page?: number
   size?: number
@@ -2959,46 +2960,4 @@ export interface BridgeRuntimeStatus {
   lastError?: string | null
   copyTradingAccountId?: number | null
   copyTradingConfigCount?: number
-}
-
-/**
- * Webhook 日志
- */
-export interface BridgeWebhookLog {
-  id: number
-  bridgeId: string
-  event: string
-  leaderAddress?: string
-  leaderName?: string
-  transactionHash?: string
-  conditionId?: string
-  marketSlug?: string
-  side?: string
-  outcome?: string
-  requestBody?: string
-  responseBody?: string
-  statusCode?: number
-  status: string
-  errorMessage?: string
-  createdAt: number
-  updatedAt: number
-}
-
-/**
- * Webhook 日志列表响应
- */
-export interface BridgeWebhookLogListResponse {
-  list: BridgeWebhookLog[]
-  total: number
-  page: number
-  size: number
-}
-
-/**
- * Webhook 日志列表请求
- */
-export interface BridgeWebhookLogListRequest {
-  status?: string
-  page?: number
-  size?: number
 }

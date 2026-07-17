@@ -51,6 +51,9 @@ LEADER_EVENT_ACTIVITY_WINDOW_SECONDS = int(
 LEADER_EVENT_ACTIVITY_MAX_RECORDS = int(os.getenv("LEADER_EVENT_ACTIVITY_MAX_RECORDS", "5"))
 LEADER_EVENT_COMBO_MIN_MARKETS = int(os.getenv("LEADER_EVENT_COMBO_MIN_MARKETS", "2"))
 GENERIC_REPEAT_BUY_WINDOW_SECONDS = int(os.getenv("GENERIC_REPEAT_BUY_WINDOW_SECONDS", "1800"))
+GENERIC_REPEAT_HEDGE_MIN_PROFIT_MARGIN = Decimal(
+    os.getenv("GENERIC_REPEAT_HEDGE_MIN_PROFIT_MARGIN", "0.02")
+)
 NEAR_EXPIRY_NEWS_BUY_MAX_HOURS = Decimal(os.getenv("NEAR_EXPIRY_NEWS_BUY_MAX_HOURS", "72"))
 NEAR_EXPIRY_NEWS_BUY_MAX_LEADER_VALUE = Decimal(
     os.getenv("NEAR_EXPIRY_NEWS_BUY_MAX_LEADER_VALUE", "25")
@@ -79,6 +82,9 @@ SHORT_CYCLE_LAST_MILE_MAX_PRICE_DRIFT = Decimal(
 )
 SHORT_CYCLE_PORTFOLIO_RISK_TIMEOUT_SECONDS = float(
     os.getenv("SHORT_CYCLE_PORTFOLIO_RISK_TIMEOUT_SECONDS", "0.35")
+)
+SHORT_CYCLE_TRADE_LOCK_TIMEOUT_SECONDS = float(
+    os.getenv("SHORT_CYCLE_TRADE_LOCK_TIMEOUT_SECONDS", "2")
 )
 
 # Singleton PID lock to prevent multiple bridge instances from competing for the
@@ -201,6 +207,10 @@ _signal_drain_reason: Optional[str] = None
 _signal_drain_started_at: Optional[float] = None
 
 
+class TradeLockTimeoutError(RuntimeError):
+    pass
+
+
 async def _recorder_call(method_name: str, *args, **kwargs):
     """Run a synchronous recorder method without blocking the event loop."""
     if not recorder:
@@ -267,6 +277,54 @@ def _market_window(market_slug: Optional[str]) -> str:
     if re.search(r"-15m-\d{10}$", slug, re.IGNORECASE):
         return "15m"
     return "other"
+
+
+@asynccontextmanager
+async def _trade_lock_scope(
+    market_slug: Optional[str],
+    side: str,
+    transaction_hash: Optional[str],
+):
+    """Acquire the single UI lane, failing fast for short-cycle markets."""
+    market_window = _market_window(market_slug)
+    timeout = (
+        SHORT_CYCLE_TRADE_LOCK_TIMEOUT_SECONDS
+        if market_window in {"5m", "15m"} and SHORT_CYCLE_TRADE_LOCK_TIMEOUT_SECONDS > 0
+        else None
+    )
+    lock_wait_started_at = time.perf_counter()
+    acquired = False
+    try:
+        if timeout is None:
+            await _trade_lock.acquire()
+        else:
+            try:
+                await asyncio.wait_for(_trade_lock.acquire(), timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                wait_ms = (time.perf_counter() - lock_wait_started_at) * 1000
+                metrics.observe_latency(
+                    "trade_lock_wait_ms",
+                    wait_ms,
+                    side=side,
+                    market_window=market_window,
+                    transaction_hash=transaction_hash,
+                )
+                raise TradeLockTimeoutError(
+                    "Short-cycle UI lane busy, skipped before submit: "
+                    f"waited={wait_ms:.0f}ms max={timeout * 1000:.0f}ms"
+                ) from exc
+        acquired = True
+        metrics.observe_latency(
+            "trade_lock_wait_ms",
+            (time.perf_counter() - lock_wait_started_at) * 1000,
+            side=side,
+            market_window=market_window,
+            transaction_hash=transaction_hash,
+        )
+        yield
+    finally:
+        if acquired:
+            _trade_lock.release()
 
 
 async def _stop_signal_workers():
@@ -1658,6 +1716,8 @@ async def handle_signal(signal: LeaderTradeSignal):
                     _generic_repeat_buy_reason,
                     signal=signal,
                     side=side_upper,
+                    price=price_dec,
+                    amount=amount,
                 )
                 if repeat_buy_reason:
                     logger.info(
@@ -1993,15 +2053,7 @@ async def handle_signal(signal: LeaderTradeSignal):
             sell_verification = None
             try:
                 market_window = _market_window(signal.market_slug)
-                lock_wait_started_at = time.perf_counter()
-                async with _trade_lock:
-                    metrics.observe_latency(
-                        "trade_lock_wait_ms",
-                        (time.perf_counter() - lock_wait_started_at) * 1000,
-                        side=side_upper,
-                        market_window=market_window,
-                        transaction_hash=signal.transaction_hash,
-                    )
+                async with _trade_lock_scope(signal.market_slug, side_upper, signal.transaction_hash):
                     stale_reason = _short_cycle_market_stale_reason(signal.market_slug, side_upper)
                     if stale_reason:
                         logger.info(
@@ -2139,6 +2191,14 @@ async def handle_signal(signal: LeaderTradeSignal):
                         _track_verification_task(
                             _verify_submitted_sell(**sell_verification)
                         )
+            except TradeLockTimeoutError as lock_err:
+                reason = str(lock_err)
+                logger.warning("Config %s: %s tx=%s", cfg.id, reason, signal.transaction_hash)
+                metrics.signals_trade_lock_timeout += 1
+                if record_id and recorder:
+                    await _recorder_call("update_status", record_id, "FAILED", reason)
+                if side_upper == "BUY":
+                    await _complete_portfolio_buy_risk(cfg, signal, "FAILED")
             except Exception as exec_err:
                 logger.exception(f"Trade execution failed for config {cfg.id}: {exec_err}")
                 metrics.signals_failed += 1
@@ -2405,9 +2465,64 @@ def _same_market_record_matches_signal(record: dict, signal: LeaderTradeSignal) 
     return False
 
 
+def _record_outcome_key(record: dict) -> str:
+    index = record.get("outcome_index")
+    if index is not None:
+        return f"index:{index}"
+    raw = {}
+    raw_payload = record.get("raw_payload")
+    if raw_payload:
+        try:
+            raw = json.loads(raw_payload)
+        except Exception:
+            raw = {}
+    return f"text:{_normalize_outcome(record.get('outcome') or raw.get('outcome'))}"
+
+
+def _signal_outcome_key(signal: LeaderTradeSignal) -> str:
+    if signal.outcome_index is not None:
+        return f"index:{signal.outcome_index}"
+    return f"text:{_normalize_outcome(signal.outcome)}"
+
+
+def _opposite_hedge_buy_is_safe(
+    *,
+    records: list[dict],
+    signal: LeaderTradeSignal,
+    price: Decimal,
+    amount: Decimal,
+) -> bool:
+    signal_key = _signal_outcome_key(signal)
+    if not signal_key or signal_key == "text:" or price <= 0 or amount <= 0:
+        return False
+
+    payouts_by_outcome: dict[str, Decimal] = {}
+    total_cost = amount
+    for record in records:
+        record_key = _record_outcome_key(record)
+        if not record_key or record_key == "text:":
+            return False
+        record_amount = _decimal_from_any(record.get("amount"))
+        record_quantity = _decimal_from_any(record.get("quantity"))
+        if record_amount <= 0 or record_quantity <= 0:
+            return False
+        total_cost += record_amount
+        payouts_by_outcome[record_key] = payouts_by_outcome.get(record_key, Decimal("0")) + record_quantity
+
+    new_quantity = amount / price
+    payouts_by_outcome[signal_key] = payouts_by_outcome.get(signal_key, Decimal("0")) + new_quantity
+    if len(payouts_by_outcome) != 2:
+        return False
+
+    required_payout = total_cost * (Decimal("1") + GENERIC_REPEAT_HEDGE_MIN_PROFIT_MARGIN)
+    return all(payout > required_payout for payout in payouts_by_outcome.values())
+
+
 def _generic_repeat_buy_reason(
     signal: LeaderTradeSignal,
     side: str,
+    price: Optional[Decimal] = None,
+    amount: Optional[Decimal] = None,
     now_ms: Optional[int] = None,
 ) -> Optional[str]:
     """Skip repeated BUYs for the same leader and market in a short window."""
@@ -2419,17 +2534,44 @@ def _generic_repeat_buy_reason(
         leader_address=signal.leader_address,
         since_ms=since_ms,
     )
+    matching_records = []
     for record in records:
         if str(record.get("side") or "").upper() != "BUY":
             continue
         if str(record.get("status") or "").upper() not in {"PENDING", "SUCCESS"}:
             continue
         if _same_market_record_matches_signal(record, signal):
-            return (
-                "Repeat same-market BUY skipped: "
-                f"window={GENERIC_REPEAT_BUY_WINDOW_SECONDS}s"
-            )
-    return None
+            matching_records.append(record)
+    if not matching_records:
+        return None
+
+    signal_key = _signal_outcome_key(signal)
+    if any(str(record.get("status") or "").upper() == "PENDING" for record in matching_records):
+        return (
+            "Repeat same-market BUY skipped: "
+            f"window={GENERIC_REPEAT_BUY_WINDOW_SECONDS}s"
+        )
+    if any(_record_outcome_key(record) == signal_key for record in matching_records):
+        return (
+            "Repeat same-market BUY skipped: "
+            f"window={GENERIC_REPEAT_BUY_WINDOW_SECONDS}s"
+        )
+    if price is not None and amount is not None and _opposite_hedge_buy_is_safe(
+        records=matching_records,
+        signal=signal,
+        price=price,
+        amount=amount,
+    ):
+        logger.info(
+            "Repeat same-market BUY allowed as safe opposite hedge: "
+            f"window={GENERIC_REPEAT_BUY_WINDOW_SECONDS}s, "
+            f"margin={GENERIC_REPEAT_HEDGE_MIN_PROFIT_MARGIN}"
+        )
+        return None
+    return (
+        "Repeat same-market BUY skipped: "
+        f"window={GENERIC_REPEAT_BUY_WINDOW_SECONDS}s"
+    )
 
 
 def _signal_market_end_date_ms(signal: LeaderTradeSignal) -> Optional[int]:

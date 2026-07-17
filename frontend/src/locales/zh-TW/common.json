@@ -348,7 +348,6 @@
     "title": "橋接交易記錄",
     "fetchFailed": "獲取橋接交易記錄失敗",
     "recordsTab": "交易記錄",
-    "webhookLogsTab": "Webhook 日誌",
     "id": "ID",
     "market": "市場",
     "side": "方向",
@@ -393,6 +392,7 @@
       "successPositionMismatch": "成功記錄與持倉不一致",
       "unexpectedPortfolioPosition": "異常真實持倉",
       "resolveEvent": "事件解析失敗",
+      "targetMarketMissing": "目標市場未出現",
       "insufficientPosition": "倉位不足",
       "clickButton": "按鈕點擊失敗",
       "navigationRace": "導航/重啟競態",
@@ -409,26 +409,11 @@
       "success": "成功",
       "pending": "進行中",
       "failed": "失敗"
-    }
-  },
-  "bridgeWebhookLog": {
-    "fetchFailed": "獲取 Webhook 日誌失敗",
-    "refresh": "刷新",
-    "id": "ID",
-    "leader": "Leader",
-    "market": "市場",
-    "side": "方向",
-    "outcome": "結果",
-    "statusCode": "HTTP 狀態",
-    "status": "狀態",
-    "request": "請求體",
-    "response": "響應體",
-    "createdAt": "發送時間",
-    "statusFilter": {
+    },
+    "sideFilter": {
       "all": "全部",
-      "success": "成功",
-      "pending": "進行中",
-      "failed": "失敗"
+      "buy": "買入",
+      "sell": "賣出"
     }
   },
   "languageSettings": {

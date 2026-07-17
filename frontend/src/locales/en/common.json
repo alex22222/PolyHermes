@@ -348,7 +348,6 @@
     "title": "Bridge Trade Records",
     "fetchFailed": "Failed to fetch bridge trade records",
     "recordsTab": "Trade Records",
-    "webhookLogsTab": "Webhook Logs",
     "id": "ID",
     "market": "Market",
     "side": "Side",
@@ -393,6 +392,7 @@
       "successPositionMismatch": "Success Record Mismatch",
       "unexpectedPortfolioPosition": "Unexpected Portfolio Position",
       "resolveEvent": "Event Resolution Failed",
+      "targetMarketMissing": "Target Market Missing",
       "insufficientPosition": "Insufficient Position",
       "clickButton": "Button Click Failed",
       "navigationRace": "Navigation/Restart Race",
@@ -409,26 +409,11 @@
       "success": "Success",
       "pending": "Pending",
       "failed": "Failed"
-    }
-  },
-  "bridgeWebhookLog": {
-    "fetchFailed": "Failed to fetch webhook logs",
-    "refresh": "Refresh",
-    "id": "ID",
-    "leader": "Leader",
-    "market": "Market",
-    "side": "Side",
-    "outcome": "Outcome",
-    "statusCode": "HTTP Status",
-    "status": "Status",
-    "request": "Request Body",
-    "response": "Response Body",
-    "createdAt": "Sent At",
-    "statusFilter": {
+    },
+    "sideFilter": {
       "all": "All",
-      "success": "Success",
-      "pending": "Pending",
-      "failed": "Failed"
+      "buy": "Buy",
+      "sell": "Sell"
     }
   },
   "languageSettings": {

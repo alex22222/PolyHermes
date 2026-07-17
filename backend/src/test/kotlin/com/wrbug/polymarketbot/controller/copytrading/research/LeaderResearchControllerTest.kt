@@ -12,6 +12,8 @@ import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchFastWatchRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchFastWatchResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchFunnelCandidateDto
+import com.wrbug.polymarketbot.dto.LeaderResearchLoopDiagnosticsRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchLoopDiagnosticsResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardRefreshRequest
@@ -52,6 +54,7 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchFalcon
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchJobService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMapper
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMarketPeerSourceImportService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchLoopDiagnosticsService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardDiagnoseService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPoliticsRecommendationExecutionService
@@ -77,6 +80,7 @@ class LeaderResearchControllerTest {
     private val activityScoringService: LeaderResearchActivityScoringService = mock()
     private val activitySourceImportService: LeaderResearchActivitySourceImportService = mock()
     private val marketPeerSourceImportService: LeaderResearchMarketPeerSourceImportService = mock()
+    private val loopDiagnosticsService: LeaderResearchLoopDiagnosticsService = mock()
     private val externalAnalyticsImportService: LeaderResearchExternalAnalyticsImportService = mock()
     private val falconLeaderboardImportService: LeaderResearchFalconLeaderboardImportService = mock()
     private val polymarketAnalyticsCopyTradeImportService: LeaderResearchPolymarketAnalyticsCopyTradeImportService = mock()
@@ -98,6 +102,7 @@ class LeaderResearchControllerTest {
         activityScoringService = activityScoringService,
         activitySourceImportService = activitySourceImportService,
         marketPeerSourceImportService = marketPeerSourceImportService,
+        loopDiagnosticsService = loopDiagnosticsService,
         externalAnalyticsImportService = externalAnalyticsImportService,
         falconLeaderboardImportService = falconLeaderboardImportService,
         polymarketAnalyticsCopyTradeImportService = polymarketAnalyticsCopyTradeImportService,
@@ -180,6 +185,28 @@ class LeaderResearchControllerTest {
         val response = controller.detail(LeaderResearchDetailRequest(candidateId = 0))
 
         assertEquals(ErrorCode.PARAM_INVALID.code, response.body!!.code)
+    }
+
+    @Test
+    fun `loop diagnostics delegates nullable request to diagnostics service`() {
+        Mockito.`when`(loopDiagnosticsService.diagnose(LeaderResearchLoopDiagnosticsRequest()))
+            .thenReturn(
+                LeaderResearchLoopDiagnosticsResponse(
+                    generatedAt = 123L,
+                    categories = listOf("politics", "finance"),
+                    enabledCopyConfigs = 3,
+                    strictReadyCount = 0,
+                    stateSummaries = emptyList(),
+                    samples = emptyList()
+                )
+            )
+
+        val response = controller.loopDiagnostics(null)
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(3, response.body!!.data!!.enabledCopyConfigs)
+        assertEquals(0, response.body!!.data!!.strictReadyCount)
+        Mockito.verify(loopDiagnosticsService).diagnose(LeaderResearchLoopDiagnosticsRequest())
     }
 
     @Test

@@ -8703,3 +8703,731 @@
 - 后端 LaunchAgent 重启后 `/actuator/health=UP`。
 - Bridge `/health={"status":"ok","executor_ready":true}`。
 - Approval preview for candidate `1458`: `canCreate=false`, `researchState=COOLDOWN`, blockers include `not_trial_ready`, `half_year_pnl_negative`, `risk_flags_not_empty`。
+
+## 2026-07-13 source-backed politics/finance paper loop
+
+**Goal**: 继续推进高质量 politics/finance leader；仅处理 Polyburg Telegram / official leaderboard 等来源明确、带长期/ALL 盈利证据、且有 pending paper activity 的候选，不放宽近期活跃、长期盈利、BUY/SELL、可复制机制和 trial-ready 门槛。
+
+**Baseline**:
+- Backend `/actuator/health=UP`，`/api/auth/check-first-use` 正常。
+- `fastWatchCount=0`，`trialReady dry-run selected=0`。
+- 严格来源池候选主要为 `small_sample`，当前没有可直接试跟 leader。
+
+**Loop actions**:
+- 执行 6 个 targeted paper 小迭代，每轮 `batchSize=10`。
+- 处理候选：
+  - politics: `1576`, `2706`, `2704`, `2714`, `2670`, `3065`, `18747`, `2724`, `2775`, `45870`
+  - finance: `9404`, `2909`, `2900`, `37757`
+- 每轮均执行 targeted `/paper/score` 和 targeted `/paper/trial-ready/recheck`。
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- `fastWatchCount=0`，最终 trial-ready recheck `selected=0`。
+- 主要阻断: `score_below_80`、`small_sample`、`copyable_pnl_not_positive`、`high_filtered_ratio`、`mixed_category_evidence`。
+- 代表性结果：
+  - `9404` finance: paper trades `10`，score `72`，copyable PnL `-5.25000106`，转 `COOLDOWN`，不可试跟。
+  - `1576` politics: paper trades `7`，score `59`，copyable PnL `+1.5`，仍为 `small_sample`，不可试跟。
+  - `2900` finance: paper trades `4`，score `59`，copyable PnL `+0.29078431`，仍为 `small_sample`，不可试跟。
+  - `2909`, `37757` finance: PnL 转负，继续观察或降权。
+
+**Next**:
+- 不继续放大这批小样本候选；优先寻找更厚 activity、BUY/SELL 更完整、无 mixed category、无 high filtered ratio 的 politics/finance 候选。
+- 继续让 `com.polyhermes.polyburg-sync` hourly 补源；Polyburg 当前已有 `33` 条 `source_evidence LIKE '%polyburg_telegram%'` 候选，但最近同步状态为 `no_new_wallet_messages`。
+- 下一轮优先跑 source diagnostics / official leaderboard refresh，再只对 score 接近 75 且 PnL 为正的候选补 paper。
+
+## 2026-07-13 official-refresh strict candidate check
+
+**Goal**: 继续寻找可试跟 politics/finance leader；本轮只接受 official leaderboard `MONTH+ALL` PnL 同为正、activity BUY/SELL 完整、risk flags 空、且 paper PnL 为正的候选进入补样本。
+
+**Source refresh**:
+- official leaderboard 深刷 `politics/finance`、`MONTH+ALL`、`PNL`：
+  - fetchedTotal `750`
+  - dedupedTotal `50`
+  - created `0`
+  - updated `25`
+  - skippedExisting `25`
+  - politics `MONTH` 第一次请求遇到 `Remote host terminated the handshake`，随后单独重试 politics 成功：fetchedTotal `500`，updated `35`。
+- targeted refresh `48059`, `153`：fetched `1600`，matched `1`，updated `1`。
+
+**Diagnostics**:
+- strict politics source diagnose: scanned `500`, pass `26`, cleanHigh `0`, eligibleForPaperNow `0`。
+- strict finance source diagnose: scanned `500`, pass `5`, cleanHigh `0`, eligibleForPaperNow `0`。
+- 主要阻断仍是 `score_below_75/80`, `small_sample`, `source_stale_over_72h`, `events_below_12`, `safe_ratio_below_0.5000`, `tail_ratio_above_0.2500`, `sell_below_2`, `buy_below_3`。
+
+**Targeted candidates**:
+- `48059` politics:
+  - refresh/score 后 score `75.18`，paper trades `15`，copyable PnL `+0.09168565`。
+  - targeted paper process 三轮后 paper trades `42`，copyable PnL 转为 `-0.09763872`，score `75.0`。
+  - 结论：样本加厚后 PnL 转负，不可试跟。
+- `2064` finance:
+  - 初始 score `73.59`，paper trades `17`，copyable PnL `+1.0`。
+  - 后续新增样本全部 filtered，最终 `COOLDOWN`，score `72.2`，pending paper events `0`。
+  - 结论：无可继续处理样本，不可试跟。
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- `fastWatchCount=0`。
+- trial-ready dry-run `selected=0`。
+- 当前 strict source-backed 查询无返回行：没有 `score>=70`, risk flags 空, paper PnL 为正, 且来源来自 Polyburg/official leaderboard 的 PAPER 候选可继续补样本。
+
+**Next**:
+- 暂停继续消耗当前 strict source-backed PAPER 池，等待 Polyburg/official leaderboard 新数据或引入新的长期 PnL 来源。
+- 下一轮优先补外部数据覆盖：更深 official page、PolymarketAnalytics/Polyburg 新消息、或能提供 ALL/365D 盈利和近期 BUY/SELL 活动的来源；再重新跑 activity evidence -> paper score -> trial-ready recheck。
+
+## 2026-07-13 Telegram source channel + Falcon expansion loop
+
+**Goal**: 把 `https://web.telegram.org/a/#7698624735` 纳入 Polyburg/Telegram 数据源渠道，并继续增加可试跟 leader 数量；仍不放宽长期/ALL 盈利、近期 activity、BUY/SELL 完整、paper PnL、score 和 mixed-category 硬门槛。
+
+**Source updates**:
+- `scripts/polyburg-sync.env.example` 新增：
+  - `POLYBURG_WEB_URL=https://web.telegram.org/a/#7698624735`
+  - `POLYBURG_SOURCE_URL=https://web.telegram.org/a/#7698624735`
+- 本地 `.env` 已同步同名配置，供 `scripts/sync_polyburg_web.py` / `scripts/run-polyburg-sync.sh` 使用。
+- Polyburg Web real sync: `status=no_new_wallet_messages`, `visibleWallets=168`，当前 `source_evidence LIKE '%polyburg_telegram%'` 候选仍为 `33`。
+- PolymarketAnalytics copy-trade 当前只能走 raw text import；直接请求返回 403，headless 页面内容变成 PolyGun marketing，没有 wallet 列表，暂不能作为自动候选来源。
+
+**Falcon expansion**:
+- 执行 `/falcon-leaderboard/import`：
+  - fetchedTotal `300`
+  - dedupedTotal `147`
+  - created `61`
+  - updated `86`
+- Falcon 总覆盖：`369` 个候选，其中 `33` 同时有 official leaderboard evidence，`24` 同时有 ALL/period:ALL evidence。
+- 说明：Falcon 只提供 15d 排名/指标，不能单独满足长期盈利门槛；本轮只把它作为候选发现源，再用 official/ALL 和 activity/paper 二次过滤。
+
+**Strict cross-filter**:
+- Falcon + official + ALL + 30d activity BUY/SELL 过滤后，主要可检查候选：
+  - `2835`: `CANDIDATE`, finance, score `59`, `small_sample`; 16 activity events, 7 markets, BUY `12`, SELL `4`。重评后仍 `small_sample`，unknown reason 包含 `insufficient_sample`, `high_tail_price_ratio`；promotion dry-run 即使用 `minScore=60` 也选中 `0`。
+  - `2892`: `COOLDOWN`, score `59`, `small_sample`, source stale，不可推进。
+  - `3042`: `CANDIDATE`, score `59`, `small_sample,low_market_diversity,mixed_category_evidence`，不可推进。
+  - `2695`: `PAPER`, score `59`, `mixed_category_evidence,small_sample`。targeted paper process 后 trade_count `3`, copyable PnL `+0.29032258`，trial-ready dry-run 阻断 `score_below_80`。
+  - `2750`: `PAPER`, score `55`, `weak_exit_sample,mixed_category_evidence,small_sample`。targeted paper process 后 trade_count `11`, copyable PnL `-0.98340562`，trial-ready dry-run 阻断 `score_below_80`。
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- politics/finance `fastWatchCount=0`。
+- trial-ready dry-run `selected=0`。
+- 当前 `TRIAL_READY` 总数仍为 `17`，enabled copy configs `3`。
+- 主要阻断: `score_below_80`, `small_sample`, `mixed_category_evidence`, `weak_exit_sample`, `source_stale`, `copyable_pnl_not_positive`。
+
+**Next**:
+- 保留 Telegram channel 配置，让 hourly Polyburg sync 继续补新 wallet；当前没有新 Telegram wallet 消息，不手动放宽阈值。
+- 下一轮不要继续消耗 Falcon-only 15d 候选；优先找能补长期 ALL/365D 盈利与近期 activity 的来源，或等待 Polyburg/official 新数据后再跑 activity evidence -> paper process -> paper score -> trial-ready recheck。
+
+## 2026-07-13 official top1000 + targeted paper loop
+
+**Goal**: 在不降低长期盈利、近期活跃、BUY/SELL 和可复制 paper 门槛的前提下，继续补充 politics/finance 高质量候选，并对 official+ALL 且 activity 较厚的 PAPER 候选做小批验证。
+
+**Baseline**:
+- Backend `/actuator/health=UP`，Bridge `/health` ready。
+- 严格查询 `PAPER + score>=70 + risk_flags 空 + paper PnL 正 + official/Polyburg + ALL` 返回 `0`。
+- politics/finance `fastWatchCount=0`，trial-ready dry-run `selected=0`。
+
+**Source refresh**:
+- official leaderboard 深刷 `politics/finance`, `MONTH+ALL`, `PNL`, top 1000：
+  - fetchedTotal `4000`
+  - dedupedTotal `355`
+  - created `39`
+  - updated `243`
+  - skippedExisting `73`
+- official evidence 总量更新为 `1389`，其中带 `ALL/period:ALL` 证据 `823`。
+- official diagnose 结果仍为 `cleanHigh=0`, `fastWatch=0`, `readyForPaper=0`；主要阻断为 `NEEDS_PROFIT_WINDOW`, `NO_ACTIVITY_SAMPLE`, `HARD_RISK`, `small_sample`, `needs_activity_window`。
+
+**Activity-source supplement**:
+- politics source diagnose:
+  - scanned `500`
+  - passImportCriteria `137`
+  - unknownWallets `11`
+  - eligibleForPaperNow `1`
+- unknown eligible wallet `0xae5839b89d47738616264276ac1f0d77f936e5c5` 具备 activity: events `9`, markets `8`, BUY `3`, SELL `6`, safe ratio `0.4444`, tail ratio `0.2222`。
+- targeted official refresh 对该 wallet 扫 `politics/finance` top 1000 的 `MONTH+ALL`，matched `0`；所以不具备长期盈利证据。
+- 已通过 `/activity-source/import` 创建候选 `61916`，score `59`, risk `small_sample`；promotion dry-run `selected=0`，仅作为观察候选，不进入 PAPER。
+
+**Targeted paper loop**:
+- 选取 official+ALL、PAPER、activity 相对厚且主要为 `small_sample` 的 8 个候选：`2949`, `3025`, `2903`, `2713`, `39184`, `2940`, `2782`, `24399`。
+- 第一轮 `/paper/process`: processed `15`, filtered `5`, failed `0`。
+- 第一轮 `/paper/score` 后 `/trial-ready/recheck`: selected `8`, advanced `0`，全部阻断 `score_below_80`。
+- 对正 PnL 薄样本 `2713`, `2782`, `24399` 再补一轮：
+  - processed `11`, filtered `9`, failed `0`
+  - `2713`: trade_count `10`, filtered `10`, copyable PnL `+2.01420727`, score `76.52841454`, risk `high_filtered_ratio,tail_price_spray`，trial-ready 阻断 `score_below_80`。
+  - `2782`: trade_count `6`, filtered `1`, copyable PnL `+1.46767612`, score `59`, risk `small_sample`，trial-ready 阻断 `score_below_80`。
+  - `24399`: trade_count `3`, filtered `7`, copyable PnL `+1.28051049`, score `59`, risk `high_filtered_ratio,tail_price_spray,small_sample`，trial-ready 阻断 `score_below_80`。
+- 单点复跑 `2713`：processed `0`, filtered `0`，无更多 pending paper events。
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- 新增长期来源候选: `39`。
+- 新增 activity-source 观察候选: `1` (`61916`)。
+- 当前 `TRIAL_READY` 总数仍为 `17`，enabled copy configs `3`。
+- politics/finance `fastWatchCount=0`，trial-ready dry-run `selected=0`。
+- 当前最接近候选为 `2713`，但 score `76.52841454 < 80` 且存在 `high_filtered_ratio,tail_price_spray`，不能进入试跟。
+
+**Next**:
+- 不继续推进 `2713`，除非后续自然新增 paper events 能改善 filtered ratio 和 score。
+- 下一轮优先处理 deep official 新增的 `DISCOVERED/CANDIDATE` 候选，按 `official+ALL + activity events>=12 + BUY/SELL + risk only small_sample` 找 promotion dry-run 候选；仍要求 paper PnL 正、score>=80 才进入 trial-ready。
+
+## 2026-07-13 DISCOVERED/CANDIDATE official+ALL promotion scan
+
+**Goal**: 延续上一轮 top1000 official 刷新结果，优先处理 deep official 新增的 `DISCOVERED/CANDIDATE` 候选；要求 `official+ALL` 长期证据、近期 activity events>=12、BUY/SELL 完整、risk 仅 `small_sample` 或为空，再做 activity score 与 promotion dry-run。
+
+**Baseline**:
+- Backend `/actuator/health=UP`，Bridge `/health` ready。
+- official evidence 总量 `1389`，其中带 `ALL/period:ALL` 证据 `823`。
+- politics/finance `fastWatchCount=0`，trial-ready dry-run `selected=0`。
+
+**DISCOVERED/CANDIDATE scan**:
+- 严格筛选 `DISCOVERED/CANDIDATE + official+ALL + activity>=12 + markets>=3 + BUY>=2 + SELL>=1 + safe>=0.20 + tail<=0.50 + risk empty/small_sample` 后，仅得到：
+  - `2904` finance: CANDIDATE, score `59`, risk `small_sample`, events `12`, markets `6`, BUY `11`, SELL `1`。
+  - `2835` finance: CANDIDATE, score `59`, risk `small_sample`, events `16`, markets `7`, BUY `12`, SELL `4`。
+- `3275` 表面有 `ALL` 字样但 official ALL PnL 为负，不作为长期盈利候选。
+- 强制 activity score 后：
+  - scanned `2`, scored `2`
+  - both score `59`
+  - riskFlagCounts `small_sample=2`
+  - promotion dry-run `minScore=60`: selected `0`
+  - promotion dry-run `minScore=80`: selected `0`
+
+**Activity evidence expansion attempt**:
+- market-peer-source dry-run:
+  - selected `28`, created `0`, updated `26`, skippedExisting `2`
+  - politics `16`, finance `12`
+- activity-source dry-run:
+  - selected `43`, created `0`, updated `43`
+  - politics `30`, finance `13`
+- 两个全量真实导入请求均返回 `curl: (52) Empty reply from server`；watchdog 随后重启 backend。DB 核对 `recent_market_peer_updates=0`, `recent_activity_updates=0`，未落库。
+- 后端恢复后 `/actuator/health=UP`。
+- 为避免再次触发长请求，改用 targeted activity-source 更新 `2904/2835`，结果 selected `0`，没有新增可导入 activity evidence。
+
+**COOLDOWN cross-check**:
+- official+ALL 且近期 activity 较厚的候选主要落在 `COOLDOWN`，不可直接 promotion：
+  - `9404`: score `72`, paper trades `10`, copyable PnL `-5.25000106`。
+  - `2846`: score `68.57142855`, paper trades `27`, copyable PnL `-5.42179001`。
+  - `776`: score `59`, paper trades `2`, copyable PnL `-0.20609330`。
+  - `3115`: score `59`, paper trades `0`, copyable PnL `0`。
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- 新增 PAPER: `0`。
+- politics/finance `fastWatchCount=0`。
+- trial-ready dry-run `selected=0`。
+- strict PAPER query `score>=80 + risk empty + paper PnL positive + official/Polyburg + ALL` 返回 `0`。
+- 当前 `TRIAL_READY` 总数仍为 `17`，enabled copy configs `3`。
+- 主要阻断: `score_below_60/80`, `small_sample`, `COOLDOWN with negative paper PnL`, and no safe long-running full-source import path without watchdog interruption.
+
+**Next**:
+- 不再跑全量 activity-source/market-peer-source 真实导入；改成分批 targeted wallet 更新，避免 watchdog 重启。
+- 下一轮优先从 dry-run preview 中挑选 `official+ALL` 且未处于 `COOLDOWN` 的 wallets，按 5-10 个一组 targeted update -> activity score -> promotion dry-run。
+- 如果仍没有 `score>=60` 的 CANDIDATE 或 `score>=80` 的 PAPER，继续等待外部新 activity/official 数据，不放宽门槛。
+
+## 2026-07-13 preview-targeted official+ALL paper follow-up
+
+**Goal**: 只从上一轮 dry-run preview 中筛 `official+ALL/positive across periods` 且未 `COOLDOWN` 的 wallets，按小批 targeted 处理，避免再次触发长请求和 watchdog 重启。
+
+**Baseline**:
+- Backend `/actuator/health=UP`，Bridge `/health` ready。
+- 上轮 full import 未落库，继续使用 DB 中已有 `leader_activity_event` 与 candidate evidence 做交叉筛选。
+- politics/finance `fastWatchCount=0`，trial-ready dry-run `selected=0`。
+
+**Preview cross-filter**:
+- 将 dry-run preview wallets 与 DB 交叉 `official positive across periods + research_state in DISCOVERED/CANDIDATE/PAPER + activity>=12 + markets>=3 + BUY>=2 + SELL>=1`。
+- 唯一符合且未 `COOLDOWN` 的 wallet 是 candidate `1576`:
+  - wallet `0xac4a1fabdac2438d6afa2a9e8e83845310a0bf1e`
+  - state `PAPER`
+  - initial score `59`
+  - risk `small_sample`
+  - initial paper trades `7`
+  - initial copyable PnL `+1.50000000`
+- `DISCOVERED/CANDIDATE` 中没有新的 `score>=60` 可 promotion 候选。
+
+**Targeted paper loop**:
+- `1576` first process:
+  - processed `13`, filtered `7`
+  - paper trades `7 -> 20`
+  - copyable PnL stayed `+1.50000000`
+  - score `78.00000005`
+  - trial-ready dry-run blocked: `score_below_80`
+- `1576` second process:
+  - processed `12`, filtered `8`
+  - paper trades `20 -> 32`
+  - copyable PnL `+1.50000000 -> +0.96193577`
+  - score `76.52387154`
+  - blocked: `score_below_80`
+- `1576` final process:
+  - processed `12`, filtered `8`
+  - paper trades `32 -> 44`
+  - copyable PnL `+0.96193577 -> -1.03806423`
+  - final score `74.42857145`
+  - risk flags empty but PnL negative and score below threshold; no longer near trial-ready.
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- 新增 PAPER: `0`。
+- `fastWatchCount=0`。
+- trial-ready dry-run `selected=0`。
+- strict query `PAPER + score>=80 + risk empty + PnL positive + official/Polyburg + ALL/positive-across-periods` 返回 `0`。
+- 当前 `TRIAL_READY` 总数仍为 `17`，enabled copy configs `3`。
+- 主要阻断: no `DISCOVERED/CANDIDATE` promotion candidate above `60`; closest PAPER candidates fail `score_below_80`, and `1576` PnL turned negative after sample thickening.
+
+**Next**:
+- 不继续消耗 `1576`。
+- 下一轮只处理新外部数据或新自然 activity；当前 preview-targeted pool 已无可合规推进项。
+- 若继续自动推进，应先跑 lightweight diagnostics，而不是 full source import；full import 需要后续拆成后端内部分页或异步任务，避免 watchdog 把长请求误判为 backend down。
+
+## 2026-07-13 high-activity wallets targeted official refresh
+
+**Goal**: 从系统已有高质量近期 activity 钱包中，挑选缺少 official+ALL 长期盈利证据的小批 wallet，执行 targeted official refresh；只在命中 `ALL/positive across periods` 后再进入 paper score / trial-ready 路径。
+
+**Baseline**:
+- Backend `/actuator/health=UP`，Bridge `/health` ready。
+- 上一轮 preview-targeted pool 已无可推进项；`1576` 加厚后 PnL 转负。
+- politics/finance `fastWatchCount=0`，trial-ready dry-run `selected=0`。
+
+**Candidate source**:
+- DB 聚合筛选 `activity_source/market_peer_source + state in DISCOVERED/CANDIDATE/PAPER + missing official+ALL/positive-across-periods + 60d activity strong`。
+- 条件包括 events `>=30`, markets `>=8`, BUY `>=3`, SELL `>=2`, safe ratio `>=0.25`, tail ratio `<=0.45`。
+- 得到的前排全为 `PAPER` 且多为 `small_sample`，代表：
+  - `514`, `1814`, `4142`, `4073`, `4526`, `114`, `7612`, `4291`, `4137`, `3824` 等。
+
+**Targeted official refresh**:
+- Batch 1 wallets: `514`, `1814`, `4142`, `4073`, `4526`
+  - fetched `4000`
+  - matched `1`
+  - updated `1`
+  - matched wallet `4073`
+  - 但 `4073` 只命中 official `MONTH` PnL；`has_all=0`, `positive_periods=0`，不满足长期盈利门槛。
+- Batch 2 wallets: `114`, `7612`, `4291`, `4137`, `3824`
+  - fetched `4000`
+  - matched `0`
+- Batch 3 wallets: `12264`, `158`, `1806`, `8904`, `1816`
+  - fetched `4000`
+  - matched `0`
+
+**Verification**:
+- `4073`: score `59`, risk `small_sample`, paper trades `0`, copyable PnL `0`, no ALL / no positive-across-periods evidence; not promoted.
+- `1576`: score `74.42857145`, risk empty, paper trades `44`, copyable PnL `-1.03806423`, has ALL/positive-across-periods but PnL negative; rejected.
+- `2713`: score `76.52841454`, risk `high_filtered_ratio,tail_price_spray`, paper trades `10`, copyable PnL `+2.01420727`; rejected by score/risk.
+- final `fastWatchCount=0`。
+- trial-ready dry-run `selected=0`。
+- strict query `PAPER + score>=80 + risk empty + paper PnL positive + official/Polyburg + ALL/positive-across-periods` returned `0`。
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- 新增长期证据合格候选: `0`。
+- Targeted official refresh 对 15 个高 activity wallet 只找到 1 个 MONTH-only 命中，没有任何 ALL 命中。
+- 当前 `TRIAL_READY` 总数仍为 `17`，enabled copy configs `3`。
+- 主要阻断: high-activity wallets lack official ALL/365D profitability evidence; existing official+ALL PAPER candidates fail score, risk, or paper PnL.
+
+**Next**:
+- 当前可用内部 activity 池与 official top1000 的交叉已经很薄；继续重复 targeted official refresh 的边际收益低。
+- 下一轮应优先引入或恢复能提供 wallet-level long-term PnL 的外部来源，或等待 official/Polyburg 新数据；否则只做 lightweight diagnostics，不再消耗 paper 样本。
+
+## 2026-07-13 targeted ALL-evidence candidate score refresh
+
+**Goal**: 在不放宽门槛的前提下，继续从已有 `ALL/365D` 长期证据候选里寻找可推进项；避免 full import 和全池 recheck，把动作限定到小批 candidateId。
+
+**Baseline**:
+- Backend `/actuator/health=UP`，Bridge `/health` ready。
+- Leader pool state counts:
+  - `DISCOVERED=1028`
+  - `CANDIDATE=3475`
+  - `PAPER=22609`
+  - `TRIAL_READY=17`
+  - `COOLDOWN=33589`
+- Enabled copy configs: `3`。
+- Strict ready query `PAPER + score>=80 + risk empty + paper PnL positive + official/Polyburg + ALL` returned `0`。
+
+**Evidence distribution**:
+- `CANDIDATE`:
+  - total `3475`
+  - `has_all_named=51`
+  - `score>=60=168`
+  - `score>=80=162`
+  - `risk_empty=10`
+- `PAPER`:
+  - total `22609`
+  - `has_all_named=175`
+  - `score>=60=13`
+  - `score>=80=0`
+  - `risk_empty=5`
+- `TRIAL_READY`:
+  - total `17`
+  - `has_all_named=0`
+  - `risk_empty=3`
+
+**Targeted candidate score refresh**:
+- Selected the top activity-thick `CANDIDATE` wallets with official/Polyburg `ALL` evidence:
+  - `3269`, `3275`, `14832`, `2835`, `2779`
+- Ran targeted `activity-score/run` with `force=true`:
+  - scanned `5`
+  - scored `5`
+  - risk flags:
+    - `small_sample=4`
+    - `low_market_diversity=2`
+    - `tail_price_spray=1`
+    - `low_safe_price_ratio=1`
+    - `activity_category_mismatch=1`
+    - `strategy_low_price_tail_risk=1`
+- Post-score state:
+  - `3275`: score `59`, risk `small_sample`
+  - `14832`: score `59`, risk `small_sample`
+  - `2835`: score `59`, risk `small_sample`
+  - `2779`: score `59`, risk `small_sample,low_market_diversity`
+  - `3269`: score `20`, risk `low_market_diversity,tail_price_spray,low_safe_price_ratio,activity_category_mismatch,strategy_low_price_tail_risk`
+- Promotion dry-run with `minScore=60` over the same 5 candidates:
+  - `selectedTotal=0`
+  - `promotedTotal=0`
+
+**Heavy endpoint check**:
+- `politics-source/diagnose` and `finance-source/diagnose` with broad `limit=80` timed out at 20s.
+- `paper/fast-watch` and `paper/trial-ready/recheck` without candidateId targeting also timed out at 20s.
+- Backend stayed healthy after timeouts; these endpoints are too heavy for the regular loop unless scoped by candidate IDs or optimized.
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- 新增 PAPER: `0`。
+- 新增 `score>=60` promotion candidate: `0`。
+- 当前严格可推进项仍为 `0`。
+- 主要阻断:
+  - `CANDIDATE` with `ALL` evidence is still dominated by `small_sample` / low diversity.
+  - `PAPER` with `ALL` evidence has no `score>=80` candidate.
+  - Existing near candidates fail by negative paper PnL, high filtered ratio, tail price spray, or mixed/category mismatch.
+  - Broad diagnose/recheck endpoints are too slow for loop usage.
+
+**Next**:
+- Stop repeating broad source scans and global rechecks in the loop.
+- Use DB prefilter first, then candidateId-targeted API calls only.
+- The next useful engineering step is to add or optimize a lightweight backend endpoint for:
+  - strict-ready count
+  - ALL-evidence candidates by state/risk/score
+  - candidateId-scoped fast-watch/trial-ready recheck
+- Without a new long-term wallet-level profitability source or endpoint optimization, further leader expansion is blocked by data quality, not by candidate quantity.
+
+## 2026-07-15 lightweight loop diagnostics endpoint
+
+**Goal**: Remove the regular-loop timeout bottleneck found in the previous iteration by adding a narrow, read-only backend endpoint for leader research loop diagnostics. This does not relax leader gates and does not create copy-trading configs.
+
+**Change**:
+- Added `POST /api/copy-trading/leader-research/loop-diagnostics`.
+- Added `LeaderResearchLoopDiagnosticsService`.
+- Added DTOs:
+  - `LeaderResearchLoopDiagnosticsRequest`
+  - `LeaderResearchLoopDiagnosticsResponse`
+  - `LeaderResearchLoopDiagnosticsStateDto`
+  - `LeaderResearchLoopDiagnosticsCandidateDto`
+- Added focused tests for:
+  - diagnostics SQL result mapping and blocker classification
+  - controller default/null request delegation
+
+**Endpoint behavior**:
+- Uses lightweight aggregate SQL instead of full source scans.
+- Returns:
+  - enabled copy config count
+  - strict-ready count
+  - state summaries with `hasAllNamedEvidence`, `score60`, `score80`, and `riskEmpty`
+  - sample ALL-evidence politics/finance candidates with blocker labels
+- Supports optional `candidateIds` for scoped loop checks.
+- Caps `sampleLimit` at `50` and candidate ID scope at `100`.
+
+**Verification**:
+- `./gradlew compileKotlin` passed.
+- Targeted test command was attempted:
+  - `./gradlew test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchLoopDiagnosticsServiceTest' --tests 'com.wrbug.polymarketbot.controller.copytrading.research.LeaderResearchControllerTest'`
+  - blocked during `compileTestKotlin` by pre-existing unrelated failure in `AccountControllerTest`: `No value passed for parameter 'bridgePortfolioClient'`.
+- Backend and Bridge were healthy before the edit. Runtime endpoint smoke still requires backend restart with the new compiled code.
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- 新增 PAPER: `0`。
+- 新增可观测能力: `1` lightweight diagnostics endpoint。
+- This makes the next loop iteration faster and safer: use `/loop-diagnostics` first, then only candidateId-targeted score/paper/recheck calls.
+
+**Next**:
+- Fix or isolate the unrelated `AccountControllerTest` constructor drift so targeted tests can run.
+- Restart backend to load the new endpoint, then smoke:
+  - `POST /api/copy-trading/leader-research/loop-diagnostics`
+- Use the endpoint output to select the next small candidate batch.
+
+## 2026-07-15 diagnostics smoke and targeted PAPER sample loop
+
+**Goal**: Verify the new lightweight loop diagnostics endpoint in the running backend, then use it to select one small politics/finance PAPER batch without relaxing gates.
+
+**Setup / test fix**:
+- Fixed unrelated `AccountControllerTest` constructor drift by adding the missing `BridgePortfolioClient` mock.
+- Targeted tests passed:
+  - `LeaderResearchLoopDiagnosticsServiceTest`
+  - `LeaderResearchControllerTest`
+  - `AccountControllerTest`
+- Built new backend jar with `./gradlew bootJar`.
+- Restarted launchd backend `com.polyhermes.backend-local`; backend returned `/actuator/health=UP`.
+
+**Loop diagnostics smoke**:
+- `POST /api/copy-trading/leader-research/loop-diagnostics` returned successfully in about `4.6s`.
+- Current hard-gate summary:
+  - enabled copy configs: `4`
+  - strict-ready count: `0`
+  - `CANDIDATE`: total `3475`, `hasAllNamedEvidence=51`, `score80=162`, `riskEmpty=10`
+  - `PAPER`: total `22609`, `hasAllNamedEvidence=175`, `score80=0`, `riskEmpty=5`
+  - `TRIAL_READY`: total `17`, `hasAllNamedEvidence=0`
+
+**Selected targeted batch**:
+- Picked only ALL-evidence PAPER candidates with positive paper PnL and mostly small-sample blockers:
+  - `2782` politics: score `59`, risk `small_sample`, trades `6`, copyable PnL `+1.4677`, filtered ratio `0.1429`
+  - `2900` finance: score `59`, risk `small_sample`, trades `4`, copyable PnL `+0.2908`, filtered ratio `0.4286`
+
+**Paper processing / scoring**:
+- `paper/process` for `[2782, 2900]` with batch size `12` timed out at `30s`, but DB showed partial completion for `2900`.
+- Post-process:
+  - `2782`: unchanged at trades `6`, PnL `+1.4677`, filtered ratio `0.1429`
+  - `2900`: trades `4 -> 7`, PnL `+0.2908 -> -1.2667`, filtered ratio `0.4286 -> 0.6316`
+- Targeted `paper/score` for `[2782, 2900]` succeeded; both remained score `59`.
+- Targeted `trial-ready/recheck` dry-run:
+  - selected `2`
+  - advanced `0`
+  - `2782` blocked by `score_below_80`
+  - `2900` blocked by `score_below_80`; diagnostics also now flags `high_filtered_ratio,tail_price_spray,small_sample`
+- A final `paper/process` on `2782` with batch size `1` returned `processed=0, filtered=0, failed=0`.
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- 新增 PAPER: `0`。
+- strict-ready count remains `0`。
+- `2900` is no longer worth consuming: sample thickening exposed negative copyable PnL and high filtered/tail risk.
+- `2782` remains positive but cannot advance without new valid paper events and a materially higher score.
+- Backend and Bridge stayed healthy after the loop.
+
+**Next**:
+- Continue using `/loop-diagnostics` as the first step of each loop.
+- Avoid `2900`.
+- Do not process PAPER candidates with filtered ratio already near or above `0.40` unless there is a strong reason.
+- Next batch should prefer:
+  - ALL evidence
+  - score near `60+`
+  - positive PnL
+  - filtered ratio `<0.20`
+  - no `mixed_category_evidence`, `tail_price_spray`, or `high_filtered_ratio`
+
+## 2026-07-16 official ALL discovered activity probe and Bridge flapping
+
+**Goal**: Continue the high-quality leader loop without relaxing gates. Since clean PAPER candidates were exhausted, try official `ALL/365D` DISCOVERED candidates with risk empty and verify whether they have enough recent politics/finance activity to become PAPER candidates.
+
+**Runtime baseline**:
+- Backend started healthy with `/actuator/health=UP`.
+- Bridge was initially down, then launchd restarted it and `/health` briefly returned `{"status":"ok","executor_ready":true}`.
+- Bridge later flapped again and stopped listening on `127.0.0.1:8080`; logs stalled at executor startup / browser profile initialization.
+- Because Bridge was unstable, stopped further `paper/process` attempts for this round.
+
+**Diagnostics / PAPER pool check**:
+- `/loop-diagnostics` returned:
+  - strict-ready count `0`
+  - `PAPER hasAllNamedEvidence=175`
+  - `PAPER score80=0`
+- `PAPER + ALL + PnL positive + filtered_ratio < 0.20 + no mixed/tail/high_filtered` was effectively exhausted:
+  - `2782` already processed last round and could not add useful events.
+  - only additional DB hit was `103`, but it has hard blockers `buy_only_no_exit,weak_exit_sample,activity_category_mismatch,small_sample`; not processed.
+
+**DISCOVERED official ALL probe**:
+- Selected 5 official `ALL/365D` risk-empty DISCOVERED candidates:
+  - `61923` politics, high MONTH PnL external rank
+  - `61918` finance
+  - `61924` finance
+  - `61955` politics
+  - `61954` finance
+- Targeted `activity-source/import` dry-run for these wallets returned `selectedTotal=0`.
+- Targeted `market-peer-source/import` dry-run for these wallets timed out at `30s`; no write was intended.
+- Targeted `activity-score/run force=true` succeeded:
+  - scanned `5`
+  - scored `5`
+  - risk flags:
+    - `small_sample=3`
+    - `low_market_diversity=3`
+    - `no_activity_sample=2`
+    - `stale_activity=2`
+- Post-score states:
+  - `61918`: score `59`, `small_sample,low_market_diversity`; only 3 buy events, no sells.
+  - `61954`: score `59`, `small_sample,low_market_diversity`; only 3 buy events, no sells.
+  - `61955`: score `46`, `small_sample,low_market_diversity`; only 2 sell events, tail price ratio 1.0.
+  - `61923`: score `10`, `no_activity_sample,stale_activity`.
+  - `61924`: score `10`, `no_activity_sample,stale_activity`.
+- Promotion dry-run `minScore=60` for these 5:
+  - `selectedTotal=0`
+  - `promotedTotal=0`
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- 新增 PAPER: `0`。
+- New official ALL candidates exist, but lack BUY/SELL-complete recent activity evidence.
+- Bridge flapping blocked safe continuation of paper sample processing.
+- Backend stayed healthy; Bridge was not healthy at final check.
+
+**Next**:
+- Do not continue paper processing until Bridge health is stable.
+- Investigate Bridge startup flapping separately before the next paper loop.
+- For leader sourcing, official ALL alone is insufficient; require activity evidence with both BUY and SELL before scoring/promotion.
+- Avoid wide `market-peer-source/import` even with wallet filters until it has a faster scoped path or timeout guard.
+
+## 2026-07-17 diagnostics-driven CANDIDATE recheck
+
+**Goal**: Continue the leader loop after Bridge recovered, without lowering gates. First use cheap diagnostics / DB filters, then only targeted activity scoring and promotion dry-run for candidates with official/Polyburg `ALL/365D` evidence and complete BUY/SELL activity.
+
+**Runtime baseline**:
+- Backend `/actuator/health=UP`.
+- Bridge `/health={"status":"ok","executor_ready":true}` at start and final check.
+- Worktree already has unrelated Bridge/frontend changes; this loop did not edit those files.
+
+**Diagnostics / strict pool**:
+- `/loop-diagnostics` with `sampleLimit=50` timed out at `12s`, so DB fallback was used.
+- DB strict summary:
+  - `CANDIDATE`: total `3475`, `has_all_named=51`, `score80=162`, `risk_empty=10`
+  - `DISCOVERED`: total `1028`, `has_all_named=244`, `score80=0`, `risk_empty=95`
+  - `PAPER`: total `22609`, `has_all_named=175`, `score80=0`, `risk_empty=5`
+  - `TRIAL_READY`: total `17`, `has_all_named=0`
+- Strict-ready query still returned `0`.
+- Clean-ish PAPER query found only `2782`, already processed last round and still blocked by score/sample. No new PAPER candidate selected.
+
+**DISCOVERED/CANDIDATE activity cross-check**:
+- Hard filter `ALL evidence + politics/finance + risk empty + events>=8 + markets>=2 + BUY>=1 + SELL>=1 + safe_ratio>=0.25 + tail_ratio<=0.45` returned `0`.
+- Relaxed BUY/SELL query found several CANDIDATE rows, but all were blocked by low score, small sample, category mismatch, low safe price, or tail risk.
+
+**Targeted re-score batch**:
+- Selected the cleanest `score=59/small_sample` CANDIDATE rows with some BUY/SELL coverage:
+  - `3275`, `14832`, `2835`, `2870`, `2952`
+- Ran targeted `activity-score/run force=true`:
+  - scanned `5`
+  - scored `5`
+  - risk flags: `small_sample=5`
+  - category counts: finance `4`, politics `1`
+  - unknown strategy reasons: `insufficient_sample=5`, plus low safe / high tail markers on weaker rows.
+- Promotion dry-run `minScore=60` over these 5:
+  - `selectedTotal=0`
+  - `promotedTotal=0`
+
+**Post-score blockers**:
+- `3275`: score `59`, `small_sample`; activity category dominated by sports despite politics source evidence.
+- `14832`: score `59`, `small_sample`; finance evidence but activity category currently crypto.
+- `2835`: score `59`, `small_sample`; activity category mixed / sports-dominant.
+- `2870`: score `59`, `small_sample`; finance evidence but still below score line.
+- `2952`: score `59`, `small_sample`; activity category sports-dominant.
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- 新增 PAPER: `0`。
+- strict-ready count remains `0`。
+- Current blocker is no longer Bridge health for this exact moment; it is the data-quality intersection:
+  - official/Polyburg `ALL` candidates with recent BUY/SELL activity still fail score/category/sample gates.
+  - PAPER candidates with ALL evidence still have `score80=0`.
+
+**Next**:
+- Continue with DB-first candidate selection rather than wide API scans.
+- Do not promote `score=59` candidates by lowering threshold.
+- The next useful source expansion must add real recent BUY/SELL-complete activity for official ALL candidates, not just more official leaderboard rows.
+
+## 2026-07-17 market-peer wallet scoped import fix
+
+**Goal**: Make `market-peer-source/import` usable for targeted source expansion, so known official/ALL wallets can be checked without accidentally running the expensive full hot-market discovery path.
+
+**Baseline / issue**:
+- Backend and Bridge were healthy at the start of this iteration, but `market-peer-source/import` with `wallets=[...]` previously timed out.
+- Root cause in code: `LeaderResearchMarketPeerSourceImportRequest` did not expose `wallets`, so Jackson ignored the caller's wallet list; the service always called the broad `discoverWalletsFromMarketPeerSource` path.
+- A first wallet-scoped implementation still joined target markets back to all market events and was too slow, so it was replaced with a lightweight targeted aggregation over the requested wallets only.
+
+**Change**:
+- Added `wallets` to `LeaderResearchMarketPeerSourceImportRequest`.
+- Added `discoverWalletsFromMarketPeerSourceForWallets(...)` for targeted wallet aggregation with the existing wallet-level gates:
+  - `minEvents`
+  - `minDistinctMarkets`
+  - `minBuyEvents`
+  - `minSellEvents`
+  - `minSafePriceRatio`
+  - `maxTailPriceRatio`
+- Updated `LeaderResearchMarketPeerSourceImportService` to use the targeted repository method only when valid wallets are supplied.
+- Kept broad hot-market discovery unchanged for calls without wallets.
+
+**Verification**:
+- Targeted unit test passed:
+  - `./gradlew test --tests 'com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMarketPeerSourceImportServiceTest'`
+- Backend build passed:
+  - `./gradlew bootJar`
+- Restarted local backend and verified:
+  - backend `/actuator/health={"status":"UP"}`
+  - Bridge `/health={"status":"ok","executor_ready":true}`
+- Authenticated API smoke, dry-run, 5 official ALL wallets, politics+finance:
+  - elapsed `0.58s`
+  - `code=0`
+  - `selectedTotal=0`
+  - categories: politics `0`, finance `0`
+- `/loop-diagnostics sampleLimit=50`:
+  - elapsed `5.06s`
+  - `strictReadyCount=0`
+
+**Result**:
+- 新增可试跟 leader: `0`。
+- 新增 PAPER: `0`。
+- The targeted market-peer path is now safe to use interactively; it no longer falls through to the broad hot-market scan.
+- The sampled official ALL wallets still do not have enough qualifying politics/finance BUY+SELL activity to create candidates under the current gates.
+- Telegram Web source channel is included in actual local config:
+  - `POLYBURG_SYNC_MODE=web`
+  - `POLYBURG_WEB_URL=https://web.telegram.org/a/#7698624735`
+  - `POLYBURG_SOURCE_URL=https://web.telegram.org/a/#7698624735`
+- Updated `scripts/README.md` so the Telegram Web URL is documented alongside web-mode sync variables.
+
+**Next**:
+- Use this targeted path as a source-expansion primitive for Telegram/Polyburg and official ALL wallet batches.
+- Run the Telegram Web source `https://web.telegram.org/a/#7698624735` through the existing Polyburg/Telegram ingestion path, then feed extracted wallets into targeted market-peer/activity-source imports.
+- Keep thresholds unchanged; increase quantity by adding verified source rows, not by promoting `small_sample` candidates.
+
+## 2026-07-17 Telegram Web Polyburg collection pass
+
+**Goal**: Collect high-quality leader candidates from `https://web.telegram.org/a/#7698624735` through the existing Polyburg/Telegram Web channel, without lowering quality gates or enabling live copy trading.
+
+**Source check**:
+- Existing config already points Polyburg Web sync at:
+  - `POLYBURG_SYNC_MODE=web`
+  - `POLYBURG_WEB_URL=https://web.telegram.org/a/#7698624735`
+  - `POLYBURG_SOURCE_URL=https://web.telegram.org/a/#7698624735`
+- Normal dry-run with the real sync state:
+  - `status=no_new_wallet_messages`
+  - `visibleWallets=168`
+  - `state_advanced=false`
+- Full visible dry-run with a temporary state file:
+  - `visibleWallets=168`
+  - `parsedTotal=168`
+  - `dedupedTotal=31`
+  - import dry-run requested `31`
+  - `selectedTotal=31`
+  - `createdTotal=0`
+  - `updatedTotal=0`
+  - `skippedExistingTotal=31`
+
+**Candidate quality snapshot**:
+- `source_evidence like '%polyburg_telegram%'`:
+  - total candidates `33`
+  - `TRIAL_READY=0`
+  - `PAPER=17`
+  - `CANDIDATE=7`
+  - `score60=0`
+  - `score80=0`
+  - `risk_empty=0`
+
+**Targeted score refresh**:
+- Ran `activity-score/run` with all `33` Polyburg-backed candidate ids, `force=true`.
+- Activity scoring endpoint scanned only eligible current states:
+  - `scannedCount=7`
+  - `scoredCount=7`
+  - risk flags: `small_sample=7`, `mixed_category_evidence=3`, `low_market_diversity=2`, `strategy_whale=1`, `strategy_low_price_tail_risk=1`
+  - category counts: `finance=4`, `politics=3`
+- Promotion dry-run with `minScore=60`:
+  - `selectedTotal=0`
+  - `promotedTotal=0`
+
+**Result**:
+- 新增 leader 候选: `0` because all visible deduped wallets already exist.
+- 新增高质量 leader: `0`.
+- 新增可试跟 leader / PAPER promotion: `0`.
+- Main blocker remains data quality, not source connectivity:
+  - available Polyburg wallets are mostly `score=59` or lower,
+  - all refreshed eligible rows still carry `small_sample`,
+  - no Polyburg-backed row currently has empty risk flags or score >= 60.
+
+**Next**:
+- Keep the Telegram Web sync running as a source feed, but do not promote current Polyburg rows without more BUY/SELL-complete activity evidence.
+- Next useful action is to expand visible/history depth or add another feed, then rerun targeted activity-source / market-peer evidence collection for only new wallets.

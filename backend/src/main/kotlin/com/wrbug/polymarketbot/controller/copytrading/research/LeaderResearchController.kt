@@ -18,6 +18,8 @@ import com.wrbug.polymarketbot.dto.LeaderResearchFastWatchResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchFunnelResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchLoopDiagnosticsRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchLoopDiagnosticsResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardRefreshRequest
@@ -73,6 +75,7 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchFalcon
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchJobService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMapper
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMarketPeerSourceImportService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchLoopDiagnosticsService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchOfficialLeaderboardDiagnoseService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPoliticsRecommendationExecutionService
@@ -109,6 +112,7 @@ class LeaderResearchController(
     private val activityScoringService: LeaderResearchActivityScoringService,
     private val activitySourceImportService: LeaderResearchActivitySourceImportService,
     private val marketPeerSourceImportService: LeaderResearchMarketPeerSourceImportService,
+    private val loopDiagnosticsService: LeaderResearchLoopDiagnosticsService,
     private val externalAnalyticsImportService: LeaderResearchExternalAnalyticsImportService,
     private val falconLeaderboardImportService: LeaderResearchFalconLeaderboardImportService,
     private val polymarketAnalyticsCopyTradeImportService: LeaderResearchPolymarketAnalyticsCopyTradeImportService,
@@ -182,6 +186,15 @@ class LeaderResearchController(
     @PostMapping("/source-health")
     fun sourceHealth(): ResponseEntity<ApiResponse<List<LeaderResearchSourceStateDto>>> {
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) { researchService.sourceHealth() }
+    }
+
+    @PostMapping("/loop-diagnostics")
+    fun loopDiagnostics(
+        @RequestBody(required = false) request: LeaderResearchLoopDiagnosticsRequest?
+    ): ResponseEntity<ApiResponse<LeaderResearchLoopDiagnosticsResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            loopDiagnosticsService.diagnose(request ?: LeaderResearchLoopDiagnosticsRequest())
+        }
     }
 
     @PostMapping("/events/list")

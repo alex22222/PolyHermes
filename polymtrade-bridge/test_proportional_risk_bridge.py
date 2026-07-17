@@ -264,6 +264,60 @@ class TestProportionalRiskBridge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorder.pending[-1]["raw_payload"]["modelCandidateId"], "candidate-1")
         self.assertEqual(recorder.pending[-1]["raw_payload"]["portfolioRiskCorrelationId"], "bridge:0xTx:7")
 
+    async def test_short_cycle_buy_skips_when_trade_lock_is_busy(self):
+        cfg = self._config()
+        recorder = FakeRecorder()
+        executor = SimpleNamespace(
+            execute_trade=AsyncMock(
+                return_value={"verified": True, "submitted_quote": 0.54}
+            )
+        )
+        risk_check = AsyncMock(return_value=PortfolioRiskCheck(True, True, "d", "ALLOW", "SHADOW"))
+        risk_complete = AsyncMock()
+        measured = BridgeMetrics()
+        signal = self._signal(
+            side="BUY",
+            size=4,
+            market_slug="xrp-updown-5m-1784274000",
+        )
+        signal._bridge_received_monotonic = main.time.perf_counter()
+
+        await main._trade_lock.acquire()
+        try:
+            with (
+                patch.object(main, "SHORT_CYCLE_TRADE_LOCK_TIMEOUT_SECONDS", 0.01),
+                patch.object(main, "rule_engine", FakeBuyRuleEngine(cfg)),
+                patch.object(main, "recorder", recorder),
+                patch.object(main, "position_ledger", None),
+                patch.object(main, "executor", executor),
+                patch.object(main, "_evaluate_portfolio_buy_risk", risk_check),
+                patch.object(main, "_complete_portfolio_buy_risk", risk_complete),
+                patch.object(main, "metrics", measured),
+                patch.object(main, "_tail_risk_low_price_buy_reason", return_value=None),
+                patch.object(main, "_high_confidence_buy_reason", return_value=None),
+                patch.object(main, "_generic_repeat_buy_reason", return_value=None),
+                patch.object(main, "_near_expiry_news_buy_reason", return_value=None),
+                patch.object(main, "_leader_event_activity_buy_reason", return_value=None),
+                patch.object(main, "_short_cycle_price_band_buy_reason", return_value=None),
+                patch.object(main, "_short_cycle_global_buy_reason", return_value=None),
+                patch.object(main, "_short_cycle_daily_limit_buy_reason", return_value=None),
+                patch.object(main, "_short_cycle_duplicate_buy_reason", return_value=None),
+                patch.object(main, "_proportional_risk_small_buyback_reason", return_value=None),
+                patch.object(main, "_short_cycle_market_stale_reason", return_value=None),
+            ):
+                await main.handle_signal(signal)
+        finally:
+            main._trade_lock.release()
+
+        executor.execute_trade.assert_not_awaited()
+        self.assertEqual("FAILED", recorder.updates[-1][1])
+        self.assertIn("Short-cycle UI lane busy", recorder.updates[-1][2])
+        latency = measured.to_dict()["latency_ms"]
+        self.assertIn("trade_lock_wait_ms", latency)
+        self.assertNotIn("buy_5m_signal_to_submit_ms", latency)
+        self.assertEqual(1, measured.to_dict()["signals_trade_lock_timeout"])
+        risk_complete.assert_awaited_once_with(cfg, ANY, "FAILED")
+
     async def test_model_candidate_id_is_forwarded_to_portfolio_risk(self):
         cfg = self._config()
         evaluate = AsyncMock(return_value=PortfolioRiskCheck(True, True, "d", "ALLOW", "SHADOW"))

@@ -48,11 +48,7 @@ class LeaderService(
             }
             
             // 3. 检查是否已存在，返回更具体的提示信息
-            val existingLeader = if (normalizedCategory != null) {
-                leaderRepository.findByLeaderAddressAndCategory(normalizedAddress, normalizedCategory)
-            } else {
-                leaderRepository.findByLeaderAddress(normalizedAddress)
-            }
+            val existingLeader = leaderRepository.findByLeaderAddressAndCategory(normalizedAddress, normalizedCategory)
             if (existingLeader != null) {
                 val displayName = existingLeader.leaderName?.takeIf { it.isNotBlank() } ?: "Leader ${existingLeader.id}"
                 return Result.failure(

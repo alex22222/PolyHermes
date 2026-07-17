@@ -349,7 +349,6 @@
     "title": "桥接交易记录",
     "fetchFailed": "获取桥接交易记录失败",
     "recordsTab": "交易记录",
-    "webhookLogsTab": "Webhook 日志",
     "id": "ID",
     "market": "市场",
     "side": "方向",
@@ -394,6 +393,7 @@
       "successPositionMismatch": "成功记录与持仓不一致",
       "unexpectedPortfolioPosition": "异常真实持仓",
       "resolveEvent": "事件解析失败",
+      "targetMarketMissing": "目标市场未出现",
       "insufficientPosition": "仓位不足",
       "clickButton": "按钮点击失败",
       "navigationRace": "导航/重启竞态",
@@ -410,26 +410,11 @@
       "success": "成功",
       "pending": "进行中",
       "failed": "失败"
-    }
-  },
-  "bridgeWebhookLog": {
-    "fetchFailed": "获取 Webhook 日志失败",
-    "refresh": "刷新",
-    "id": "ID",
-    "leader": "Leader",
-    "market": "市场",
-    "side": "方向",
-    "outcome": "结果",
-    "statusCode": "HTTP 状态",
-    "status": "状态",
-    "request": "请求体",
-    "response": "响应体",
-    "createdAt": "发送时间",
-    "statusFilter": {
+    },
+    "sideFilter": {
       "all": "全部",
-      "success": "成功",
-      "pending": "进行中",
-      "failed": "失败"
+      "buy": "买入",
+      "sell": "卖出"
     }
   },
   "apiHealthStatus": {

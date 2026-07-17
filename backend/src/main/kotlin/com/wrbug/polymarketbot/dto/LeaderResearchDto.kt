@@ -99,6 +99,45 @@ data class LeaderResearchActivityScoreResponse(
     val unknownStrategyReasonCounts: Map<String, Int> = emptyMap()
 )
 
+data class LeaderResearchLoopDiagnosticsRequest(
+    val categories: List<String> = listOf("politics", "finance"),
+    val sampleLimit: Int = 20,
+    val candidateIds: List<Long> = emptyList()
+)
+
+data class LeaderResearchLoopDiagnosticsStateDto(
+    val state: String,
+    val total: Long,
+    val hasAllNamedEvidence: Long,
+    val score60: Long,
+    val score80: Long,
+    val riskEmpty: Long
+)
+
+data class LeaderResearchLoopDiagnosticsCandidateDto(
+    val candidateId: Long,
+    val wallet: String,
+    val researchState: String,
+    val score: String?,
+    val riskFlags: List<String>,
+    val strategyType: String?,
+    val tradeCount: Int,
+    val copyablePnl: String,
+    val filteredRatio: String,
+    val hasAllNamedEvidence: Boolean,
+    val sourceCategory: String?,
+    val blocker: String
+)
+
+data class LeaderResearchLoopDiagnosticsResponse(
+    val generatedAt: Long,
+    val categories: List<String>,
+    val enabledCopyConfigs: Long,
+    val strictReadyCount: Long,
+    val stateSummaries: List<LeaderResearchLoopDiagnosticsStateDto>,
+    val samples: List<LeaderResearchLoopDiagnosticsCandidateDto>
+)
+
 data class LeaderResearchActivitySourceImportRequest(
     val dryRun: Boolean = false,
     val categories: List<String> = listOf("politics", "finance"),
@@ -153,6 +192,7 @@ data class LeaderResearchActivitySourceImportResponse(
 data class LeaderResearchMarketPeerSourceImportRequest(
     val dryRun: Boolean = true,
     val categories: List<String> = listOf("politics", "finance"),
+    val wallets: List<String> = emptyList(),
     val limitPerCategory: Int = 50,
     val lookbackDays: Int = 60,
     val hotMarketLimit: Int = 40,

@@ -20,6 +20,7 @@ interface BridgeTradeRecordRepository : JpaRepository<BridgeTradeRecord, Long> {
             FROM bridge_trade_record
             WHERE (:bridgeId IS NULL OR bridge_id = :bridgeId)
               AND (:status IS NULL OR status = :status)
+              AND (:side IS NULL OR UPPER(side) = :side)
               AND (
                   :marketKeyword IS NULL
                   OR LOWER(COALESCE(market_title, '')) LIKE CONCAT('%', LOWER(:marketKeyword), '%')
@@ -32,6 +33,7 @@ interface BridgeTradeRecordRepository : JpaRepository<BridgeTradeRecord, Long> {
             FROM bridge_trade_record
             WHERE (:bridgeId IS NULL OR bridge_id = :bridgeId)
               AND (:status IS NULL OR status = :status)
+              AND (:side IS NULL OR UPPER(side) = :side)
               AND (
                   :marketKeyword IS NULL
                   OR LOWER(COALESCE(market_title, '')) LIKE CONCAT('%', LOWER(:marketKeyword), '%')
@@ -43,6 +45,7 @@ interface BridgeTradeRecordRepository : JpaRepository<BridgeTradeRecord, Long> {
     fun findFiltered(
         @Param("bridgeId") bridgeId: String?,
         @Param("status") status: String?,
+        @Param("side") side: String?,
         @Param("marketKeyword") marketKeyword: String?,
         pageable: Pageable
     ): Page<BridgeTradeRecord>

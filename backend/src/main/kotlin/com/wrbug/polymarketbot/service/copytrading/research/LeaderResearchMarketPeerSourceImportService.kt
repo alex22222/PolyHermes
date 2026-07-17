@@ -36,6 +36,10 @@ class LeaderResearchMarketPeerSourceImportService(
         val since = System.currentTimeMillis() - request.lookbackDays.coerceIn(1, 365).toLong() * DAY_MS
         val minSafePriceRatio = request.minSafePriceRatio.toBigDecimalOrDefault(BigDecimal("0.20"))
         val maxTailPriceRatio = request.maxTailPriceRatio.toBigDecimalOrDefault(BigDecimal("0.50"))
+        val targetWallets = request.wallets
+            .map { it.trim().lowercase() }
+            .filter { WALLET_REGEX.matches(it) }
+            .distinct()
         val selectedWallets = mutableSetOf<String>()
         val categoryResults = mutableListOf<LeaderResearchMarketPeerSourceCategoryDto>()
         val previewItems = mutableListOf<LeaderResearchMarketPeerSourcePreviewItemDto>()
@@ -46,20 +50,43 @@ class LeaderResearchMarketPeerSourceImportService(
         var skippedLockedTotal = 0
 
         categories.forEach { category ->
-            val selected = activityEventRepository.discoverWalletsFromMarketPeerSource(
-                since = since,
-                marketPattern = LeaderResearchMarketCategoryPatterns.patternFor(category),
-                hotMarketLimit = request.hotMarketLimit.coerceIn(1, MAX_HOT_MARKET_LIMIT),
-                minMarketEvents = request.minMarketEvents.coerceIn(1, 5000),
-                minMarketWallets = request.minMarketWallets.coerceIn(1, 5000),
-                minEvents = request.minEvents.coerceIn(1, 1000),
-                minDistinctMarkets = request.minDistinctMarkets.coerceIn(1, 1000),
-                minBuyEvents = request.minBuyEvents.coerceIn(0, 1000),
-                minSellEvents = request.minSellEvents.coerceIn(0, 1000),
-                minSafePriceRatio = minSafePriceRatio,
-                maxTailPriceRatio = maxTailPriceRatio,
-                limit = (limit * OVERSAMPLE_FACTOR).coerceAtMost(MAX_SOURCE_SCAN_PER_CATEGORY)
-            )
+            val marketPattern = LeaderResearchMarketCategoryPatterns.patternFor(category)
+            val hotMarketLimit = request.hotMarketLimit.coerceIn(1, MAX_HOT_MARKET_LIMIT)
+            val minMarketEvents = request.minMarketEvents.coerceIn(1, 5000)
+            val minMarketWallets = request.minMarketWallets.coerceIn(1, 5000)
+            val minEvents = request.minEvents.coerceIn(1, 1000)
+            val minDistinctMarkets = request.minDistinctMarkets.coerceIn(1, 1000)
+            val minBuyEvents = request.minBuyEvents.coerceIn(0, 1000)
+            val minSellEvents = request.minSellEvents.coerceIn(0, 1000)
+            val discovered = if (targetWallets.isEmpty()) {
+                activityEventRepository.discoverWalletsFromMarketPeerSource(
+                    since = since,
+                    marketPattern = marketPattern,
+                    hotMarketLimit = hotMarketLimit,
+                    minMarketEvents = minMarketEvents,
+                    minMarketWallets = minMarketWallets,
+                    minEvents = minEvents,
+                    minDistinctMarkets = minDistinctMarkets,
+                    minBuyEvents = minBuyEvents,
+                    minSellEvents = minSellEvents,
+                    minSafePriceRatio = minSafePriceRatio,
+                    maxTailPriceRatio = maxTailPriceRatio,
+                    limit = (limit * OVERSAMPLE_FACTOR).coerceAtMost(MAX_SOURCE_SCAN_PER_CATEGORY)
+                )
+            } else {
+                activityEventRepository.discoverWalletsFromMarketPeerSourceForWallets(
+                    wallets = targetWallets,
+                    since = since,
+                    marketPattern = marketPattern,
+                    minEvents = minEvents,
+                    minDistinctMarkets = minDistinctMarkets,
+                    minBuyEvents = minBuyEvents,
+                    minSellEvents = minSellEvents,
+                    minSafePriceRatio = minSafePriceRatio,
+                    maxTailPriceRatio = maxTailPriceRatio
+                )
+            }
+            val selected = discovered
                 .asSequence()
                 .filter { selectedWallets.add(it.getNormalizedWallet().lowercase()) }
                 .map { source ->
@@ -296,6 +323,7 @@ class LeaderResearchMarketPeerSourceImportService(
         private const val OVERSAMPLE_FACTOR = 20
         private const val MAX_SOURCE_SCAN_PER_CATEGORY = 1000
         private const val DAY_MS = 24L * 60 * 60 * 1000
+        private val WALLET_REGEX = Regex("^0x[a-f0-9]{40}$")
     }
 
     private data class MarketPeerSourceSelection(

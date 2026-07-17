@@ -24,6 +24,7 @@ class BridgeMetrics:
     signals_executed: int = 0
     signals_failed: int = 0
     signals_queue_rejected: int = 0
+    signals_trade_lock_timeout: int = 0
 
     # Trade outcomes
     trades_buy_total: int = 0
@@ -233,6 +234,7 @@ class BridgeMetrics:
             "signals_executed": self.signals_executed,
             "signals_failed": self.signals_failed,
             "signals_queue_rejected": self.signals_queue_rejected,
+            "signals_trade_lock_timeout": self.signals_trade_lock_timeout,
             "trades_buy_total": self.trades_buy_total,
             "trades_buy_success": self.trades_buy_success,
             "trades_buy_failed": self.trades_buy_failed,

@@ -8,6 +8,7 @@ import com.wrbug.polymarketbot.repository.*
 import com.wrbug.polymarketbot.service.accounts.AccountService
 import com.wrbug.polymarketbot.service.accounts.BridgePositionSellService
 import com.wrbug.polymarketbot.service.accounts.DailyAssetSnapshotService
+import com.wrbug.polymarketbot.service.bridge.BridgePortfolioClient
 import com.wrbug.polymarketbot.service.common.BlockchainService
 import com.wrbug.polymarketbot.service.common.MarketService
 import com.wrbug.polymarketbot.service.copytrading.statistics.CopyTradingStatisticsService
@@ -123,7 +124,8 @@ class AccountControllerTest {
         bridgePositionSellService = Mockito.mock(BridgePositionSellService::class.java),
         statisticsService = service,
         dailyAssetSnapshotService = Mockito.mock(DailyAssetSnapshotService::class.java),
-        accountRepository = Mockito.mock(AccountRepository::class.java)
+        accountRepository = Mockito.mock(AccountRepository::class.java),
+        bridgePortfolioClient = Mockito.mock(BridgePortfolioClient::class.java)
     )
 
     private class StubStatisticsService(

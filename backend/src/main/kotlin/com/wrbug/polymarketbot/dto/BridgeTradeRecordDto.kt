@@ -8,6 +8,7 @@ import com.google.gson.annotations.SerializedName
 data class BridgeTradeRecordListRequest(
     val bridgeId: String? = null,
     val status: String? = null,
+    val side: String? = null,
     val marketKeyword: String? = null,
     val page: Int = 1,
     val size: Int = 20

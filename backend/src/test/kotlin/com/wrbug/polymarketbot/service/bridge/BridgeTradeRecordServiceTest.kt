@@ -32,6 +32,7 @@ class BridgeTradeRecordServiceTest {
             repository.findFiltered(
                 eq(null),
                 eq(null),
+                eq(null),
                 eqNonNull("XRP"),
                 eqNonNull(pageable)
             )
@@ -45,7 +46,44 @@ class BridgeTradeRecordServiceTest {
         verify(repository).findFiltered(
             eq(null),
             eq(null),
+            eq(null),
             eqNonNull("XRP"),
+            eqNonNull(pageable)
+        )
+    }
+
+    @Test
+    fun `list uses uppercased side filter`() {
+        val repository = mock(BridgeTradeRecordRepository::class.java)
+        val service = BridgeTradeRecordService(
+            repository,
+            mock(BridgePositionSnapshotRepository::class.java),
+            mock(BridgePortfolioClient::class.java),
+            mock(CopyTradingRepository::class.java),
+            mock(LeaderRepository::class.java),
+            mock(BridgeWebhookLogRepository::class.java)
+        )
+        val pageable = PageRequest.of(0, 20)
+        `when`(
+            repository.findFiltered(
+                eq(null),
+                eq(null),
+                eqNonNull("BUY"),
+                eq(null),
+                eqNonNull(pageable)
+            )
+        ).thenReturn(Page.empty())
+
+        val result = service.getBridgeTradeRecordList(
+            BridgeTradeRecordListRequest(side = " buy ")
+        ).getOrThrow()
+
+        assertEquals(0, result.total)
+        verify(repository).findFiltered(
+            eq(null),
+            eq(null),
+            eqNonNull("BUY"),
+            eq(null),
             eqNonNull(pageable)
         )
     }

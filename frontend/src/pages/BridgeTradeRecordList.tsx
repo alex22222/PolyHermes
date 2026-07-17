@@ -1,21 +1,20 @@
-import { useEffect, useState } from 'react'
-import { Alert, Card, Table, Tag, Tabs, message, Space, Button, Tooltip, Radio, Typography, Input } from 'antd'
+import { useEffect, useRef, useState } from 'react'
+import { Alert, Card, Table, Tag, message, Space, Button, Tooltip, Radio, Typography, Input } from 'antd'
 import { useTranslation } from 'react-i18next'
 import { useMediaQuery } from 'react-responsive'
 import { CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import { apiService } from '../services/api'
-import type { BridgeRuntimeStatus, BridgeTradeRecord, BridgeWebhookLog } from '../types'
+import type { BridgeRuntimeStatus, BridgeTradeRecord } from '../types'
 import { formatUSDC } from '../utils'
 
 type RecordStatus = '' | 'SUCCESS' | 'PENDING' | 'FAILED'
-type WebhookLogStatus = '' | 'SUCCESS' | 'FAILED' | 'PENDING'
+type RecordSide = '' | 'BUY' | 'SELL'
 type BackendHealthStatus = 'unknown' | 'healthy' | 'unhealthy'
 
 const BridgeTradeRecordList: React.FC = () => {
   const { t, i18n } = useTranslation()
   const isMobile = useMediaQuery({ maxWidth: 768 })
 
-  const [activeTab, setActiveTab] = useState('records')
   const [backendHealth, setBackendHealth] = useState<BackendHealthStatus>('unknown')
   const [bridgeStatus, setBridgeStatus] = useState<BridgeRuntimeStatus | null>(null)
   const [healthError, setHealthError] = useState<string | null>(null)
@@ -26,31 +25,19 @@ const BridgeTradeRecordList: React.FC = () => {
   const [records, setRecords] = useState<BridgeTradeRecord[]>([])
   const [recordsLoading, setRecordsLoading] = useState(false)
   const [statusFilter, setStatusFilter] = useState<RecordStatus>('')
+  const [sideFilter, setSideFilter] = useState<RecordSide>('')
   const [marketSearchInput, setMarketSearchInput] = useState('')
   const [marketFilter, setMarketFilter] = useState('')
+  const recordsRequestSeq = useRef(0)
   const [recordsPagination, setRecordsPagination] = useState({
     current: 1,
     pageSize: 20,
     total: 0
   })
 
-  // Webhook 日志
-  const [webhookLogs, setWebhookLogs] = useState<BridgeWebhookLog[]>([])
-  const [webhookLogsLoading, setWebhookLogsLoading] = useState(false)
-  const [webhookStatusFilter, setWebhookStatusFilter] = useState<WebhookLogStatus>('')
-  const [webhookLogsPagination, setWebhookLogsPagination] = useState({
-    current: 1,
-    pageSize: 20,
-    total: 0
-  })
-
   useEffect(() => {
-    if (activeTab === 'records') {
-      fetchRecords()
-    } else if (activeTab === 'webhookLogs') {
-      fetchWebhookLogs()
-    }
-  }, [activeTab, recordsPagination.current, recordsPagination.pageSize, statusFilter, marketFilter, webhookLogsPagination.current, webhookLogsPagination.pageSize, webhookStatusFilter])
+    fetchRecords()
+  }, [recordsPagination.current, recordsPagination.pageSize, statusFilter, sideFilter, marketFilter])
 
   useEffect(() => {
     fetchSystemHealth()
@@ -80,15 +67,19 @@ const BridgeTradeRecordList: React.FC = () => {
   }
 
   const fetchRecords = async () => {
+    const requestSeq = recordsRequestSeq.current + 1
+    recordsRequestSeq.current = requestSeq
     setRecordsLoading(true)
     try {
       const response = await apiService.bridgeTradeRecords.list({
         page: recordsPagination.current,
         size: recordsPagination.pageSize,
         status: statusFilter || undefined,
+        side: sideFilter || undefined,
         marketKeyword: marketFilter || undefined
       })
       if (response.data.code === 0 && response.data.data) {
+        if (requestSeq !== recordsRequestSeq.current) return
         const payload = response.data.data
         const list = Array.isArray(payload) ? payload : payload.list || []
         setRecords(list)
@@ -97,12 +88,16 @@ const BridgeTradeRecordList: React.FC = () => {
           total: Array.isArray(payload) ? list.length : payload.total || 0
         }))
       } else {
+        if (requestSeq !== recordsRequestSeq.current) return
         message.error(response.data.msg || t('bridgeTradeRecord.fetchFailed') || '获取桥接交易记录失败')
       }
     } catch (error: any) {
+      if (requestSeq !== recordsRequestSeq.current) return
       message.error(error.message || t('bridgeTradeRecord.fetchFailed') || '获取桥接交易记录失败')
     } finally {
-      setRecordsLoading(false)
+      if (requestSeq === recordsRequestSeq.current) {
+        setRecordsLoading(false)
+      }
     }
   }
 
@@ -172,32 +167,6 @@ const BridgeTradeRecordList: React.FC = () => {
     )
   }
 
-  const fetchWebhookLogs = async () => {
-    setWebhookLogsLoading(true)
-    try {
-      const response = await apiService.bridgeWebhookLogs.list({
-        page: webhookLogsPagination.current,
-        size: webhookLogsPagination.pageSize,
-        status: webhookStatusFilter || undefined
-      })
-      if (response.data.code === 0 && response.data.data) {
-        const payload = response.data.data
-        const list = Array.isArray(payload) ? payload : payload.list || []
-        setWebhookLogs(list)
-        setWebhookLogsPagination((prev) => ({
-          ...prev,
-          total: Array.isArray(payload) ? list.length : payload.total || 0
-        }))
-      } else {
-        message.error(response.data.msg || t('bridgeWebhookLog.fetchFailed') || '获取 Webhook 日志失败')
-      }
-    } catch (error: any) {
-      message.error(error.message || t('bridgeWebhookLog.fetchFailed') || '获取 Webhook 日志失败')
-    } finally {
-      setWebhookLogsLoading(false)
-    }
-  }
-
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'SUCCESS':
@@ -248,6 +217,9 @@ const BridgeTradeRecordList: React.FC = () => {
     if (lower.includes('could not resolve polymtrade event')) {
       return { key: 'resolve_event', label: t('bridgeTradeRecord.errorType.resolveEvent') || '事件解析失败' }
     }
+    if (lower.includes('target market content never appeared')) {
+      return { key: 'target_market_missing', label: t('bridgeTradeRecord.errorType.targetMarketMissing') || '目标市场未出现' }
+    }
     if (lower.includes('insufficient position')) {
       return { key: 'insufficient_position', label: t('bridgeTradeRecord.errorType.insufficientPosition') || '仓位不足' }
     }
@@ -280,41 +252,6 @@ const BridgeTradeRecordList: React.FC = () => {
       return { key: 'insufficient_balance', label: t('bridgeTradeRecord.errorType.insufficientBalance') || '余额不足' }
     }
     return { key: 'other', label: t('bridgeTradeRecord.errorType.other') || '其他' }
-  }
-
-  /**
-   * 格式化 JSON 请求/响应体，便于展示
-   */
-  const formatBodyPreview = (body?: string): string => {
-    if (!body) return ''
-    try {
-      const str = JSON.stringify(JSON.parse(body))
-      return str.length > 60 ? str.slice(0, 60) + '...' : str
-    } catch {
-      return body.length > 60 ? body.slice(0, 60) + '...' : body
-    }
-  }
-
-  const formatBodyTooltip = (body?: string): string => {
-    if (!body) return ''
-    try {
-      return JSON.stringify(JSON.parse(body), null, 2)
-    } catch {
-      return body
-    }
-  }
-
-  const renderBodyCell = (body: string | undefined) => {
-    if (!body) return '-'
-    const preview = formatBodyPreview(body)
-    const formatted = formatBodyTooltip(body)
-    return (
-      <Tooltip title={<pre style={{ maxHeight: '300px', overflow: 'auto' }}>{formatted}</pre>} placement="topLeft">
-        <Typography.Text style={{ fontFamily: 'monospace', fontSize: '12px', color: '#888', cursor: 'help' }} ellipsis>
-          {preview}
-        </Typography.Text>
-      </Tooltip>
-    )
   }
 
   /**
@@ -532,126 +469,43 @@ const BridgeTradeRecordList: React.FC = () => {
     }
   ]
 
-  const webhookLogColumns = [
-    {
-      title: t('bridgeWebhookLog.id') || 'ID',
-      dataIndex: 'id',
-      key: 'id',
-      width: 70
-    },
-    {
-      title: t('bridgeWebhookLog.leader') || 'Leader',
-      dataIndex: 'leaderName',
-      key: 'leader',
-      render: (_name: string | undefined, record: BridgeWebhookLog) => (
-        <Space direction="vertical" size={0}>
-          <Typography.Text strong>{record.leaderName || '-'}</Typography.Text>
-          {record.leaderAddress && String(record.leaderAddress) && (
-            <Typography.Text style={{ fontFamily: 'monospace', fontSize: '12px', color: '#888' }}>
-              {String(record.leaderAddress).slice(0, 16)}...
-            </Typography.Text>
-          )}
-        </Space>
-      )
-    },
-    {
-      title: t('bridgeWebhookLog.market') || '市场',
-      dataIndex: 'marketSlug',
-      key: 'marketSlug',
-      render: (_slug: string | undefined, record: BridgeWebhookLog) => (
-        <Space direction="vertical" size={0}>
-          <Typography.Text>{record.marketSlug || '-'}</Typography.Text>
-          {record.conditionId && String(record.conditionId) && (
-            <Typography.Text style={{ fontFamily: 'monospace', fontSize: '12px', color: '#888' }}>
-              {String(record.conditionId).slice(0, 16)}...
-            </Typography.Text>
-          )}
-        </Space>
-      )
-    },
-    {
-      title: t('bridgeWebhookLog.side') || '方向',
-      dataIndex: 'side',
-      key: 'side',
-      width: 90,
-      render: (side: string) => side ? <Tag color={getSideColor(side)}>{side}</Tag> : '-'
-    },
-    {
-      title: t('bridgeWebhookLog.outcome') || '结果',
-      dataIndex: 'outcome',
-      key: 'outcome',
-      width: 120,
-      render: (outcome: string | undefined) => outcome || '-'
-    },
-    {
-      title: t('bridgeWebhookLog.statusCode') || 'HTTP 状态',
-      dataIndex: 'statusCode',
-      key: 'statusCode',
-      width: 110,
-      render: (code: number | undefined, record: BridgeWebhookLog) => (
-        <Tag color={getStatusColor(record.status)}>
-          {code ?? '-'}
-        </Tag>
-      )
-    },
-    {
-      title: t('bridgeWebhookLog.status') || '状态',
-      dataIndex: 'status',
-      key: 'status',
-      width: 100,
-      render: (status: string, record: BridgeWebhookLog) => (
-        <Space direction="vertical" size={4}>
-          <Tag color={getStatusColor(status)}>{status}</Tag>
-          {record.errorMessage && (
-            <Tooltip title={record.errorMessage} placement="topLeft">
-              <Typography.Text style={{ fontSize: '11px', color: '#ff4d4f', cursor: 'help', maxWidth: '120px' }} ellipsis>
-                {record.errorMessage}
-              </Typography.Text>
-            </Tooltip>
-          )}
-        </Space>
-      )
-    },
-    {
-      title: t('bridgeWebhookLog.request') || '请求体',
-      dataIndex: 'requestBody',
-      key: 'requestBody',
-      render: renderBodyCell
-    },
-    {
-      title: t('bridgeWebhookLog.response') || '响应体',
-      dataIndex: 'responseBody',
-      key: 'responseBody',
-      render: renderBodyCell
-    },
-    {
-      title: t('bridgeWebhookLog.createdAt') || '发送时间',
-      dataIndex: 'createdAt',
-      key: 'createdAt',
-      width: 170,
-      render: (timestamp: number | undefined) =>
-        timestamp ? new Date(timestamp).toLocaleString(i18n.language || 'zh-CN') : '-'
-    }
-  ]
-
   const renderRecordsTab = () => (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
         <Space wrap>
-          <Radio.Group
-            value={statusFilter}
-            onChange={(e) => {
-              setStatusFilter(e.target.value)
-              setRecordsPagination((prev) => ({ ...prev, current: 1 }))
-            }}
-            optionType="button"
-            buttonStyle="solid"
-          >
-            <Radio.Button value="">{t('bridgeTradeRecord.statusFilter.all') || '全部'}</Radio.Button>
-            <Radio.Button value="SUCCESS">{t('bridgeTradeRecord.statusFilter.success') || '成功'}</Radio.Button>
-            <Radio.Button value="PENDING">{t('bridgeTradeRecord.statusFilter.pending') || '进行中'}</Radio.Button>
-            <Radio.Button value="FAILED">{t('bridgeTradeRecord.statusFilter.failed') || '失败'}</Radio.Button>
-          </Radio.Group>
+          <Space size={6}>
+            <Typography.Text type="secondary">{t('bridgeTradeRecord.status') || '状态'}:</Typography.Text>
+            <Radio.Group
+              value={statusFilter}
+              onChange={(e) => {
+                setStatusFilter(e.target.value)
+                setRecordsPagination((prev) => ({ ...prev, current: 1 }))
+              }}
+              optionType="button"
+              buttonStyle="solid"
+            >
+              <Radio.Button value="">{t('bridgeTradeRecord.statusFilter.all') || '全部'}</Radio.Button>
+              <Radio.Button value="SUCCESS">{t('bridgeTradeRecord.statusFilter.success') || '成功'}</Radio.Button>
+              <Radio.Button value="PENDING">{t('bridgeTradeRecord.statusFilter.pending') || '进行中'}</Radio.Button>
+              <Radio.Button value="FAILED">{t('bridgeTradeRecord.statusFilter.failed') || '失败'}</Radio.Button>
+            </Radio.Group>
+          </Space>
+          <Space size={6}>
+            <Typography.Text type="secondary">{t('bridgeTradeRecord.side') || '方向'}:</Typography.Text>
+            <Radio.Group
+              value={sideFilter}
+              onChange={(e) => {
+                setSideFilter(e.target.value)
+                setRecordsPagination((prev) => ({ ...prev, current: 1 }))
+              }}
+              optionType="button"
+              buttonStyle="solid"
+            >
+              <Radio.Button value="">{t('bridgeTradeRecord.sideFilter.all') || '全部'}</Radio.Button>
+              <Radio.Button value="BUY">{t('bridgeTradeRecord.sideFilter.buy') || '买入'}</Radio.Button>
+              <Radio.Button value="SELL">{t('bridgeTradeRecord.sideFilter.sell') || '卖出'}</Radio.Button>
+            </Radio.Group>
+          </Space>
           <Input.Search
             allowClear
             value={marketSearchInput}
@@ -703,58 +557,6 @@ const BridgeTradeRecordList: React.FC = () => {
     </Space>
   )
 
-  const renderWebhookLogsTab = () => (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
-        <Radio.Group
-          value={webhookStatusFilter}
-          onChange={(e) => {
-            setWebhookStatusFilter(e.target.value)
-            setWebhookLogsPagination((prev) => ({ ...prev, current: 1 }))
-          }}
-          optionType="button"
-          buttonStyle="solid"
-        >
-          <Radio.Button value="">{t('bridgeWebhookLog.statusFilter.all') || '全部'}</Radio.Button>
-          <Radio.Button value="SUCCESS">{t('bridgeWebhookLog.statusFilter.success') || '成功'}</Radio.Button>
-          <Radio.Button value="PENDING">{t('bridgeWebhookLog.statusFilter.pending') || '进行中'}</Radio.Button>
-          <Radio.Button value="FAILED">{t('bridgeWebhookLog.statusFilter.failed') || '失败'}</Radio.Button>
-        </Radio.Group>
-        <Button icon={<ReloadOutlined />} onClick={fetchWebhookLogs} loading={webhookLogsLoading}>
-          {t('bridgeWebhookLog.refresh') || '刷新'}
-        </Button>
-      </Space>
-
-      <Table
-        dataSource={webhookLogs}
-        columns={webhookLogColumns}
-        rowKey="id"
-        loading={webhookLogsLoading}
-        scroll={isMobile ? { x: 1400 } : undefined}
-        pagination={{
-          current: webhookLogsPagination.current,
-          pageSize: webhookLogsPagination.pageSize,
-          total: webhookLogsPagination.total,
-          showSizeChanger: !isMobile,
-          onChange: (page, pageSize) => setWebhookLogsPagination((prev) => ({ ...prev, current: page, pageSize }))
-        }}
-      />
-    </Space>
-  )
-
-  const items = [
-    {
-      key: 'records',
-      label: t('bridgeTradeRecord.recordsTab') || '交易记录',
-      children: renderRecordsTab()
-    },
-    {
-      key: 'webhookLogs',
-      label: t('bridgeTradeRecord.webhookLogsTab') || 'Webhook 日志',
-      children: renderWebhookLogsTab()
-    }
-  ]
-
   return (
     <div>
       <div style={{ marginBottom: '16px' }}>
@@ -764,7 +566,7 @@ const BridgeTradeRecordList: React.FC = () => {
         <div style={{ marginBottom: '16px' }}>
           {renderSystemHealth()}
         </div>
-        <Tabs activeKey={activeTab} onChange={setActiveTab} items={items} />
+        {renderRecordsTab()}
       </Card>
     </div>
   )

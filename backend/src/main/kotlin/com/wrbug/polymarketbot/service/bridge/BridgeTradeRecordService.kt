@@ -50,6 +50,7 @@ class BridgeTradeRecordService(
             val page: Page<BridgeTradeRecord> = bridgeTradeRecordRepository.findFiltered(
                 bridgeId = request.bridgeId?.trim()?.takeIf { it.isNotEmpty() },
                 status = request.status?.trim()?.takeIf { it.isNotEmpty() },
+                side = request.side?.trim()?.uppercase()?.takeIf { it.isNotEmpty() },
                 marketKeyword = request.marketKeyword?.trim()?.takeIf { it.isNotEmpty() },
                 pageable = pageRequest
             )

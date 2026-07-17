@@ -153,6 +153,8 @@ export POLYBURG_DEFAULT_CATEGORY=finance
 export POLYBURG_AUTO_INSTALL_DEPS=false
 export POLYBURG_SYNC_MODE=web
 export POLYBURG_PYTHON_BIN=/Library/Frameworks/Python.framework/Versions/3.14/bin/python3
+export POLYBURG_WEB_URL=https://web.telegram.org/a/#7698624735
+export POLYBURG_SOURCE_URL=https://web.telegram.org/a/#7698624735
 export POLYBURG_WEB_PROFILE=/Users/henry/projects/polyhermes/.polyburg_web_profile
 export POLYBURG_WEB_SYNC_STATE=/Users/henry/projects/polyhermes/.polyburg_web_sync_state.json
 ```
@@ -182,6 +184,8 @@ POLYHERMES_BASE_URL=http://127.0.0.1:8000
 POLYHERMES_TOKEN=your_jwt
 POLYBURG_SYNC_MODE=web
 POLYBURG_PYTHON_BIN=/Library/Frameworks/Python.framework/Versions/3.14/bin/python3
+POLYBURG_WEB_URL=https://web.telegram.org/a/#7698624735
+POLYBURG_SOURCE_URL=https://web.telegram.org/a/#7698624735
 ```
 
 可以从模板开始：

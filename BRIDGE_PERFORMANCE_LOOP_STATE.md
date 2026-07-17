@@ -824,6 +824,108 @@ final latency distribution.
   records were protective FAILED filters (`keyword whitelist not matched`, `price > max_price
   0.55000000`, or insufficient position), and global `PENDING` count remained 0, so there is still
   no post-load BUY/SELL submit sample for the new target-visible budget.
+- [x] Iteration 50 captured real post-Iteration-49 submit evidence. Webhook acceptance was proven
+  with 15,370 samples, P50 `0.08 ms`, P95 `1.395 ms`. 5m BUY had 17 signal-to-submit samples with
+  P50 `12822.704 ms`, P95 `32950.249 ms`, max `40028.499 ms`, still outside the target. 5m SELL had
+  12 signal-to-submit samples with P50 `15254.819 ms`, P95 `31042.788 ms`, max `41163.769 ms`,
+  also outside the target. UI-only submission was much better (`buy_5m_ui_submit_ms` P50
+  `7341.026 ms`, P95 `16730.281 ms`; `sell_5m_ui_submit_ms` P50 `6589.005 ms`, P95 `8522.303 ms`),
+  so the remaining tail was mostly pre-UI delay.
+- [x] Iteration 50 root-cause evidence: the slowest BUYs and SELLs were dominated by waiting for the
+  single UI lane. Examples: tx `0xab963e44f37662af04a371e41f4353a02ca7da38c1d460bad99836935f6aa38a`
+  had `trade_lock_wait_ms=25335.798` and `buy_5m_signal_to_submit_ms=40028.499`; tx
+  `0x22d10b154ff2d44137c74f5effd15faf981746345c80c74be5ff603a7d3447a6` had
+  `trade_lock_wait_ms=18431.623` and `buy_5m_signal_to_submit_ms=31180.687`. These are queued
+  short-cycle signals; executing them after a long wait worsens P95 and often misses the viable
+  market window.
+- [x] Iteration 50 added `SHORT_CYCLE_TRADE_LOCK_TIMEOUT_SECONDS` with a `2 s` default. 5m/15m
+  auto-follow signals now acquire the UI trade lock through `_trade_lock_scope`; if the lock is still
+  busy after the timeout, the signal is marked FAILED with `Short-cycle UI lane busy, skipped before
+  submit` instead of waiting tens of seconds and submitting stale. Non-short-cycle and manual
+  execution paths keep the previous lock behavior.
+- [x] Iteration 50 verification: targeted tests for proportional-risk Bridge, signal queue, and
+  metrics passed 19 tests; full Bridge unittest discovery passed 107 tests; `git diff --check`
+  passed. The change was loaded through `safe_restart_bridge.sh --execute`; admission drained at
+  queue depth 0 and recovered with `accepting_signals=True`.
+- [x] Iteration 50 post-load evidence: `/health` returned ok, `/status` was ready/logged in with
+  `last_error=null`, `/metrics` had queue depth 0 and a single default page at `https://polym.trade/`.
+  The latest-code report restarted at `since_ms=1784276249000`; the first 2 webhook samples had
+  P50 `37.652 ms`, P95 `70.858 ms`, max `74.548 ms`, below target but below the 100-sample floor.
+  The first 2 post-load records were protective FAILED filters; no post-load BUY/SELL submit sample
+  has yet exercised the new short-cycle trade-lock timeout.
+- [x] Iteration 51 added explicit observability for the Iteration 50 lock guard:
+  `/metrics.signals_trade_lock_timeout` now counts 5m/15m signals that skip before UI submission
+  because the single UI lane stayed busy past `SHORT_CYCLE_TRADE_LOCK_TIMEOUT_SECONDS`. This closes
+  the prior evidence gap where stale-lock skips would be visible only through recorder reasons and
+  `trade_lock_wait_ms` latency samples.
+- [x] Iteration 51 verification: targeted Bridge tests passed 20 tests, full Bridge unittest
+  discovery passed 108 tests, and `git diff --check` passed for the touched Bridge files and loop
+  state. The change was loaded through `safe_restart_bridge.sh --execute`; admission drained at
+  queue depth 0 and recovered with `accepting_signals=True`.
+- [x] Iteration 51 post-load evidence: `/health` returned ok, `/status` was ready/logged in with
+  `last_error=null`, and `/metrics` exposed `signals_trade_lock_timeout=0`, queue depth 0, one
+  default browser page at `https://polym.trade/`, and `accepting_signals=true`. The latest-code
+  report restarted at `since_ms=1784276622000`; the first post-load sample was a protective 15m SELL
+  filter (`keyword whitelist not matched`), so there is still no post-load BUY/SELL submit sample for
+  the trade-lock timeout guard.
+- [x] Iteration 52 was evidence-only to preserve the latest-code sample window. `/health` returned
+  ok, `/status` was ready/logged in with `last_error=null`, and `/metrics` showed queue depth 0,
+  `accepting_signals=true`, one default browser page, and `signals_trade_lock_timeout=0`. The
+  latest-code report had 32 webhook samples with P50 `0.2 ms`, P95 `2.765 ms`, max `34.307 ms`, and
+  a final `/metrics` check later in the same iteration had 46 webhook samples with P50 `0.14 ms`,
+  P95 `3.021 ms`, max `34.307 ms`; this remains below the 200 ms target but below the 100-sample
+  acceptance floor. The report window's 32 execution records were all protective FAILED filters
+  (20 SELL, 12 BUY), so BUY/SELL submit latency remains unproven in this window and no restart or
+  code change was made.
+- [x] Iteration 53 confirmed the post-Iteration-51 webhook gate without resetting the runtime. The
+  latest-code report reached 108 webhook samples with P50 `0.158 ms`, P95 `2.361 ms`, max
+  `34.307 ms`, so webhook acceptance passes the `P95 < 200 ms` target with the required 100+ samples.
+  `/health` remained ok, `/status` remained ready/logged in with `last_error=null`, health
+  observation advanced to `0.67/7` days with `threshold_restarts=0`, and the report window still had
+  zero BUY/SELL submit samples. All 108 execution records were protective FAILED filters (82 SELL,
+  26 BUY), so the BUY/SELL latency gates remain pending rather than failed or passed.
+- [x] Iteration 54 preserved the same runtime window and confirmed the webhook pass is holding.
+  `/health` returned ok and `/status` stayed ready/logged in with `last_error=null`. `/metrics`
+  showed 140 webhook samples with P50 `0.153 ms`, P95 `2.303 ms`, max `34.307 ms`, queue depth 0,
+  `accepting_signals=true`, one default page, and `signals_trade_lock_timeout=0`. The latest-code
+  report still had zero BUY/SELL submit samples; all 140 execution records were protective FAILED
+  filters (106 SELL, 34 BUY), mostly `keyword whitelist not matched`, `price > max_price
+  0.55000000`, or insufficient position. The webhook gate remains passed; BUY/SELL latency and
+  7-day health stability remain pending.
+- [x] Iteration 55 again preserved the same runtime window. `/health` returned ok, `/status` stayed
+  ready/logged in with `last_error=null`, and `/metrics` showed 156 webhook samples with P50
+  `0.158 ms`, P95 `2.595 ms`, max `34.307 ms`, queue depth 0, `accepting_signals=true`, one default
+  page, and `signals_trade_lock_timeout=0`. Health observation advanced to `0.671/7` days with
+  `threshold_restarts=0`. The latest-code report still had zero BUY/SELL submit samples; all 156
+  execution records were protective FAILED filters (122 SELL, 34 BUY), mostly keyword whitelist,
+  max-price, or insufficient-position filters. No code change or restart was made.
+- [x] Iteration 56 captured the first post-Iteration-51 submit samples in the preserved latest-code
+  window. The latest-code report had 10,927 webhook samples with P50 `0.083 ms`, P95 `1.252 ms`,
+  max `349.663 ms`, so the webhook gate remains passed. 5m BUY now has 4 submit samples with P50
+  `7625.481 ms`, P95 `10725.629 ms`, max `11266.985 ms`; these are within the latency target but
+  below the required 20-sample floor. 5m SELL has 1 submit sample at `9268.686 ms`, also within the
+  target but below the 20-sample floor. 15m BUY/SELL still have 0 submit samples.
+- [x] Iteration 56 runtime/failure evidence: `/health` returned ok, `/status` was ready/logged in,
+  queue depth was 0, and health observation reached `0.914/7` days with `threshold_restarts=0`.
+  `/metrics` showed 4 submitted BUYs, 1 submitted SELL, `signals_trade_lock_timeout=0`, and one
+  default page plus one portfolio page. The latest runtime `last_error` was `Target market content
+  never appeared for XRP Up or Down - July 17, 10:15AM-10:20AM ET`. A read-only DB check since
+  `1784276622000` found 4 BUY SUCCESS, 1 SELL SUCCESS, 7 BUY failures from last-mile price drift
+  protection, and 1 BUY failure from target content not appearing. The drift failures are intentional
+  protection; the single target-content failure should be watched before changing navigation logic.
+- [x] Iteration 57 fixed stale runtime status after recovered trade failures. The executor now clears
+  `last_error` on a successful `execute_trade`, so a one-off target-content failure no longer leaves
+  `/status.last_error` polluted after later successful execution. Added
+  `test_successful_trade_clears_stale_last_error`; targeted navigation/runtime tests passed 18 tests,
+  full Bridge unittest discovery passed 109 tests, and `git diff --check` passed.
+- [x] Iteration 57 loaded the stale-error fix through `safe_restart_bridge.sh --execute`; admission
+  drained at queue depth 0 and recovered with `accepting_signals=True`. Post-load `/health` returned
+  ok, `/status` was ready/logged in with `last_error=null`, queue depth was 0, and the browser had
+  one default page at `https://polym.trade/`. Because the code fingerprint changed, the latest-code
+  verification window restarted at `since_ms=1784298207000`; its first 27 webhook samples had P50
+  `0.096 ms`, P95 `7.365 ms`, max `44.04 ms`, and all 27 execution records were protective filters.
+  The previous 5m submit samples remain useful evidence for Iteration 56, but the new loaded code
+  needs fresh BUY/SELL submit samples before the latency gates can pass.
 
 ## Blocked / Escalated
 
@@ -837,9 +939,14 @@ final latency distribution.
 
 ## Next Iteration
 
-Collect the next real 5m/15m BUY or SELL submit sample and seven consecutive days of health-event
-evidence. Current traffic is being filtered by config 13, and pre-submit skips no longer increment
-`signals_executed`, so do not infer submit latency from the absence of executions. Watch whether
+Collect more real 5m/15m BUY or SELL submit samples and seven consecutive days of health-event
+evidence. Iteration 57 intentionally reset the latest-code window to load the stale-`last_error`
+runtime fix, so the new window needs fresh submit samples. Iteration 56's 5m BUY and SELL samples
+were within target but below the 20-sample floor; 15m still has no submit sample. Current traffic is
+still mostly filtered by config 13, and pre-submit skips no longer increment `signals_executed`, so
+do not infer submit latency from filtered records. Watch whether the one
+`Target market content never appeared` failure repeats, whether stale `last_error` remains null after
+later successful execution, whether
 the default browser page remains on `https://polym.trade/` between account/portfolio probes and
 the next trade, whether `event_resolve_5m_ms`/`event_resolve_15m_ms` stays near zero,
 short-cycle SHADOW portfolio-risk timeouts stay near <=0.35 seconds, available portfolio-risk calls
@@ -851,14 +958,17 @@ through binary Up/Down ready detection and the short-cycle 0.15-second page-read
 short-cycle BUY initial page-ready waits cap around `0.6 s` before the stronger target-visible loop,
 short-cycle missing-target checks cap around `1.2 s` per attempt before portfolio-row fallback or
 re-navigation,
+short-cycle UI-lane lock waits cap around `2 s` before a protective FAILED skip,
+`/metrics.signals_trade_lock_timeout` increments when that protective skip fires,
 `buy_5m_navigate_ms` drops materially below the prior
 `1399.959 ms` sample through the short-cycle `commit` navigation wait, `buy_5m_click_submit_ms`
 drops materially below the prior `7234.155 ms` outlier through the short-cycle 2-second submit-button
 budget, post-outcome fixed wait contributes about `0.15 s` instead of `0.8 s` on submit-eligible
 short-cycle BUYs, submitted 5m/15m `*_ui_submit_ms` samples stay below the 10-20 s submission
 target, and new BUY verifications stop producing false unconfirmed results from dialog share previews. Re-run the
-latest-code report after either 100 post-restart webhook samples or the next
-non-filtered submit attempt. If a latest-code window reaches 100 webhook samples but still has no
+latest-code report after the next non-filtered submit attempt. The current latest-code window has
+already passed the webhook gate with 108 samples and should be preserved for submit evidence if
+traffic produces one. If a later latest-code window reaches 100 webhook samples but still has no
 submit samples, record the webhook pass and DB reason summary without restarting; repeated restarts
 reset the useful latest-code sample window. For fair post-load verification, run
 `./.venv/bin/python bridge_performance_report.py --since-health-window --since-latest-code-fingerprint --include-db-records`.
