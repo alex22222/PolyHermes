@@ -168,7 +168,7 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
             wait_until="commit",
         )
         wait_ready.assert_awaited_once_with(
-            timeout=0.6,
+            timeout=1.5,
             market_title="BTC Up or Down",
             event_id="1",
             market_slug="btc-updown-15m-1",
@@ -178,7 +178,7 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
             "Up",
             market_slug="btc-updown-15m-1",
             market_title="BTC Up or Down",
-            timeout=1.2,
+            timeout=2.5,
         )
         is_buy_dialog_open.assert_awaited_once_with(timeout=1.25)
         click_buy_button.assert_awaited_once_with(timeout=2.0)
@@ -247,8 +247,8 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
     async def test_short_cycle_markets_use_tight_target_visible_budget(self):
         executor = PolymtradeExecutor()
 
-        self.assertEqual(1.2, executor._target_visible_timeout_for_market("btc-updown-5m-1"))
-        self.assertEqual(1.2, executor._target_visible_timeout_for_market("btc-updown-15m-1"))
+        self.assertEqual(2.5, executor._target_visible_timeout_for_market("btc-updown-5m-1"))
+        self.assertEqual(2.5, executor._target_visible_timeout_for_market("btc-updown-15m-1"))
         self.assertEqual(0.8, executor._post_outcome_settle_seconds_for_market("fed-decision-in-july-181"))
         self.assertEqual(1.0, executor._retry_navigation_settle_seconds_for_market("fed-decision-in-july-181"))
         self.assertEqual(1.5, executor._portfolio_row_settle_seconds_for_market("fed-decision-in-july-181"))
@@ -260,7 +260,7 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
         executor = PolymtradeExecutor()
 
         self.assertEqual(6.0, executor._page_ready_timeout_for_market("btc-updown-5m-1"))
-        self.assertEqual(0.6, executor._buy_page_ready_timeout_for_market("btc-updown-5m-1"))
+        self.assertEqual(1.5, executor._buy_page_ready_timeout_for_market("btc-updown-5m-1"))
         self.assertEqual(1.25, executor._dialog_detect_timeout_for_market("btc-updown-5m-1"))
         self.assertEqual(1.25, executor._confirm_timeout_for_market("btc-updown-15m-1"))
         self.assertEqual(0.15, executor._page_ready_poll_seconds_for_market("btc-updown-5m-1"))

@@ -105,6 +105,24 @@ BTC_UPDOWN_EVENT_HTML = """
 """
 
 
+ETH_UPDOWN_SHORT_TITLE_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <section class="event-card">
+      <h1>ETH Up or Down - July 18, 7:20AM-7:25AM ET</h1>
+      <div class="trade-buttons">
+        <button>Up 66c</button>
+        <button>Down 35c</button>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
 BTC_UPDOWN_PORTFOLIO_HTML = """
 <!doctype html>
 <html>
@@ -322,6 +340,33 @@ async def test_binary_updown_visible_only_with_trade_buttons():
                 outcome="Up",
                 market_slug="btc-updown-5m-1782299700",
                 market_title="Bitcoin Up or Down - June 24, 7:15AM-7:20AM ET",
+                timeout=2.0,
+            )
+            assert visible is True
+        finally:
+            await browser.close()
+
+
+async def test_binary_updown_visible_when_slug_url_matches_short_display_title():
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.route(
+                "https://polym.trade/**",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="text/html",
+                    body=ETH_UPDOWN_SHORT_TITLE_HTML,
+                ),
+            )
+            await page.goto("https://polym.trade/portfolio?eventSlug=eth-updown-5m-1784373600&eventSource=polymarket")
+
+            executor = await _make_executor(page)
+            visible = await executor._is_target_event_visible(
+                outcome="Down",
+                market_slug="eth-updown-5m-1784373600",
+                market_title="Ethereum Up or Down - July 18, 7:20AM-7:25AM ET",
                 timeout=2.0,
             )
             assert visible is True

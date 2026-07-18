@@ -79,13 +79,13 @@ class PolymtradeExecutor:
             os.getenv("BRIDGE_SHORT_CYCLE_PAGE_READY_TIMEOUT_SECONDS", "6")
         )
         self._short_cycle_buy_page_ready_timeout_seconds = float(
-            os.getenv("BRIDGE_SHORT_CYCLE_BUY_PAGE_READY_TIMEOUT_SECONDS", "0.6")
+            os.getenv("BRIDGE_SHORT_CYCLE_BUY_PAGE_READY_TIMEOUT_SECONDS", "1.5")
         )
         self._short_cycle_page_ready_poll_seconds = float(
             os.getenv("BRIDGE_SHORT_CYCLE_PAGE_READY_POLL_SECONDS", "0.15")
         )
         self._short_cycle_target_visible_timeout_seconds = float(
-            os.getenv("BRIDGE_SHORT_CYCLE_TARGET_VISIBLE_TIMEOUT_SECONDS", "1.2")
+            os.getenv("BRIDGE_SHORT_CYCLE_TARGET_VISIBLE_TIMEOUT_SECONDS", "2.5")
         )
         self._short_cycle_event_url_timeout_seconds = float(
             os.getenv("BRIDGE_SHORT_CYCLE_EVENT_URL_TIMEOUT_SECONDS", "2")
@@ -1772,11 +1772,13 @@ class PolymtradeExecutor:
             try:
                 result = await self._evaluate_with_navigation_retry(
                     """(args) => {
-                        const [keywords, sideLabels, binaryOutcomeMode, marketTitle] = args;
+                        const [keywords, sideLabels, binaryOutcomeMode, marketTitle, marketSlug] = args;
                         const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
                         const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
                         const bodyText = norm(textOf(document.body));
                         const targetTitle = norm(marketTitle || "");
+                        const targetSlug = norm(marketSlug || "");
+                        const slugInUrl = !!targetSlug && norm(window.location.href).includes(targetSlug);
 
                         const keywordHits = keywords.filter(kw => bodyText.includes(kw.toLowerCase())).length;
                         const hasKeyword = keywords.length === 0 || keywordHits > 0;
@@ -1819,12 +1821,25 @@ class PolymtradeExecutor:
                                 return hasNearbyTrade;
                             });
                             if (!activeTarget) {
+                                if (slugInUrl && hasSide && hasOutcome) {
+                                    return {
+                                        visible: true,
+                                        keywordHits,
+                                        hasSide,
+                                        hasOutcome,
+                                        strictTargetTitle: targetTitle,
+                                        slugInUrl,
+                                        strategy: "binary-slug-url",
+                                        url: window.location.href,
+                                    };
+                                }
                                 return {
                                     visible: false,
                                     keywordHits,
                                     hasSide,
                                     hasOutcome,
                                     strictTargetTitle: targetTitle,
+                                    slugInUrl,
                                     url: window.location.href,
                                 };
                             }
@@ -1834,6 +1849,7 @@ class PolymtradeExecutor:
                                 hasSide,
                                 hasOutcome,
                                 strictTargetTitle: targetTitle,
+                                slugInUrl,
                                 url: window.location.href,
                             };
                         }
@@ -1879,7 +1895,7 @@ class PolymtradeExecutor:
                             url: window.location.href,
                         };
                     }""",
-                    [keywords, side_labels, binary_updown, market_title or ""],
+                    [keywords, side_labels, binary_updown, market_title or "", market_slug or ""],
                     label="target_event_visible.evaluate",
                 )
                 if result and result.get("visible"):
