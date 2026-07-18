@@ -21,6 +21,10 @@
 
 `status` 子命令会访问 `/actuator/health` 检查后端存活状态。
 
+本地后端不要直接运行 `backend/build/libs/polyhermes-backend-1.0.0.jar`。`bootJar` 会在开发过程中覆盖这个构建产物；
+如果运行中的 Spring Boot fat jar 继续从该文件读取 nested jar，可能触发 classloader/Kotlin reflection 异常并导致接口随机 500。
+`run_backend_local.sh` 会在启动时复制一份稳定的 `.runtime/backend-local.jar`，launchd 和 tmux 均应通过该脚本启动后端。
+
 ### Java Runtime
 
 本机可用的 Java 17 runtime 固定在：
@@ -56,7 +60,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.polyhermes.backend-l
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.polyhermes.backend-watchdog.plist
 ```
 
-`backend-local` 通过 `run_backend_local.sh` 加载项目 `.env` 并持续监督 Java 进程。
+`backend-local` 通过 `run_backend_local.sh` 加载项目 `.env`，复制稳定 runtime jar，并持续监督 Java 进程。
 `backend-watchdog` 每分钟同时检查 Actuator 和一个实际访问数据库仓库的业务接口，连续失败三次后重启 Backend。
 
 已提交的 `V*.sql` Flyway 迁移不可修改。需要调整数据库时必须添加新版本迁移；Backend 构建阶段会运行

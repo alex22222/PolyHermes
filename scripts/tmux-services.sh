@@ -59,7 +59,7 @@ cmd_start() {
 
     # 1) backend window
     tmux new-session -d -s "$SESSION_NAME" -n backend \
-        "cd '$PROJECT_ROOT/backend' && exec java -jar -Dserver.port=${SERVER_PORT:-8000} build/libs/polyhermes-backend-1.0.0.jar --spring.profiles.active=${SPRING_PROFILES_ACTIVE:-prod} 2>&1 | tee '$backend_log'"
+        "cd '$PROJECT_ROOT' && exec ./run_backend_local.sh 2>&1 | tee '$backend_log'"
 
     # 2) frontend window
     tmux new-window -t "$SESSION_NAME" -n frontend \
@@ -83,7 +83,7 @@ cmd_stop() {
     echo "==> Stopping PolyHermes services..."
     tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
     # 兜底清理后端和 bridge 残留进程
-    pkill -f "polyhermes-backend-1.0.0.jar" 2>/dev/null || true
+    pkill -f "backend-local.jar" 2>/dev/null || true
     pkill -f "python .*polymtrade-bridge/main.py" 2>/dev/null || true
     echo "==> Stopped."
 }
@@ -101,7 +101,7 @@ cmd_status() {
     printf "%-15s %-10s %-30s\n" "SERVICE" "PID/PORT" "HEALTH"
 
     # backend
-    backend_pid=$(pgrep -f "polyhermes-backend-1.0.0.jar" | head -1 || true)
+    backend_pid=$(pgrep -f "backend-local.jar" | head -1 || true)
     if [[ -n "$backend_pid" ]]; then
         health=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${SERVER_PORT:-8000}/actuator/health" || echo "ERR")
         if [[ "$health" == "200" ]]; then

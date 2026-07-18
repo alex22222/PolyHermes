@@ -7,11 +7,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/henry/projects/polyhermes/jdk17/Contents/Home/bin/java</string>
-        <string>-jar</string>
-        <string>-Dserver.port=8000</string>
-        <string>/Users/henry/projects/polyhermes/backend/build/libs/polyhermes-backend-1.0.0.jar</string>
-        <string>--spring.profiles.active=prod</string>
+        <string>/bin/bash</string>
+        <string>/Users/henry/projects/polyhermes/run_backend_local.sh</string>
     </array>
 
     <key>EnvironmentVariables</key>
@@ -34,7 +31,7 @@
     </dict>
 
     <key>WorkingDirectory</key>
-    <string>/Users/henry/projects/polyhermes/backend</string>
+    <string>/Users/henry/projects/polyhermes</string>
 
     <key>StandardOutPath</key>
     <string>/Users/henry/projects/polyhermes/logs/backend.log</string>

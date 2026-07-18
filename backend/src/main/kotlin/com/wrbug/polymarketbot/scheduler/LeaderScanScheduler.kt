@@ -3,6 +3,7 @@ package com.wrbug.polymarketbot.scheduler
 import com.wrbug.polymarketbot.service.copytrading.leaders.LeaderResearchScoreAdapterService
 import com.wrbug.polymarketbot.service.copytrading.leaders.LeaderScannerService
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Configuration
 import org.springframework.scheduling.annotation.Scheduled
 
@@ -14,10 +15,11 @@ import org.springframework.scheduling.annotation.Scheduled
  *   中沉淀候选钱包到 leader_scanner_candidate_pool，不调用 Data API。
  * - 每日 02:30 执行全量扫描：先发现再分析，从候选池中读取 PENDING 钱包，调用 Data API 分析并写入 copy_trading_leaders。
  */
-@Configuration
+@Configuration(proxyBeanMethods = false)
 class LeaderScanScheduler(
     private val leaderScannerService: LeaderScannerService,
-    private val researchScoreAdapterService: LeaderResearchScoreAdapterService
+    private val researchScoreAdapterService: LeaderResearchScoreAdapterService,
+    @Value("\${leader.scanner.scheduled.enabled:false}") private val scheduledEnabled: Boolean = false
 ) {
     private val logger = LoggerFactory.getLogger(LeaderScanScheduler::class.java)
 
@@ -26,6 +28,10 @@ class LeaderScanScheduler(
      */
     @Scheduled(cron = "0 0 * * * ?")
     fun hourlyDiscovery() {
+        if (!scheduledEnabled) {
+            logger.debug("Leader 候选定时发现已关闭")
+            return
+        }
         logger.info("【定时任务】Leader 候选发现开始 ...")
         try {
             val discovered = leaderScannerService.discoverOnly(targetCategory = null)
@@ -41,6 +47,10 @@ class LeaderScanScheduler(
      */
     @Scheduled(cron = "0 30 2 * * ?")
     fun dailyScan() {
+        if (!scheduledEnabled) {
+            logger.debug("Leader 每日定时扫描已关闭")
+            return
+        }
         logger.info("【定时任务】Leader 每日扫描开始 ...")
         try {
             val result = leaderScannerService.scan(targetCategory = null, dryRun = false)

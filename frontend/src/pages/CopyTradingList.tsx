@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Card, Table, Button, Space, Tag, Popconfirm, Switch, message, Select, Dropdown, Spin, List, Empty, Tooltip } from 'antd'
-import { PlusOutlined, DeleteOutlined, BarChartOutlined, UnorderedListOutlined, ArrowUpOutlined, ArrowDownOutlined, EditOutlined, WalletOutlined, UserOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, BarChartOutlined, UnorderedListOutlined, EditOutlined, WalletOutlined, UserOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import type { MenuProps } from 'antd'
 import { apiService } from '../services/api'
 import { useAccountStore } from '../store/accountStore'
-import type { CopyTrading, Leader, CopyTradingStatistics } from '../types'
+import type { CopyTrading, Leader } from '../types'
 import { useMediaQuery } from 'react-responsive'
 import { formatUSDC } from '../utils'
 import CopyTradingOrdersModal from './CopyTradingOrders/index'
@@ -26,8 +26,6 @@ const CopyTradingList: React.FC = () => {
   const [copyTradings, setCopyTradings] = useState<CopyTrading[]>([])
   const [leaders, setLeaders] = useState<Leader[]>([])
   const [loading, setLoading] = useState(false)
-  const [statisticsMap, setStatisticsMap] = useState<Record<number, CopyTradingStatistics>>({})
-  const [loadingStatistics, setLoadingStatistics] = useState<Set<number>>(new Set())
   const [filters, setFilters] = useState<{
     accountId?: number
     leaderId?: number
@@ -91,10 +89,6 @@ const CopyTradingList: React.FC = () => {
       if (response.data.code === 0 && response.data.data) {
         const list = response.data.data.list || []
         setCopyTradings(list)
-        // 为每个跟单关系获取统计信息
-        list.forEach((ct: CopyTrading) => {
-          fetchStatistics(ct.id)
-        })
       } else {
         message.error(response.data.msg || t('copyTradingList.fetchFailed') || '获取跟单列表失败')
       }
@@ -103,50 +97,6 @@ const CopyTradingList: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }
-  
-  const fetchStatistics = async (copyTradingId: number) => {
-    // 如果正在加载或已有数据，跳过
-    if (loadingStatistics.has(copyTradingId) || statisticsMap[copyTradingId]) {
-      return
-    }
-    
-    setLoadingStatistics(prev => new Set(prev).add(copyTradingId))
-    try {
-      const response = await apiService.statistics.detail({ copyTradingId })
-      if (response.data.code === 0 && response.data.data) {
-        setStatisticsMap(prev => ({
-          ...prev,
-          [copyTradingId]: response.data.data
-        }))
-      }
-    } catch (error: any) {
-      console.error(`获取跟单统计失败: copyTradingId=${copyTradingId}`, error)
-    } finally {
-      setLoadingStatistics(prev => {
-        const next = new Set(prev)
-        next.delete(copyTradingId)
-        return next
-      })
-    }
-  }
-  
-  const getPnlColor = (value: string): string => {
-    const num = parseFloat(value)
-    if (isNaN(num)) return '#666'
-    return num >= 0 ? '#3f8600' : '#cf1322'
-  }
-  
-  const getPnlIcon = (value: string) => {
-    const num = parseFloat(value)
-    if (isNaN(num)) return null
-    return num >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />
-  }
-  
-  const formatPercent = (value: string): string => {
-    const num = parseFloat(value)
-    if (isNaN(num)) return '-'
-    return `${num >= 0 ? '+' : ''}${num.toFixed(2)}%`
   }
   
   const handleToggleStatus = async (copyTrading: CopyTrading) => {
@@ -253,54 +203,6 @@ const CopyTradingList: React.FC = () => {
           unCheckedChildren={t('copyTradingList.disabled') || '停止'}
         />
       )
-    },
-    {
-      title: '盈亏（已实现/浮动）',
-      key: 'totalPnl',
-      width: isMobile ? 120 : 170,
-      render: (_: any, record: CopyTrading) => {
-        const stats = statisticsMap[record.id]
-        if (!stats) {
-          return loadingStatistics.has(record.id) ? (
-            <span style={{ fontSize: isMobile ? 11 : 12 }}>{t('common.loading') || '加载中...'}</span>
-          ) : (
-            <span style={{ fontSize: isMobile ? 11 : 12 }}>-</span>
-          )
-        }
-        const lowConfidence = Boolean(stats.riskDiagnosis?.lowConfidence)
-        return (
-          <Tooltip title={lowConfidence ? stats.riskDiagnosis?.confidenceReason : undefined}>
-          <div>
-            <div style={{ 
-              color: getPnlColor(stats.totalPnl), 
-              fontWeight: 500,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 4,
-              fontSize: isMobile ? 12 : 14
-            }}>
-              {getPnlIcon(stats.totalPnl)}
-              {isMobile ? formatUSDC(stats.totalPnl) : `$${formatUSDC(stats.totalPnl)}`}
-              {lowConfidence && <Tag color="orange" style={{ marginLeft: 2, marginInlineEnd: 0 }}>未验证</Tag>}
-            </div>
-            {!isMobile && (
-              <>
-                <div style={{
-                  fontSize: 12,
-                  color: getPnlColor(stats.totalPnlPercent),
-                  marginTop: 4
-                }}>
-                  {formatPercent(stats.totalPnlPercent)}
-                </div>
-                <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>
-                  已实现 ${formatUSDC(stats.totalRealizedPnl)} / 浮动 ${formatUSDC(stats.totalUnrealizedPnl)}
-                </div>
-              </>
-            )}
-          </div>
-          </Tooltip>
-        )
-      }
     },
     {
       title: t('common.actions') || '操作',
@@ -495,8 +397,6 @@ const CopyTradingList: React.FC = () => {
               <List
                 dataSource={copyTradings}
                 renderItem={(record) => {
-                  const stats = statisticsMap[record.id]
-                  
                   return (
                     <Card
                       key={record.id}
@@ -530,59 +430,6 @@ const CopyTradingList: React.FC = () => {
                             ? `${t('copyTradingList.ratioMode') || '比例'} ${(parseFloat(record.copyRatio || '0') * 100).toFixed(0).replace(/\.0+$/, '')}%`
                             : `${t('copyTradingList.fixedAmountMode') || '固定'} $${formatUSDC(record.fixedAmount || '0')}`
                           }
-                        </div>
-                      </div>
-
-                      {/* 盈亏区域 - 常驻显示 */}
-                      <div style={{
-                        padding: '8px 12px',
-                        backgroundColor: '#fafafa',
-                        borderBottom: '1px solid #f0f0f0',
-                        minHeight: '42px',
-                        display: 'flex',
-                        alignItems: 'center'
-                      }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-                          <div>
-                            <div style={{ fontSize: '10px', color: '#8c8c8c' }}>
-                              盈亏（已实现/浮动）
-                            </div>
-                            {stats ? (
-                              <div style={{ 
-                                fontSize: '14px', 
-                                fontWeight: '600',
-                                color: getPnlColor(stats.totalPnl),
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '4px'
-                              }}>
-                                {getPnlIcon(stats.totalPnl)}
-                                ${formatUSDC(stats.totalPnl)}
-                                {stats.riskDiagnosis?.lowConfidence && <Tag color="orange" style={{ marginInlineEnd: 0 }}>未验证</Tag>}
-                              </div>
-                            ) : loadingStatistics.has(record.id) ? (
-                              <Spin size="small" />
-                            ) : (
-                              <div style={{ fontSize: '14px', color: '#8c8c8c' }}>-</div>
-                            )}
-                          </div>
-                          {stats && (
-                            <div style={{ textAlign: 'right' }}>
-                              <div style={{ fontSize: '10px', color: '#8c8c8c' }}>
-                                {t('copyTradingList.profitRate') || '收益率'}
-                              </div>
-                              <div style={{ 
-                                fontSize: '12px', 
-                                fontWeight: '500',
-                                color: getPnlColor(stats.totalPnlPercent)
-                              }}>
-                                {formatPercent(stats.totalPnlPercent)}
-                              </div>
-                              <div style={{ fontSize: '10px', color: '#8c8c8c', marginTop: '2px' }}>
-                                已实现 ${formatUSDC(stats.totalRealizedPnl)} / 浮动 ${formatUSDC(stats.totalUnrealizedPnl)}
-                              </div>
-                            </div>
-                          )}
                         </div>
                       </div>
 

@@ -32,5 +32,23 @@ export ENCRYPTION_KEY="${ENCRYPTION_KEY:-${JWT_SECRET}}"
 # 本地开发默认 Bridge webhook
 export BRIDGE_WEBHOOK_URL="${BRIDGE_WEBHOOK_URL:-http://localhost:8080/signal}"
 
+SOURCE_JAR="$SCRIPT_DIR/backend/build/libs/polyhermes-backend-1.0.0.jar"
+RUNTIME_DIR="$SCRIPT_DIR/.runtime"
+RUNTIME_JAR="$RUNTIME_DIR/backend-local.jar"
+RUNTIME_TMP="$RUNTIME_JAR.tmp"
+
+if [[ ! -f "$SOURCE_JAR" ]]; then
+    echo "ERROR: $SOURCE_JAR not found. Run: source scripts/java-env.sh && cd backend && ./gradlew bootJar" >&2
+    exit 1
+fi
+
+# Never run directly from backend/build/libs. Gradle bootJar overwrites that file
+# in-place during normal development, and a running Spring Boot fat jar can then
+# read mixed nested-jar content, causing reflection/classloading failures and
+# random HTTP 500s. Run from a stable copy instead.
+mkdir -p "$RUNTIME_DIR"
+cp "$SOURCE_JAR" "$RUNTIME_TMP"
+mv "$RUNTIME_TMP" "$RUNTIME_JAR"
+
 cd "$SCRIPT_DIR/backend"
-exec java -jar -Dserver.port=$SERVER_PORT build/libs/polyhermes-backend-1.0.0.jar --spring.profiles.active=${SPRING_PROFILES_ACTIVE:-prod}
+exec java -jar -Dserver.port=$SERVER_PORT "$RUNTIME_JAR" --spring.profiles.active=${SPRING_PROFILES_ACTIVE:-prod}
