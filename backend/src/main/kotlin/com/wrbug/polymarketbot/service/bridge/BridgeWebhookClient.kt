@@ -15,7 +15,8 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
-import java.util.concurrent.ConcurrentHashMap
+import com.github.benmanes.caffeine.cache.Cache
+import com.github.benmanes.caffeine.cache.Caffeine
 
 /**
  * Bridge webhook 客户端
@@ -25,12 +26,21 @@ import java.util.concurrent.ConcurrentHashMap
 @Component
 class BridgeWebhookClient(
     @Value("\${bridge.webhook.url:}") private val webhookUrl: String,
-    private val bridgeWebhookLogRepository: BridgeWebhookLogRepository
+    private val bridgeWebhookLogRepository: BridgeWebhookLogRepository,
+    @Value("\${bridge.webhook.dedup-ttl-ms:3600000}") dedupTtlMs: Long = 3600000,
+    @Value("\${bridge.webhook.dedup-max-size:100000}") dedupMaxSize: Long = 100000
 ) {
 
     private val logger = LoggerFactory.getLogger(BridgeWebhookClient::class.java)
     private val gson = Gson()
-    private val acceptedTxHashes = ConcurrentHashMap.newKeySet<String>()
+    /**
+     * Keep webhook de-duplication bounded. A permanent set grows for every
+     * observed transaction and eventually exhausts the backend heap.
+     */
+    private val acceptedTxHashes: Cache<String, Boolean> = Caffeine.newBuilder()
+        .maximumSize(dedupMaxSize.coerceAtLeast(1))
+        .expireAfterWrite(Duration.ofMillis(dedupTtlMs.coerceAtLeast(1000)))
+        .build()
 
     companion object {
         private val RETRY_DELAYS_MS = listOf(0L, 2_000L, 5_000L, 10_000L)
@@ -56,7 +66,7 @@ class BridgeWebhookClient(
         }
 
         val txHash = signal.transactionHash.trim()
-        if (txHash.isNotBlank() && !acceptedTxHashes.add(txHash.lowercase())) {
+        if (txHash.isNotBlank() && !acceptTransactionHash(txHash)) {
             logger.debug("Bridge webhook duplicate skipped in memory: txHash=$txHash")
             return true
         }
@@ -173,6 +183,12 @@ class BridgeWebhookClient(
             }
         }
         return true
+    }
+
+    internal fun acceptTransactionHash(transactionHash: String): Boolean {
+        val normalized = transactionHash.trim().lowercase()
+        if (normalized.isBlank()) return true
+        return acceptedTxHashes.asMap().putIfAbsent(normalized, true) == null
     }
 
     /**
