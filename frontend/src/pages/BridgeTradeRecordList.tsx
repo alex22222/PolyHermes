@@ -236,6 +236,9 @@ const BridgeTradeRecordList: React.FC = () => {
     if (lower.includes('duplicate short-cycle market buy skipped')) {
       return { key: 'duplicate_short_cycle_buy', label: t('bridgeTradeRecord.errorType.duplicateShortCycleBuy') || '短周期重复买入已跳过' }
     }
+    if (lower.includes('repeat same-market buy skipped')) {
+      return { key: 'repeat_same_market_buy', label: t('bridgeTradeRecord.errorType.repeatSameMarketBuy') || '重复同市场 BUY 已跳过' }
+    }
     if (lower.includes('btc 5m high-price buy skipped')) {
       return { key: 'btc_5m_high_price_buy', label: t('bridgeTradeRecord.errorType.btc5mHighPriceBuy') || 'BTC 5M 高价买入已跳过' }
     }

@@ -397,6 +397,7 @@
       "clickButton": "Button Click Failed",
       "navigationRace": "Navigation/Restart Race",
       "duplicateShortCycleBuy": "Duplicate Short-Cycle BUY Skipped",
+      "repeatSameMarketBuy": "Repeat Same-Market BUY Skipped",
       "btc5mHighPriceBuy": "BTC 5M High-Price BUY Skipped",
       "btc5mLowPriceBuy": "BTC 5M Low-Price BUY Skipped",
       "btc5mGlobalBuy": "BTC 5M Same-Market BUY Skipped",

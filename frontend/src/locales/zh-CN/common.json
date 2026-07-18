@@ -398,6 +398,7 @@
       "clickButton": "按钮点击失败",
       "navigationRace": "导航/重启竞态",
       "duplicateShortCycleBuy": "短周期重复买入已跳过",
+      "repeatSameMarketBuy": "重复同市场 BUY 已跳过",
       "btc5mHighPriceBuy": "BTC 5M 高价买入已跳过",
       "btc5mLowPriceBuy": "BTC 5M 低价买入已跳过",
       "btc5mGlobalBuy": "BTC 5M 同市场买入已跳过",

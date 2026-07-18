@@ -54,6 +54,8 @@ GENERIC_REPEAT_BUY_WINDOW_SECONDS = int(os.getenv("GENERIC_REPEAT_BUY_WINDOW_SEC
 GENERIC_REPEAT_HEDGE_MIN_PROFIT_MARGIN = Decimal(
     os.getenv("GENERIC_REPEAT_HEDGE_MIN_PROFIT_MARGIN", "0.02")
 )
+GENERIC_REPEAT_PENDING_WAIT_SECONDS = float(os.getenv("GENERIC_REPEAT_PENDING_WAIT_SECONDS", "12"))
+GENERIC_REPEAT_PENDING_POLL_SECONDS = float(os.getenv("GENERIC_REPEAT_PENDING_POLL_SECONDS", "0.5"))
 NEAR_EXPIRY_NEWS_BUY_MAX_HOURS = Decimal(os.getenv("NEAR_EXPIRY_NEWS_BUY_MAX_HOURS", "72"))
 NEAR_EXPIRY_NEWS_BUY_MAX_LEADER_VALUE = Decimal(
     os.getenv("NEAR_EXPIRY_NEWS_BUY_MAX_LEADER_VALUE", "25")
@@ -2518,18 +2520,10 @@ def _opposite_hedge_buy_is_safe(
     return all(payout > required_payout for payout in payouts_by_outcome.values())
 
 
-def _generic_repeat_buy_reason(
+def _matching_repeat_buy_records(
     signal: LeaderTradeSignal,
-    side: str,
-    price: Optional[Decimal] = None,
-    amount: Optional[Decimal] = None,
-    now_ms: Optional[int] = None,
-) -> Optional[str]:
-    """Skip repeated BUYs for the same leader and market in a short window."""
-    if side.upper() != "BUY" or not recorder:
-        return None
-    now = now_ms if now_ms is not None else int(time.time() * 1000)
-    since_ms = now - GENERIC_REPEAT_BUY_WINDOW_SECONDS * 1000
+    since_ms: int,
+) -> list[dict]:
     records = recorder.recent_leader_records_since(
         leader_address=signal.leader_address,
         since_ms=since_ms,
@@ -2542,6 +2536,56 @@ def _generic_repeat_buy_reason(
             continue
         if _same_market_record_matches_signal(record, signal):
             matching_records.append(record)
+    return matching_records
+
+
+def _wait_for_pending_repeat_buy_records(
+    signal: LeaderTradeSignal,
+    since_ms: int,
+    records: list[dict],
+    wait_seconds: float,
+    poll_seconds: float,
+) -> list[dict]:
+    if wait_seconds <= 0 or not any(str(record.get("status") or "").upper() == "PENDING" for record in records):
+        return records
+
+    deadline = time.time() + wait_seconds
+    while any(str(record.get("status") or "").upper() == "PENDING" for record in records):
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return records
+        time.sleep(min(max(poll_seconds, 0), remaining))
+        records = _matching_repeat_buy_records(signal, since_ms)
+        if not records:
+            return []
+    return records
+
+
+def _generic_repeat_buy_reason(
+    signal: LeaderTradeSignal,
+    side: str,
+    price: Optional[Decimal] = None,
+    amount: Optional[Decimal] = None,
+    now_ms: Optional[int] = None,
+    pending_wait_seconds: Optional[float] = None,
+    pending_poll_seconds: Optional[float] = None,
+) -> Optional[str]:
+    """Skip repeated BUYs for the same leader and market in a short window."""
+    if side.upper() != "BUY" or not recorder:
+        return None
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    since_ms = now - GENERIC_REPEAT_BUY_WINDOW_SECONDS * 1000
+    matching_records = _matching_repeat_buy_records(signal, since_ms)
+    if not matching_records:
+        return None
+
+    matching_records = _wait_for_pending_repeat_buy_records(
+        signal=signal,
+        since_ms=since_ms,
+        records=matching_records,
+        wait_seconds=GENERIC_REPEAT_PENDING_WAIT_SECONDS if pending_wait_seconds is None else pending_wait_seconds,
+        poll_seconds=GENERIC_REPEAT_PENDING_POLL_SECONDS if pending_poll_seconds is None else pending_poll_seconds,
+    )
     if not matching_records:
         return None
 

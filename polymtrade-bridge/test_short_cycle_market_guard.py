@@ -405,6 +405,109 @@ def test_generic_repeat_blocks_opposite_hedge_when_prior_buy_is_pending():
             price=Decimal("0.345476"),
             amount=Decimal("1"),
             now_ms=1783234800000,
+            pending_wait_seconds=0,
+        )
+        assert reason is not None, reason
+        assert "Repeat same-market BUY skipped" in reason
+    finally:
+        bridge_main.recorder = original
+
+
+def test_generic_repeat_allows_retry_when_prior_pending_buy_fails():
+    class SequenceRecorder(FakeRecorder):
+        def __init__(self):
+            super().__init__()
+            self.responses = [
+                [
+                    {
+                        "market_id": "0xmarket",
+                        "side": "BUY",
+                        "status": "PENDING",
+                        "outcome": "Yes",
+                        "outcome_index": 0,
+                        "quantity": Decimal("1.97047247"),
+                        "price": Decimal("0.50749250"),
+                        "amount": Decimal("1"),
+                        "raw_payload": '{"marketSlug":"same-market","outcome":"Yes"}',
+                    }
+                ],
+                [
+                    {
+                        "market_id": "0xmarket",
+                        "side": "BUY",
+                        "status": "FAILED",
+                        "outcome": "Yes",
+                        "outcome_index": 0,
+                        "quantity": Decimal("1.97047247"),
+                        "price": Decimal("0.50749250"),
+                        "amount": Decimal("1"),
+                        "raw_payload": '{"marketSlug":"same-market","outcome":"Yes"}',
+                    }
+                ],
+            ]
+
+        def recent_leader_records_since(self, leader_address, since_ms, limit=200):
+            self.recent_calls.append((leader_address, since_ms, limit))
+            if self.responses:
+                return self.responses.pop(0)
+            return []
+
+    original = bridge_main.recorder
+    try:
+        bridge_main.recorder = SequenceRecorder()
+        signal = SimpleNamespace(
+            leader_address="0xLeader",
+            condition_id="0xmarket",
+            market_slug="same-market",
+            outcome="Yes",
+            outcome_index=0,
+        )
+        reason = _generic_repeat_buy_reason(
+            signal,
+            "BUY",
+            price=Decimal("0.54742666"),
+            amount=Decimal("0.41"),
+            now_ms=1783234800000,
+            pending_wait_seconds=0.001,
+            pending_poll_seconds=0,
+        )
+        assert reason is None, reason
+    finally:
+        bridge_main.recorder = original
+
+
+def test_generic_repeat_blocks_retry_when_prior_pending_buy_remains_pending():
+    original = bridge_main.recorder
+    try:
+        bridge_main.recorder = FakeRecorder(
+            recent_records=[
+                {
+                    "market_id": "0xmarket",
+                    "side": "BUY",
+                    "status": "PENDING",
+                    "outcome": "Yes",
+                    "outcome_index": 0,
+                    "quantity": Decimal("1.97047247"),
+                    "price": Decimal("0.50749250"),
+                    "amount": Decimal("1"),
+                    "raw_payload": '{"marketSlug":"same-market","outcome":"Yes"}',
+                }
+            ]
+        )
+        signal = SimpleNamespace(
+            leader_address="0xLeader",
+            condition_id="0xmarket",
+            market_slug="same-market",
+            outcome="Yes",
+            outcome_index=0,
+        )
+        reason = _generic_repeat_buy_reason(
+            signal,
+            "BUY",
+            price=Decimal("0.54742666"),
+            amount=Decimal("0.41"),
+            now_ms=1783234800000,
+            pending_wait_seconds=0,
         )
         assert reason is not None, reason
         assert "Repeat same-market BUY skipped" in reason
@@ -606,6 +709,8 @@ def main() -> int:
     test_generic_repeat_allows_safe_opposite_hedge_buy()
     test_generic_repeat_blocks_unsafe_opposite_hedge_buy()
     test_generic_repeat_blocks_opposite_hedge_when_prior_buy_is_pending()
+    test_generic_repeat_allows_retry_when_prior_pending_buy_fails()
+    test_generic_repeat_blocks_retry_when_prior_pending_buy_remains_pending()
     test_near_expiry_small_news_buy_guard()
     test_same_event_high_frequency_buy_guard()
     test_same_event_multi_outcome_combo_buy_guard()
