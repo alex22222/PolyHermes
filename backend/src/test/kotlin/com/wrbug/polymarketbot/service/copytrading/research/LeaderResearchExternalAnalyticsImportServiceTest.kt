@@ -68,7 +68,8 @@ class LeaderResearchExternalAnalyticsImportServiceTest {
                 id = 40L,
                 normalizedWallet = unchangedWallet,
                 source = "EXTERNAL_ANALYTICS_SOURCE",
-                sourceEvidence = unchangedEvidence
+                sourceEvidence = unchangedEvidence,
+                lastSourceSeenAt = System.currentTimeMillis()
             )
         )
         Mockito.`when`(leaderRepository.findByLeaderAddress(Mockito.anyString())).thenReturn(null)
@@ -101,6 +102,37 @@ class LeaderResearchExternalAnalyticsImportServiceTest {
         Mockito.verify(candidateRepository, Mockito.times(2)).save(anyCandidate())
     }
 
+    @Test
+    fun `import refreshes stale exact evidence without appending duplicate source evidence`() {
+        val wallet = "0x5555555555555555555555555555555555555555"
+        val evidence = "external_analytics:polymarket_official_leaderboard | category:politics | rank:12 | external_score:88"
+        Mockito.`when`(candidateRepository.findByNormalizedWallet(wallet)).thenReturn(
+            LeaderResearchCandidate(
+                id = 50L,
+                normalizedWallet = wallet,
+                source = "EXTERNAL_ANALYTICS_SOURCE",
+                sourceEvidence = evidence,
+                lastSourceSeenAt = System.currentTimeMillis() - 2L * 60 * 60 * 1000
+            )
+        )
+        Mockito.`when`(leaderRepository.findByLeaderAddress(wallet)).thenReturn(null)
+        Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer { it.arguments[0] }
+
+        val response = service.importFromExternalAnalytics(
+            LeaderResearchExternalAnalyticsImportRequest(
+                dryRun = false,
+                items = listOf(externalItem(wallet, "politics", "polymarket_official_leaderboard", 12, "88"))
+            )
+        )
+
+        assertEquals(1, response.updatedTotal)
+        assertEquals(0, response.skippedExistingTotal)
+        assertEquals("REFRESH", response.previewItems.single().action)
+        val saved = captureSavedCandidates().single()
+        assertEquals(evidence, saved.sourceEvidence)
+        assertTrue(saved.lastSourceSeenAt!! > System.currentTimeMillis() - 60_000L)
+    }
+
     private fun externalItem(
         wallet: String,
         category: String,
@@ -118,6 +150,12 @@ class LeaderResearchExternalAnalyticsImportServiceTest {
     private fun anyCandidate(): LeaderResearchCandidate {
         Mockito.any(LeaderResearchCandidate::class.java)
         return LeaderResearchCandidate(normalizedWallet = "0x1111111111111111111111111111111111111111")
+    }
+
+    private fun captureSavedCandidates(): List<LeaderResearchCandidate> {
+        val captor = org.mockito.ArgumentCaptor.forClass(LeaderResearchCandidate::class.java)
+        Mockito.verify(candidateRepository, Mockito.atLeastOnce()).save(captor.capture())
+        return captor.allValues
     }
 
     @Suppress("UNCHECKED_CAST")

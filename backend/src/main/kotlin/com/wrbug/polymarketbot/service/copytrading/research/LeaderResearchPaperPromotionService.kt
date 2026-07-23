@@ -56,6 +56,7 @@ class LeaderResearchPaperPromotionService(
                 .filter { (it.score ?: BigDecimal.ZERO) >= minScore }
                 .filter { it.scoreVersion == LeaderResearchActivityScoringService.SCORE_VERSION }
                 .filter { isStateMachineReadyForPaperPromotion(it, now) }
+                .filter { isPrimaryEvidenceReadyForPaperPromotion(category, it) }
                 .sortedWith(
                     compareByDescending<LeaderResearchCandidate> { it.score ?: BigDecimal.ZERO }
                         .thenByDescending { it.lastScoredAt ?: 0L }
@@ -146,6 +147,11 @@ class LeaderResearchPaperPromotionService(
         return sourceFresh48h && (score >= BigDecimal("60") || canBootstrapPaperObservation(candidate))
     }
 
+    private fun isPrimaryEvidenceReadyForPaperPromotion(category: String, candidate: LeaderResearchCandidate): Boolean {
+        if (category !in PRIMARY_CATEGORIES) return true
+        return LeaderResearchProfitWindowParser.parse(candidate.sourceEvidence).blockers.isEmpty()
+    }
+
     private fun canBootstrapPaperObservation(candidate: LeaderResearchCandidate): Boolean {
         return candidate.agentOwned || candidate.leaderId != null || candidate.poolId != null
     }
@@ -171,6 +177,7 @@ class LeaderResearchPaperPromotionService(
         private const val LIVE_PROMOTE_BATCH_LIMIT = 8
         private const val PREVIEW_LIMIT = 100
         private const val SOURCE_FRESH_48H_MS = 48L * 60 * 60 * 1000
+        private val PRIMARY_CATEGORIES = setOf("politics", "finance")
         private val HARD_EXCLUDE_FLAGS = setOf(
             "tail_price_spray",
             "buy_only_no_exit",

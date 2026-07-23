@@ -46,6 +46,11 @@ interface LeaderResearchMarketPeerSourceProjection : LeaderResearchActivitySourc
     fun getTopMarkets(): String?
 }
 
+interface LeaderResearchStrategyCountProjection {
+    fun getStrategyType(): String?
+    fun getTotal(): Long
+}
+
 @Repository
 interface LeaderResearchRunRepository : JpaRepository<LeaderResearchRun, Long> {
     fun findTopByOrderByStartedAtDesc(): LeaderResearchRun?
@@ -59,11 +64,24 @@ interface LeaderResearchCandidateRepository : JpaRepository<LeaderResearchCandid
     fun findByNormalizedWallet(normalizedWallet: String): LeaderResearchCandidate?
     fun findByLeaderId(leaderId: Long): LeaderResearchCandidate?
     fun findByPoolId(poolId: Long): LeaderResearchCandidate?
+    fun findByNormalizedWalletIn(normalizedWallets: Collection<String>): List<LeaderResearchCandidate>
     fun findByResearchState(researchState: LeaderResearchState): List<LeaderResearchCandidate>
     fun findByResearchStateIn(states: Collection<LeaderResearchState>): List<LeaderResearchCandidate>
     fun findByResearchStateIn(states: Collection<LeaderResearchState>, pageable: Pageable): Page<LeaderResearchCandidate>
     fun findAllByOrderByUpdatedAtDesc(pageable: Pageable): Page<LeaderResearchCandidate>
     fun countByResearchState(researchState: LeaderResearchState): Long
+
+    @Query(
+        """
+        select c.strategyType as strategyType, count(c) as total
+        from LeaderResearchCandidate c
+        where c.researchState in (:states)
+        group by c.strategyType
+        """
+    )
+    fun countStrategyTypesByResearchStateIn(
+        @Param("states") states: Collection<LeaderResearchState>
+    ): List<LeaderResearchStrategyCountProjection>
 
     @Query(
         """
@@ -198,6 +216,35 @@ interface LeaderResearchCandidateRepository : JpaRepository<LeaderResearchCandid
 interface LeaderResearchScoreRepository : JpaRepository<LeaderResearchScore, Long> {
     fun findTopByCandidateIdOrderByCreatedAtDesc(candidateId: Long): LeaderResearchScore?
     fun findByCandidateIdOrderByCreatedAtDesc(candidateId: Long): List<LeaderResearchScore>
+
+    @Query(
+        value = """
+        select ranked.candidate_id as candidateId,
+               sum(case when ranked.total_score >= :minScore then 1 else 0 end) as stableHighScoreCount
+        from (
+            select candidate_id,
+                   total_score,
+                   row_number() over (partition by candidate_id order by created_at desc) as rn
+            from leader_research_score
+            where candidate_id in (:candidateIds)
+              and score_version = :scoreVersion
+        ) ranked
+        where ranked.rn <= :windowSize
+        group by ranked.candidate_id
+        """,
+        nativeQuery = true
+    )
+    fun countRecentHighScores(
+        @Param("candidateIds") candidateIds: Collection<Long>,
+        @Param("scoreVersion") scoreVersion: String,
+        @Param("minScore") minScore: BigDecimal,
+        @Param("windowSize") windowSize: Int
+    ): List<LeaderResearchStableScoreProjection>
+}
+
+interface LeaderResearchStableScoreProjection {
+    fun getCandidateId(): Long
+    fun getStableHighScoreCount(): Long
 }
 
 @Repository
@@ -229,6 +276,97 @@ interface LeaderActivityEventRepository : JpaRepository<LeaderActivityEvent, Lon
     fun findByNormalizedWalletAndEventTimeBetweenOrderByEventTimeAsc(normalizedWallet: String, start: Long, end: Long): List<LeaderActivityEvent>
     fun findByUsableForDiscoveryTrueAndEventTimeGreaterThanEqual(eventTime: Long): List<LeaderActivityEvent>
     fun findByPaperProcessingStatusInAndUsableForPaperTrueOrderByEventTimeAsc(statuses: Collection<LeaderPaperProcessingStatus>, pageable: Pageable): Page<LeaderActivityEvent>
+
+    @Query(
+        value = """
+        select count(1)
+        from leader_activity_wallet_metric m
+        where m.category = :category
+          and m.lookback_days = :lookbackDays
+        """,
+        nativeQuery = true
+    )
+    fun countActivityWalletMetrics(
+        @Param("category") category: String,
+        @Param("lookbackDays") lookbackDays: Int
+    ): Long
+
+    @Modifying
+    @Query(
+        value = """
+        delete from leader_activity_wallet_metric
+        where category = :category
+          and lookback_days = :lookbackDays
+        """,
+        nativeQuery = true
+    )
+    fun deleteActivityWalletMetrics(
+        @Param("category") category: String,
+        @Param("lookbackDays") lookbackDays: Int
+    ): Int
+
+    @Modifying
+    @Query(
+        value = """
+        insert into leader_activity_wallet_metric (
+          category,
+          lookback_days,
+          normalized_wallet,
+          total_events,
+          distinct_markets,
+          buy_events,
+          sell_events,
+          safe_price_events,
+          tail_price_events,
+          avg_amount,
+          total_amount,
+          last_event_time,
+          generated_at,
+          created_at,
+          updated_at
+        )
+        select
+          :category as category,
+          :lookbackDays as lookback_days,
+          e.normalized_wallet as normalized_wallet,
+          count(e.id) as total_events,
+          count(distinct e.market_id) as distinct_markets,
+          coalesce(sum(case when upper(e.side) = 'BUY' then 1 else 0 end), 0) as buy_events,
+          coalesce(sum(case when upper(e.side) = 'SELL' then 1 else 0 end), 0) as sell_events,
+          coalesce(sum(case
+            when e.price >= 0.10000000
+             and e.price <= 0.80000000
+             and e.size > 0
+             and e.market_id is not null
+            then 1 else 0 end), 0) as safe_price_events,
+          coalesce(sum(case
+            when e.price < 0.05000000 or e.price > 0.95000000
+            then 1 else 0 end), 0) as tail_price_events,
+          avg(coalesce(e.amount, e.price * e.size)) as avg_amount,
+          coalesce(sum(coalesce(e.amount, e.price * e.size, 0)), 0) as total_amount,
+          max(e.event_time) as last_event_time,
+          :generatedAt as generated_at,
+          :generatedAt as created_at,
+          :generatedAt as updated_at
+        from leader_activity_event e use index (idx_leader_activity_event_discovery_time_market_wallet)
+        where e.usable_for_discovery = 1
+          and e.normalized_wallet regexp '^0x[a-f0-9]{40}$'
+          and e.event_time >= :since
+          and (
+            lower(coalesce(e.market_slug, '')) regexp :marketPattern
+            or lower(coalesce(e.market_title, '')) regexp :marketPattern
+          )
+        group by e.normalized_wallet
+        """,
+        nativeQuery = true
+    )
+    fun insertActivityWalletMetrics(
+        @Param("category") category: String,
+        @Param("lookbackDays") lookbackDays: Int,
+        @Param("since") since: Long,
+        @Param("marketPattern") marketPattern: String,
+        @Param("generatedAt") generatedAt: Long
+    ): Int
 
     @Query(
         value = """
@@ -281,8 +419,9 @@ interface LeaderActivityEventRepository : JpaRepository<LeaderActivityEvent, Lon
           avg(coalesce(e.amount, e.price * e.size)) as avgAmount,
           coalesce(sum(coalesce(e.amount, e.price * e.size, 0)), 0) as totalAmount,
           max(e.event_time) as lastEventTime
-        from leader_activity_event e
-        where e.normalized_wallet regexp '^0x[a-f0-9]{40}$'
+        from leader_activity_event e use index (idx_leader_activity_event_discovery_time_market_wallet)
+        where e.usable_for_discovery = 1
+          and e.normalized_wallet regexp '^0x[a-f0-9]{40}$'
           and e.event_time >= :since
           and (
             lower(coalesce(e.market_slug, '')) regexp :marketPattern
@@ -307,6 +446,49 @@ interface LeaderActivityEventRepository : JpaRepository<LeaderActivityEvent, Lon
     fun discoverWalletsFromActivitySource(
         @Param("since") since: Long,
         @Param("marketPattern") marketPattern: String,
+        @Param("minEvents") minEvents: Int,
+        @Param("minDistinctMarkets") minDistinctMarkets: Int,
+        @Param("minBuyEvents") minBuyEvents: Int,
+        @Param("minSellEvents") minSellEvents: Int,
+        @Param("minSafePriceRatio") minSafePriceRatio: BigDecimal,
+        @Param("maxTailPriceRatio") maxTailPriceRatio: BigDecimal,
+        @Param("limit") limit: Int
+    ): List<LeaderResearchActivitySourceProjection>
+
+    @Query(
+        value = """
+        select
+          m.normalized_wallet as normalizedWallet,
+          m.total_events as totalEvents,
+          m.distinct_markets as distinctMarkets,
+          m.buy_events as buyEvents,
+          m.sell_events as sellEvents,
+          m.safe_price_events as safePriceEvents,
+          m.tail_price_events as tailPriceEvents,
+          m.avg_amount as avgAmount,
+          m.total_amount as totalAmount,
+          m.last_event_time as lastEventTime
+        from leader_activity_wallet_metric m
+        where m.category = :category
+          and m.lookback_days = :lookbackDays
+          and m.total_events >= :minEvents
+          and m.distinct_markets >= :minDistinctMarkets
+          and m.buy_events >= :minBuyEvents
+          and m.sell_events >= :minSellEvents
+          and m.safe_price_events / nullif(m.total_events, 0) >= :minSafePriceRatio
+          and m.tail_price_events / nullif(m.total_events, 0) <= :maxTailPriceRatio
+        order by
+          m.sell_events desc,
+          m.safe_price_events desc,
+          m.distinct_markets desc,
+          m.total_amount desc
+        limit :limit
+        """,
+        nativeQuery = true
+    )
+    fun discoverWalletsFromActivitySourceMetrics(
+        @Param("category") category: String,
+        @Param("lookbackDays") lookbackDays: Int,
         @Param("minEvents") minEvents: Int,
         @Param("minDistinctMarkets") minDistinctMarkets: Int,
         @Param("minBuyEvents") minBuyEvents: Int,
@@ -379,8 +561,9 @@ interface LeaderActivityEventRepository : JpaRepository<LeaderActivityEvent, Lon
             count(e.id) as marketEvents,
             count(distinct e.normalized_wallet) as marketWallets,
             coalesce(sum(coalesce(e.amount, e.price * e.size, 0)), 0) as marketAmount
-          from leader_activity_event e
+          from leader_activity_event e use index (idx_leader_activity_event_discovery_time_market_wallet)
           where e.market_id is not null
+            and e.usable_for_discovery = 1
             and e.event_time >= :since
             and (
               lower(coalesce(e.market_slug, '')) regexp :marketPattern
@@ -411,9 +594,10 @@ interface LeaderActivityEventRepository : JpaRepository<LeaderActivityEvent, Lon
           coalesce(sum(coalesce(e.amount, e.price * e.size, 0)), 0) as totalAmount,
           max(e.event_time) as lastEventTime,
           substring_index(group_concat(distinct hm.marketSlug order by hm.marketAmount desc separator ','), ',', 5) as topMarkets
-        from leader_activity_event e
+        from leader_activity_event e use index (idx_leader_activity_event_market_time_wallet)
         inner join hot_markets hm on hm.market_id = e.market_id
         where e.normalized_wallet regexp '^0x[a-f0-9]{40}$'
+          and e.usable_for_discovery = 1
           and e.event_time >= :since
         group by e.normalized_wallet
         having totalEvents >= :minEvents

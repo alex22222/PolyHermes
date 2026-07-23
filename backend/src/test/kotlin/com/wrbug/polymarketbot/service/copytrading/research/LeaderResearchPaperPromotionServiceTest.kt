@@ -95,7 +95,9 @@ class LeaderResearchPaperPromotionServiceTest {
 
     @Test
     fun `promotion can target candidate ids without full state scan`() {
-        val target = financeCandidate(42, System.currentTimeMillis()).copy(sourceEvidence = "activity_source:politics | category:politics")
+        val target = financeCandidate(42, System.currentTimeMillis()).copy(
+            sourceEvidence = primaryEvidence("politics")
+        )
         Mockito.`when`(candidateRepository.findAllById(listOf(42L, 404L))).thenReturn(listOf(target))
 
         val response = service.promote(
@@ -116,6 +118,29 @@ class LeaderResearchPaperPromotionServiceTest {
         Mockito.verify(candidateRepository).findAllById(listOf(42L, 404L))
     }
 
+    @Test
+    fun `primary candidate without long window evidence is not selected for paper promotion`() {
+        val falconOnly = financeCandidate(3392, System.currentTimeMillis()).copy(
+            sourceEvidence = "external_analytics:falcon_leaderboard | category:finance | roi15d:44.6 pnl15d:44505.59"
+        )
+        Mockito.`when`(candidateRepository.findAllById(listOf(3392L))).thenReturn(listOf(falconOnly))
+
+        val response = service.promote(
+            LeaderResearchPaperPromotionRequest(
+                minScore = "80",
+                politicsLimit = 0,
+                financeLimit = 5,
+                sportsLimit = 0,
+                cryptoLimit = 0,
+                dryRun = true,
+                candidateIds = listOf(3392L)
+            )
+        )
+
+        assertEquals(0, response.selectedTotal)
+        assertTrue(response.items.isEmpty())
+    }
+
     private fun financeCandidates(count: Int): List<LeaderResearchCandidate> {
         return (1..count).map { index ->
             financeCandidate(index, System.currentTimeMillis())
@@ -128,12 +153,18 @@ class LeaderResearchPaperPromotionServiceTest {
             normalizedWallet = "0x${index.toString().padStart(40, '0')}",
             researchState = LeaderResearchState.DISCOVERED,
             source = "ACTIVITY_SOURCE",
-            sourceEvidence = "activity_source:finance | category:finance",
+            sourceEvidence = primaryEvidence("finance"),
             score = BigDecimal("90"),
             scoreVersion = LeaderResearchActivityScoringService.SCORE_VERSION,
             lastSourceSeenAt = lastSourceSeenAt,
             agentOwned = true
         )
+    }
+
+    private fun primaryEvidence(category: String): String {
+        return "external_analytics:polymarket_official_leaderboard | category:$category | " +
+            "profit_window:all:100 | profit_window:30d:10\n" +
+            "activity_source:$category | category:$category | activity_window:14d_trades:12 | last_event_time:${System.currentTimeMillis()}"
     }
 
     private fun anyStates(): Collection<LeaderResearchState> {

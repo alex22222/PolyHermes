@@ -15,9 +15,13 @@ class LeaderResearchLoopDiagnosticsServiceTest {
 
     @Test
     fun `diagnose returns strict counts state summaries and blockers`() {
+        var strictReadySql = ""
         Mockito.`when`(jdbcTemplate.queryForList(Mockito.anyString(), anySqlParams()))
             .thenReturn(listOf(mapOf("count" to 3L)))
-            .thenReturn(listOf(mapOf("count" to 1L)))
+            .thenAnswer { invocation ->
+                strictReadySql = invocation.arguments[0] as String
+                listOf(mapOf("count" to 1L))
+            }
             .thenReturn(
                 listOf(
                     mapOf(
@@ -55,6 +59,10 @@ class LeaderResearchLoopDiagnosticsServiceTest {
 
         assertEquals(3, response.enabledCopyConfigs)
         assertEquals(1, response.strictReadyCount)
+        assertTrue(strictReadySql.contains("c.strategy_type = 'human_directional'"))
+        assertTrue(strictReadySql.contains("ps.trade_count >= 10"))
+        assertTrue(strictReadySql.contains("coalesce(sc.stable_high_scores, 0) >= 3"))
+        assertTrue(strictReadySql.contains("c.last_source_seen_at"))
         assertEquals("PAPER", response.stateSummaries.single().state)
         assertEquals(5, response.stateSummaries.single().hasAllNamedEvidence)
         assertEquals(2, response.samples.size)
@@ -106,10 +114,17 @@ class LeaderResearchLoopDiagnosticsServiceTest {
             "score" to score,
             "risk_flags" to riskFlags,
             "strategy_type" to "human_directional",
-            "source_evidence" to "external_analytics:polymarket_official_leaderboard | category:politics | ALL pnl:100",
+            "source_evidence" to "external_analytics:polymarket_official_leaderboard | category:politics | period:ALL pnl:100 | activity_window:14d_trades:12",
+            "last_source_seen_at" to System.currentTimeMillis(),
+            "started_at" to (System.currentTimeMillis() - 8L * 24 * 60 * 60 * 1000),
             "trade_count" to tradeCount,
+            "filtered_count" to 0,
             "copyable_pnl" to copyablePnl,
-            "filtered_ratio" to filteredRatio
+            "max_drawdown" to BigDecimal.ZERO,
+            "open_exposure" to BigDecimal.ZERO,
+            "unknown_valuation_exposure" to BigDecimal.ZERO,
+            "filtered_ratio" to filteredRatio,
+            "stable_high_scores" to 3
         )
     }
 

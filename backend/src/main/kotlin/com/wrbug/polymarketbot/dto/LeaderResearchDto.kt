@@ -180,6 +180,7 @@ data class LeaderResearchActivitySourcePreviewItemDto(
 data class LeaderResearchActivitySourceImportResponse(
     val dryRun: Boolean,
     val requestedCategories: List<String>,
+    val metricsBackedCategories: List<String> = emptyList(),
     val selectedTotal: Int,
     val createdTotal: Int,
     val updatedTotal: Int,
@@ -187,6 +188,27 @@ data class LeaderResearchActivitySourceImportResponse(
     val skippedLockedTotal: Int,
     val categories: List<LeaderResearchActivitySourceCategoryDto>,
     val previewItems: List<LeaderResearchActivitySourcePreviewItemDto>
+)
+
+data class LeaderResearchActivitySourceMetricRefreshRequest(
+    val categories: List<String> = listOf("politics", "finance"),
+    val lookbackDays: Int = 14
+)
+
+data class LeaderResearchActivitySourceMetricRefreshCategoryDto(
+    val category: String,
+    val lookbackDays: Int,
+    val refreshedCount: Int,
+    val generatedAt: Long,
+    val durationMs: Long
+)
+
+data class LeaderResearchActivitySourceMetricRefreshResponse(
+    val requestedCategories: List<String>,
+    val lookbackDays: Int,
+    val categories: List<LeaderResearchActivitySourceMetricRefreshCategoryDto>,
+    val refreshedTotal: Int,
+    val generatedAt: Long
 )
 
 data class LeaderResearchMarketPeerSourceImportRequest(
@@ -673,6 +695,74 @@ data class LeaderResearchTrialReadyRecheckResponse(
     val generatedAt: Long
 )
 
+data class LeaderResearchCooldownRecheckRequest(
+    val dryRun: Boolean = true,
+    val candidateIds: List<Long> = emptyList(),
+    val maxCandidates: Int = 20
+)
+
+data class LeaderResearchCooldownRecheckItemDto(
+    val candidateId: Long,
+    val wallet: String,
+    val beforeState: String,
+    val afterState: String,
+    val score: String,
+    val cooldownUntil: Long?,
+    val cooldownCount: Int,
+    val lastSourceSeenAt: Long?,
+    val eligible: Boolean,
+    val action: String,
+    val reason: String
+)
+
+data class LeaderResearchCooldownRecheckResponse(
+    val dryRun: Boolean,
+    val requestedCandidateIds: List<Long>,
+    val scannedCount: Int,
+    val selectedCount: Int,
+    val advancedCount: Int,
+    val recoveredCandidateIds: List<Long>,
+    val retiredCandidateIds: List<Long>,
+    val missingCandidateIds: List<Long>,
+    val items: List<LeaderResearchCooldownRecheckItemDto>,
+    val generatedAt: Long
+)
+
+data class LeaderResearchActivityHistoryBackfillRequest(
+    val dryRun: Boolean = true,
+    val wallets: List<String> = emptyList(),
+    val candidateIds: List<Long> = emptyList(),
+    val lookbackDays: Int = 30,
+    val pageSize: Int = 100,
+    val maxPagesPerWallet: Int = 3
+)
+
+data class LeaderResearchActivityHistoryBackfillWalletDto(
+    val wallet: String,
+    val fetchedCount: Int,
+    val tradeCount: Int,
+    val ingestedCount: Int,
+    val newEventCount: Int,
+    val duplicateCount: Int,
+    val buyCount: Int,
+    val sellCount: Int,
+    val earliestEventTime: Long?,
+    val latestEventTime: Long?,
+    val error: String? = null
+)
+
+data class LeaderResearchActivityHistoryBackfillResponse(
+    val dryRun: Boolean,
+    val requestedWallets: List<String>,
+    val fetchedTotal: Int,
+    val tradeTotal: Int,
+    val ingestedTotal: Int,
+    val newEventTotal: Int,
+    val duplicateTotal: Int,
+    val wallets: List<LeaderResearchActivityHistoryBackfillWalletDto>,
+    val generatedAt: Long
+)
+
 data class LeaderResearchPaperPromotionRequest(
     val minScore: String = "80",
     val politicsLimit: Int = 20,
@@ -735,6 +825,7 @@ data class LeaderResearchSummaryDto(
     val candidateCount: Long,
     val paperCount: Long,
     val trialReadyCount: Long,
+    val strictReadyCount: Long,
     val cooldownCount: Long,
     val retiredCount: Long,
     val activePaperSessions: Long,

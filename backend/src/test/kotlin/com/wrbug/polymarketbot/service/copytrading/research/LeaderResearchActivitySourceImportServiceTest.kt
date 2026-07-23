@@ -1,6 +1,7 @@
 package com.wrbug.polymarketbot.service.copytrading.research
 
 import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceImportRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceMetricRefreshRequest
 import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
 import com.wrbug.polymarketbot.enums.LeaderCandidateProvenance
 import com.wrbug.polymarketbot.repository.LeaderActivityEventRepository
@@ -250,10 +251,11 @@ class LeaderResearchActivitySourceImportServiceTest {
     }
 
     @Test
-    fun `import refreshes freshness when evidence is unchanged but last source time is wrong`() {
+    fun `import skips unchanged evidence when existing freshness is newer than activity`() {
         val wallet = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         val source = activitySource(wallet)
-        val evidence = "activity_source:politics | category:politics | events:24 | markets:6 | buy_events:18 | sell_events:6 | safe_price_ratio:0.5833 | tail_price_ratio:0.0833 | avg_amount:3.2500 | total_amount:78.0000 | last_event_time:1782284401000"
+        val evidence = "activity_source:politics | category:politics | events:24 | markets:6 | buy_events:18 | sell_events:6 | safe_price_ratio:0.5833 | tail_price_ratio:0.0833 | avg_amount:3.2500 | total_amount:78.0000 | activity_window:30d_trades:24 | last_event_time:1782284401000"
+        val newerSourceSeenAt = source.getLastEventTime() + 60_000L
         Mockito.`when`(
             activityEventRepository.discoverWalletsFromActivitySource(
                 Mockito.anyLong(),
@@ -267,15 +269,62 @@ class LeaderResearchActivitySourceImportServiceTest {
                 Mockito.anyInt()
             )
         ).thenReturn(listOf(source))
+        Mockito.`when`(candidateRepository.findByNormalizedWalletIn(listOf(wallet))).thenReturn(emptyList())
         Mockito.`when`(candidateRepository.findByNormalizedWallet(wallet)).thenReturn(
             LeaderResearchCandidate(
                 id = 51L,
                 normalizedWallet = wallet,
                 source = "ACTIVITY_SOURCE",
                 sourceEvidence = evidence,
-                lastSourceSeenAt = System.currentTimeMillis()
+                lastSourceSeenAt = newerSourceSeenAt
             )
         )
+        Mockito.`when`(leaderRepository.findLatestByLeaderAddressIn(listOf(wallet))).thenReturn(emptyList())
+        Mockito.`when`(leaderRepository.findByLeaderAddress(wallet)).thenReturn(null)
+
+        val response = service.importFromActivitySource(
+            LeaderResearchActivitySourceImportRequest(
+                dryRun = false,
+                categories = listOf("politics"),
+                limitPerCategory = 1
+            )
+        )
+
+        assertEquals(0, response.updatedTotal)
+        assertEquals(1, response.skippedExistingTotal)
+        assertEquals("SKIP_EXISTING", response.previewItems.single().action)
+        Mockito.verify(candidateRepository, Mockito.never()).save(anyCandidate())
+    }
+
+    @Test
+    fun `import preserves newer existing freshness when activity evidence changes`() {
+        val wallet = "0xabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val lastEventTime = 1782284401000L
+        val newerSourceSeenAt = lastEventTime + 60_000L
+        Mockito.`when`(
+            activityEventRepository.discoverWalletsFromActivitySource(
+                Mockito.anyLong(),
+                Mockito.anyString(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                anyBigDecimal(),
+                anyBigDecimal(),
+                Mockito.anyInt()
+            )
+        ).thenReturn(listOf(activitySource(wallet, lastEventTime)))
+        Mockito.`when`(candidateRepository.findByNormalizedWalletIn(listOf(wallet))).thenReturn(emptyList())
+        Mockito.`when`(candidateRepository.findByNormalizedWallet(wallet)).thenReturn(
+            LeaderResearchCandidate(
+                id = 52L,
+                normalizedWallet = wallet,
+                source = "EXTERNAL_ANALYTICS_SOURCE",
+                sourceEvidence = "external_analytics:polymarket_official_leaderboard | category:politics",
+                lastSourceSeenAt = newerSourceSeenAt
+            )
+        )
+        Mockito.`when`(leaderRepository.findLatestByLeaderAddressIn(listOf(wallet))).thenReturn(emptyList())
         Mockito.`when`(leaderRepository.findByLeaderAddress(wallet)).thenReturn(null)
         Mockito.`when`(candidateRepository.save(anyCandidate())).thenAnswer { it.arguments[0] }
 
@@ -290,7 +339,7 @@ class LeaderResearchActivitySourceImportServiceTest {
         assertEquals(1, response.updatedTotal)
         assertEquals("UPDATE", response.previewItems.single().action)
         val saved = captureSavedCandidates().single()
-        assertEquals(source.getLastEventTime(), saved.lastSourceSeenAt)
+        assertEquals(newerSourceSeenAt, saved.lastSourceSeenAt)
     }
 
     @Test
@@ -380,6 +429,106 @@ class LeaderResearchActivitySourceImportServiceTest {
             anyBigDecimal(),
             Mockito.anyInt()
         )
+    }
+
+    @Test
+    fun `untargeted import uses precomputed metrics when available`() {
+        val wallet = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        Mockito.`when`(activityEventRepository.countActivityWalletMetrics("finance", 14)).thenReturn(12)
+        Mockito.`when`(
+            activityEventRepository.discoverWalletsFromActivitySourceMetrics(
+                Mockito.eq("finance") ?: "finance",
+                Mockito.eq(14),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                Mockito.anyInt(),
+                anyBigDecimal(),
+                anyBigDecimal(),
+                Mockito.anyInt()
+            )
+        ).thenReturn(listOf(activitySource(wallet)))
+        Mockito.`when`(candidateRepository.findByNormalizedWallet(wallet)).thenReturn(null)
+        Mockito.`when`(leaderRepository.findByLeaderAddress(wallet)).thenReturn(null)
+
+        val response = service.importFromActivitySource(
+            LeaderResearchActivitySourceImportRequest(
+                dryRun = true,
+                categories = listOf("finance"),
+                lookbackDays = 14,
+                limitPerCategory = 1
+            )
+        )
+
+        assertEquals(listOf("finance"), response.metricsBackedCategories)
+        assertEquals(1, response.selectedTotal)
+        assertEquals(wallet, response.previewItems.single().wallet)
+        Mockito.verify(activityEventRepository, Mockito.never()).discoverWalletsFromActivitySource(
+            Mockito.anyLong(),
+            Mockito.anyString(),
+            Mockito.anyInt(),
+            Mockito.anyInt(),
+            Mockito.anyInt(),
+            Mockito.anyInt(),
+            anyBigDecimal(),
+            anyBigDecimal(),
+            Mockito.anyInt()
+        )
+    }
+
+    @Test
+    fun `scheduled metrics refresh is disabled by default`() {
+        service.scheduledMetricsRefresh()
+
+        Mockito.verify(activityEventRepository, Mockito.never()).deleteActivityWalletMetrics(
+            Mockito.anyString(),
+            Mockito.anyInt()
+        )
+        Mockito.verify(activityEventRepository, Mockito.never()).insertActivityWalletMetrics(
+            Mockito.anyString(),
+            Mockito.anyInt(),
+            Mockito.anyLong(),
+            Mockito.anyString(),
+            Mockito.anyLong()
+        )
+    }
+
+    @Test
+    fun `refresh metrics recomputes each requested category`() {
+        Mockito.`when`(
+            activityEventRepository.deleteActivityWalletMetrics(Mockito.anyString(), Mockito.eq(14))
+        ).thenReturn(0)
+        Mockito.`when`(
+            activityEventRepository.insertActivityWalletMetrics(
+                Mockito.eq("politics") ?: "politics",
+                Mockito.eq(14),
+                Mockito.anyLong(),
+                Mockito.anyString(),
+                Mockito.anyLong()
+            )
+        ).thenReturn(12)
+        Mockito.`when`(
+            activityEventRepository.insertActivityWalletMetrics(
+                Mockito.eq("finance") ?: "finance",
+                Mockito.eq(14),
+                Mockito.anyLong(),
+                Mockito.anyString(),
+                Mockito.anyLong()
+            )
+        ).thenReturn(7)
+
+        val response = service.refreshMetrics(
+            LeaderResearchActivitySourceMetricRefreshRequest(
+                categories = listOf("politics", "finance"),
+                lookbackDays = 14
+            )
+        )
+
+        assertEquals(19, response.refreshedTotal)
+        assertEquals(listOf("politics", "finance"), response.requestedCategories)
+        assertEquals(listOf(12, 7), response.categories.map { it.refreshedCount })
+        Mockito.verify(activityEventRepository).deleteActivityWalletMetrics("politics", 14)
+        Mockito.verify(activityEventRepository).deleteActivityWalletMetrics("finance", 14)
     }
 
     private fun activitySource(

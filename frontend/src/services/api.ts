@@ -55,6 +55,8 @@ import type {
   LeaderResearchPaperPromotionResponse,
   LeaderResearchPaperScoreRequest,
   LeaderResearchPaperScoreResponse,
+  LeaderResearchTrialReadyRecheckRequest,
+  LeaderResearchTrialReadyRecheckResponse,
   LeaderResearchPoliticsRecommendationExecuteRequest,
   LeaderResearchPoliticsRecommendationExecutionSnapshot,
   LeaderResearchPoliticsRecommendationExecuteResponse,
@@ -582,6 +584,9 @@ export const apiService = {
 
     scorePaper: (data: LeaderResearchPaperScoreRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchPaperScoreResponse>>('/copy-trading/leader-research/paper/score', data, { timeout: 120000 }),
+
+    recheckTrialReady: (data: LeaderResearchTrialReadyRecheckRequest = {}) =>
+      apiClient.post<ApiResponse<LeaderResearchTrialReadyRecheckResponse>>('/copy-trading/leader-research/paper/trial-ready/recheck', data, { timeout: 120000 }),
 
     listCandidates: (data: LeaderResearchCandidateListRequest = {}) =>
       apiClient.post<ApiResponse<LeaderResearchCandidateListResponse>>('/copy-trading/leader-research/candidates/list', data),

@@ -33,6 +33,7 @@ class LeaderResearchExternalAnalyticsImportService(
         var skippedExisting = 0
         var skippedLocked = 0
         val previews = mutableListOf<LeaderResearchExternalAnalyticsImportPreviewItemDto>()
+        val now = System.currentTimeMillis()
 
         selected.forEachIndexed { index, item ->
             if (!item.wallet.matches(WALLET_REGEX) || item.category !in ALLOWED_CATEGORIES) {
@@ -53,9 +54,13 @@ class LeaderResearchExternalAnalyticsImportService(
                     created += 1
                     "CREATE"
                 }
-                hasExactEvidence(existing.sourceEvidence, sourceEvidence) -> {
+                hasExactEvidence(existing.sourceEvidence, sourceEvidence) && hasFreshSourceSeenAt(existing, now) -> {
                     skippedExisting += 1
                     "SKIP_EXISTING"
+                }
+                hasExactEvidence(existing.sourceEvidence, sourceEvidence) -> {
+                    updated += 1
+                    "REFRESH"
                 }
                 else -> {
                     updated += 1
@@ -64,7 +69,6 @@ class LeaderResearchExternalAnalyticsImportService(
             }
 
             if (!request.dryRun && action != "SKIP_LOCKED" && action != "SKIP_EXISTING") {
-                val now = System.currentTimeMillis()
                 val saved = if (existing == null) {
                     candidateRepository.save(
                         LeaderResearchCandidate(
@@ -88,6 +92,11 @@ class LeaderResearchExternalAnalyticsImportService(
                         )
                     )
                 } else {
+                    val refreshedEvidence = if (action == "REFRESH") {
+                        existing.sourceEvidence
+                    } else {
+                        appendEvidence(existing.sourceEvidence, sourceEvidence)
+                    }
                     candidateRepository.save(
                         existing.copy(
                             leaderId = existing.leaderId ?: leader?.id,
@@ -98,7 +107,7 @@ class LeaderResearchExternalAnalyticsImportService(
                             } else {
                                 existing.provenance
                             },
-                            sourceEvidence = appendEvidence(existing.sourceEvidence, sourceEvidence),
+                            sourceEvidence = refreshedEvidence,
                             lastSourceSeenAt = now,
                             updatedAt = now
                         )
@@ -208,6 +217,10 @@ class LeaderResearchExternalAnalyticsImportService(
             .any { it == incoming.trim() }
     }
 
+    private fun hasFreshSourceSeenAt(existing: LeaderResearchCandidate, now: Long): Boolean {
+        return existing.lastSourceSeenAt?.let { now - it <= SOURCE_REFRESH_GRACE_MS } == true
+    }
+
     companion object {
         const val SOURCE_EXTERNAL_ANALYTICS = "EXTERNAL_ANALYTICS_SOURCE"
         private val WALLET_REGEX = Regex("^0x[a-f0-9]{40}$")
@@ -215,6 +228,7 @@ class LeaderResearchExternalAnalyticsImportService(
         private const val MAX_SOURCE_LENGTH = 50
         private const val MAX_IMPORT_ITEMS = 1000
         private const val PREVIEW_LIMIT = 100
+        private const val SOURCE_REFRESH_GRACE_MS = 60L * 60 * 1000
     }
 
     private data class NormalizedExternalItem(

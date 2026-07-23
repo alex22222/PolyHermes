@@ -24,6 +24,12 @@ import {
 } from 'antd'
 import {
   ExperimentOutlined,
+  ArrowRightOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  DatabaseOutlined,
+  FilterOutlined,
+  InfoCircleOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined
@@ -56,11 +62,13 @@ import type {
   LeaderResearchPoliticsSourceDiagnose,
   LeaderResearchPolymarketAnalyticsCopyTradeImportResponse,
   LeaderResearchPolyburgTelegramImportResponse,
+  LeaderResearchTrialReadyRecheckResponse,
   LeaderResearchTrialReadiness,
   LeaderResearchSourceState,
   LeaderResearchState,
   LeaderResearchSummary
 } from '../types'
+import './LeaderResearch.css'
 
 const { Paragraph, Text, Title } = Typography
 
@@ -72,6 +80,143 @@ const STATE_COLORS: Record<LeaderResearchState, string> = {
   COOLDOWN: 'orange',
   RETIRED: 'red'
 }
+
+const STATE_LABELS: Record<LeaderResearchState, string> = {
+  DISCOVERED: '已发现',
+  CANDIDATE: '候选',
+  PAPER: '纸跟验证',
+  TRIAL_READY: '建议试跟',
+  COOLDOWN: '冷却复核',
+  RETIRED: '已淘汰'
+}
+
+const CATEGORY_LABELS: Record<string, string> = {
+  politics: '政治',
+  finance: '金融',
+  sports: '体育',
+  crypto: '加密市场'
+}
+
+const STRATEGY_TYPE_LABELS: Record<string, string> = {
+  human_directional: '人工方向交易',
+  whale: '大额鲸鱼型',
+  bot_hft: '高频机器人',
+  market_maker_lp: '做市 / 流动性',
+  arbitrage: '套利型',
+  low_price_tail_risk: '低价尾部风险',
+  rebalance_churn: '高频再平衡',
+  unknown: '待识别'
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  ACTIVITY_DERIVED: '链上活动发现',
+  EXISTING_LEADER: '现有 Leader',
+  WATCHLIST: '观察名单',
+  OFFICIAL_LEADERBOARD: '官方排行榜',
+  FALCON_LEADERBOARD: 'Falcon 排行榜',
+  EXTERNAL_ANALYTICS: '外部分析',
+  POLYBURG_TELEGRAM: 'Polyburg / Telegram',
+  MARKET_PEER: '热门市场对手方'
+}
+
+const SOURCE_STATUS_LABELS: Record<string, string> = {
+  SUCCESS: '正常',
+  RUNNING: '运行中',
+  DISABLED: '已停用',
+  FAILED: '失败',
+  PARTIAL: '部分成功',
+  NEVER_RUN: '尚未运行'
+}
+
+const RECOMMENDATION_LABELS: Record<string, string> = {
+  IMPORT_NOW: '导入候选',
+  SCORE_REFRESH: '刷新评分',
+  PAPER_PROCESS: '推进纸跟',
+  FAST_WATCH_REVIEW: '快速观察复核'
+}
+
+const RUN_STATUS_LABELS: Record<string, string> = {
+  SUCCESS: '成功',
+  RUNNING: '运行中',
+  FAILED: '失败',
+  SKIPPED: '已跳过',
+  PARTIAL_SUCCESS: '部分成功'
+}
+
+const RISK_FLAG_LABELS: Record<string, string> = {
+  mixed_category_evidence: '跨分类证据混杂',
+  high_filtered_ratio: '过滤比例过高',
+  tail_price_spray: '低价尾部下注过多',
+  stale_source: '来源数据过期',
+  non_copyable_strategy: '策略不适合复制',
+  negative_pnl: '纸跟收益为负',
+  insufficient_samples: '有效样本不足',
+  unknown_strategy: '策略类型未识别',
+  missing_profit_window_all: '缺少全周期收益证据'
+}
+
+const REASON_LABELS: Record<string, string> = {
+  state_criteria_satisfied: '已满足状态推进条件',
+  source_stale: '来源已过期，需要刷新',
+  insufficient_paper_age: '纸跟观察时间不足',
+  insufficient_trade_count: '有效纸跟成交不足',
+  insufficient_stable_scores: '最近评分稳定性不足',
+  copyable_pnl_not_positive: '可复制收益尚未为正',
+  risk_flags_present: '仍有风险标记未消除',
+  unknown_strategy_all_filtered_after_enrichment: '策略未识别且样本全部被过滤',
+  unknown_strategy_negative_pnl_after_enrichment: '策略未识别且纸跟收益为负'
+}
+
+const STATE_FLOW: Array<{
+  state: LeaderResearchState
+  stage: string
+  description: string
+  gate: string
+  next: string
+}> = [
+  {
+    state: 'DISCOVERED',
+    stage: '来源入库',
+    description: '从榜单、链上活动和外部名单发现钱包。',
+    gate: '来源在 48 小时内有效，并完成初步评分。',
+    next: '评分达到 60 或具备受管观察条件后进入候选。'
+  },
+  {
+    state: 'CANDIDATE',
+    stage: '通过初筛',
+    description: '已具备研究价值，等待建立纸跟观察。',
+    gate: '来源新鲜、分类明确，且具备可复制性线索。',
+    next: '建立纸跟会话，开始累计可执行样本。'
+  },
+  {
+    state: 'PAPER',
+    stage: '纸跟验证',
+    description: '只做模拟跟单，检验成交、收益与风险。',
+    gate: '评分 ≥80、观察 ≥168 小时、最近 3 次稳定高分、风险为空且纸跟收益为正。',
+    next: '全部通过后进入建议试跟；恶化则转入冷却。'
+  },
+  {
+    state: 'TRIAL_READY',
+    stage: '人工决策',
+    description: '研究门槛已通过，等待你进行人工预检。',
+    gate: '这里只代表“可考虑小额试跟”，不代表已启用。',
+    next: '最多创建默认禁用的试跟配置，仍需手动启用。'
+  },
+  {
+    state: 'COOLDOWN',
+    stage: '冷却复核',
+    description: '数据过期、收益转差或风险信号触发暂停。',
+    gate: '冷却 3 天后重新检查来源与质量。',
+    next: '恢复则回到候选；累计 3 次或 30 天无来源则淘汰。'
+  },
+  {
+    state: 'RETIRED',
+    stage: '停止推进',
+    description: '不再进入自动研究推进流程。',
+    gate: '保留历史记录用于审计与复盘。',
+    next: '不会进入跟单执行链路。'
+  }
+]
 
 const VALUATION_COLORS: Record<string, string> = {
   AVAILABLE: 'green',
@@ -107,7 +252,35 @@ const STRATEGY_TYPE_COLORS: Record<string, string> = {
 
 const strategyTypeTag = (strategyType?: string) => {
   const value = strategyType || 'unknown'
-  return <Tag color={STRATEGY_TYPE_COLORS[value] || 'default'}>{value}</Tag>
+  return <Tag color={STRATEGY_TYPE_COLORS[value] || 'default'}>{STRATEGY_TYPE_LABELS[value] || value}</Tag>
+}
+
+const categoryLabel = (category?: string) => category ? CATEGORY_LABELS[category] || category : '-'
+
+const sourceLabel = (source?: string) => {
+  if (!source) return '-'
+  return source
+    .split(',')
+    .map(item => SOURCE_LABELS[item.trim()] || item.trim().replace(/_/g, ' '))
+    .join('、')
+}
+
+const readableCode = (value?: string) => {
+  if (!value) return ''
+  const normalized = value.trim()
+  if (normalized.startsWith('PUBLIC_LEADERBOARD:')) {
+    return '公开排行榜：V1 暂未启用；当前发现范围为观察名单、现有 Leader 与已持久化活动数据'
+  }
+  return RISK_FLAG_LABELS[normalized] ||
+    REASON_LABELS[normalized] ||
+    normalized
+      .replace(/TRIAL_READY/g, '建议试跟')
+      .replace(/PAPER/g, '纸跟')
+      .replace(/CANDIDATE/g, '候选')
+      .replace(/DISCOVERED/g, '已发现')
+      .replace(/COOLDOWN/g, '冷却')
+      .replace(/RETIRED/g, '淘汰')
+      .replace(/_/g, ' ')
 }
 
 const officialDiagnoseBucketColor = (bucket: string) => {
@@ -177,12 +350,16 @@ const LeaderResearch: React.FC = () => {
   const [stateFilter, setStateFilter] = useState<LeaderResearchState | undefined>()
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
+  const [advancedLoading, setAdvancedLoading] = useState(false)
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false)
   const [running, setRunning] = useState(false)
   const [fastWatchAction, setFastWatchAction] = useState<'score' | 'process' | null>(null)
+  const [trialReadyRefreshAction, setTrialReadyRefreshAction] = useState<'dryRun' | 'live' | null>(null)
   const [politicsAction, setPoliticsAction] = useState<'process' | 'importPreview' | 'importConfirm' | 'scoreRefresh' | 'executePreview' | null>(null)
   const [politicsImportResult, setPoliticsImportResult] = useState<LeaderResearchActivitySourceImportResponse | null>(null)
   const [politicsPromotionResult, setPoliticsPromotionResult] = useState<LeaderResearchPaperPromotionResponse | null>(null)
   const [politicsExecutionResult, setPoliticsExecutionResult] = useState<LeaderResearchPoliticsRecommendationExecuteResponse | null>(null)
+  const [trialReadyRefreshResult, setTrialReadyRefreshResult] = useState<LeaderResearchTrialReadyRecheckResponse | null>(null)
   const [latestPoliticsExecution, setLatestPoliticsExecution] = useState<LeaderResearchPoliticsRecommendationExecutionSnapshot | null>(null)
   const [lastPaperProcessSummaries, setLastPaperProcessSummaries] = useState<LeaderResearchPaperProcessCandidate[]>([])
   const [detailLoading, setDetailLoading] = useState(false)
@@ -199,16 +376,6 @@ const LeaderResearch: React.FC = () => {
   const loadAll = async (showLoading = true) => {
     if (showLoading) setLoading(true)
     try {
-      const [candidateResp, summaryResp, funnelResp, fastWatchResp, sourceResp, politicsExecutionResp, accountResp] = await Promise.allSettled([
-        apiService.leaderResearch.listCandidates({ page: 0, size: 50, state: stateFilter, query: query || undefined }),
-        apiService.leaderResearch.summary(),
-        apiService.leaderResearch.funnel(),
-        apiService.leaderResearch.fastWatch({ categories: ['politics', 'finance'], limit: 12, includeTrialReady: true }),
-        apiService.leaderResearch.sourceHealth(),
-        apiService.leaderResearch.latestPoliticsRecommendationExecution(),
-        apiService.accounts.list()
-      ])
-
       const readData = <T,>(result: PromiseSettledResult<{ data: { code: number; data?: T | null; msg?: string } }>, label: string): T | null => {
         if (result.status === 'rejected') {
           console.warn(`[leader-research] ${label} load failed`, result.reason)
@@ -221,50 +388,85 @@ const LeaderResearch: React.FC = () => {
         return result.value.data.data ?? null
       }
 
+      const [candidateResp] = await Promise.allSettled([
+        apiService.leaderResearch.listCandidates({ page: 0, size: 50, state: stateFilter, query: query || undefined })
+      ])
+
       const candidateData = readData(candidateResp, 'candidates')
       if (candidateData) {
         setCandidates(candidateData)
+        setSummary(candidateData.summary)
       } else {
         message.warning(t('leaderResearch.fetchFailed'))
       }
-      const summaryData = readData(summaryResp, 'summary')
-      if (summaryData) {
-        setSummary(summaryData)
-      }
-      const funnelData = readData(funnelResp, 'funnel')
-      if (funnelData) {
-        setFunnel(funnelData)
-      }
-      const fastWatchData = readData(fastWatchResp, 'fastWatch')
-      if (fastWatchData) {
-        setFastWatch(fastWatchData)
-      }
-      const sourceData = readData(sourceResp, 'sourceHealth')
-      if (sourceData) {
-        setSourceHealth(sourceData)
-      }
-      const politicsExecutionData = readData(politicsExecutionResp, 'latestPoliticsExecution')
-      setLatestPoliticsExecution(politicsExecutionData || null)
-      const accountData = readData(accountResp, 'accounts')
-      if (accountData) {
-        setAccounts(accountData.list || [])
-      }
-
       void Promise.allSettled([
-        apiService.leaderResearch.diagnosePoliticsSource({ limit: 500 }),
-        apiService.leaderResearch.diagnosePoliticsSource({ category: 'finance', limit: 500 })
-      ]).then(([politicsDiagnoseResp, financeDiagnoseResp]) => {
-        if (politicsDiagnoseResp.status === 'fulfilled' && politicsDiagnoseResp.value.data.code === 0 && politicsDiagnoseResp.value.data.data) {
-          setPoliticsDiagnose(politicsDiagnoseResp.value.data.data)
+        apiService.leaderResearch.sourceHealth(),
+        apiService.leaderResearch.latestPoliticsRecommendationExecution(),
+        apiService.accounts.list()
+      ]).then(([sourceResp, politicsExecutionResp, accountResp]) => {
+        const sourceData = readData(sourceResp, 'sourceHealth')
+        if (sourceData) {
+          setSourceHealth(sourceData)
         }
-        if (financeDiagnoseResp.status === 'fulfilled' && financeDiagnoseResp.value.data.code === 0 && financeDiagnoseResp.value.data.data) {
-          setFinanceDiagnose(financeDiagnoseResp.value.data.data)
+        const politicsExecutionData = readData(politicsExecutionResp, 'latestPoliticsExecution')
+        setLatestPoliticsExecution(politicsExecutionData || null)
+        const accountData = readData(accountResp, 'accounts')
+        if (accountData) {
+          setAccounts(accountData.list || [])
         }
       })
+
     } catch (error: any) {
       message.error(error.message || t('leaderResearch.fetchFailed'))
     } finally {
       if (showLoading) setLoading(false)
+    }
+  }
+
+  const loadAdvancedResearch = async () => {
+    setAdvancedLoading(true)
+    try {
+      const funnelResp = await apiService.leaderResearch.funnel()
+      if (funnelResp.data.code === 0 && funnelResp.data.data) {
+        setFunnel(funnelResp.data.data)
+      }
+      const fastWatchResp = await apiService.leaderResearch.fastWatch({
+        categories: ['politics', 'finance'],
+        limit: 12,
+        includeTrialReady: true
+      })
+      if (fastWatchResp.data.code === 0 && fastWatchResp.data.data) {
+        setFastWatch(fastWatchResp.data.data)
+      }
+    } catch (error: any) {
+      message.error(error.message || '加载漏斗与快速观察失败')
+    } finally {
+      setAdvancedLoading(false)
+    }
+  }
+
+  const loadSourceDiagnostics = async () => {
+    setDiagnosticsLoading(true)
+    try {
+      const [politicsResp, financeResp] = await Promise.allSettled([
+        apiService.leaderResearch.diagnosePoliticsSource({ limit: 500 }),
+        apiService.leaderResearch.diagnosePoliticsSource({ category: 'finance', limit: 500 })
+      ])
+      const politicsData = politicsResp.status === 'fulfilled' && politicsResp.value.data.code === 0
+        ? politicsResp.value.data.data
+        : null
+      const financeData = financeResp.status === 'fulfilled' && financeResp.value.data.code === 0
+        ? financeResp.value.data.data
+        : null
+      if (politicsData) setPoliticsDiagnose(politicsData)
+      if (financeData) setFinanceDiagnose(financeData)
+      if (!politicsData && !financeData) {
+        message.warning('来源诊断暂时不可用，请稍后重试')
+      }
+    } catch (error: any) {
+      message.error(error.message || '加载来源诊断失败')
+    } finally {
+      setDiagnosticsLoading(false)
     }
   }
 
@@ -300,6 +502,9 @@ const LeaderResearch: React.FC = () => {
   }
 
   const fastWatchCandidateIds = () => fastWatch?.items.map(item => item.candidateId).filter(Boolean) || []
+
+  const uniqueCandidateIds = (candidateIds: number[]) =>
+    candidateIds.filter((id, index, ids) => ids.indexOf(id) === index)
 
   const politicsPaperProcessCandidateIds = () => politicsDiagnose?.recommendations
     .filter(item => item.recommendation === 'PAPER_PROCESS' && item.candidateId)
@@ -390,6 +595,90 @@ const LeaderResearch: React.FC = () => {
       message.error(error.message || t('leaderResearch.fetchFailed'))
     } finally {
       setFastWatchAction(null)
+    }
+  }
+
+  const refreshHighQualityTrialReady = async () => {
+    const candidateIds = uniqueCandidateIds(fastWatchCandidateIds())
+    if (candidateIds.length === 0) {
+      message.info(t('leaderResearch.noFastWatchCandidatesRefresh'))
+      return
+    }
+    setTrialReadyRefreshAction('dryRun')
+    try {
+      const processResponse = await apiService.leaderResearch.processPaper({
+        batchSize: 20,
+        candidateIds
+      })
+      if (processResponse.data.code !== 0 || !processResponse.data.data) {
+        message.error(processResponse.data.msg || t('leaderResearch.fetchFailed'))
+        return
+      }
+      setLastPaperProcessSummaries(processResponse.data.data.candidateSummaries || [])
+
+      const scoreResponse = await apiService.leaderResearch.scorePaper({
+        candidateIds,
+        maxCandidates: 100
+      })
+      if (scoreResponse.data.code !== 0 || !scoreResponse.data.data) {
+        message.error(scoreResponse.data.msg || t('leaderResearch.fetchFailed'))
+        return
+      }
+
+      const recheckResponse = await apiService.leaderResearch.recheckTrialReady({
+        dryRun: true,
+        candidateIds,
+        maxCandidates: candidateIds.length
+      })
+      if (recheckResponse.data.code !== 0 || !recheckResponse.data.data) {
+        message.error(recheckResponse.data.msg || t('leaderResearch.fetchFailed'))
+        return
+      }
+
+      const dryRunResult = recheckResponse.data.data
+      setTrialReadyRefreshResult(dryRunResult)
+      message.success(t('leaderResearch.trialReadyRefreshDryRunSuccess', {
+        processed: processResponse.data.data.processed,
+        scored: scoreResponse.data.data.scoredCount,
+        ready: dryRunResult.trialReadyCandidateIds.length
+      }))
+      await loadAll(false)
+
+      if (dryRunResult.trialReadyCandidateIds.length === 0) return
+
+      Modal.confirm({
+        title: t('leaderResearch.confirmTrialReadyRecheckTitle'),
+        content: t('leaderResearch.confirmTrialReadyRecheckContent', { count: dryRunResult.trialReadyCandidateIds.length }),
+        okText: t('leaderResearch.confirmTrialReadyRecheck'),
+        cancelText: t('common.cancel'),
+        onOk: async () => {
+          setTrialReadyRefreshAction('live')
+          try {
+            const liveResponse = await apiService.leaderResearch.recheckTrialReady({
+              dryRun: false,
+              candidateIds: dryRunResult.trialReadyCandidateIds,
+              maxCandidates: dryRunResult.trialReadyCandidateIds.length
+            })
+            if (liveResponse.data.code !== 0 || !liveResponse.data.data) {
+              message.error(liveResponse.data.msg || t('leaderResearch.fetchFailed'))
+              return
+            }
+            setTrialReadyRefreshResult(liveResponse.data.data)
+            message.success(t('leaderResearch.trialReadyRefreshLiveSuccess', {
+              promoted: liveResponse.data.data.trialReadyCandidateIds.length
+            }))
+            await loadAll(false)
+          } finally {
+            setTrialReadyRefreshAction(null)
+          }
+        }
+      })
+    } catch (error: any) {
+      message.error(error.message || t('leaderResearch.fetchFailed'))
+    } finally {
+      if (trialReadyRefreshAction !== 'live') {
+        setTrialReadyRefreshAction(null)
+      }
     }
   }
 
@@ -934,6 +1223,114 @@ const LeaderResearch: React.FC = () => {
   const pendingDecisions = candidates.list.filter(candidate => candidate.researchState === 'TRIAL_READY')
   const lastRun = activeSummary.lastRun
   const activeApprovalPreview = approvalPreview(approvalCandidate)
+  const stateCounts: Record<LeaderResearchState, number> = {
+    DISCOVERED: activeSummary.discoveredCount,
+    CANDIDATE: activeSummary.candidateCount,
+    PAPER: activeSummary.paperCount,
+    TRIAL_READY: activeSummary.trialReadyCount,
+    COOLDOWN: activeSummary.cooldownCount,
+    RETIRED: activeSummary.retiredCount
+  }
+
+  const selectState = (state?: LeaderResearchState) => {
+    setStateFilter(state)
+    window.setTimeout(() => {
+      document.getElementById('leader-candidate-workbench')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 0)
+  }
+
+  const candidateNextStep = (candidate: LeaderResearchCandidate) => {
+    const firstRisk = candidate.riskFlags[0]
+    if (firstRisk) {
+      return {
+        title: '先消除风险标记',
+        detail: readableCode(firstRisk),
+        tone: 'warning'
+      }
+    }
+    if (candidate.locked) {
+      return {
+        title: '已锁定，等待人工处理',
+        detail: '自动状态机不会推进已锁定候选。',
+        tone: 'warning'
+      }
+    }
+    if (candidate.researchState === 'DISCOVERED') {
+      return {
+        title: '等待初评与来源确认',
+        detail: readableCode(candidate.reason) || '需要新鲜来源，并达到初筛分数。',
+        tone: 'neutral'
+      }
+    }
+    if (candidate.researchState === 'CANDIDATE') {
+      return {
+        title: '建立纸跟观察',
+        detail: readableCode(candidate.reason) || '下一轮状态推进会创建纸跟会话。',
+        tone: 'active'
+      }
+    }
+    if (candidate.researchState === 'PAPER') {
+      const session = candidate.latestPaperSession
+      return {
+        title: '继续累计可执行样本',
+        detail: session
+          ? `已成交 ${session.tradeCount} 笔，可复制收益 ${session.copyablePnl} USDC。`
+          : '尚未建立有效纸跟样本。',
+        tone: 'active'
+      }
+    }
+    if (candidate.researchState === 'TRIAL_READY') {
+      return {
+        title: '等待人工预检',
+        detail: '可创建默认禁用的小额试跟配置。',
+        tone: 'success'
+      }
+    }
+    if (candidate.researchState === 'COOLDOWN') {
+      return {
+        title: '等待冷却后复核',
+        detail: candidate.cooldownUntil ? `预计 ${formatDate(candidate.cooldownUntil)} 后重新检查。` : readableCode(candidate.reason),
+        tone: 'warning'
+      }
+    }
+    return {
+      title: '已停止自动推进',
+      detail: readableCode(candidate.reason) || '保留记录，仅用于审计与复盘。',
+      tone: 'neutral'
+    }
+  }
+
+  const primaryGuidance = lastRun?.status === 'RUNNING'
+    ? {
+        title: '研究任务正在运行',
+        description: '系统正在更新来源、评分和状态；完成前无需重复触发。',
+        state: undefined as LeaderResearchState | undefined,
+        action: '查看运行状态',
+        icon: <ClockCircleOutlined />
+      }
+    : activeSummary.trialReadyCount > 0
+      ? {
+          title: `有 ${activeSummary.trialReadyCount} 个候选进入建议试跟`,
+          description: '先查看硬门槛与风险，再决定是否创建默认禁用的试跟配置。',
+          state: 'TRIAL_READY' as LeaderResearchState,
+          action: '处理人工决策',
+          icon: <CheckCircleOutlined />
+        }
+      : (fastWatch?.fastWatchCount || 0) > 0
+        ? {
+            title: `有 ${fastWatch?.fastWatchCount || 0} 个快速观察候选`,
+            description: '优先补充纸跟样本、增量评分，并等待 7 天观察门槛。',
+            state: 'PAPER' as LeaderResearchState,
+            action: '查看纸跟候选',
+            icon: <InfoCircleOutlined />
+          }
+        : {
+            title: '当前重点是积累有效纸跟样本',
+            description: `${activeSummary.paperCount} 个候选正在纸跟验证；不要仅凭排行榜或单次高分进入试跟。`,
+            state: 'PAPER' as LeaderResearchState,
+            action: '查看纸跟进度',
+            icon: <DatabaseOutlined />
+          }
 
   const columns = [
     {
@@ -955,7 +1352,7 @@ const LeaderResearch: React.FC = () => {
       width: 130,
       render: (state: LeaderResearchState) => (
         <Space direction="vertical" size={0}>
-          <Tag color={STATE_COLORS[state]}>{t(`leaderResearch.states.${state}`, { defaultValue: state })}</Tag>
+          <Tag color={STATE_COLORS[state]}>{STATE_LABELS[state]}</Tag>
           {state === 'TRIAL_READY' && (
             <Text type="secondary" style={{ fontSize: 12 }}>{t('leaderResearch.trialReadyHint')}</Text>
           )}
@@ -992,7 +1389,22 @@ const LeaderResearch: React.FC = () => {
     {
       title: t('leaderResearch.source'),
       dataIndex: 'source',
-      width: 160
+      width: 180,
+      render: (source?: string) => sourceLabel(source)
+    },
+    {
+      title: '当前卡点 / 下一步',
+      key: 'nextStep',
+      width: 260,
+      render: (_: unknown, item: LeaderResearchCandidate) => {
+        const nextStep = candidateNextStep(item)
+        return (
+          <Space direction="vertical" size={2} className={`leader-next-step is-${nextStep.tone}`}>
+            <Text strong>{nextStep.title}</Text>
+            <Text type="secondary">{nextStep.detail}</Text>
+          </Space>
+        )
+      }
     },
     {
       title: t('leaderResearch.lastSeen'),
@@ -1025,48 +1437,175 @@ const LeaderResearch: React.FC = () => {
   ]
 
   return (
-    <Space direction="vertical" size="large" style={{ width: '100%' }}>
-      <Card>
-        <Space direction="vertical" style={{ width: '100%' }}>
-          <Space align="start" style={{ justifyContent: 'space-between', width: '100%' }}>
-            <div>
-              <Title level={3} style={{ marginBottom: 4 }}>{t('leaderResearch.title')}</Title>
-              <Paragraph type="secondary" style={{ marginBottom: 0 }}>{t('leaderResearch.subtitle')}</Paragraph>
-            </div>
-            <Space>
-              <Button icon={<ReloadOutlined />} onClick={() => loadAll()}>{t('common.refresh')}</Button>
-              <Button onClick={() => setExternalImportOpen(true)}>{t('leaderResearch.importExternalList')}</Button>
-              <Button type="primary" icon={<PlayCircleOutlined />} loading={running || lastRun?.status === 'RUNNING'} onClick={runAgent}>
-                {t('leaderResearch.runNow')}
-              </Button>
-            </Space>
+    <Space className="leader-research-page" direction="vertical" size="large" style={{ width: '100%' }}>
+      <Card className="leader-research-hero" bordered={false}>
+        <div className="leader-research-hero-main">
+          <div>
+            <Text className="leader-research-eyebrow">研究状态机 · RESEARCH WORKFLOW</Text>
+            <Title level={2}>Leader 研究工作台</Title>
+            <Paragraph>
+              按“发现 → 候选 → 纸跟验证 → 人工试跟决策”推进。每个阶段都展示进入门槛、当前卡点和下一步操作。
+            </Paragraph>
+          </div>
+          <Space className="leader-research-hero-actions" wrap>
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => loadAll()}>刷新数据</Button>
+            <Button icon={<DatabaseOutlined />} onClick={() => setExternalImportOpen(true)}>导入研究候选</Button>
+            <Button type="primary" icon={<PlayCircleOutlined />} loading={running || lastRun?.status === 'RUNNING'} onClick={runAgent}>
+              运行一次研究
+            </Button>
           </Space>
+        </div>
+        <nav className="leader-research-nav" aria-label="Leader 研究页面导航">
+          <a href="#leader-state-machine">状态流程</a>
+          <a href="#leader-candidate-workbench">候选工作台</a>
+          <a href="#leader-fast-watch">快速观察</a>
+          <a href="#leader-advanced-research">高级诊断</a>
+          <a href="#leader-source-health">来源健康</a>
+        </nav>
+        <Space direction="vertical" style={{ width: '100%' }}>
           <Alert
             type="info"
             showIcon
             icon={<ExperimentOutlined />}
-            message={t('leaderResearch.safetyTitle')}
-            description={t('leaderResearch.safetyDesc')}
+            message="研究与真实跟单严格隔离"
+            description="本页只维护研究状态、纸跟账本和试跟建议。即使人工批准，也只会创建默认禁用的配置，不会自动启用真钱跟单。"
           />
           {activeSummary.sourceLimitations?.length > 0 && (
             <Alert
               type="warning"
               showIcon
-              message={t('leaderResearch.sourceLimitations')}
-              description={activeSummary.sourceLimitations.join(' | ')}
+              message="当前数据来源存在限制"
+              description={activeSummary.sourceLimitations.map(readableCode).join('；')}
             />
           )}
         </Space>
       </Card>
 
-      <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} lg={4}><Card><Statistic title={t('leaderResearch.states.DISCOVERED')} value={activeSummary.discoveredCount} /></Card></Col>
-        <Col xs={24} sm={12} lg={4}><Card><Statistic title={t('leaderResearch.states.CANDIDATE')} value={activeSummary.candidateCount} /></Card></Col>
-        <Col xs={24} sm={12} lg={4}><Card><Statistic title={t('leaderResearch.states.PAPER')} value={activeSummary.paperCount} /></Card></Col>
-        <Col xs={24} sm={12} lg={4}><Card><Statistic title={t('leaderResearch.states.TRIAL_READY')} value={activeSummary.trialReadyCount} /></Card></Col>
-        <Col xs={24} sm={12} lg={4}><Card><Statistic title={t('leaderResearch.states.COOLDOWN')} value={activeSummary.cooldownCount} /></Card></Col>
-        <Col xs={24} sm={12} lg={4}><Card><Statistic title={t('leaderResearch.states.RETIRED')} value={activeSummary.retiredCount} /></Card></Col>
-      </Row>
+      <section id="leader-state-machine" className="leader-state-section" aria-labelledby="leader-state-title">
+        <div className="leader-section-heading">
+          <div>
+            <Text className="leader-section-kicker">主流程</Text>
+            <Title id="leader-state-title" level={3}>候选现在走到哪一步</Title>
+            <Paragraph>点击任一阶段即可筛选对应候选。绿色路径代表研究通过，不代表实盘已经启用。</Paragraph>
+          </div>
+          {stateFilter && (
+            <Button icon={<FilterOutlined />} onClick={() => selectState(undefined)}>清除状态筛选</Button>
+          )}
+        </div>
+        <div className="leader-state-grid">
+          {STATE_FLOW.map((item, index) => (
+            <button
+              type="button"
+              className={`leader-state-card state-${item.state.toLowerCase()} ${stateFilter === item.state ? 'is-selected' : ''}`}
+              key={item.state}
+              aria-pressed={stateFilter === item.state}
+              onClick={() => selectState(item.state)}
+            >
+              <span className="leader-state-card-top">
+                <span className="leader-state-index">{String(index + 1).padStart(2, '0')}</span>
+                <span className="leader-state-count">{stateCounts[item.state].toLocaleString()}</span>
+              </span>
+              <strong>{STATE_LABELS[item.state]}</strong>
+              <span className="leader-state-stage">{item.stage}</span>
+              <span className="leader-state-description">{item.description}</span>
+              <span className="leader-state-gate">
+                <SafetyCertificateOutlined />
+                {item.gate}
+              </span>
+              <span className="leader-state-next">
+                {item.next}
+                {index < STATE_FLOW.length - 1 && <ArrowRightOutlined />}
+              </span>
+              {item.state === 'TRIAL_READY' && (
+                <span className="leader-state-strict">其中严格可试跟 {activeSummary.strictReadyCount}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <Card className="leader-guidance-card" bordered={false}>
+        <div className="leader-guidance-icon">{primaryGuidance.icon}</div>
+        <div className="leader-guidance-copy">
+          <Text className="leader-section-kicker">系统建议的下一步</Text>
+          <Title level={4}>{primaryGuidance.title}</Title>
+          <Paragraph>{primaryGuidance.description}</Paragraph>
+        </div>
+        <Button
+          type="primary"
+          onClick={() => {
+            if (primaryGuidance.state) {
+              selectState(primaryGuidance.state)
+            } else {
+              document.getElementById('leader-run-status')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }
+          }}
+        >
+          {primaryGuidance.action}
+        </Button>
+      </Card>
+
+      <Card
+        id="leader-candidate-workbench"
+        className="leader-candidate-workbench"
+        title={
+          <Space direction="vertical" size={0}>
+            <Text strong>候选工作台</Text>
+            <Text type="secondary">查看每个候选的当前卡点，并只执行该状态允许的操作。</Text>
+          </Space>
+        }
+        extra={<Tag color={stateFilter ? STATE_COLORS[stateFilter] : 'blue'}>{stateFilter ? STATE_LABELS[stateFilter] : '全部状态'} · {candidates.total}</Tag>}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Space wrap>
+            <Select
+              allowClear
+              style={{ width: 220 }}
+              placeholder="按研究状态筛选"
+              value={stateFilter}
+              onChange={setStateFilter}
+              options={Object.keys(STATE_COLORS).map(state => ({
+                value: state,
+                label: STATE_LABELS[state as LeaderResearchState]
+              }))}
+            />
+            <Input.Search
+              allowClear
+              style={{ width: 320 }}
+              placeholder="搜索钱包、Leader 名称或原因"
+              value={query}
+              onChange={event => setQuery(event.target.value)}
+              onSearch={() => loadAll()}
+              enterButton="搜索"
+            />
+          </Space>
+          <Table
+            rowKey="id"
+            loading={loading}
+            columns={columns}
+            dataSource={candidates.list}
+            scroll={{ x: 1560 }}
+            pagination={{ pageSize: 20, showSizeChanger: false }}
+            locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前筛选下没有研究候选" /> }}
+          />
+        </Space>
+      </Card>
+
+      <div id="leader-advanced-research" className="leader-section-heading leader-section-heading-standalone">
+        <div>
+          <Text className="leader-section-kicker">高级研究区</Text>
+          <Title level={3}>漏斗、快速观察与来源诊断</Title>
+          <Paragraph>这些工具会扫描大量研究历史，已改为需要时手动加载，避免影响主状态和实时数据。</Paragraph>
+        </div>
+        <Space wrap>
+          <Button icon={<FilterOutlined />} loading={advancedLoading} onClick={loadAdvancedResearch}>
+            {funnel || fastWatch ? '重新加载漏斗与快速观察' : '加载漏斗与快速观察'}
+          </Button>
+          <Button icon={<DatabaseOutlined />} loading={diagnosticsLoading} onClick={loadSourceDiagnostics}>
+            {politicsDiagnose || financeDiagnose ? '重新加载来源诊断' : '加载来源诊断'}
+          </Button>
+        </Space>
+      </div>
 
       {funnel && (
         <Row gutter={[16, 16]}>
@@ -1091,9 +1630,9 @@ const LeaderResearch: React.FC = () => {
                     status={funnel.allocationHealth.status === 'DEFICIT' ? 'exception' : 'normal'}
                   />
                   <Text type="secondary">
-                    politics/finance {funnel.allocationHealth.primaryCleanHighCount} · sports/crypto {funnel.allocationHealth.secondaryCleanHighCount}
+                    政治 / 金融 {funnel.allocationHealth.primaryCleanHighCount} · 体育 / 加密市场 {funnel.allocationHealth.secondaryCleanHighCount}
                   </Text>
-                  <Text type="secondary">{funnel.allocationHealth.message}</Text>
+                  <Text type="secondary">{readableCode(funnel.allocationHealth.message)}</Text>
                 </Space>
               </Space>
             </Card>
@@ -1103,7 +1642,7 @@ const LeaderResearch: React.FC = () => {
               <Space direction="vertical" style={{ width: '100%' }}>
                 {funnel.categories.map(category => (
                   <Space key={category.category} style={{ justifyContent: 'space-between', width: '100%' }}>
-                    <Text strong>{category.category}</Text>
+                    <Text strong>{categoryLabel(category.category)}</Text>
                     <Text>{t('leaderResearch.categoryConversionItem', {
                       total: category.totalCandidates,
                       paperState: t('leaderResearch.states.PAPER'),
@@ -1166,15 +1705,17 @@ const LeaderResearch: React.FC = () => {
 
       {fastWatch && (
         <Card
+          id="leader-fast-watch"
+          className="leader-fast-watch-card"
           title={t('leaderResearch.fastWatchCandidatesTitle')}
           extra={
-            <Space>
-              <Tag color="blue">FAST_WATCH {fastWatch.fastWatchCount}</Tag>
-              <Tag color="green">TRIAL_READY {fastWatch.trialReadyCount}</Tag>
+            <Space wrap>
+              <Tag color="blue">快速观察 {fastWatch.fastWatchCount}</Tag>
+              <Tag color="green">建议试跟 {fastWatch.trialReadyCount}</Tag>
               <Button
                 size="small"
                 loading={fastWatchAction === 'score'}
-                disabled={fastWatch.items.length === 0 || fastWatchAction !== null}
+                disabled={fastWatch.items.length === 0 || fastWatchAction !== null || trialReadyRefreshAction !== null}
                 onClick={scoreFastWatch}
               >
                 {t('leaderResearch.scoreIncrement')}
@@ -1183,10 +1724,19 @@ const LeaderResearch: React.FC = () => {
                 size="small"
                 type="primary"
                 loading={fastWatchAction === 'process'}
-                disabled={fastWatch.items.length === 0 || fastWatchAction !== null}
+                disabled={fastWatch.items.length === 0 || fastWatchAction !== null || trialReadyRefreshAction !== null}
                 onClick={processFastWatch}
               >
                 {t('leaderResearch.advancePaper')}
+              </Button>
+              <Button
+                size="small"
+                type="primary"
+                loading={trialReadyRefreshAction !== null}
+                disabled={fastWatch.items.length === 0 || fastWatchAction !== null || trialReadyRefreshAction !== null}
+                onClick={refreshHighQualityTrialReady}
+              >
+                {t('leaderResearch.refreshHighQualityStatus')}
               </Button>
               <Button size="small" icon={<ReloadOutlined />} onClick={() => loadAll(false)}>
                 {t('common.refresh')}
@@ -1201,7 +1751,24 @@ const LeaderResearch: React.FC = () => {
               <Col xs={12} md={6}><Statistic title={t('leaderResearch.states.TRIAL_READY')} value={fastWatch.trialReadyCount} /></Col>
               <Col xs={12} md={6}><Statistic title={t('leaderResearch.coveredCategories')} value={fastWatch.categories.join(' / ')} /></Col>
             </Row>
-            <Text type="secondary">{fastWatch.criteria}</Text>
+            <Text type="secondary">{readableCode(fastWatch.criteria)}</Text>
+            {trialReadyRefreshResult && (
+              <Alert
+                showIcon
+                type={trialReadyRefreshResult.trialReadyCandidateIds.length > 0 ? 'success' : 'info'}
+                message={trialReadyRefreshResult.dryRun
+                  ? t('leaderResearch.trialReadyRefreshDryRunMessage', {
+                      scanned: trialReadyRefreshResult.scannedCount,
+                      selected: trialReadyRefreshResult.selectedCount,
+                      ready: trialReadyRefreshResult.trialReadyCandidateIds.length
+                    })
+                  : t('leaderResearch.trialReadyRefreshLiveMessage', {
+                      scanned: trialReadyRefreshResult.scannedCount,
+                      promoted: trialReadyRefreshResult.trialReadyCandidateIds.length
+                    })}
+                description={trialReadyRefreshResult.items.slice(0, 5).map(item => `#${item.candidateId} ${readableCode(item.action)}：${readableCode(item.reason)}`).join('；')}
+              />
+            )}
             {fastWatch.items.length > 0 ? (
               <Row gutter={[12, 12]}>
                 {fastWatch.items.slice(0, 8).map(candidate => (
@@ -1216,7 +1783,7 @@ const LeaderResearch: React.FC = () => {
                         </Space>
                         <Text copyable={{ text: candidate.wallet }}>{candidate.wallet.slice(0, 10)}...{candidate.wallet.slice(-6)}</Text>
                         <Space wrap size={4}>
-                          <Tag color={candidate.category === 'politics' ? 'purple' : 'cyan'}>{candidate.category}</Tag>
+                          <Tag color={candidate.category === 'politics' ? 'purple' : 'cyan'}>{categoryLabel(candidate.category)}</Tag>
                           {strategyTypeTag(candidate.strategyType)}
                           <Tag color="green">{candidate.score}</Tag>
                           <Tag>{t('leaderResearch.tradeCountLabel', { count: candidate.tradeCount, trades: t('leaderResearch.trades') })}</Tag>
@@ -1237,7 +1804,7 @@ const LeaderResearch: React.FC = () => {
                           <Text type="secondary">{formatTrialEta(candidate.trialReadiness)}</Text>
                         )}
                         <Text type="secondary">
-                          {candidate.trialReadiness.blockers[0] || candidate.trialReadiness.fastWatchBlockers[0] || t('leaderResearch.waitForManualReview')}
+                          {readableCode(candidate.trialReadiness.blockers[0] || candidate.trialReadiness.fastWatchBlockers[0]) || t('leaderResearch.waitForManualReview')}
                         </Text>
                       </Space>
                     </Card>
@@ -1346,10 +1913,10 @@ const LeaderResearch: React.FC = () => {
                 title={t('leaderResearch.financeSourceDiagnosis')}
                 extra={
                   <Space wrap>
-                    <Tag color="green">IMPORT_NOW {recommendationCount(financeDiagnose, 'IMPORT_NOW')}</Tag>
-                    <Tag color="gold">SCORE_REFRESH {recommendationCount(financeDiagnose, 'SCORE_REFRESH')}</Tag>
-                    <Tag color="blue">PAPER_PROCESS {recommendationCount(financeDiagnose, 'PAPER_PROCESS')}</Tag>
-                    <Tag color="purple">FAST_WATCH_REVIEW {recommendationCount(financeDiagnose, 'FAST_WATCH_REVIEW')}</Tag>
+                    <Tag color="green">导入候选 {recommendationCount(financeDiagnose, 'IMPORT_NOW')}</Tag>
+                    <Tag color="gold">刷新评分 {recommendationCount(financeDiagnose, 'SCORE_REFRESH')}</Tag>
+                    <Tag color="blue">推进纸跟 {recommendationCount(financeDiagnose, 'PAPER_PROCESS')}</Tag>
+                    <Tag color="purple">快速观察复核 {recommendationCount(financeDiagnose, 'FAST_WATCH_REVIEW')}</Tag>
                   </Space>
                 }
               >
@@ -1374,10 +1941,10 @@ const LeaderResearch: React.FC = () => {
               title={t('leaderResearch.politicsRecommendationActions')}
               extra={
                 <Space wrap>
-                  <Tag color="green">IMPORT_NOW {politicsImportWallets().length}</Tag>
-                  <Tag color="gold">SCORE_REFRESH {politicsScoreRefreshCandidateIds().length}</Tag>
-                  <Tag color="blue">PAPER_PROCESS {politicsPaperProcessCandidateIds().length}</Tag>
-                  <Tag color="purple">FAST_WATCH_REVIEW {politicsFastWatchReviewRecommendations().length}</Tag>
+                  <Tag color="green">导入候选 {politicsImportWallets().length}</Tag>
+                  <Tag color="gold">刷新评分 {politicsScoreRefreshCandidateIds().length}</Tag>
+                  <Tag color="blue">推进纸跟 {politicsPaperProcessCandidateIds().length}</Tag>
+                  <Tag color="purple">快速观察复核 {politicsFastWatchReviewRecommendations().length}</Tag>
                   <Button
                     size="small"
                     loading={politicsAction === 'executePreview'}
@@ -1503,11 +2070,11 @@ const LeaderResearch: React.FC = () => {
                                   : item.recommendation === 'FAST_WATCH_REVIEW' ? 'purple'
                                     : 'gold'
                             }>
-                              {item.recommendation}
+                              {RECOMMENDATION_LABELS[item.recommendation] || readableCode(item.recommendation)}
                             </Tag>
                           </Space>
                           <Text copyable={{ text: item.wallet }}>{item.wallet.slice(0, 10)}...{item.wallet.slice(-6)}</Text>
-                          <Text type="secondary">{item.reason}</Text>
+                          <Text type="secondary">{readableCode(item.reason)}</Text>
                           <Text type="secondary">
                             {t('leaderResearch.sourceSampleMeta', {
                               events: item.totalEvents,
@@ -1554,7 +2121,7 @@ const LeaderResearch: React.FC = () => {
                     <Space direction="vertical" size={0}>
                       <Text strong>{sample.wallet.slice(0, 12)}...</Text>
                       <Text type="secondary">
-                        {sample.totalEvents} events · {sample.distinctMarkets} markets · buy/sell {sample.buyEvents}/{sample.sellEvents}
+                        {sample.totalEvents} 条活动 · {sample.distinctMarkets} 个市场 · 买入 / 卖出 {sample.buyEvents}/{sample.sellEvents}
                       </Text>
                       <Text type="secondary">
                         {t('leaderResearch.sourceSampleThreshold', {
@@ -1676,11 +2243,13 @@ const LeaderResearch: React.FC = () => {
 
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={12}>
-          <Card title={t('leaderResearch.runStatus')}>
+          <Card id="leader-run-status" title="最近一次研究运行">
             {lastRun ? (
               <Descriptions size="small" column={1}>
                 <Descriptions.Item label={t('common.status')}>
-                  <Tag color={lastRun.partialFailure ? 'orange' : lastRun.status === 'SUCCESS' ? 'green' : 'default'}>{lastRun.status}</Tag>
+                  <Tag color={lastRun.partialFailure ? 'orange' : lastRun.status === 'SUCCESS' ? 'green' : 'default'}>
+                    {lastRun.partialFailure ? '部分成功' : RUN_STATUS_LABELS[lastRun.status] || lastRun.status}
+                  </Tag>
                 </Descriptions.Item>
                 <Descriptions.Item label={t('leaderResearch.lastRun')}>{formatDate(lastRun.startedAt)}</Descriptions.Item>
                 <Descriptions.Item label={t('leaderResearch.duration')}>{lastRun.durationMs ?? '-'} ms</Descriptions.Item>
@@ -1720,51 +2289,17 @@ const LeaderResearch: React.FC = () => {
         </Col>
       </Row>
 
-      <Card>
-        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-          <Space wrap>
-            <Select
-              allowClear
-              style={{ width: 220 }}
-              placeholder={t('leaderResearch.filterState')}
-              value={stateFilter}
-              onChange={setStateFilter}
-              options={Object.keys(STATE_COLORS).map(state => ({
-                value: state,
-                label: t(`leaderResearch.states.${state}`, { defaultValue: state })
-              }))}
-            />
-            <Input.Search
-              allowClear
-              style={{ width: 320 }}
-              placeholder={t('leaderResearch.searchPlaceholder')}
-              value={query}
-              onChange={event => setQuery(event.target.value)}
-              onSearch={() => loadAll()}
-            />
-          </Space>
-          <Table
-            rowKey="id"
-            loading={loading}
-            columns={columns}
-            dataSource={candidates.list}
-            scroll={{ x: 1300 }}
-            locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('leaderResearch.empty')} /> }}
-          />
-        </Space>
-      </Card>
-
-      <Card title={t('leaderResearch.sourceHealth')}>
+      <Card id="leader-source-health" title="数据来源健康">
         <Row gutter={[12, 12]}>
           {sourceHealth.map(source => (
             <Col xs={24} md={12} lg={6} key={source.sourceType}>
               <Card size="small">
                 <Space direction="vertical" size={4}>
-                  <Badge status={source.status === 'SUCCESS' ? 'success' : source.status === 'DISABLED' ? 'default' : 'warning'} text={source.sourceType} />
-                  <Tag>{source.status}</Tag>
+                  <Badge status={source.status === 'SUCCESS' ? 'success' : source.status === 'DISABLED' ? 'default' : 'warning'} text={sourceLabel(source.sourceType)} />
+                  <Tag>{SOURCE_STATUS_LABELS[source.status] || source.status}</Tag>
                   <Text type="secondary">{t('leaderResearch.candidates')}: {source.lastCandidateCount}</Text>
                   <Text type="secondary">{formatDate(source.lastRunAt)}</Text>
-                  {(source.disabledReason || source.errorMessage) && <Text type="secondary">{source.disabledReason || source.errorMessage}</Text>}
+                  {(source.disabledReason || source.errorMessage) && <Text type="secondary">{readableCode(source.disabledReason || source.errorMessage)}</Text>}
                 </Space>
               </Card>
             </Col>
@@ -1789,12 +2324,16 @@ const LeaderResearch: React.FC = () => {
                   <Space direction="vertical" style={{ width: '100%' }}>
                     <Descriptions bordered column={1} size="small">
                       <Descriptions.Item label={t('leaderResearch.wallet')}>{detail.candidate.normalizedWallet}</Descriptions.Item>
-                      <Descriptions.Item label={t('common.status')}>{detail.candidate.researchState}</Descriptions.Item>
+                      <Descriptions.Item label={t('common.status')}>{STATE_LABELS[detail.candidate.researchState]}</Descriptions.Item>
                       <Descriptions.Item label={t('leaderResearch.score')}>{detail.candidate.score || '-'}</Descriptions.Item>
                       <Descriptions.Item label={t('leaderResearch.strategyType')}>{strategyTypeTag(detail.candidate.strategyType)}</Descriptions.Item>
-                      <Descriptions.Item label={t('leaderResearch.reason')}>{detail.candidate.reason || '-'}</Descriptions.Item>
-                      <Descriptions.Item label={t('leaderResearch.riskFlags')}>{detail.candidate.riskFlags.join(', ') || '-'}</Descriptions.Item>
-                      <Descriptions.Item label={t('leaderResearch.sourceEvidence')}>{detail.candidate.sourceEvidence || '-'}</Descriptions.Item>
+                      <Descriptions.Item label={t('leaderResearch.reason')}>{readableCode(detail.candidate.reason) || '-'}</Descriptions.Item>
+                      <Descriptions.Item label={t('leaderResearch.riskFlags')}>
+                        {detail.candidate.riskFlags.length > 0
+                          ? detail.candidate.riskFlags.map(flag => <Tag color="orange" key={flag}>{readableCode(flag)}</Tag>)
+                          : '无'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label={t('leaderResearch.sourceEvidence')}>{readableCode(detail.candidate.sourceEvidence) || '-'}</Descriptions.Item>
                     </Descriptions>
                     {detail.latestScore && (
                       <Descriptions bordered size="small" column={2} title={t('leaderResearch.scoreBreakdown')}>
@@ -1829,8 +2368,8 @@ const LeaderResearch: React.FC = () => {
                     dataSource={detail.events}
                     columns={[
                       { title: t('common.time'), dataIndex: 'createdAt', render: formatDate },
-                      { title: t('leaderResearch.eventType'), dataIndex: 'eventType' },
-                      { title: t('leaderResearch.reason'), dataIndex: 'reason' }
+                      { title: t('leaderResearch.eventType'), dataIndex: 'eventType', render: readableCode },
+                      { title: t('leaderResearch.reason'), dataIndex: 'reason', render: readableCode }
                     ]}
                   />
                 )
@@ -2185,6 +2724,7 @@ const summaryFallback: LeaderResearchSummary = {
   candidateCount: 0,
   paperCount: 0,
   trialReadyCount: 0,
+  strictReadyCount: 0,
   cooldownCount: 0,
   retiredCount: 0,
   activePaperSessions: 0,

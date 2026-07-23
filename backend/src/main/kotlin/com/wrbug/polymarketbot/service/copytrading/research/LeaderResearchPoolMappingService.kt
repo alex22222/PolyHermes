@@ -55,10 +55,19 @@ class LeaderResearchPoolMappingService(
 
     private fun ensureLeader(candidate: LeaderResearchCandidate): Leader {
         val researchCategory = researchCategory(candidate)
-        candidate.leaderId?.let { id ->
-            leaderRepository.findById(id).orElse(null)?.let { return fillMissingCategory(it, researchCategory) }
+        if (!researchCategory.isNullOrBlank()) {
+            leaderRepository.findByLeaderAddressAndCategory(candidate.normalizedWallet, researchCategory)?.let { return it }
         }
-        leaderRepository.findByLeaderAddress(candidate.normalizedWallet)?.let { return fillMissingCategory(it, researchCategory) }
+        candidate.leaderId?.let { id ->
+            leaderRepository.findById(id).orElse(null)?.let { leader ->
+                if (researchCategory.isNullOrBlank() || leader.category.isNullOrBlank() || leader.category == researchCategory) {
+                    return fillMissingCategory(leader, researchCategory)
+                }
+            }
+        }
+        if (researchCategory.isNullOrBlank()) {
+            leaderRepository.findByLeaderAddress(candidate.normalizedWallet)?.let { return fillMissingCategory(it, researchCategory) }
+        }
         val now = System.currentTimeMillis()
         return leaderRepository.save(
             Leader(

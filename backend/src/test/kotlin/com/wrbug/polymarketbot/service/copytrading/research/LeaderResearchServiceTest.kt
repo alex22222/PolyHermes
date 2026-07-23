@@ -4,7 +4,6 @@ import com.wrbug.polymarketbot.dto.LeaderResearchFastWatchRequest
 import com.wrbug.polymarketbot.entity.Leader
 import com.wrbug.polymarketbot.entity.LeaderPaperSession
 import com.wrbug.polymarketbot.entity.LeaderResearchCandidate
-import com.wrbug.polymarketbot.entity.LeaderResearchScore
 import com.wrbug.polymarketbot.enums.LeaderResearchState
 import com.wrbug.polymarketbot.repository.LeaderPaperPositionRepository
 import com.wrbug.polymarketbot.repository.LeaderPaperSessionRepository
@@ -15,6 +14,8 @@ import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchEventRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchRunRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchScoreRepository
+import com.wrbug.polymarketbot.repository.LeaderResearchStableScoreProjection
+import com.wrbug.polymarketbot.repository.LeaderResearchStrategyCountProjection
 import com.wrbug.polymarketbot.repository.LeaderResearchSourceStateRepository
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -33,6 +34,7 @@ class LeaderResearchServiceTest {
     private val paperPositionRepository: LeaderPaperPositionRepository = mock()
     private val leaderRepository: LeaderRepository = mock()
     private val leaderPoolRepository: LeaderPoolRepository = mock()
+    private val loopDiagnosticsService: LeaderResearchLoopDiagnosticsService = mock()
     private val mapper: LeaderResearchMapper = mock()
     private val service = LeaderResearchService(
         candidateRepository = candidateRepository,
@@ -45,6 +47,7 @@ class LeaderResearchServiceTest {
         paperPositionRepository = paperPositionRepository,
         leaderRepository = leaderRepository,
         leaderPoolRepository = leaderPoolRepository,
+        loopDiagnosticsService = loopDiagnosticsService,
         mapper = mapper
     )
 
@@ -70,15 +73,6 @@ class LeaderResearchServiceTest {
             copyablePnl = BigDecimal("12.50"),
             maxDrawdown = BigDecimal.ZERO
         )
-        val stableScores = (1..3).map {
-            LeaderResearchScore(
-                candidateId = 42,
-                scoreVersion = LeaderResearchScoringService.SCORE_VERSION,
-                totalScore = BigDecimal("90"),
-                createdAt = System.currentTimeMillis() - it
-            )
-        }
-
         Mockito.`when`(candidateRepository.findByResearchStateIn(anyStates()))
             .thenReturn(listOf(candidate))
         Mockito.`when`(paperSessionRepository.findLatestByCandidateIds(listOf(42)))
@@ -94,8 +88,8 @@ class LeaderResearchServiceTest {
                     )
                 )
             )
-        Mockito.`when`(scoreRepository.findByCandidateIdOrderByCreatedAtDesc(42))
-            .thenReturn(stableScores)
+        Mockito.`when`(scoreRepository.countRecentHighScores(listOf(42), LeaderResearchScoringService.SCORE_VERSION, BigDecimal("80"), 3))
+            .thenReturn(listOf(stableScoreProjection(42, 3)))
 
         val cryptoResponse = service.fastWatch(
             LeaderResearchFastWatchRequest(categories = listOf("crypto"), limit = 10, includeTrialReady = true)
@@ -132,21 +126,12 @@ class LeaderResearchServiceTest {
             maxDrawdown = BigDecimal.ZERO,
             filteredRatio = BigDecimal.ZERO
         )
-        val stableScores = (1..3).map {
-            LeaderResearchScore(
-                candidateId = 43,
-                scoreVersion = LeaderResearchScoringService.SCORE_VERSION,
-                totalScore = BigDecimal("92"),
-                createdAt = System.currentTimeMillis() - it
-            )
-        }
-
         Mockito.`when`(candidateRepository.findByResearchStateIn(anyStates()))
             .thenReturn(listOf(candidate))
         Mockito.`when`(paperSessionRepository.findLatestByCandidateIds(listOf(43)))
             .thenReturn(listOf(session))
-        Mockito.`when`(scoreRepository.findByCandidateIdOrderByCreatedAtDesc(43))
-            .thenReturn(stableScores)
+        Mockito.`when`(scoreRepository.countRecentHighScores(listOf(43), LeaderResearchScoringService.SCORE_VERSION, BigDecimal("80"), 3))
+            .thenReturn(listOf(stableScoreProjection(43, 3)))
 
         val response = service.fastWatch(
             LeaderResearchFastWatchRequest(categories = listOf("finance"), limit = 10, includeTrialReady = true)
@@ -177,21 +162,12 @@ class LeaderResearchServiceTest {
             maxDrawdown = BigDecimal.ZERO,
             filteredRatio = BigDecimal.ZERO
         )
-        val stableScores = (1..3).map {
-            LeaderResearchScore(
-                candidateId = 44,
-                scoreVersion = LeaderResearchScoringService.SCORE_VERSION,
-                totalScore = BigDecimal("92"),
-                createdAt = System.currentTimeMillis() - it
-            )
-        }
-
         Mockito.`when`(candidateRepository.findByResearchStateIn(anyStates()))
             .thenReturn(listOf(candidate))
         Mockito.`when`(paperSessionRepository.findLatestByCandidateIds(listOf(44)))
             .thenReturn(listOf(session))
-        Mockito.`when`(scoreRepository.findByCandidateIdOrderByCreatedAtDesc(44))
-            .thenReturn(stableScores)
+        Mockito.`when`(scoreRepository.countRecentHighScores(listOf(44), LeaderResearchScoringService.SCORE_VERSION, BigDecimal("80"), 3))
+            .thenReturn(listOf(stableScoreProjection(44, 3)))
 
         val response = service.fastWatch(
             LeaderResearchFastWatchRequest(categories = listOf("finance"), limit = 10, includeTrialReady = true)
@@ -203,35 +179,28 @@ class LeaderResearchServiceTest {
 
     @Test
     fun `summary includes active strategy type distribution and non copyable blockers`() {
-        val activeCandidates = listOf(
-            LeaderResearchCandidate(
-                id = 1,
-                normalizedWallet = "0x1111111111111111111111111111111111111111",
-                researchState = LeaderResearchState.PAPER,
-                strategyType = LeaderResearchStrategyTypeClassifier.HUMAN_DIRECTIONAL
-            ),
-            LeaderResearchCandidate(
-                id = 2,
-                normalizedWallet = "0x2222222222222222222222222222222222222222",
-                researchState = LeaderResearchState.PAPER,
-                strategyType = LeaderResearchStrategyTypeClassifier.LOW_PRICE_TAIL_RISK
-            ),
-            LeaderResearchCandidate(
-                id = 3,
-                normalizedWallet = "0x3333333333333333333333333333333333333333",
-                researchState = LeaderResearchState.TRIAL_READY,
-                strategyType = null
-            )
+        val activeStrategyCounts = listOf(
+            strategyCountProjection(LeaderResearchStrategyTypeClassifier.HUMAN_DIRECTIONAL, 1),
+            strategyCountProjection(LeaderResearchStrategyTypeClassifier.LOW_PRICE_TAIL_RISK, 1),
+            strategyCountProjection(null, 1)
         )
-        Mockito.`when`(candidateRepository.findByResearchStateIn(listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)))
-            .thenReturn(activeCandidates)
-        Mockito.`when`(candidateRepository.findByResearchStateIn(listOf(LeaderResearchState.COOLDOWN)))
-            .thenReturn(emptyList())
+        Mockito.`when`(candidateRepository.countStrategyTypesByResearchStateIn(listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)))
+            .thenReturn(activeStrategyCounts)
+        Mockito.`when`(candidateRepository.countByResearchState(LeaderResearchState.COOLDOWN))
+            .thenReturn(7)
+        Mockito.`when`(loopDiagnosticsService.strictReadyCount()).thenReturn(2)
         Mockito.`when`(mapper.sourceLimitations()).thenReturn(emptyList())
 
         val summary = service.summary()
 
         assertEquals(3, summary.activePaperSessions)
+        assertEquals(2, summary.strictReadyCount)
+        assertEquals(7, summary.pendingRiskCount)
+        Mockito.verify(loopDiagnosticsService).strictReadyCount()
+        Mockito.verifyNoMoreInteractions(loopDiagnosticsService)
+        Mockito.verify(candidateRepository).countByResearchState(LeaderResearchState.COOLDOWN)
+        Mockito.verify(candidateRepository, Mockito.never())
+            .findByResearchStateIn(listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY))
         assertEquals(
             mapOf(
                 LeaderResearchStrategyTypeClassifier.HUMAN_DIRECTIONAL to 1L,
@@ -249,6 +218,20 @@ class LeaderResearchServiceTest {
     private fun anyStates(): Collection<LeaderResearchState> {
         Mockito.anyCollection<LeaderResearchState>()
         return emptyList()
+    }
+
+    private fun stableScoreProjection(candidateId: Long, count: Long): LeaderResearchStableScoreProjection {
+        return object : LeaderResearchStableScoreProjection {
+            override fun getCandidateId() = candidateId
+            override fun getStableHighScoreCount() = count
+        }
+    }
+
+    private fun strategyCountProjection(strategyType: String?, count: Long): LeaderResearchStrategyCountProjection {
+        return object : LeaderResearchStrategyCountProjection {
+            override fun getStrategyType() = strategyType
+            override fun getTotal() = count
+        }
     }
 
     @Suppress("UNCHECKED_CAST")

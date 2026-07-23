@@ -145,12 +145,10 @@ class LeaderResearchOfficialLeaderboardImportService(
             .ifEmpty { PRIMARY_CATEGORIES.toList() }
         val timePeriods = request.timePeriods.map { normalizeApiToken(it, "MONTH") }.distinct()
         val orderBys = request.orderBys.map { normalizeApiToken(it, "PNL") }.distinct()
-        val limitPerPage = request.limitPerPage.coerceIn(1, 50)
-        val maxPagesPerQuery = request.maxPagesPerQuery.coerceIn(1, 20)
         val maxItems = request.maxItems.coerceIn(1, 1000)
 
         val fetches = mutableListOf<LeaderResearchOfficialLeaderboardFetchDto>()
-        val items = mutableListOf<LeaderResearchExternalAnalyticsImportItemDto>()
+        val observations = mutableListOf<OfficialLeaderboardObservation>()
         var fetchedTotal = 0
 
         categories.forEach { category ->
@@ -158,41 +156,38 @@ class LeaderResearchOfficialLeaderboardImportService(
                 orderBys.forEach { orderBy ->
                     var fetched = 0
                     var error: String? = null
-                    for (page in 0 until maxPagesPerQuery) {
-                        val offset = page * limitPerPage
+                    targetWallets.forEach { wallet ->
                         val result = runCatching {
-                            client.fetch(
+                            client.fetchForWallet(
                                 category = category.uppercase(),
                                 timePeriod = timePeriod,
                                 orderBy = orderBy,
-                                limit = limitPerPage,
-                                offset = offset
+                                wallet = wallet
                             )
                         }
                         val entries = result.getOrElse {
-                            error = it.message?.take(180) ?: it::class.simpleName
+                            error = error ?: it.message?.take(180) ?: it::class.simpleName
                             emptyList()
                         }
                         fetched += entries.size
                         fetchedTotal += entries.size
                         entries.forEachIndexed { index, entry ->
-                            if (entry.wallet.lowercase() in targetWallets && items.size < maxItems) {
-                                items += entry.toImportItem(
+                            if (entry.wallet.lowercase() == wallet) {
+                                observations += OfficialLeaderboardObservation(
+                                    entry = entry,
                                     category = category,
-                                    sourceName = SOURCE_NAME,
-                                    rankFallback = offset + index + 1,
                                     timePeriod = timePeriod,
-                                    orderBy = orderBy
+                                    orderBy = orderBy,
+                                    rankFallback = index + 1
                                 )
                             }
                         }
-                        if (entries.size < limitPerPage || error != null) break
                     }
                     fetches += LeaderResearchOfficialLeaderboardFetchDto(
                         category = category,
                         timePeriod = timePeriod,
                         orderBy = orderBy,
-                        requestedPages = maxPagesPerQuery,
+                        requestedPages = targetWallets.size,
                         fetchedItems = fetched,
                         error = error
                     )
@@ -200,9 +195,12 @@ class LeaderResearchOfficialLeaderboardImportService(
             }
         }
 
-        val dedupedItems = items
-            .distinctBy { it.wallet.lowercase() }
-            .take(maxItems)
+        val dedupedItems = selectQualifiedImportItems(
+            observations = observations,
+            requiredTimePeriods = timePeriods,
+            orderBys = orderBys,
+            maxItems = maxItems
+        )
 
         val importResult = externalAnalyticsImportService.importFromExternalAnalytics(
             LeaderResearchExternalAnalyticsImportRequest(
@@ -338,11 +336,9 @@ class LeaderResearchOfficialLeaderboardImportService(
                 else -> observation.timePeriod.lowercase()
             }
             listOfNotNull(
-                observation.timePeriod,
+                "period:${observation.timePeriod}",
                 observation.entry.pnl?.let { "profit_window:$window:${it.toPlainString()}" },
-                "rank:${observation.rank}",
-                observation.entry.pnl?.let { "pnl:${it.toPlainString()}" },
-                observation.entry.volume?.let { "vol:${it.toPlainString()}" }
+                "rank:${observation.rank}"
             ).joinToString(" ")
         }
         return "official leaderboard positive across periods | $details".take(240)
@@ -374,6 +370,11 @@ class LeaderResearchOfficialLeaderboardImportService(
 
 interface LeaderResearchOfficialLeaderboardClient {
     fun fetch(category: String, timePeriod: String, orderBy: String, limit: Int, offset: Int): List<OfficialLeaderboardEntry>
+
+    fun fetchForWallet(category: String, timePeriod: String, orderBy: String, wallet: String): List<OfficialLeaderboardEntry> {
+        return fetch(category, timePeriod, orderBy, limit = 50, offset = 0)
+            .filter { it.wallet.equals(wallet, ignoreCase = true) }
+    }
 }
 
 data class OfficialLeaderboardEntry(
@@ -395,12 +396,29 @@ class PolymarketOfficialLeaderboardClient(
         .build()
 
     override fun fetch(category: String, timePeriod: String, orderBy: String, limit: Int, offset: Int): List<OfficialLeaderboardEntry> {
+        return fetch(category, timePeriod, orderBy, limit, offset, null)
+    }
+
+    override fun fetchForWallet(category: String, timePeriod: String, orderBy: String, wallet: String): List<OfficialLeaderboardEntry> {
+        return fetch(category, timePeriod, orderBy, limit = 1, offset = 0, user = wallet)
+            .filter { it.wallet.equals(wallet, ignoreCase = true) }
+    }
+
+    private fun fetch(
+        category: String,
+        timePeriod: String,
+        orderBy: String,
+        limit: Int,
+        offset: Int,
+        user: String?
+    ): List<OfficialLeaderboardEntry> {
         val url = BASE_URL.toHttpUrl().newBuilder()
             .addQueryParameter("category", category)
             .addQueryParameter("timePeriod", timePeriod)
             .addQueryParameter("orderBy", orderBy)
             .addQueryParameter("limit", limit.toString())
             .addQueryParameter("offset", offset.toString())
+            .apply { user?.let { addQueryParameter("user", it) } }
             .build()
         val request = Request.Builder()
             .url(url)

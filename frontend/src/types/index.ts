@@ -520,6 +520,7 @@ export interface LeaderResearchSummary {
   candidateCount: number
   paperCount: number
   trialReadyCount: number
+  strictReadyCount: number
   cooldownCount: number
   retiredCount: number
   activePaperSessions: number
@@ -664,6 +665,40 @@ export interface LeaderResearchPaperScoreResponse {
   effectiveCandidateCount: number
   maxCandidates?: number
   truncated: boolean
+}
+
+export interface LeaderResearchTrialReadyRecheckRequest {
+  dryRun?: boolean
+  candidateIds?: number[]
+  maxCandidates?: number
+}
+
+export interface LeaderResearchTrialReadyRecheckItem {
+  candidateId: number
+  wallet: string
+  beforeState: string
+  afterState: string
+  score: string
+  tradeCount: number
+  filteredCount: number
+  copyablePnl: string
+  filteredRatio: string
+  ageHours: number
+  hoursUntilTrialReady: number
+  eligible: boolean
+  action: string
+  reason: string
+}
+
+export interface LeaderResearchTrialReadyRecheckResponse {
+  dryRun: boolean
+  scannedCount: number
+  selectedCount: number
+  scoredCount: number
+  advancedCount: number
+  trialReadyCandidateIds: number[]
+  items: LeaderResearchTrialReadyRecheckItem[]
+  generatedAt: number
 }
 
 export interface LeaderResearchPoliticsSourceDiagnoseRequest {

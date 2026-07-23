@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito
+import java.util.Properties
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -34,6 +35,20 @@ class LeaderResearchJobServiceTest {
     private val eventService: LeaderResearchEventService = mock()
     private val politicsRecommendationExecutionService: LeaderResearchPoliticsRecommendationExecutionService = mock()
     private val loopGoalControlService: LoopGoalControlService = mock()
+
+    @Test
+    fun `recommendation dry run is disabled by default`() {
+        val properties = Properties().apply {
+            LeaderResearchJobServiceTest::class.java.classLoader
+                .getResourceAsStream("application.properties")
+                .use { load(it) }
+        }
+
+        assertEquals(
+            "\${LEADER_RESEARCH_RECOMMENDATION_DRY_RUN_ENABLED:false}",
+            properties.getProperty("leader.research.recommendation-dry-run.enabled")
+        )
+    }
 
     @Test
     fun `successful run writes run record counts cursor and processing phases`() {

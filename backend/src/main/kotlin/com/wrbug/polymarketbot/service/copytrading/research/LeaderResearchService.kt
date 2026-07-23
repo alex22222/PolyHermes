@@ -26,6 +26,7 @@ import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchEventRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchRunRepository
 import com.wrbug.polymarketbot.repository.LeaderResearchScoreRepository
+import com.wrbug.polymarketbot.repository.LeaderResearchStrategyCountProjection
 import com.wrbug.polymarketbot.repository.LeaderResearchSourceStateRepository
 import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
@@ -44,6 +45,7 @@ class LeaderResearchService(
     private val paperPositionRepository: LeaderPaperPositionRepository,
     private val leaderRepository: LeaderRepository,
     private val leaderPoolRepository: LeaderPoolRepository,
+    private val loopDiagnosticsService: LeaderResearchLoopDiagnosticsService,
     private val mapper: LeaderResearchMapper
 ) {
     fun findCandidatesForStates(states: Collection<LeaderResearchState>): List<LeaderResearchCandidate> {
@@ -75,42 +77,45 @@ class LeaderResearchService(
     }
 
     fun summary(): LeaderResearchSummaryDto {
-        val activeCandidates = candidateRepository.findByResearchStateIn(
+        val activeStrategyCounts = candidateRepository.countStrategyTypesByResearchStateIn(
             listOf(LeaderResearchState.PAPER, LeaderResearchState.TRIAL_READY)
         )
+        val cooldownCount = candidateRepository.countByResearchState(LeaderResearchState.COOLDOWN)
+        val strictReadyCount = loopDiagnosticsService.strictReadyCount()
         return LeaderResearchSummaryDto(
             discoveredCount = candidateRepository.countByResearchState(LeaderResearchState.DISCOVERED),
             candidateCount = candidateRepository.countByResearchState(LeaderResearchState.CANDIDATE),
             paperCount = candidateRepository.countByResearchState(LeaderResearchState.PAPER),
             trialReadyCount = candidateRepository.countByResearchState(LeaderResearchState.TRIAL_READY),
-            cooldownCount = candidateRepository.countByResearchState(LeaderResearchState.COOLDOWN),
+            strictReadyCount = strictReadyCount,
+            cooldownCount = cooldownCount,
             retiredCount = candidateRepository.countByResearchState(LeaderResearchState.RETIRED),
-            activePaperSessions = activeCandidates.count().toLong(),
-            pendingRiskCount = candidateRepository.findByResearchStateIn(listOf(LeaderResearchState.COOLDOWN)).count().toLong(),
-            strategyTypeCounts = activeCandidates.strategyTypeCounts(),
-            nonCopyableStrategyBlockers = activeCandidates.nonCopyableStrategyBlockers(),
+            activePaperSessions = activeStrategyCounts.sumOf { it.getTotal() },
+            pendingRiskCount = cooldownCount,
+            strategyTypeCounts = activeStrategyCounts.strategyTypeCounts(),
+            nonCopyableStrategyBlockers = activeStrategyCounts.nonCopyableStrategyBlockers(),
             lastRun = runRepository.findTopByOrderByStartedAtDesc()?.let { mapper.runDto(it) },
             sourceLimitations = mapper.sourceLimitations()
         )
     }
 
-    private fun List<LeaderResearchCandidate>.strategyTypeCounts(): List<com.wrbug.polymarketbot.dto.LeaderResearchCountDto> {
-        return groupingBy { it.strategyType?.takeIf { value -> value.isNotBlank() } ?: LeaderResearchStrategyTypeClassifier.UNKNOWN }
-            .eachCount()
+    private fun List<LeaderResearchStrategyCountProjection>.strategyTypeCounts(): List<com.wrbug.polymarketbot.dto.LeaderResearchCountDto> {
+        return groupBy { it.getStrategyType()?.takeIf { value -> value.isNotBlank() } ?: LeaderResearchStrategyTypeClassifier.UNKNOWN }
+            .mapValues { (_, counts) -> counts.sumOf { it.getTotal() } }
             .entries
-            .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
-            .map { com.wrbug.polymarketbot.dto.LeaderResearchCountDto(it.key, it.value.toLong()) }
+            .sortedWith(compareByDescending<Map.Entry<String, Long>> { it.value }.thenBy { it.key })
+            .map { com.wrbug.polymarketbot.dto.LeaderResearchCountDto(it.key, it.value) }
     }
 
-    private fun List<LeaderResearchCandidate>.nonCopyableStrategyBlockers(): List<com.wrbug.polymarketbot.dto.LeaderResearchCountDto> {
-        return flatMap { candidate ->
-            LeaderResearchStrategyTypeClassifier.trialReadyBlockerCode(candidate.strategyType)?.let { listOf(it) } ?: emptyList()
+    private fun List<LeaderResearchStrategyCountProjection>.nonCopyableStrategyBlockers(): List<com.wrbug.polymarketbot.dto.LeaderResearchCountDto> {
+        return mapNotNull { count ->
+            LeaderResearchStrategyTypeClassifier.trialReadyBlockerCode(count.getStrategyType())?.let { it to count.getTotal() }
         }
-            .groupingBy { it }
-            .eachCount()
+            .groupBy({ it.first }, { it.second })
+            .mapValues { (_, counts) -> counts.sum() }
             .entries
-            .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
-            .map { com.wrbug.polymarketbot.dto.LeaderResearchCountDto(it.key, it.value.toLong()) }
+            .sortedWith(compareByDescending<Map.Entry<String, Long>> { it.value }.thenBy { it.key })
+            .map { com.wrbug.polymarketbot.dto.LeaderResearchCountDto(it.key, it.value) }
     }
 
     fun funnel(): LeaderResearchFunnelResponse {
@@ -264,6 +269,7 @@ class LeaderResearchService(
     private fun buildTrialReadiness(
         candidate: LeaderResearchCandidate,
         session: com.wrbug.polymarketbot.entity.LeaderPaperSession,
+        stableHighScoreCount: Int = latestStableHighScoreCount(candidate),
         now: Long = System.currentTimeMillis()
     ): LeaderResearchTrialReadinessDto {
         val blockers = mutableListOf<String>()
@@ -279,8 +285,6 @@ class LeaderResearchService(
         } else {
             BigDecimal.ZERO
         }
-        val stableHighScoreCount = latestStableHighScoreCount(candidate)
-
         if (score < TRIAL_READY_MIN_SCORE) blockers += "研究评分低于 80"
         LeaderResearchStrategyTypeClassifier.trialReadyBlocker(candidate.strategyType)?.let { blockers += it }
         if (!candidate.riskFlags.isNullOrBlank()) blockers += "风险标记未清空：${candidate.riskFlags}"
@@ -379,6 +383,17 @@ class LeaderResearchService(
             .count { it.totalScore >= TRIAL_READY_MIN_SCORE }
     }
 
+    private fun stableHighScoreCounts(candidates: List<LeaderResearchCandidate>): Map<Long, Int> {
+        val candidateIds = candidates.mapNotNull { it.id }
+        if (candidateIds.isEmpty()) return emptyMap()
+        return scoreRepository.countRecentHighScores(
+            candidateIds = candidateIds,
+            scoreVersion = LeaderResearchScoringService.SCORE_VERSION,
+            minScore = TRIAL_READY_MIN_SCORE,
+            windowSize = TRIAL_READY_STABLE_SCORE_WINDOW
+        ).associate { it.getCandidateId() to it.getStableHighScoreCount().toInt() }
+    }
+
     fun listCandidates(request: LeaderResearchCandidateListRequest): LeaderResearchCandidateListResponse {
         val pageable = PageRequest.of(request.page.coerceAtLeast(0), request.size.coerceIn(1, 100))
         val state = request.state?.trim()?.takeIf { it.isNotBlank() }?.let { LeaderResearchState.valueOf(it.uppercase()) }
@@ -408,12 +423,17 @@ class LeaderResearchService(
             ?.let { paperSessionRepository.findLatestByCandidateIds(it).associateBy { session -> session.candidateId } }
             .orEmpty()
         val leaderCategoriesById = leaderCategoriesById(candidates)
+        val stableHighScoresByCandidateId = stableHighScoreCounts(candidates)
         val allItems = candidates.mapNotNull { candidate ->
             val candidateId = candidate.id ?: return@mapNotNull null
             val category = categoryOf(candidate, leaderCategoriesById)
             if (category !in categories) return@mapNotNull null
             val session = latestSessionsByCandidateId[candidateId] ?: return@mapNotNull null
-            val readiness = buildTrialReadiness(candidate, session)
+            val readiness = buildTrialReadiness(
+                candidate,
+                session,
+                stableHighScoresByCandidateId[candidateId] ?: 0
+            )
             val shouldInclude = readiness.level == "FAST_WATCH" ||
                 (request.includeTrialReady && readiness.level == "TRIAL_READY")
             if (!shouldInclude) return@mapNotNull null

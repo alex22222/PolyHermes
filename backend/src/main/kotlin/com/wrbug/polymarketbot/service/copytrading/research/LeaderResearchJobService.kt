@@ -35,7 +35,7 @@ class LeaderResearchJobService(
     private val politicsRecommendationExecutionService: LeaderResearchPoliticsRecommendationExecutionService,
     private val loopGoalControlService: LoopGoalControlService,
     @Value("\${leader.research.enabled:false}") private val scheduledEnabled: Boolean,
-    @Value("\${leader.research.recommendation-dry-run.enabled:true}") private val recommendationDryRunEnabled: Boolean,
+    @Value("\${leader.research.recommendation-dry-run.enabled:false}") private val recommendationDryRunEnabled: Boolean,
     @Value("\${leader.research.recommendation-dry-run.startup-delay-ms:30000}") private val recommendationDryRunStartupDelayMs: Long,
     @Value("\${leader.research.running-timeout-ms:21600000}") private val runningTimeoutMs: Long
 ) {
@@ -62,7 +62,7 @@ class LeaderResearchJobService(
 
     @EventListener(ApplicationReadyEvent::class)
     fun scheduleStartupRecommendationDryRun() {
-        if (recommendationDryRunStartupDelayMs < 0) return
+        if (!recommendationDryRunEnabled || recommendationDryRunStartupDelayMs < 0) return
         Thread {
             if (recommendationDryRunStartupDelayMs > 0) {
                 Thread.sleep(recommendationDryRunStartupDelayMs)

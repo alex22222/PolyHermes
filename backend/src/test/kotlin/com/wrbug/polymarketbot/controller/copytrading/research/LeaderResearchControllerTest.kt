@@ -5,6 +5,10 @@ import com.wrbug.polymarketbot.dto.LeaderResearchApprovalPreviewRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchApprovalPreviewResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchActivityHistoryBackfillRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchActivityHistoryBackfillResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchCooldownRecheckRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchCooldownRecheckResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchMarketPeerSourceImportRequest
@@ -46,9 +50,11 @@ import com.wrbug.polymarketbot.service.copytrading.research.LeaderPaperProcessin
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalConfirmRequiredException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityScoringService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityHistoryBackfillService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivitySourceImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateLockedException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateNotCopyableException
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCooldownRecheckService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchExternalAnalyticsImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchFalconLeaderboardImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchJobService
@@ -78,6 +84,7 @@ class LeaderResearchControllerTest {
     private val researchService: LeaderResearchService = mock()
     private val scannerPoolImportService: LeaderResearchScannerPoolImportService = mock()
     private val activityScoringService: LeaderResearchActivityScoringService = mock()
+    private val activityHistoryBackfillService: LeaderResearchActivityHistoryBackfillService = mock()
     private val activitySourceImportService: LeaderResearchActivitySourceImportService = mock()
     private val marketPeerSourceImportService: LeaderResearchMarketPeerSourceImportService = mock()
     private val loopDiagnosticsService: LeaderResearchLoopDiagnosticsService = mock()
@@ -92,6 +99,7 @@ class LeaderResearchControllerTest {
     private val paperTradingService: LeaderPaperTradingService = mock()
     private val paperPromotionService: LeaderResearchPaperPromotionService = mock()
     private val trialReadyRecheckService: LeaderResearchTrialReadyRecheckService = mock()
+    private val cooldownRecheckService: LeaderResearchCooldownRecheckService = mock()
     private val scoringService: LeaderResearchScoringService = mock()
     private val approvalService: LeaderResearchApprovalService = mock()
     private val mapper: LeaderResearchMapper = mock()
@@ -100,6 +108,7 @@ class LeaderResearchControllerTest {
         researchService = researchService,
         scannerPoolImportService = scannerPoolImportService,
         activityScoringService = activityScoringService,
+        activityHistoryBackfillService = activityHistoryBackfillService,
         activitySourceImportService = activitySourceImportService,
         marketPeerSourceImportService = marketPeerSourceImportService,
         loopDiagnosticsService = loopDiagnosticsService,
@@ -114,6 +123,7 @@ class LeaderResearchControllerTest {
         paperTradingService = paperTradingService,
         paperPromotionService = paperPromotionService,
         trialReadyRecheckService = trialReadyRecheckService,
+        cooldownRecheckService = cooldownRecheckService,
         scoringService = scoringService,
         approvalService = approvalService,
         mapper = mapper,
@@ -360,6 +370,33 @@ class LeaderResearchControllerTest {
     }
 
     @Test
+    fun `activity history backfill delegates to service`() {
+        val request = LeaderResearchActivityHistoryBackfillRequest(
+            dryRun = true,
+            candidateIds = listOf(2722L),
+            lookbackDays = 7
+        )
+        val result = LeaderResearchActivityHistoryBackfillResponse(
+            dryRun = true,
+            requestedWallets = listOf("0xd426adbc3c4461c86099c26221c877f20e42334a"),
+            fetchedTotal = 12,
+            tradeTotal = 12,
+            ingestedTotal = 0,
+            newEventTotal = 8,
+            duplicateTotal = 4,
+            wallets = emptyList(),
+            generatedAt = 123L
+        )
+        Mockito.`when`(activityHistoryBackfillService.backfill(request)).thenReturn(result)
+
+        val response = controller.backfillActivityHistory(request)
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(8, response.body!!.data!!.newEventTotal)
+        Mockito.verify(activityHistoryBackfillService).backfill(request)
+    }
+
+    @Test
     fun `paper fast watch delegates to research service`() {
         val request = LeaderResearchFastWatchRequest(categories = listOf("finance"), limit = 5)
         val result = LeaderResearchFastWatchResponse(
@@ -402,6 +439,35 @@ class LeaderResearchControllerTest {
         assertEquals(1, response.body!!.data!!.fastWatchCount)
         assertEquals("FAST_WATCH", response.body!!.data!!.items.first().trialReadiness.level)
         Mockito.verify(researchService).fastWatch(request)
+    }
+
+    @Test
+    fun `cooldown recheck delegates to cooldown recheck service`() {
+        val request = LeaderResearchCooldownRecheckRequest(
+            dryRun = true,
+            candidateIds = listOf(2846L, 9404L),
+            maxCandidates = 10
+        )
+        val result = LeaderResearchCooldownRecheckResponse(
+            dryRun = true,
+            requestedCandidateIds = listOf(2846L, 9404L),
+            scannedCount = 2,
+            selectedCount = 2,
+            advancedCount = 0,
+            recoveredCandidateIds = listOf(2846L, 9404L),
+            retiredCandidateIds = emptyList(),
+            missingCandidateIds = emptyList(),
+            items = emptyList(),
+            generatedAt = 123L
+        )
+        Mockito.`when`(cooldownRecheckService.recheck(request)).thenReturn(result)
+
+        val response = controller.recheckCooldown(request)
+
+        assertEquals(0, response.body!!.code)
+        assertEquals(2, response.body!!.data!!.selectedCount)
+        assertEquals(listOf(2846L, 9404L), response.body!!.data!!.recoveredCandidateIds)
+        Mockito.verify(cooldownRecheckService).recheck(request)
     }
 
     @Test

@@ -12,7 +12,16 @@ object LeaderResearchCategoryEvidenceClassifier {
     private val categoryRegex = Regex("category[:=]([a-z_-]+)")
 
     fun classify(sourceEvidence: String?, fallback: String? = null): LeaderResearchCategoryEvidence {
-        val normalizedEvidence = sourceEvidence.orEmpty().lowercase()
+        val evidenceLines = sourceEvidence.orEmpty()
+            .lowercase()
+            .lineSequence()
+            .toList()
+        // Official leaderboard category is durable evidence; discovery-source defaults must not dilute it.
+        val normalizedEvidence = evidenceLines
+            .filter { OFFICIAL_LEADERBOARD_TOKEN in it }
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString("\n")
+            ?: evidenceLines.joinToString("\n")
         val counts = categoryRegex.findAll(normalizedEvidence)
             .mapNotNull { match -> normalize(match.groupValues.getOrNull(1)) }
             .groupingBy { it }
@@ -53,4 +62,5 @@ object LeaderResearchCategoryEvidenceClassifier {
     }
 
     private const val MIXED_DOMINANCE_THRESHOLD = 0.80
+    private const val OFFICIAL_LEADERBOARD_TOKEN = "polymarket_official_leaderboard"
 }

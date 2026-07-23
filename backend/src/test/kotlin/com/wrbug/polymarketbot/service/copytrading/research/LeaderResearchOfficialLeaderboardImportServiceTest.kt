@@ -121,6 +121,47 @@ class LeaderResearchOfficialLeaderboardImportServiceTest {
     }
 
     @Test
+    fun `keeps every requested profit window in compact official evidence`() {
+        val wallet = "0x8888888888888888888888888888888888888888"
+        val pnl = BigDecimal("1234567890.123456789")
+        val volume = BigDecimal("9876543210.987654321")
+        listOf("ALL", "MONTH", "WEEK").forEachIndexed { index, period ->
+            client.responses["POLITICS-$period-PNL-0"] = listOf(
+                OfficialLeaderboardEntry(
+                    wallet = wallet,
+                    rank = index + 1,
+                    name = "consistent",
+                    pnl = pnl,
+                    volume = volume
+                )
+            )
+        }
+        var capturedRequest: LeaderResearchExternalAnalyticsImportRequest? = null
+        Mockito.doAnswer {
+            capturedRequest = it.arguments[0] as LeaderResearchExternalAnalyticsImportRequest
+            importResponse(requested = capturedRequest!!.items.size)
+        }.`when`(externalAnalyticsImportService).importFromExternalAnalytics(anyImportRequest())
+
+        service.importFromOfficialLeaderboard(
+            LeaderResearchOfficialLeaderboardImportRequest(
+                dryRun = true,
+                categories = listOf("politics"),
+                timePeriods = listOf("ALL", "MONTH", "WEEK"),
+                orderBys = listOf("PNL"),
+                limitPerPage = 50,
+                maxPagesPerQuery = 1,
+                maxItems = 10
+            )
+        )
+
+        val note = capturedRequest!!.items.single().note!!
+        assertTrue(note.contains("profit_window:all:$pnl"))
+        assertTrue(note.contains("profit_window:30d:$pnl"))
+        assertTrue(note.contains("profit_window:7d:$pnl"))
+        assertTrue(note.length <= 240)
+    }
+
+    @Test
     fun `records fetch errors instead of silently returning empty success`() {
         client.failKeys += "POLITICS-MONTH-PNL-0"
         Mockito.`when`(externalAnalyticsImportService.importFromExternalAnalytics(anyImportRequest()))
@@ -167,11 +208,80 @@ class LeaderResearchOfficialLeaderboardImportServiceTest {
             )
         )
 
-        assertEquals(2, response.fetchedTotal)
+        assertEquals(1, response.fetchedTotal)
         assertEquals(1, response.matchedTotal)
         assertEquals(listOf(targetWallet), response.requestedWallets)
         assertEquals(listOf(targetWallet), capturedRequest!!.items.map { it.wallet })
         assertEquals("finance", capturedRequest!!.items.single().category)
+    }
+
+    @Test
+    fun `refresh queries the official leaderboard directly for each wallet`() {
+        val targetWallet = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        client.walletResponses["$targetWallet-FINANCE-ALL-PNL"] = listOf(
+            OfficialLeaderboardEntry(wallet = targetWallet, rank = 1234, name = "off-page", pnl = BigDecimal("100"), volume = BigDecimal("1000"))
+        )
+        var capturedRequest: LeaderResearchExternalAnalyticsImportRequest? = null
+        Mockito.doAnswer {
+            capturedRequest = it.arguments[0] as LeaderResearchExternalAnalyticsImportRequest
+            importResponse(requested = capturedRequest!!.items.size)
+        }.`when`(externalAnalyticsImportService).importFromExternalAnalytics(anyImportRequest())
+
+        val response = service.refreshCandidatesFromOfficialLeaderboard(
+            LeaderResearchOfficialLeaderboardRefreshRequest(
+                dryRun = true,
+                wallets = listOf(targetWallet),
+                categories = listOf("finance"),
+                timePeriods = listOf("ALL"),
+                orderBys = listOf("PNL")
+            )
+        )
+
+        assertEquals(1, response.fetchedTotal)
+        assertEquals(1, response.matchedTotal)
+        assertEquals(listOf("$targetWallet-FINANCE-ALL-PNL"), client.walletRequests)
+        assertEquals(listOf(targetWallet), capturedRequest!!.items.map { it.wallet })
+    }
+
+    @Test
+    fun `refresh retains every requested profit window for matched wallet`() {
+        val targetWallet = "0x9999999999999999999999999999999999999999"
+        val pnl = BigDecimal("1234567890.123456789")
+        val volume = BigDecimal("9876543210.987654321")
+        listOf("ALL", "MONTH", "WEEK").forEachIndexed { index, period ->
+            client.responses["FINANCE-$period-PNL-0"] = listOf(
+                OfficialLeaderboardEntry(
+                    wallet = targetWallet,
+                    rank = index + 1,
+                    name = "target",
+                    pnl = pnl,
+                    volume = volume
+                )
+            )
+        }
+        var capturedRequest: LeaderResearchExternalAnalyticsImportRequest? = null
+        Mockito.doAnswer {
+            capturedRequest = it.arguments[0] as LeaderResearchExternalAnalyticsImportRequest
+            importResponse(requested = capturedRequest!!.items.size)
+        }.`when`(externalAnalyticsImportService).importFromExternalAnalytics(anyImportRequest())
+
+        val response = service.refreshCandidatesFromOfficialLeaderboard(
+            LeaderResearchOfficialLeaderboardRefreshRequest(
+                dryRun = true,
+                wallets = listOf(targetWallet),
+                categories = listOf("finance"),
+                timePeriods = listOf("ALL", "MONTH", "WEEK"),
+                orderBys = listOf("PNL"),
+                limitPerPage = 50,
+                maxPagesPerQuery = 1
+            )
+        )
+
+        assertEquals(1, response.matchedTotal)
+        val note = capturedRequest!!.items.single().note!!
+        assertTrue(note.contains("profit_window:all:$pnl"))
+        assertTrue(note.contains("profit_window:30d:$pnl"))
+        assertTrue(note.contains("profit_window:7d:$pnl"))
     }
 
     @Test
@@ -226,12 +336,21 @@ class LeaderResearchOfficialLeaderboardImportServiceTest {
 
     private class FakeOfficialLeaderboardClient : LeaderResearchOfficialLeaderboardClient {
         val responses = mutableMapOf<String, List<OfficialLeaderboardEntry>>()
+        val walletResponses = mutableMapOf<String, List<OfficialLeaderboardEntry>>()
+        val walletRequests = mutableListOf<String>()
         val failKeys = mutableSetOf<String>()
 
         override fun fetch(category: String, timePeriod: String, orderBy: String, limit: Int, offset: Int): List<OfficialLeaderboardEntry> {
             val key = "$category-$timePeriod-$orderBy-$offset"
             if (key in failKeys) error("boom for $key")
             return responses[key].orEmpty()
+        }
+
+        override fun fetchForWallet(category: String, timePeriod: String, orderBy: String, wallet: String): List<OfficialLeaderboardEntry> {
+            val key = "$wallet-$category-$timePeriod-$orderBy"
+            walletRequests += key
+            return walletResponses[key] ?: fetch(category, timePeriod, orderBy, limit = 50, offset = 0)
+                .filter { it.wallet.equals(wallet, ignoreCase = true) }
         }
     }
 }

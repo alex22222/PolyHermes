@@ -8,6 +8,8 @@ import com.wrbug.polymarketbot.dto.LeaderResearchApprovalResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateDetailDto
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchCandidateListResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchCooldownRecheckRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchCooldownRecheckResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchEventDto
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchExternalAnalyticsImportResponse
@@ -29,8 +31,12 @@ import com.wrbug.polymarketbot.dto.LeaderResearchOfficialLeaderboardDiagnoseResp
 import com.wrbug.polymarketbot.dto.LeaderPaperSessionDto
 import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchActivityScoreResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchActivityHistoryBackfillRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchActivityHistoryBackfillResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceImportRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceImportResponse
+import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceMetricRefreshRequest
+import com.wrbug.polymarketbot.dto.LeaderResearchActivitySourceMetricRefreshResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchStrategyBackfillRequest
 import com.wrbug.polymarketbot.dto.LeaderResearchStrategyBackfillResponse
 import com.wrbug.polymarketbot.dto.LeaderResearchUnknownStrategySampleEnrichRequest
@@ -65,10 +71,12 @@ import com.wrbug.polymarketbot.enums.LeaderResearchTriggerType
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalConfirmRequiredException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchApprovalService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityScoringService
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivityHistoryBackfillService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchActivitySourceImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateNotReadyException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateLockedException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCandidateNotCopyableException
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchCooldownRecheckService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchDuplicateTrialConfigException
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchExternalAnalyticsImportService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchFalconLeaderboardImportService
@@ -110,6 +118,7 @@ class LeaderResearchController(
     private val researchService: LeaderResearchService,
     private val scannerPoolImportService: LeaderResearchScannerPoolImportService,
     private val activityScoringService: LeaderResearchActivityScoringService,
+    private val activityHistoryBackfillService: LeaderResearchActivityHistoryBackfillService,
     private val activitySourceImportService: LeaderResearchActivitySourceImportService,
     private val marketPeerSourceImportService: LeaderResearchMarketPeerSourceImportService,
     private val loopDiagnosticsService: LeaderResearchLoopDiagnosticsService,
@@ -124,6 +133,7 @@ class LeaderResearchController(
     private val paperTradingService: LeaderPaperTradingService,
     private val paperPromotionService: LeaderResearchPaperPromotionService,
     private val trialReadyRecheckService: LeaderResearchTrialReadyRecheckService,
+    private val cooldownRecheckService: LeaderResearchCooldownRecheckService,
     private val scoringService: LeaderResearchScoringService,
     private val approvalService: LeaderResearchApprovalService,
     private val mapper: LeaderResearchMapper,
@@ -287,6 +297,24 @@ class LeaderResearchController(
     ): ResponseEntity<ApiResponse<LeaderResearchActivitySourceImportResponse>> {
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
             activitySourceImportService.importFromActivitySource(request)
+        }
+    }
+
+    @PostMapping("/activity-source/metrics/refresh")
+    fun refreshActivitySourceMetrics(
+        @RequestBody(required = false) request: LeaderResearchActivitySourceMetricRefreshRequest?
+    ): ResponseEntity<ApiResponse<LeaderResearchActivitySourceMetricRefreshResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            activitySourceImportService.refreshMetrics(request ?: LeaderResearchActivitySourceMetricRefreshRequest())
+        }
+    }
+
+    @PostMapping("/activity-history/backfill")
+    fun backfillActivityHistory(
+        @RequestBody(required = false) request: LeaderResearchActivityHistoryBackfillRequest?
+    ): ResponseEntity<ApiResponse<LeaderResearchActivityHistoryBackfillResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            activityHistoryBackfillService.backfill(request ?: LeaderResearchActivityHistoryBackfillRequest())
         }
     }
 
@@ -486,6 +514,15 @@ class LeaderResearchController(
     ): ResponseEntity<ApiResponse<LeaderResearchTrialReadyRecheckResponse>> {
         return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
             trialReadyRecheckService.recheck(request ?: LeaderResearchTrialReadyRecheckRequest())
+        }
+    }
+
+    @PostMapping("/cooldown/recheck")
+    fun recheckCooldown(
+        @RequestBody(required = false) request: LeaderResearchCooldownRecheckRequest?
+    ): ResponseEntity<ApiResponse<LeaderResearchCooldownRecheckResponse>> {
+        return safe(ErrorCode.SERVER_LEADER_RESEARCH_FETCH_FAILED) {
+            cooldownRecheckService.recheck(request ?: LeaderResearchCooldownRecheckRequest())
         }
     }
 
