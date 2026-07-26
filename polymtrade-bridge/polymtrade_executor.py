@@ -50,7 +50,7 @@ class PolymtradeExecutor:
         )
         self.portfolio_page: Optional[Page] = None
         self.base_url = os.getenv("POLYMTRADE_URL", "https://polym.trade")
-        self.proxy = os.getenv("BROWSER_PROXY")  # e.g. http://host.docker.internal:7890
+        self.proxy = os.getenv("BROWSER_PROXY", "").strip() or None  # e.g. http://host.docker.internal:7890
         self.profile_dir = os.path.abspath(os.getenv("BROWSER_PROFILE_DIR", "./browser_profile"))
         self.headless = os.getenv("HEADLESS", "false").lower() == "true"
         self.last_error: Optional[str] = None
@@ -138,7 +138,10 @@ class PolymtradeExecutor:
     @asynccontextmanager
     async def _http_client_context(self):
         if self._http_client is None or self._http_client.is_closed:
-            limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+            # Gamma/CLOB requests pass through the local proxy. Reusing an idle
+            # proxy connection can leave metadata resolution stuck until the
+            # request timeout, so each completed request gets a fresh connection.
+            limits = httpx.Limits(max_connections=20, max_keepalive_connections=0)
             transport = httpx.AsyncHTTPTransport(proxy=self.proxy, limits=limits)
             self._http_client = httpx.AsyncClient(
                 transport=transport,
@@ -1238,7 +1241,8 @@ class PolymtradeExecutor:
                 last_error = e
                 err = str(e)
                 is_transient = (
-                    "ConnectError" in err
+                    isinstance(e, (httpx.TimeoutException, httpx.NetworkError))
+                    or "ConnectError" in err
                     or "Timeout" in err
                     or "ReadError" in err
                     or (resp is not None and resp.status_code >= 500)
@@ -1247,6 +1251,11 @@ class PolymtradeExecutor:
                     delay = base_delay * (2 ** attempt)
                     logger.warning(f"Gamma request failed (attempt {attempt + 1}/{max_retries}): {e}; retrying in {delay}s")
                     metrics.gamma_api_failures += 1
+                    if self._http_client is client:
+                        self._http_client = None
+                        await client.aclose()
+                        async with self._http_client_context() as refreshed_client:
+                            client = refreshed_client
                     await asyncio.sleep(delay)
                     continue
                 metrics.gamma_api_failures += 1
@@ -1368,18 +1377,35 @@ class PolymtradeExecutor:
                 )
                 for endpoint in endpoint_order:
                     try:
-                        resp = await client.get(
-                            f"https://gamma-api.polymarket.com/{endpoint}",
-                            params={"slug": slug_to_use, "limit": 5},
+                        data = (
+                            await self._search_gamma_events_by_slug(slug_to_use, max_retries=2)
+                            if endpoint == "events"
+                            else await self._search_gamma_markets_by_slug(slug_to_use, max_retries=2)
                         )
-                        resp.raise_for_status()
-                        data = resp.json()
                         event = None
                         if data:
                             if endpoint == "events":
                                 event = data[0]
                             else:
-                                event = (data[0].get("events") or [None])[0]
+                                market = data[0]
+                                event = (market.get("events") or [None])[0]
+                                # Some Gamma markets do not expose a parent event.
+                                # Polymtrade can still open these directly by their
+                                # canonical market slug, without an eventId.
+                                if (
+                                    event is None
+                                    and market.get("slug") == slug_to_use
+                                    and (
+                                        not condition_id
+                                        or (market.get("conditionId") or "").lower()
+                                        == condition_id.lower()
+                                    )
+                                ):
+                                    logger.info(
+                                        "Resolved standalone Gamma market slug: %s",
+                                        slug_to_use,
+                                    )
+                                    return "", slug_to_use
                         if event and event.get("id"):
                             logger.info(
                                 "Resolved event via Gamma %s slug: %s",
@@ -1400,11 +1426,12 @@ class PolymtradeExecutor:
             # and then resolve the event from Gamma using that slug.
             if condition_id:
                 try:
-                    resp = await client.get(
-                        f"https://clob.polymarket.com/markets/{condition_id}"
-                    )
-                    resp.raise_for_status()
-                    clob_data = resp.json()
+                    async with self._http_client_context() as metadata_client:
+                        resp = await metadata_client.get(
+                            f"https://clob.polymarket.com/markets/{condition_id}"
+                        )
+                        resp.raise_for_status()
+                        clob_data = resp.json()
                     slug_to_use = clob_data.get("market_slug") or slug_to_use
                     logger.info(f"Resolved CLOB slug {slug_to_use} for condition {condition_id}")
                 except Exception as e:
@@ -1413,18 +1440,32 @@ class PolymtradeExecutor:
             if slug_to_use:
                 for endpoint in ["events", "markets"]:
                     try:
-                        resp = await client.get(
-                            f"https://gamma-api.polymarket.com/{endpoint}",
-                            params={"slug": slug_to_use, "limit": 5},
+                        data = (
+                            await self._search_gamma_events_by_slug(slug_to_use, max_retries=2)
+                            if endpoint == "events"
+                            else await self._search_gamma_markets_by_slug(slug_to_use, max_retries=2)
                         )
-                        resp.raise_for_status()
-                        data = resp.json()
                         event = None
                         if data:
                             if endpoint == "events":
                                 event = data[0]
                             else:
-                                event = data[0].get("events", [None])[0]
+                                market = data[0]
+                                event = (market.get("events") or [None])[0]
+                                if (
+                                    event is None
+                                    and market.get("slug") == slug_to_use
+                                    and (
+                                        not condition_id
+                                        or (market.get("conditionId") or "").lower()
+                                        == condition_id.lower()
+                                    )
+                                ):
+                                    logger.info(
+                                        "Resolved standalone Gamma market slug via fallback: %s",
+                                        slug_to_use,
+                                    )
+                                    return "", slug_to_use
                         if event and event.get("id"):
                             logger.info(f"Resolved event via {endpoint} fallback: {event['id']}")
                             return str(event["id"]), event["slug"]
@@ -1782,6 +1823,7 @@ class PolymtradeExecutor:
 
                         const keywordHits = keywords.filter(kw => bodyText.includes(kw.toLowerCase())).length;
                         const hasKeyword = keywords.length === 0 || keywordHits > 0;
+                        const dateKeywords = keywords.filter(kw => /^\\d{1,2}月\\d{1,2}(日)?$/.test(kw));
 
                         const tradeLabels = binaryOutcomeMode
                             ? [...sideLabels]
@@ -1859,7 +1901,16 @@ class PolymtradeExecutor:
                             if (rect.width === 0 || rect.height === 0) return false;
                             const text = norm(textOf(row));
                             if (!text || text.length > 1400) return false;
-                            if (keywords.length && !keywords.some(kw => text.includes(kw.toLowerCase()))) return false;
+                            const matchedKeywords = keywords.filter(kw => text.includes(kw.toLowerCase()));
+                            if (keywords.length && matchedKeywords.length === 0) return false;
+                            // Date-bounded markets such as ceasefire deadlines frequently
+                            // share country and topic keywords with related-market cards.
+                            // Require the target date and one additional market keyword in
+                            // the same actionable row before treating it as the target.
+                            if (dateKeywords.length) {
+                                const hasTargetDate = dateKeywords.some(kw => text.includes(kw.toLowerCase()));
+                                if (!hasTargetDate || matchedKeywords.length < 2) return false;
+                            }
                             const actions = Array.from(row.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"], .cursor-pointer'));
                             return actions.some(isTradeAction);
                         });

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 from playwright.async_api import async_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -120,6 +121,25 @@ async def test_gamma_request_with_retry_transient():
     assert result == {"result": "ok"}
     assert mock_client.get.call_count == 2
     print("test_gamma_request_with_retry_transient passed")
+
+
+async def test_gamma_request_with_retry_empty_timeout_message():
+    executor = PolymtradeExecutor()
+
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"result": "ok"}
+    mock_resp.raise_for_status = MagicMock()
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=[httpx.ReadTimeout(""), mock_resp])
+
+    result = await executor._gamma_request_with_retry(
+        mock_client, "https://example.com/api", {"q": "test"}, max_retries=2, base_delay=0.01
+    )
+
+    assert result == {"result": "ok"}
+    assert mock_client.get.call_count == 2
+    print("test_gamma_request_with_retry_empty_timeout_message passed")
 
 
 async def test_gamma_request_with_retry_exhausted():
@@ -389,6 +409,7 @@ def main() -> int:
         test_enrich_position_no_match,
         test_gamma_request_with_retry_success,
         test_gamma_request_with_retry_transient,
+        test_gamma_request_with_retry_empty_timeout_message,
         test_gamma_request_with_retry_exhausted,
         test_extract_href_from_portfolio_card,
         test_wrong_href_event_slug_falls_back_to_title_search,

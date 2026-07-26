@@ -87,6 +87,45 @@ NO_BUTTONS_HTML = """
 """
 
 
+IRAN_RELATED_MARKET_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <section class="event-card">
+      <h1>霍尔木兹海峡航运在8月31日之前恢复正常?</h1>
+      <div class="market-row">
+        <div>伊朗停火持续至8月31日?</div>
+        <div role="button">是 63¢</div>
+        <div role="button">否 38¢</div>
+      </div>
+    </section>
+    <aside>Israel Iran ceasefire 相关新闻</aside>
+  </main>
+</body>
+</html>
+"""
+
+
+IRAN_TARGET_MARKET_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <section class="event-card">
+      <h1>以色列和伊朗停火会持续到8月15日吗?</h1>
+      <div class="market-row">
+        <div>伊朗停火持续至8月15日?</div>
+        <div role="button">是 63¢</div>
+        <div role="button">否 38¢</div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
 BTC_UPDOWN_EVENT_HTML = """
 <!doctype html>
 <html>
@@ -324,6 +363,28 @@ async def test_is_target_event_visible_false_when_side_buttons_missing():
                 timeout=2.0,
             )
             assert visible is False
+        finally:
+            await browser.close()
+
+
+async def test_date_bounded_event_does_not_match_related_market_with_wrong_deadline():
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            executor = await _make_executor(page)
+            target = {
+                "outcome": "Yes",
+                "market_slug": "israel-x-iran-ceasefire-continues-throughptptpt-20260716224448963",
+                "market_title": "Israel x Iran ceasefire continues through August 15?",
+                "timeout": 1.0,
+            }
+
+            await page.set_content(IRAN_RELATED_MARKET_HTML)
+            assert await executor._is_target_event_visible(**target) is False
+
+            await page.set_content(IRAN_TARGET_MARKET_HTML)
+            assert await executor._is_target_event_visible(**target) is True
         finally:
             await browser.close()
 
@@ -598,6 +659,7 @@ if __name__ == "__main__":
     asyncio.run(test_is_target_event_visible_with_chinese_trade_actions())
     asyncio.run(test_is_target_event_visible_false_on_wrong_event())
     asyncio.run(test_is_target_event_visible_false_when_side_buttons_missing())
+    asyncio.run(test_date_bounded_event_does_not_match_related_market_with_wrong_deadline())
     asyncio.run(test_binary_updown_visible_only_with_trade_buttons())
     asyncio.run(test_binary_updown_page_ready_uses_outcome_buttons())
     asyncio.run(test_binary_updown_portfolio_row_is_not_trade_visible_and_can_open())

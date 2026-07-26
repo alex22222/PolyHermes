@@ -15,6 +15,36 @@ class TestMetadataCache(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(("", market_slug), result)
 
+    async def test_standalone_gamma_market_resolves_without_parent_event(self):
+        executor = PolymtradeExecutor()
+        market_slug = "iran-leadership-change-by-july-31-20260629143932628"
+        condition_id = "0x0d3ad3afe0e01075d00e6869a09f1982742fba950b4cae8fff452b282b5a80fc"
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        class Client:
+            async def get(self, url, params, timeout=None):
+                if url.endswith("/events"):
+                    return Response([])
+                return Response([{"slug": market_slug, "conditionId": condition_id}])
+
+        @asynccontextmanager
+        async def fake_http_client_context():
+            yield Client()
+
+        with patch.object(executor, "_http_client_context", fake_http_client_context):
+            result = await executor._resolve_event_uncached(market_slug, condition_id)
+
+        self.assertEqual(("", market_slug), result)
+
     async def test_http_client_is_reused_and_closed(self):
         executor = PolymtradeExecutor()
         executor.proxy = None
