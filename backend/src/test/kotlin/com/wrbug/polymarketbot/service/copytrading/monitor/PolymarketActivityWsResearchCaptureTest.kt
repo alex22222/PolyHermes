@@ -71,6 +71,17 @@ class PolymarketActivityWsResearchCaptureTest {
     }
 
     @Test
+    fun `unmatched activity message still refreshes websocket liveness`() {
+        val service = service(globalCaptureEnabled = false)
+
+        invokeHandleMessage(service, activityMessage("tx-liveness"))
+
+        val field = PolymarketActivityWsService::class.java.getDeclaredField("lastActivityTime")
+        field.isAccessible = true
+        assertTrue(field.getLong(service) > 0)
+    }
+
+    @Test
     fun `successful research capture writes success source health cursor before known leader filtering`() {
         Mockito.`when`(activityEventRepository.findByStableEventKey(Mockito.anyString())).thenReturn(null)
         Mockito.`when`(activityEventRepository.save(anyActivityEvent())).thenAnswer { it.arguments[0] }

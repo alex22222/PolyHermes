@@ -247,7 +247,7 @@ class PolymarketActivityWsService(
             // 重置最后一次收到 activity 消息的时间
             lastActivityTime = System.currentTimeMillis()
             // 启动 Activity 消息超时检测
-//            startActivityTimeoutCheck()
+            startActivityTimeoutCheck()
             logger.info("Activity WebSocket 订阅成功（全局交易流: trades + orders_matched）")
         } catch (e: Exception) {
             logger.error("订阅 Activity WebSocket 失败", e)
@@ -346,6 +346,11 @@ class PolymarketActivityWsService(
                 return
             }
 
+            // Any non-PONG WebSocket message proves the global activity stream
+            // is alive. This must happen before leader filtering because most
+            // activity messages belong to other addresses.
+            lastActivityTime = System.currentTimeMillis()
+
             maybeCaptureResearchActivity(message)
 
             // 快速预检查：检查是否包含监听地址
@@ -368,9 +373,6 @@ class PolymarketActivityWsService(
                 (tradeMessage.type != "trades" && tradeMessage.type != "orders_matched")) {
                 return
             }
-
-            // 更新最后一次收到 activity 消息的时间（即使不是我们监听的 Leader 的交易）
-            lastActivityTime = System.currentTimeMillis()
 
             val payload = tradeMessage.payload
 

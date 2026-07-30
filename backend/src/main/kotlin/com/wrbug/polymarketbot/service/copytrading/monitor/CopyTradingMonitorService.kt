@@ -9,7 +9,9 @@ import jakarta.annotation.PostConstruct
 import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.*
 import org.slf4j.LoggerFactory
+import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 跟单监听服务（主服务）
@@ -32,6 +34,11 @@ class CopyTradingMonitorService(
     private val logger = LoggerFactory.getLogger(CopyTradingMonitorService::class.java)
     
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+    // Keep this local view so the periodic reconciliation can correct listeners
+    // after a configuration was changed outside the normal service path.
+    private val monitoredLeaderIds = ConcurrentHashMap.newKeySet<Long>()
+    private val monitoredAccountIds = ConcurrentHashMap.newKeySet<Long>()
     
     /**
      * 系统启动时初始化监听
@@ -87,6 +94,8 @@ class CopyTradingMonitorService(
         // 4. 启动 Activity WebSocket 监听（优先，低延迟）
         //    全局 research capture 开启时，没有 Leader 也会连接，用于发现候选交易者
         activityWsService.start(leaders)
+        monitoredLeaderIds.clear()
+        monitoredLeaderIds.addAll(leaderIds)
 
         if (enabledCopyTradings.isEmpty()) {
             logger.info("没有启用的跟单配置，仅启动 Activity WebSocket 全局 research capture")
@@ -98,6 +107,61 @@ class CopyTradingMonitorService(
 
         // 6. 启动跟单账户的链上 WebSocket 监听（用于检测卖出/赎回事件）
         accountOnChainMonitorService.start(accounts)
+        monitoredAccountIds.clear()
+        monitoredAccountIds.addAll(accountIds)
+    }
+
+    /**
+     * Reconcile enabled configurations in case an update bypassed the normal
+     * configuration service or a transient listener update failed. This only
+     * adds/removes listeners; it does not change copy-trading rules.
+     */
+    @Scheduled(fixedDelay = 60_000)
+    fun reconcileEnabledMonitoring() {
+        scope.launch {
+            try {
+                reconcileEnabledMonitoringNow()
+            } catch (e: Exception) {
+                logger.error("校准启用跟单配置监听失败", e)
+            }
+        }
+    }
+
+    internal suspend fun reconcileEnabledMonitoringNow() {
+        val enabledCopyTradings = copyTradingRepository.findByEnabledTrue()
+        val desiredLeaderIds = enabledCopyTradings.map { it.leaderId }.toSet()
+        val desiredAccountIds = enabledCopyTradings.map { it.accountId }.toSet()
+
+        (monitoredLeaderIds - desiredLeaderIds).forEach { leaderId ->
+            activityWsService.removeLeader(leaderId)
+            onChainWsService.removeLeader(leaderId)
+            monitoredLeaderIds.remove(leaderId)
+        }
+        (desiredLeaderIds - monitoredLeaderIds).forEach { leaderId ->
+            val leader = leaderRepository.findById(leaderId).orElse(null)
+            if (leader == null) {
+                logger.warn("启用跟单配置的 Leader 不存在，无法补齐监听: leaderId=$leaderId")
+                return@forEach
+            }
+            activityWsService.addLeader(leader)
+            onChainWsService.addLeader(leader)
+            monitoredLeaderIds.add(leaderId)
+            logger.info("已补齐启用跟单配置的 Leader 监听: leaderId=$leaderId")
+        }
+
+        (monitoredAccountIds - desiredAccountIds).forEach { accountId ->
+            accountOnChainMonitorService.removeAccount(accountId)
+            monitoredAccountIds.remove(accountId)
+        }
+        (desiredAccountIds - monitoredAccountIds).forEach { accountId ->
+            val account = accountRepository.findById(accountId).orElse(null)
+            if (account == null) {
+                logger.warn("启用跟单配置的账户不存在，无法补齐监听: accountId=$accountId")
+                return@forEach
+            }
+            accountOnChainMonitorService.addAccount(account)
+            monitoredAccountIds.add(accountId)
+        }
     }
     
     /**
@@ -116,6 +180,7 @@ class CopyTradingMonitorService(
         // 同时添加到两种监听
         activityWsService.addLeader(leader)
         onChainWsService.addLeader(leader)
+        monitoredLeaderIds.add(leaderId)
     }
     
     /**
@@ -132,6 +197,7 @@ class CopyTradingMonitorService(
         // 没有启用的跟单配置了，同时从两种监听移除
         activityWsService.removeLeader(leaderId)
         onChainWsService.removeLeader(leaderId)
+        monitoredLeaderIds.remove(leaderId)
     }
     
     /**
@@ -147,6 +213,7 @@ class CopyTradingMonitorService(
             // 有启用的跟单配置，确保在监听列表中
             activityWsService.addLeader(leader)
             onChainWsService.addLeader(leader)
+            monitoredLeaderIds.add(leaderId)
             
             // 更新账户监听（添加该配置关联的账户）
             val accountIds = copyTradings.map { it.accountId }.distinct()
@@ -154,12 +221,14 @@ class CopyTradingMonitorService(
                 val account = accountRepository.findById(accountId).orElse(null)
                 if (account != null) {
                     accountOnChainMonitorService.addAccount(account)
+                    monitoredAccountIds.add(accountId)
                 }
             }
         } else {
             // 没有启用的跟单配置，同时从两种监听移除
             activityWsService.removeLeader(leaderId)
             onChainWsService.removeLeader(leaderId)
+            monitoredLeaderIds.remove(leaderId)
         }
     }
     
@@ -176,9 +245,11 @@ class CopyTradingMonitorService(
         if (copyTradings.isNotEmpty()) {
             // 有启用的跟单配置，确保账户在监听列表中
             accountOnChainMonitorService.addAccount(account)
+            monitoredAccountIds.add(accountId)
         } else {
             // 没有启用的跟单配置，移除账户监听
             accountOnChainMonitorService.removeAccount(accountId)
+            monitoredAccountIds.remove(accountId)
         }
     }
     
@@ -194,4 +265,3 @@ class CopyTradingMonitorService(
         startMonitoring()
     }
 }
-
