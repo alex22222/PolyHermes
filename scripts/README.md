@@ -80,6 +80,24 @@ sudo systemctl enable --now polyhermes-backend
 sudo systemctl enable --now polyhermes-bridge
 ```
 
+### VPS 服务不可用监控与飞书告警
+
+`polyhermes-watchdog.timer` 每分钟检查 Docker 容器、Backend 数据库业务接口、
+公网首页以及 Bridge `/health`、`/status`。连续失败三次后发送飞书告警；仅在主应用异常时
+自动重启 `polyhermes`。Bridge 异常只告警，以免破坏浏览器登录态或中断正在执行的交易。
+服务恢复后会发送一次恢复通知。
+
+```bash
+sudo mkdir -p /etc/polyhermes
+sudo cp scripts/systemd/polyhermes-watchdog.env.example /etc/polyhermes/watchdog.env
+sudo chmod 600 /etc/polyhermes/watchdog.env
+# 编辑 FEISHU_WEBHOOK_URL 后：
+sudo cp scripts/systemd/polyhermes-watchdog.service /etc/systemd/system/
+sudo cp scripts/systemd/polyhermes-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now polyhermes-watchdog.timer
+```
+
 ---
 
 ## 4. 健康检查

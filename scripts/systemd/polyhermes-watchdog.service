@@ -1,0 +1,13 @@
+[Unit]
+Description=PolyHermes production health watchdog
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/polyhermes
+EnvironmentFile=-/etc/polyhermes/watchdog.env
+ExecStart=/usr/bin/python3 /opt/polyhermes/scripts/vps_service_watchdog.py
+StateDirectory=polyhermes-watchdog
+TimeoutStartSec=50
