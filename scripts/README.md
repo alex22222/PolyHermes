@@ -91,11 +91,14 @@ sudo systemctl enable --now polyhermes-bridge
 sudo mkdir -p /etc/polyhermes
 sudo cp scripts/systemd/polyhermes-watchdog.env.example /etc/polyhermes/watchdog.env
 sudo chmod 600 /etc/polyhermes/watchdog.env
-# 编辑 FEISHU_WEBHOOK_URL 后：
+# 编辑 FEISHU_WEBHOOK_URL，或配置 FEISHU_APP_ID、FEISHU_APP_SECRET、FEISHU_RECEIVE_ID 后：
 sudo cp scripts/systemd/polyhermes-watchdog.service /etc/systemd/system/
 sudo cp scripts/systemd/polyhermes-watchdog.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now polyhermes-watchdog.timer
+sudo systemctl start polyhermes-watchdog.service
+sudo bash -c 'set -a; . /etc/polyhermes/watchdog.env; set +a; \
+  python3 /opt/polyhermes/scripts/vps_service_watchdog.py --test-alert'
 ```
 
 ---

@@ -22,6 +22,9 @@ class FakeNotifier:
 
 
 class FakeHttpResponse:
+    def __init__(self, body=b'{"code":0,"msg":"success"}'):
+        self.body = body
+
     def __enter__(self):
         return self
 
@@ -29,7 +32,7 @@ class FakeHttpResponse:
         return False
 
     def read(self):
-        return b'{"code":0,"msg":"success"}'
+        return self.body
 
 
 class VpsServiceWatchdogTest(unittest.TestCase):
@@ -117,6 +120,34 @@ class VpsServiceWatchdogTest(unittest.TestCase):
         payload = json.loads(request.data.decode("utf-8"))
         self.assertEqual("text", payload["msg_type"])
         self.assertEqual("title\ndetails", payload["content"]["text"])
+
+    def test_feishu_notifier_sends_app_message_to_chat(self):
+        notifier = watchdog_module.FeishuNotifier(
+            app_id="cli_test",
+            app_secret="secret",
+            receive_id="oc_test",
+            timeout=1,
+        )
+        responses = [
+            FakeHttpResponse(b'{"code":0,"tenant_access_token":"token"}'),
+            FakeHttpResponse(),
+        ]
+        with mock.patch.object(
+            watchdog_module.urllib.request,
+            "urlopen",
+            side_effect=responses,
+        ) as urlopen:
+            self.assertTrue(notifier.send("title", "details"))
+
+        message_request = urlopen.call_args_list[1].args[0]
+        self.assertIn("receive_id_type=chat_id", message_request.full_url)
+        self.assertEqual("Bearer token", message_request.headers["Authorization"])
+        payload = json.loads(message_request.data.decode("utf-8"))
+        self.assertEqual("oc_test", payload["receive_id"])
+        self.assertEqual(
+            {"text": "title\ndetails"},
+            json.loads(payload["content"]),
+        )
 
 
 if __name__ == "__main__":

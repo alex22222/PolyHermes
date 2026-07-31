@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -51,39 +52,95 @@ class Config:
 
 
 class FeishuNotifier:
-    def __init__(self, webhook_url=None, timeout=8):
+    def __init__(
+        self,
+        webhook_url=None,
+        app_id=None,
+        app_secret=None,
+        receive_id=None,
+        timeout=8,
+    ):
         self.webhook_url = webhook_url or os.getenv("FEISHU_WEBHOOK_URL", "")
+        self.app_id = app_id or os.getenv("FEISHU_APP_ID", "")
+        self.app_secret = app_secret or os.getenv("FEISHU_APP_SECRET", "")
+        self.receive_id = receive_id or os.getenv("FEISHU_RECEIVE_ID", "")
         self.timeout = timeout
 
     def send(self, title, message):
-        if not self.webhook_url:
-            print("Feishu alert was not sent: FEISHU_WEBHOOK_URL is not configured")
+        text = f"{title}\n{message}"
+        if self.webhook_url:
+            return self._send_webhook(text)
+        if self.app_id and self.app_secret and self.receive_id:
+            return self._send_as_app(text)
+        print("Feishu alert was not sent: webhook or app credentials are not configured")
+        return False
+
+    def _send_webhook(self, text):
+        payload = {
+            "msg_type": "text",
+            "content": {"text": text},
+        }
+        response = self._request_json(self.webhook_url, payload)
+        return self._is_success(response)
+
+    def _send_as_app(self, text):
+        token_response = self._request_json(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            {"app_id": self.app_id, "app_secret": self.app_secret},
+        )
+        token = token_response.get("tenant_access_token")
+        if token_response.get("code") != 0 or not token:
+            print(f"Feishu tenant token failed: {token_response}")
             return False
 
-        payload = json.dumps(
+        receive_id_type = "chat_id" if self.receive_id.startswith("oc_") else "open_id"
+        url = (
+            "https://open.feishu.cn/open-apis/im/v1/messages"
+            f"?receive_id_type={receive_id_type}"
+        )
+        response = self._request_json(
+            url,
             {
+                "receive_id": self.receive_id,
                 "msg_type": "text",
-                "content": {"text": f"{title}\n{message}"},
+                "content": json.dumps({"text": text}, ensure_ascii=False),
             },
-            ensure_ascii=False,
-        ).encode("utf-8")
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        return self._is_success(response)
+
+    def _request_json(self, url, payload, headers=None):
         request = urllib.request.Request(
-            self.webhook_url,
-            data=payload,
-            headers={"Content-Type": "application/json; charset=utf-8"},
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                **(headers or {}),
+            },
             method="POST",
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                body = json.loads(response.read().decode("utf-8"))
-            response_code = body.get("code", body.get("StatusCode"))
-            success = response_code == 0
-            if not success:
-                print(f"Feishu rejected alert: {body}")
-            return success
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            try:
+                body = json.loads(raw)
+            except ValueError:
+                body = {"code": -1, "msg": raw or str(exc)}
+            print(f"Feishu HTTP {exc.code}: {body}")
+            return body
         except (OSError, ValueError, urllib.error.URLError) as exc:
             print(f"Feishu alert failed: {exc}")
-            return False
+            return {"code": -1, "msg": str(exc)}
+
+    @staticmethod
+    def _is_success(response):
+        response_code = response.get("code", response.get("StatusCode"))
+        success = response_code == 0
+        if not success:
+            print(f"Feishu rejected alert: {response}")
+        return success
 
 
 class Watchdog:
@@ -272,6 +329,12 @@ class Watchdog:
 def main():
     config = Config.from_env()
     notifier = FeishuNotifier(timeout=config.request_timeout)
+    if "--test-alert" in sys.argv:
+        sent = notifier.send(
+            "✅ PolyHermes 飞书预警测试",
+            f"主机: {socket.gethostname()}\nVPS 健康监控已启用。",
+        )
+        raise SystemExit(0 if sent else 1)
     Watchdog(config=config, notifier=notifier).run_once()
 
 
