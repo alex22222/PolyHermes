@@ -1894,6 +1894,13 @@ class PolymtradeExecutor:
                         const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
                         const bodyText = norm(textOf(document.body));
                         const targetTitle = norm(marketTitle || "");
+                        const comparableTitle = (s) => norm(
+                            (s || "").replace(
+                                /\\(\\s*(?:h\\s*\\.\\s*r\\s*\\.?|s\\s*\\.?)\\s*\\d+[a-z0-9.-]*\\s*\\)/gi,
+                                " "
+                            )
+                        );
+                        const comparableTargetTitle = comparableTitle(marketTitle || "");
                         const targetSlug = norm(marketSlug || "");
                         const slugInUrl = !!targetSlug && norm(window.location.href).includes(targetSlug);
                         const currentUrl = new URL(window.location.href);
@@ -1977,6 +1984,46 @@ class PolymtradeExecutor:
                                 slugInUrl,
                                 url: window.location.href,
                             };
+                        }
+
+                        // Single-market detail pages can place the market title and
+                        // Yes/No buttons in separate subtrees under one large detail
+                        // container. Accept that layout only when a specific title
+                        // node and a trade action share an ancestor below MAIN. The
+                        // comparison ignores legislative identifiers such as
+                        // "(H.R.3633)", which Polymarket may add after signal capture.
+                        if (comparableTargetTitle) {
+                            const isVisible = (el) => {
+                                const rect = el.getBoundingClientRect();
+                                return rect.width > 0 && rect.height > 0;
+                            };
+                            const titleNodes = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, span, div'))
+                                .filter(el => {
+                                    const text = textOf(el);
+                                    return isVisible(el)
+                                        && text.length <= 300
+                                        && comparableTitle(text) === comparableTargetTitle;
+                                });
+                            const activeTarget = titleNodes.some(titleNode => {
+                                let container = titleNode.parentElement;
+                                for (let depth = 0; depth < 8 && container; depth++, container = container.parentElement) {
+                                    if (['MAIN', 'BODY', 'HTML', 'ASIDE'].includes(container.tagName)) break;
+                                    const actions = Array.from(container.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"]'));
+                                    if (actions.some(isTradeAction)) return true;
+                                }
+                                return false;
+                            });
+                            if (activeTarget) {
+                                return {
+                                    visible: true,
+                                    keywordHits,
+                                    hasSide,
+                                    hasOutcome,
+                                    strictTargetTitle: targetTitle,
+                                    strategy: "title-container",
+                                    url: window.location.href,
+                                };
+                            }
                         }
                         const rows = Array.from(document.querySelectorAll('article, section, li, [role="listitem"], [class*="market"], [class*="outcome"], [class*="row"], div'));
                         const hasTargetTradeRow = rows.some(row => {

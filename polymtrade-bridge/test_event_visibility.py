@@ -125,6 +125,48 @@ IRAN_TARGET_MARKET_HTML = """
 </html>
 """
 
+
+CLARITY_ACT_DETAIL_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <aside>
+      <div>Trending</div>
+      <div>Clarity Act (H.R.3633) signed into law in 2026?</div>
+    </aside>
+    <section class="event-detail">
+      <h1>Clarity Act (H.R.3633) signed into law in 2026?</h1>
+      <div class="rules">%s</div>
+      <div class="trade-actions">
+        <button>Yes 24¢</button>
+        <button>No 77¢</button>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
+""" % ("Long market rules. " * 120)
+
+
+CLARITY_ACT_SIDEBAR_ONLY_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <aside>
+      <div>Clarity Act (H.R.3633) signed into law in 2026?</div>
+    </aside>
+    <section class="event-detail">
+      <h1>Next Prime Minister of Ethiopia?</h1>
+      <button>Yes 96¢</button>
+      <button>No 4¢</button>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
 KOSTYANTYNIVKA_GROUPED_EVENT_HTML = """
 <!doctype html>
 <html>
@@ -408,6 +450,36 @@ async def test_date_bounded_event_does_not_match_related_market_with_wrong_deadl
 
             await page.set_content(IRAN_TARGET_MARKET_HTML)
             assert await executor._is_target_event_visible(**target) is True
+        finally:
+            await browser.close()
+
+
+async def test_legislative_title_variant_visible_only_in_its_trade_container():
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            executor = await _make_executor(page)
+            target = {
+                "outcome": "No",
+                "market_slug": "clarity-act-signed-into-law-in-2026",
+                "market_title": "Clarity Act signed into law in 2026?",
+                "timeout": 1.0,
+            }
+
+            await page.set_content(CLARITY_ACT_SIDEBAR_ONLY_HTML)
+            assert await executor._is_target_event_visible(**target) is False
+
+            await page.set_content(CLARITY_ACT_DETAIL_HTML)
+            assert await executor._is_target_event_visible(**target) is True
+            selected = await executor._select_polymtrade_outcome(
+                outcome="No",
+                market_slug=target["market_slug"],
+                market_title=target["market_title"],
+                max_attempts=1,
+            )
+            assert selected["clicked"] is True
+            assert selected["label"].startswith("No")
         finally:
             await browser.close()
 
@@ -715,6 +787,7 @@ if __name__ == "__main__":
     asyncio.run(test_is_target_event_visible_false_on_wrong_event())
     asyncio.run(test_is_target_event_visible_false_when_side_buttons_missing())
     asyncio.run(test_date_bounded_event_does_not_match_related_market_with_wrong_deadline())
+    asyncio.run(test_legislative_title_variant_visible_only_in_its_trade_container())
     asyncio.run(test_binary_updown_visible_only_with_trade_buttons())
     asyncio.run(test_binary_updown_page_ready_uses_outcome_buttons())
     asyncio.run(test_binary_updown_portfolio_row_is_not_trade_visible_and_can_open())
