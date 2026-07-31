@@ -45,6 +45,36 @@ class TestMetadataCache(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(("", market_slug), result)
 
+    async def test_canonical_slug_requires_matching_condition_id(self):
+        executor = PolymtradeExecutor()
+
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "condition_id": "0xexpected",
+                    "market_slug": "canonical-market-slug",
+                }
+
+        class Client:
+            async def get(self, url):
+                return Response()
+
+        @asynccontextmanager
+        async def fake_http_client_context():
+            yield Client()
+
+        with patch.object(executor, "_http_client_context", fake_http_client_context):
+            self.assertEqual(
+                "canonical-market-slug",
+                await executor._canonical_market_slug_for_condition("0xexpected"),
+            )
+            self.assertIsNone(
+                await executor._canonical_market_slug_for_condition("0xother"),
+            )
+
     async def test_http_client_is_reused_and_closed(self):
         executor = PolymtradeExecutor()
         executor.proxy = None

@@ -178,6 +178,8 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
             "Up",
             market_slug="btc-updown-15m-1",
             market_title="BTC Up or Down",
+            event_id="1",
+            event_slug="event",
             timeout=2.5,
         )
         is_buy_dialog_open.assert_awaited_once_with(timeout=1.25)
@@ -322,6 +324,95 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("commit", awaited.kwargs.get("wait_until"))
         self.assertIn(call(0.25), sleep.await_args_list)
         self.assertNotIn(call(1.0), sleep.await_args_list)
+
+    async def test_target_market_missing_retries_once_with_verified_canonical_slug(self):
+        executor = PolymtradeExecutor()
+        executor.page = type("Page", (), {"url": "https://polym.trade/portfolio"})()
+        goto = AsyncMock()
+        canonical_slug = "us-announces-end-of-iranian-blockade-by-august-15"
+
+        with (
+            patch.object(executor, "_goto_with_retry", goto),
+            patch.object(executor, "_wait_for_page_ready", AsyncMock(return_value=True)),
+            patch.object(executor, "_get_usdc_balance", AsyncMock(return_value=100)),
+            patch.object(executor, "_is_target_event_visible", AsyncMock(return_value=False)) as target_visible,
+            patch.object(executor, "_open_target_market_from_portfolio_row", AsyncMock(return_value=False)),
+            patch.object(
+                executor,
+                "_canonical_market_slug_for_condition",
+                AsyncMock(return_value=canonical_slug),
+            ) as canonical_lookup,
+            patch.object(executor, "_capture_target_market_diagnostics", AsyncMock()) as capture_diagnostics,
+            patch("polymtrade_executor.asyncio.sleep", new=AsyncMock()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Target market content never appeared"):
+                await executor._execute_buy_on_page(
+                    "123",
+                    "iran-blockade-event",
+                    "No",
+                    1.0,
+                    market_slug="us-announces-end-of-iranian-blockade-byptptpt-20260713152715080",
+                    market_title="US announces end of Iranian blockade by August 15, 2026?",
+                    condition_id="0xa055",
+                )
+
+        self.assertEqual(8, target_visible.await_count)
+        canonical_lookup.assert_awaited_once_with("0xa055")
+        self.assertTrue(
+            any(canonical_slug in awaited.args[0] for awaited in goto.await_args_list)
+        )
+        capture_diagnostics.assert_awaited_once()
+
+    async def test_grouped_market_missing_retries_on_root_event_route(self):
+        executor = PolymtradeExecutor()
+        executor.page = type("Page", (), {"url": "https://polym.trade/portfolio"})()
+        goto = AsyncMock()
+
+        with (
+            patch.object(executor, "_goto_with_retry", goto),
+            patch.object(executor, "_wait_for_page_ready", AsyncMock(return_value=True)),
+            patch.object(executor, "_get_usdc_balance", AsyncMock(return_value=100)),
+            patch.object(
+                executor,
+                "_is_target_event_visible",
+                AsyncMock(side_effect=[False] * 6 + [True]),
+            ) as target_visible,
+            patch.object(executor, "_open_target_market_from_portfolio_row", AsyncMock(return_value=False)),
+            patch.object(
+                executor,
+                "_select_polymtrade_outcome",
+                AsyncMock(return_value={"label": "No 47¢"}),
+            ),
+            patch.object(executor, "_is_network_modal_open", AsyncMock(return_value=False)),
+            patch.object(executor, "_is_buy_dialog_open", AsyncMock(return_value=True)),
+            patch.object(executor, "_capture_buy_baseline", AsyncMock(return_value={})),
+            patch.object(executor, "_enter_amount", AsyncMock()),
+            patch.object(executor, "_click_buy_button", AsyncMock()),
+            patch.object(executor, "_confirm_trade", AsyncMock()),
+            patch("polymtrade_executor.asyncio.sleep", new=AsyncMock()),
+        ):
+            await executor._execute_buy_on_page(
+                "216716",
+                "will-russia-capture-all-of-kostyantynivka-by",
+                "No",
+                1.0,
+                market_slug="will-russia-capture-all-of-kostyantynivka-by-december-31-2026-372-718",
+                market_title="Will Russia capture all of Kostyantynivka by December 31, 2026?",
+                condition_id="0x627ed3",
+            )
+
+        self.assertEqual(7, target_visible.await_count)
+        self.assertTrue(
+            any(
+                awaited.args[0]
+                == (
+                    "https://polym.trade/?eventId=216716"
+                    "&eventSlug=will-russia-capture-all-of-kostyantynivka-by"
+                    "&eventSource=polymarket"
+                )
+                for awaited in goto.await_args_list
+            )
+        )
 
     async def test_short_cycle_buy_uses_reduced_portfolio_row_settle(self):
         executor = PolymtradeExecutor()

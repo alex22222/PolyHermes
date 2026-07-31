@@ -374,6 +374,35 @@ IRAN_BLOCKADE_MULTIDATE_HTML = """
 </html>
 """
 
+KOSTYANTYNIVKA_MULTIDATE_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <section id="kostyantynivka-event">
+      <h1>Will Russia capture all of Kostyantynivka by...?</h1>
+      <div class="market-row">
+        <div>September 30</div>
+        <div role="button">Yes 19¢</div>
+        <div role="button">No 82¢</div>
+      </div>
+      <div class="market-row">
+        <div>December 31</div>
+        <div role="button">Yes 54¢</div>
+        <div role="button">No 47¢</div>
+      </div>
+    </section>
+  </main>
+  <script>
+    window.clickedLabels = [];
+    document.addEventListener("click", (event) => {
+      window.clickedLabels.push((event.target.innerText || event.target.textContent || "").trim());
+    });
+  </script>
+</body>
+</html>
+"""
+
 
 async def _run_selector_fixture() -> None:
     async with async_playwright() as playwright:
@@ -737,6 +766,23 @@ async def _run_selector_fixture() -> None:
             assert "99¢" in result["label"], result
             assert "99.8¢" not in result["label"], result
             assert clicked_labels == [result["label"]], clicked_labels
+
+            page = await browser.new_page()
+            await page.set_content(KOSTYANTYNIVKA_MULTIDATE_HTML)
+            keywords = PolymtradeExecutor._extract_market_keywords(
+                "will-russia-capture-all-of-kostyantynivka-by-december-31-2026-372-718",
+                "Will Russia capture all of Kostyantynivka by December 31, 2026?",
+            )
+            assert "december 31" in keywords, keywords
+            result = await page.evaluate(
+                PolymtradeExecutor._select_outcome_script(),
+                ["No", ["否", "No", "Buy No", "Short"], keywords, False],
+            )
+            clicked_labels = await page.evaluate("window.clickedLabels")
+            assert result["clicked"] is True, result
+            assert "December 31" in result["rowText"], result
+            assert result["label"] == "No 47¢", result
+            assert clicked_labels == ["No 47¢"], clicked_labels
         finally:
             await browser.close()
 

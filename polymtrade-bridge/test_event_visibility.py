@@ -125,6 +125,29 @@ IRAN_TARGET_MARKET_HTML = """
 </html>
 """
 
+KOSTYANTYNIVKA_GROUPED_EVENT_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <section class="event-card">
+      <h1>Will Russia capture all of Kostyantynivka by...?</h1>
+      <div class="market-row">
+        <span>December 31</span>
+        <button>Yes 54¢</button>
+        <button>No 47¢</button>
+      </div>
+      <div class="market-row">
+        <span>September 30</span>
+        <button>Yes 19¢</button>
+        <button>No 82¢</button>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
 
 BTC_UPDOWN_EVENT_HTML = """
 <!doctype html>
@@ -385,6 +408,38 @@ async def test_date_bounded_event_does_not_match_related_market_with_wrong_deadl
 
             await page.set_content(IRAN_TARGET_MARKET_HTML)
             assert await executor._is_target_event_visible(**target) is True
+        finally:
+            await browser.close()
+
+async def test_grouped_event_visible_on_exact_root_event_route():
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.route(
+                "https://polym.trade/**",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="text/html",
+                    body=KOSTYANTYNIVKA_GROUPED_EVENT_HTML,
+                ),
+            )
+            await page.goto(
+                "https://polym.trade/?eventId=216716"
+                "&eventSlug=will-russia-capture-all-of-kostyantynivka-by"
+                "&eventSource=polymarket"
+            )
+
+            executor = await _make_executor(page)
+            visible = await executor._is_target_event_visible(
+                outcome="No",
+                market_slug="will-russia-capture-all-of-kostyantynivka-by-december-31-2026-372-718",
+                market_title="Will Russia capture all of Kostyantynivka by December 31, 2026?",
+                event_id="216716",
+                event_slug="will-russia-capture-all-of-kostyantynivka-by",
+                timeout=1.0,
+            )
+            assert visible is True
         finally:
             await browser.close()
 

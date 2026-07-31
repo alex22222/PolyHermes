@@ -1110,6 +1110,56 @@ class PolymtradeExecutor:
             logger.exception(f"Failed to collect debug info: {e}")
             return {"error": str(e)}
 
+    async def _capture_target_market_diagnostics(
+        self,
+        market_slug: Optional[str],
+        market_title: Optional[str],
+        outcome: str,
+        condition_id: Optional[str],
+    ) -> None:
+        """Persist the final target-market state without attempting a trade."""
+        if not self.page:
+            return
+        safe_slug = re.sub(r"[^a-zA-Z0-9_.-]+", "_", market_slug or "unknown")
+        try:
+            screenshot_path = f"/tmp/trade_target_market_missing_{safe_slug}.png"
+            await self.page.screenshot(path=screenshot_path)
+            payload = await self._evaluate_with_navigation_retry(
+                """() => {
+                    const textOf = (el) => (el ? (el.innerText || el.textContent || '').trim() : '');
+                    const isVisible = (el) => {
+                        const rect = el.getBoundingClientRect();
+                        const style = window.getComputedStyle(el);
+                        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                    };
+                    return {
+                        url: window.location.href,
+                        title: document.title,
+                        bodyText: textOf(document.body).slice(0, 12000),
+                        buttons: Array.from(document.querySelectorAll('button, [role="button"]'))
+                            .filter(isVisible)
+                            .slice(0, 100)
+                            .map(el => ({text: textOf(el).slice(0, 160), disabled: !!el.disabled, className: el.className || ''})),
+                    };
+                }""",
+                label="target_market_missing_diagnostics.evaluate",
+            )
+            if not isinstance(payload, dict):
+                payload = {"diagnosticError": "target-page evaluation returned no payload"}
+            payload.update({
+                "marketSlug": market_slug,
+                "marketTitle": market_title,
+                "outcome": outcome,
+                "conditionId": condition_id,
+                "screenshot": screenshot_path,
+            })
+            snapshot_path = f"/tmp/trade_target_market_missing_{safe_slug}.json"
+            with open(snapshot_path, "w", encoding="utf-8") as snapshot:
+                json.dump(payload, snapshot, ensure_ascii=False)
+            logger.warning("Target market diagnostics saved: %s", snapshot_path)
+        except Exception as e:
+            logger.warning("Failed to capture target market diagnostics: %s", e)
+
     async def search_markets(self, query: str) -> dict:
         """Use the Polymtrade search box to look for a market.
 
@@ -1476,6 +1526,29 @@ class PolymtradeExecutor:
                 f"Could not resolve Polymtrade event for slug={market_slug}, condition_id={condition_id}"
             )
 
+    async def _canonical_market_slug_for_condition(
+        self,
+        condition_id: Optional[str],
+    ) -> Optional[str]:
+        """Return the CLOB canonical market slug for one verified condition."""
+        if not condition_id:
+            return None
+        try:
+            async with self._http_client_context() as client:
+                response = await client.get(
+                    f"https://clob.polymarket.com/markets/{condition_id}"
+                )
+                response.raise_for_status()
+                market = response.json()
+            returned_condition_id = market.get("condition_id") or market.get("conditionId")
+            if (returned_condition_id or "").lower() != condition_id.lower():
+                logger.warning("CLOB canonical slug condition mismatch for %s", condition_id)
+                return None
+            return market.get("market_slug") or None
+        except Exception as e:
+            logger.warning("Failed to resolve canonical CLOB slug for %s: %s", condition_id, e)
+            return None
+
     @staticmethod
     def _is_short_cycle_market_slug(market_slug: Optional[str]) -> bool:
         return bool(
@@ -1531,6 +1604,7 @@ class PolymtradeExecutor:
                     event_id, event_slug, outcome, amount_usdc,
                     market_slug=market_slug, market_title=market_title,
                     signal_price=signal_price, max_price_drift=max_price_drift,
+                    condition_id=condition_id,
                 )
                 # Post-trade verification: confirm the buy actually affected the account.
                 baseline = result.get("baseline") or {}
@@ -1792,6 +1866,8 @@ class PolymtradeExecutor:
         outcome: str,
         market_slug: Optional[str] = None,
         market_title: Optional[str] = None,
+        event_id: Optional[str] = None,
+        event_slug: Optional[str] = None,
         timeout: float = 8.0,
     ) -> bool:
         """Return True when the target market/outcome is rendered on the page.
@@ -1813,17 +1889,24 @@ class PolymtradeExecutor:
             try:
                 result = await self._evaluate_with_navigation_retry(
                     """(args) => {
-                        const [keywords, sideLabels, binaryOutcomeMode, marketTitle, marketSlug] = args;
+                        const [keywords, sideLabels, binaryOutcomeMode, marketTitle, marketSlug, eventId, eventSlug] = args;
                         const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
                         const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
                         const bodyText = norm(textOf(document.body));
                         const targetTitle = norm(marketTitle || "");
                         const targetSlug = norm(marketSlug || "");
                         const slugInUrl = !!targetSlug && norm(window.location.href).includes(targetSlug);
+                        const currentUrl = new URL(window.location.href);
+                        const eventIdMatches = !eventId || currentUrl.searchParams.get("eventId") === String(eventId);
+                        const eventSlugMatches = !eventSlug || currentUrl.searchParams.get("eventSlug") === String(eventSlug);
+                        const exactEventRoute = !!(eventId || eventSlug) && eventIdMatches && eventSlugMatches;
 
                         const keywordHits = keywords.filter(kw => bodyText.includes(kw.toLowerCase())).length;
                         const hasKeyword = keywords.length === 0 || keywordHits > 0;
-                        const dateKeywords = keywords.filter(kw => /^\\d{1,2}月\\d{1,2}(日)?$/.test(kw));
+                        const dateKeywords = keywords.filter(kw =>
+                            /^\\d{1,2}月\\d{1,2}(日)?$/.test(kw)
+                            || /^(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\s+\\d{1,2}$/i.test(kw)
+                        );
 
                         const tradeLabels = binaryOutcomeMode
                             ? [...sideLabels]
@@ -1909,7 +1992,8 @@ class PolymtradeExecutor:
                             // the same actionable row before treating it as the target.
                             if (dateKeywords.length) {
                                 const hasTargetDate = dateKeywords.some(kw => text.includes(kw.toLowerCase()));
-                                if (!hasTargetDate || matchedKeywords.length < 2) return false;
+                                if (!hasTargetDate) return false;
+                                if (!exactEventRoute && matchedKeywords.length < 2) return false;
                             }
                             const actions = Array.from(row.querySelectorAll('button, [role="button"], a, div[class*="button"], div[tabindex="0"], .cursor-pointer'));
                             return actions.some(isTradeAction);
@@ -1946,7 +2030,15 @@ class PolymtradeExecutor:
                             url: window.location.href,
                         };
                     }""",
-                    [keywords, side_labels, binary_updown, market_title or "", market_slug or ""],
+                    [
+                        keywords,
+                        side_labels,
+                        binary_updown,
+                        market_title or "",
+                        market_slug or "",
+                        event_id or "",
+                        event_slug or "",
+                    ],
                     label="target_event_visible.evaluate",
                 )
                 if result and result.get("visible"):
@@ -2249,6 +2341,7 @@ class PolymtradeExecutor:
         market_title: Optional[str] = None,
         signal_price: Optional[float] = None,
         max_price_drift: Optional[float] = None,
+        condition_id: Optional[str] = None,
     ):
         """Execute a BUY order on the Polymtrade event page.
 
@@ -2268,6 +2361,7 @@ class PolymtradeExecutor:
                     event_id, event_slug, outcome, amount_usdc,
                     market_slug=market_slug, market_title=market_title,
                     signal_price=signal_price, max_price_drift=max_price_drift,
+                    condition_id=condition_id,
                 )
         finally:
             try:
@@ -2285,6 +2379,7 @@ class PolymtradeExecutor:
         market_title: Optional[str] = None,
         signal_price: Optional[float] = None,
         max_price_drift: Optional[float] = None,
+        condition_id: Optional[str] = None,
     ):
         """Internal BUY implementation that operates on ``self.page``."""
         # Fallback URL without eventId. Polymtrade redirects this to the canonical
@@ -2341,14 +2436,23 @@ class PolymtradeExecutor:
         selected_quote = None
         buy_attempts = self._buy_attempts_for_market(market_slug)
         dialog_detect_timeout = self._dialog_detect_timeout_for_market(market_slug)
-        for attempt in range(buy_attempts):
+        root_event_route_attempted = False
+        canonical_slug_attempted = False
+        root_event_route_available = bool(event_id or event_slug) and not self._is_short_cycle_updown_market(market_slug)
+        extra_attempts = (1 if root_event_route_available else 0) + (1 if condition_id else 0)
+        for attempt in range(buy_attempts + extra_attempts):
             # The portfolio page auto-rotates through the user's position events.
             # Instead of waiting for the exact eventId to appear in the URL, we
             # verify the target market/outcome content is actually rendered. If
             # the carousel rotated away, we re-navigate to bring it back.
             stage_started_at = time.perf_counter()
             if not await self._is_target_event_visible(
-                outcome, market_slug=market_slug, market_title=market_title, timeout=target_visible_timeout
+                outcome,
+                market_slug=market_slug,
+                market_title=market_title,
+                event_id=event_id,
+                event_slug=event_slug,
+                timeout=target_visible_timeout,
             ):
                 self._observe_trade_stage("BUY", market_slug, "target_visible", stage_started_at)
                 current_url = self.page.url if self.page else ""
@@ -2370,6 +2474,49 @@ class PolymtradeExecutor:
                     )
                     await asyncio.sleep(self._retry_navigation_settle_seconds_for_market(market_slug))
                     continue
+                if not root_event_route_attempted and root_event_route_available:
+                    root_event_route_attempted = True
+                    root_event_url = (
+                        f"{self.base_url}/?eventId={event_id}"
+                        f"&eventSlug={event_slug}&eventSource=polymarket"
+                        if event_id
+                        else f"{self.base_url}/?eventSlug={event_slug}&eventSource=polymarket"
+                    )
+                    logger.info(
+                        "Target market missing on portfolio route; retrying on root event route %s",
+                        root_event_url,
+                    )
+                    await self._goto_with_retry(
+                        root_event_url,
+                        wait_until=self._navigation_wait_until_for_market(market_slug),
+                    )
+                    await asyncio.sleep(self._retry_navigation_settle_seconds_for_market(market_slug))
+                    continue
+                if not canonical_slug_attempted:
+                    canonical_slug_attempted = True
+                    canonical_slug = await self._canonical_market_slug_for_condition(condition_id)
+                    if canonical_slug and canonical_slug != event_slug:
+                        logger.info(
+                            "Target market missing; retrying once with CLOB canonical slug %s",
+                            canonical_slug,
+                        )
+                        market_slug = canonical_slug
+                        canonical_url = (
+                            f"{self.base_url}/?eventSlug={canonical_slug}"
+                            "&eventSource=polymarket"
+                        )
+                        await self._goto_with_retry(
+                            canonical_url,
+                            wait_until=self._navigation_wait_until_for_market(market_slug),
+                        )
+                        await asyncio.sleep(self._retry_navigation_settle_seconds_for_market(market_slug))
+                        continue
+                await self._capture_target_market_diagnostics(
+                    market_slug=market_slug,
+                    market_title=market_title,
+                    outcome=outcome,
+                    condition_id=condition_id,
+                )
                 raise RuntimeError(
                     f"Target market content never appeared for {market_title or market_slug}"
                 )
@@ -2852,24 +2999,26 @@ class PolymtradeExecutor:
 
         if raw:
             month_aliases = {
-                "january": "1",
-                "february": "2",
-                "march": "3",
-                "april": "4",
-                "may": "5",
-                "june": "6",
-                "july": "7",
-                "august": "8",
-                "september": "9",
-                "october": "10",
-                "november": "11",
-                "december": "12",
+                "january": ("1", "jan"),
+                "february": ("2", "feb"),
+                "march": ("3", "mar"),
+                "april": ("4", "apr"),
+                "may": ("5", "may"),
+                "june": ("6", "jun"),
+                "july": ("7", "jul"),
+                "august": ("8", "aug"),
+                "september": ("9", "sep"),
+                "october": ("10", "oct"),
+                "november": ("11", "nov"),
+                "december": ("12", "dec"),
             }
             title_for_dates = unicodedata.normalize("NFKD", raw).lower()
             title_for_dates = "".join(c for c in title_for_dates if not unicodedata.combining(c))
-            for month_name, month_num in month_aliases.items():
+            for month_name, (month_num, month_short) in month_aliases.items():
                 for match in re.finditer(rf"\b{month_name}\s+(\d{{1,2}})\b", title_for_dates):
                     day = str(int(match.group(1)))
+                    add(f"{month_name} {day}")
+                    add(f"{month_short} {day}")
                     add(f"{month_num}月{day}日")
                     add(f"{month_num}月{day}")
 
