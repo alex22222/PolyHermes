@@ -21,6 +21,12 @@ class FakeNotifier:
         return True
 
 
+class FailingNotifier(FakeNotifier):
+    def send(self, title, message):
+        self.messages.append((title, message))
+        return False
+
+
 class FakeHttpResponse:
     def __init__(self, body=b'{"code":0,"msg":"success"}'):
         self.body = body
@@ -103,6 +109,27 @@ class VpsServiceWatchdogTest(unittest.TestCase):
             self.assertEqual(2, len(notifier.messages))
             self.assertIn("服务不可用", notifier.messages[0][0])
             self.assertIn("服务已恢复", notifier.messages[1][0])
+
+    def test_failed_recovery_notification_does_not_keep_incident_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "state.json"
+            state_file.write_text(
+                json.dumps({"failures": 3, "incident": True, "incident_started_at": 900}),
+                encoding="utf-8",
+            )
+            notifier = FailingNotifier()
+            monitor = watchdog_module.Watchdog(
+                config=self.config(state_file, threshold=1),
+                notifier=notifier,
+                issue_collector=lambda: [],
+                now=lambda: 1000,
+            )
+
+            self.assertTrue(monitor.run_once())
+
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual({"failures": 0, "incident": False}, state)
+            self.assertEqual(1, len(notifier.messages))
 
     def test_feishu_notifier_sends_text_payload(self):
         notifier = watchdog_module.FeishuNotifier(

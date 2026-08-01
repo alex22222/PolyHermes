@@ -181,10 +181,7 @@ class Watchdog:
                     f"主机: {socket.gethostname()}\n中断持续: {duration} 秒\n所有健康检查已通过。",
                 )
                 if not sent:
-                    state["failures"] = 0
-                    self._save_state(state)
-                    print("PolyHermes watchdog: healthy; recovery alert will be retried")
-                    return True
+                    print("PolyHermes watchdog: recovery alert failed; incident state cleared")
             self._save_state({"failures": 0, "incident": False})
             print("PolyHermes watchdog: healthy")
             return True
