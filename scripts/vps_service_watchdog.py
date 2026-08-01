@@ -13,6 +13,11 @@ import urllib.request
 from pathlib import Path
 
 
+def is_bridge_runtime_ready(body):
+    """Treat completed trade errors as records, not a Bridge runtime outage."""
+    return body.get("ready") is True and body.get("logged_in") is True
+
+
 class Config:
     def __init__(
         self,
@@ -247,7 +252,7 @@ class Watchdog:
         self._check_json(
             f"{self.config.bridge_url}/status",
             "bridge_status",
-            lambda body: body.get("ready") is True and not body.get("last_error"),
+            is_bridge_runtime_ready,
             issues,
         )
 

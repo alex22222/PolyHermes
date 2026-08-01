@@ -109,6 +109,21 @@ class VpsServiceWatchdogTest(unittest.TestCase):
             self.assertEqual(1, len(notifier.messages))
             self.assertIn("未自动重启 Bridge", notifier.messages[0][1])
 
+    def test_bridge_status_accepts_ready_logged_in_runtime_with_stale_trade_error(self):
+        self.assertTrue(
+            watchdog_module.is_bridge_runtime_ready(
+                {
+                    "ready": True,
+                    "logged_in": True,
+                    "last_error": "Could not open buy dialog after outcome click",
+                }
+            )
+        )
+
+    def test_bridge_status_rejects_not_ready_or_logged_out_runtime(self):
+        self.assertFalse(watchdog_module.is_bridge_runtime_ready({"ready": False, "logged_in": True}))
+        self.assertFalse(watchdog_module.is_bridge_runtime_ready({"ready": True, "logged_in": False}))
+
     def test_sends_recovery_notification_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             notifier = FakeNotifier()
