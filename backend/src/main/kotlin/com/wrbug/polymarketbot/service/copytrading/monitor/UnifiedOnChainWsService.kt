@@ -7,7 +7,6 @@ import com.wrbug.polymarketbot.api.*
 import com.wrbug.polymarketbot.service.system.RpcNodeService
 import com.wrbug.polymarketbot.util.RetrofitFactory
 import com.wrbug.polymarketbot.util.createClient
-import com.wrbug.polymarketbot.util.getProxyConfig
 import jakarta.annotation.PostConstruct
 import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.*
@@ -21,6 +20,13 @@ import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.TimeUnit
+
+internal fun createOnChainWsClient(): OkHttpClient {
+    return createClient()
+        .pingInterval(20, TimeUnit.SECONDS)
+        .build()
+}
 
 /**
  * 统一的链上 WebSocket 服务
@@ -153,6 +159,7 @@ class UnifiedOnChainWsService(
      * 单个地址的 WebSocket 连接管理
      */
     inner class AddressWsConnection(val address: String) {
+        private val httpClient = createOnChainWsClient()
         private var webSocket: WebSocket? = null
         @Volatile
         private var isConnected = false
@@ -185,10 +192,10 @@ class UnifiedOnChainWsService(
             connectionJob = null
             webSocket?.close(1000, "停止监听")
             webSocket = null
-            isConnected = false
+            markDisconnected()
             subscriptions.clear()
-            requestIdToSubscriptionId.clear()
-            rpcSubscriptionIdToSubscriptionId.clear()
+            httpClient.dispatcher.executorService.shutdown()
+            httpClient.connectionPool.evictAll()
         }
 
         fun addSubscription(subscription: SubscriptionInfo) {
@@ -244,7 +251,6 @@ class UnifiedOnChainWsService(
 
                     logger.info("[$address] 连接链上 WebSocket: $wsUrl")
 
-                    val httpClient = createHttpClient()
                     val rpcApi = retrofitFactory.createEthereumRpcApi(httpUrl)
 
                     connectWebSocket(wsUrl, httpClient, rpcApi)
@@ -291,20 +297,26 @@ class UnifiedOnChainWsService(
                 }
 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                    isConnected = false
+                    markDisconnected()
                     logger.warn("[$address] 链上 WebSocket 连接关闭: code=$code, reason=$reason")
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    isConnected = false
+                    markDisconnected()
                     logger.warn("[$address] 链上 WebSocket 连接已关闭: code=$code, reason=$reason")
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) {
                     logger.error("[$address] 链上 WebSocket 连接失败: ${t.message}", t)
-                    isConnected = false
+                    markDisconnected()
                 }
             })
+        }
+
+        private fun markDisconnected() {
+            isConnected = false
+            requestIdToSubscriptionId.clear()
+            rpcSubscriptionIdToSubscriptionId.clear()
         }
 
         private suspend fun subscribeAddressOnChain(subscription: SubscriptionInfo) {
@@ -435,12 +447,5 @@ class UnifiedOnChainWsService(
             }
         }
         
-        private fun createHttpClient(): OkHttpClient {
-            val proxy = getProxyConfig()
-            val builder = createClient()
-            if (proxy != null) builder.proxy(proxy)
-            return builder.build()
-        }
     }
 }
-

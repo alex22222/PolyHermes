@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -159,12 +160,14 @@ class Watchdog:
         config,
         notifier,
         issue_collector=None,
+        app_diagnostics=None,
         app_restarter=None,
         now=None,
     ):
         self.config = config
         self.notifier = notifier
         self.issue_collector = issue_collector or self.collect_issues
+        self.app_diagnostics = app_diagnostics or self.capture_app_diagnostics
         self.app_restarter = app_restarter or self.restart_app
         self.now = now or (lambda: int(time.time()))
 
@@ -198,6 +201,7 @@ class Watchdog:
         app_issue = any(issue.startswith(self.APP_ISSUE_PREFIXES) for issue in issues)
         action = ""
         if app_issue and self.config.auto_restart_app and not state.get("incident"):
+            self.app_diagnostics()
             restarted = self.app_restarter()
             action = "已自动重启主应用 polyhermes。" if restarted else "自动重启主应用失败。"
         elif any(issue.startswith("bridge_") for issue in issues):
@@ -264,6 +268,75 @@ class Watchdog:
 
     def restart_app(self):
         return self._command(["docker", "restart", "polyhermes"], check=False).strip() == "polyhermes"
+
+    def capture_app_diagnostics(self):
+        """Save a bounded, redacted snapshot before restarting a wedged app."""
+        diagnostic_dir = self.config.state_file.parent / "incidents"
+        diagnostic_dir.mkdir(parents=True, exist_ok=True)
+        diagnostic_path = diagnostic_dir / f"app-wedge-{int(time.time())}.log"
+        commands = [
+            (
+                "container_state",
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "status={{.State.Status}} health={{.State.Health.Status}} "
+                    "oom={{.State.OOMKilled}} restartCount={{.RestartCount}} "
+                    "started={{.State.StartedAt}}",
+                    "polyhermes",
+                ],
+            ),
+            ("container_stats", ["docker", "stats", "--no-stream", "polyhermes"]),
+            ("container_processes", ["docker", "top", "polyhermes", "-eo", "pid,stat,%cpu,%mem,etime,cmd"]),
+            ("backend_listeners", ["docker", "exec", "polyhermes", "sh", "-lc", "ss -lnt"]),
+            (
+                "java_thread_dump_signal",
+                [
+                    "docker",
+                    "exec",
+                    "polyhermes",
+                    "sh",
+                    "-lc",
+                    "pid=$(pgrep -f 'java -jar /app/app.jar' | head -n 1); "
+                    "if [ -n \"$pid\" ]; then kill -QUIT \"$pid\"; echo java_pid=$pid; "
+                    "else echo java_pid_not_found; fi",
+                ],
+            ),
+        ]
+        try:
+            sections = []
+            for label, command in commands:
+                result = subprocess.run(
+                    command,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+                sections.append(f"[{label}]\n{result.stdout.strip()}\n")
+
+            time.sleep(1)
+            logs = self._command(["docker", "logs", "--tail", "1200", "polyhermes"], stderr=True)
+            marker = logs.rfind("Full thread dump")
+            if marker >= 0:
+                sections.append(f"[java_thread_dump]\n{self._redact(logs[marker:])}\n")
+            else:
+                sections.append("[java_thread_dump]\nnot found in recent container logs\n")
+
+            diagnostic_path.write_text("\n".join(sections), encoding="utf-8")
+            diagnostic_path.chmod(0o600)
+            print(f"PolyHermes watchdog: saved app diagnostics to {diagnostic_path}")
+        except OSError as exc:
+            print(f"PolyHermes watchdog: failed to save app diagnostics: {exc}")
+
+    @staticmethod
+    def _redact(text):
+        return re.sub(
+            r"(?i)(authorization:?\\s*(?:bearer\\s+)?|token=)[^\\s&]+",
+            r"\\1[REDACTED]",
+            text,
+        )
 
     def _check_container(self, name, require_health, issue_prefix, issues):
         running = self._command(

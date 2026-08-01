@@ -58,6 +58,7 @@ class VpsServiceWatchdogTest(unittest.TestCase):
                 config=self.config(Path(tmp) / "state.json"),
                 notifier=notifier,
                 issue_collector=lambda: ["backend_business: HTTP 502"],
+                app_diagnostics=lambda: None,
                 app_restarter=lambda: restarts.append("polyhermes") or True,
                 now=lambda: 1000,
             )
@@ -71,6 +72,24 @@ class VpsServiceWatchdogTest(unittest.TestCase):
             self.assertEqual(1, len(notifier.messages))
             self.assertIn("服务不可用", notifier.messages[0][0])
             self.assertIn("已自动重启主应用", notifier.messages[0][1])
+
+    def test_captures_diagnostics_before_restarting_main_app(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            diagnostics = []
+            restarts = []
+            monitor = watchdog_module.Watchdog(
+                config=self.config(Path(tmp) / "state.json", threshold=1),
+                notifier=FakeNotifier(),
+                issue_collector=lambda: ["backend_business: HTTP 502"],
+                app_diagnostics=lambda: diagnostics.append("captured"),
+                app_restarter=lambda: restarts.append("polyhermes") or True,
+                now=lambda: 1000,
+            )
+
+            monitor.run_once()
+
+            self.assertEqual(["captured"], diagnostics)
+            self.assertEqual(["polyhermes"], restarts)
 
     def test_bridge_failure_alerts_without_restarting_browser_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -98,6 +117,7 @@ class VpsServiceWatchdogTest(unittest.TestCase):
                 config=self.config(Path(tmp) / "state.json", threshold=1),
                 notifier=notifier,
                 issue_collector=lambda: issues.pop(0),
+                app_diagnostics=lambda: None,
                 app_restarter=lambda: True,
                 now=lambda: 1000,
             )
