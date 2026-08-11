@@ -57,6 +57,36 @@ WORLD_CUP_FINAL_HTML = """
 """
 
 
+TRUSTED_OUTCOME_CLICK_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <section class="market-row">
+      <div>US-Iran 60 day negotiation period extended?</div>
+      <div role="button" id="yes-outcome">Yes\n33¢</div>
+      <div role="button">No\n68¢</div>
+    </section>
+    <div id="trade-dialog"></div>
+  </main>
+  <script>
+    window.clickTrust = [];
+    document.getElementById("yes-outcome").addEventListener("click", (event) => {
+      window.clickTrust.push(event.isTrusted);
+      if (event.isTrusted) {
+        document.getElementById("trade-dialog").innerHTML = `
+          <section role="dialog" class="trade-dialog">
+            <input name="buyAmount" inputmode="decimal" />
+          </section>
+        `;
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 WORLD_CUP_GROUP_HTML = """
 <!doctype html>
 <html>
@@ -604,6 +634,22 @@ async def _run_selector_fixture() -> None:
             assert "Mexico" in result["rowText"], result
             assert result["label"] == "No 88¢", result
             assert clicked_labels == ["No 88¢"], clicked_labels
+
+            # Modern Polymtrade handlers can ignore synthetic DOM click() calls.
+            # The selected outcome must receive a trusted Playwright click so
+            # the buy dialog actually opens.
+            page = await browser.new_page()
+            await page.set_content(TRUSTED_OUTCOME_CLICK_HTML)
+            executor = PolymtradeExecutor()
+            executor.page = page
+            await executor._select_polymtrade_outcome(
+                "Yes",
+                market_slug="us-iran-60-day-negotiation-period-extended-20260624044855448",
+                market_title="US-Iran 60 day negotiation period extended?",
+                max_attempts=1,
+            )
+            assert await executor._is_buy_dialog_open(timeout=0.5) is True
+            assert True in await page.evaluate("window.clickTrust")
 
             # WNBA-style binary outcome page: "Toronto Tempo" as the Yes side.
             page = await browser.new_page()

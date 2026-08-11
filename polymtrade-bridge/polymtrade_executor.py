@@ -118,6 +118,8 @@ class PolymtradeExecutor:
         )
         self._portfolio_page_idle_close_task: Optional[asyncio.Task] = None
         self._portfolio_page_last_used_at: float = 0.0
+        self._portfolio_render_failures = 0
+        self._portfolio_render_unhealthy_after = 2
 
     @property
     def page(self) -> Optional[Page]:
@@ -240,6 +242,8 @@ class PolymtradeExecutor:
     def is_ready(self) -> bool:
         if not self._ready or self.page is None or self.context is None:
             return False
+        if self._portfolio_render_failures >= self._portfolio_render_unhealthy_after:
+            return False
         try:
             if self.page.is_closed():
                 return False
@@ -276,8 +280,20 @@ class PolymtradeExecutor:
             "page_count": len(pages),
             "default_page_closed": self._default_page.is_closed() if self._default_page else None,
             "portfolio_page_closed": self.portfolio_page.is_closed() if self.portfolio_page else None,
+            "portfolio_render_failures": self._portfolio_render_failures,
             "pages": page_infos,
         }
+
+    def _record_portfolio_render_result(self, rendered: bool) -> None:
+        if rendered:
+            self._portfolio_render_failures = 0
+            return
+        self._portfolio_render_failures += 1
+        if self._portfolio_render_failures == self._portfolio_render_unhealthy_after:
+            logger.error(
+                "Portfolio page failed to render %s consecutive times; marking executor unhealthy",
+                self._portfolio_render_failures,
+            )
 
     async def close_known_unmanaged_pages(self) -> int:
         """Close browser tabs that are known to be unrelated to execution."""
@@ -612,6 +628,7 @@ class PolymtradeExecutor:
         try:
             await self._goto_with_retry(f"{self.base_url}/portfolio", max_retries=6)
             rendered = await self._wait_for_portfolio_rows(timeout=12.0)
+            self._record_portfolio_render_result(rendered)
             if not rendered:
                 logger.warning("Portfolio rows did not render before scrape; continuing with best effort")
 
@@ -3136,7 +3153,7 @@ class PolymtradeExecutor:
         """
         return """
         (args) => {
-            const [outcome, sideLabels, keywords, binaryOutcomeMode] = args;
+            const [outcome, sideLabels, keywords, binaryOutcomeMode, trustedClickMode] = args;
             const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
             const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
 
@@ -3193,7 +3210,14 @@ class PolymtradeExecutor:
             function clickTarget(el) {
                 const target = clickableAncestor(el);
                 target.scrollIntoView({block: "center", inline: "center"});
-                target.click();
+                if (trustedClickMode) {
+                    document.querySelectorAll('[data-polyhermes-outcome-target="true"]').forEach(node => {
+                        node.removeAttribute('data-polyhermes-outcome-target');
+                    });
+                    target.setAttribute('data-polyhermes-outcome-target', 'true');
+                } else {
+                    target.click();
+                }
                 return target;
             }
 
@@ -3523,28 +3547,31 @@ class PolymtradeExecutor:
 
             result = await self._evaluate_with_navigation_retry(
                 self._select_outcome_script(),
-                [outcome, side_labels, keywords, binary_updown],
+                [outcome, side_labels, keywords, binary_updown, True],
                 label="select_outcome.evaluate",
             )
             last_result = result
 
             if result and result.get("clicked"):
-                # Scroll the clicked element into view and use Playwright click
-                # as a second confirmation. If the element is gone, the JS click
-                # already fired, so we still treat it as success.
-                if not binary_updown:
-                    try:
-                        # Try to find the button that was clicked by its label text.
-                        label = result.get("label", "")
-                        if label:
-                            clicked_el = await self.page.wait_for_selector(
-                                f"text={label}", timeout=1000
-                            )
-                            if clicked_el:
-                                await clicked_el.scroll_into_view_if_needed()
-                                await asyncio.sleep(0.1)
-                    except Exception:
-                        pass
+                try:
+                    clicked_el = await self.page.wait_for_selector(
+                        '[data-polyhermes-outcome-target="true"]', timeout=1000
+                    )
+                    if not clicked_el:
+                        raise RuntimeError("Selected outcome element disappeared before trusted click")
+                    await clicked_el.scroll_into_view_if_needed()
+                    await clicked_el.click(timeout=3000)
+                    await clicked_el.evaluate(
+                        "el => el.removeAttribute('data-polyhermes-outcome-target')"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Trusted outcome click failed (attempt {attempt + 1}/{max_attempts}): {e}"
+                    )
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(1.5)
+                        continue
+                    raise RuntimeError(f"Could not click selected outcome: {e}") from e
                 logger.info(
                     f"Selected outcome: {outcome} -> {result.get('label')} "
                     f"(rowScore={result.get('rowScore')}, strategy={result.get('strategy')}, "
