@@ -26,8 +26,13 @@ class PortfolioRiskEvaluationServiceTest {
     private val buyControlService = Mockito.mock(PortfolioBuyControlService::class.java) { invocation ->
         if (invocation.method.name == "snapshot") PortfolioBuyControlSnapshot() else Mockito.RETURNS_DEFAULTS.answer(invocation)
     }
+    private val relationService = Mockito.mock(PortfolioRelationService::class.java) { invocation ->
+        if (invocation.method.name == "getRelations") emptyRelations() else Mockito.RETURNS_DEFAULTS.answer(invocation)
+    }
+    private val relationClassifier = PortfolioRelationClassifier()
     private val service = PortfolioRiskEvaluationService(
-        exposureService, marketRepository, decisionRepository, reservationService, dailyMetricsService, buyControlService, PortfolioRiskPolicy(), Gson()
+        exposureService, marketRepository, decisionRepository, reservationService, dailyMetricsService,
+        buyControlService, relationService, relationClassifier, PortfolioRiskPolicy(), Gson()
     )
 
     @Test
@@ -41,6 +46,7 @@ class PortfolioRiskEvaluationServiceTest {
                 amount = "11",
                 marketId = "market-1",
                 marketTitle = "Bitcoin market",
+                outcome = "YES",
                 eventSlug = "event-1",
                 leaderAddress = "0xleader",
                 category = "crypto",
@@ -48,7 +54,7 @@ class PortfolioRiskEvaluationServiceTest {
             )
         )
 
-        assertEquals("G3-SHADOW-V4", result.policyVersion)
+        assertEquals("G3-SHADOW-V5", result.policyVersion)
         assertEquals("SHADOW", result.mode)
         assertEquals("WOULD_BLOCK", result.outcome)
         assertEquals(true, result.executionAllowed)
@@ -58,6 +64,7 @@ class PortfolioRiskEvaluationServiceTest {
         assertEquals("WOULD_BLOCK", result.rules.first { it.code == "MAX_EVENT_EXPOSURE" }.status)
         assertEquals("INSUFFICIENT_DATA", result.rules.first { it.code == "MAX_LEADER_EXPOSURE" }.status)
         assertEquals("WOULD_BLOCK", result.rules.first { it.code == "MAX_CATEGORY_EXPOSURE" }.status)
+        assertEquals("PASS", result.rules.first { it.code == "POSITION_RELATIONSHIP" }.status)
 
         val captor = ArgumentCaptor.forClass(com.wrbug.polymarketbot.entity.PortfolioRiskDecision::class.java)
         Mockito.verify(decisionRepository).save(captor.capture())
@@ -149,7 +156,8 @@ class PortfolioRiskEvaluationServiceTest {
             else Mockito.RETURNS_DEFAULTS.answer(invocation)
         }
         val localService = PortfolioRiskEvaluationService(
-            exposureService, marketRepository, decisionRepository, projectedReservation, daily, buyControlService, PortfolioRiskPolicy(), Gson()
+            exposureService, marketRepository, decisionRepository, projectedReservation, daily,
+            buyControlService, relationService, relationClassifier, PortfolioRiskPolicy(), Gson()
         )
         Mockito.`when`(exposureService.getExposure(2L)).thenReturn(exposure())
 
@@ -158,6 +166,7 @@ class PortfolioRiskEvaluationServiceTest {
                 accountId = 2,
                 side = "BUY",
                 amount = "1",
+                outcome = "YES",
                 eventSlug = "event-1",
                 category = "crypto",
                 requestId = "concurrent-1",
@@ -175,6 +184,51 @@ class PortfolioRiskEvaluationServiceTest {
     }
 
     @Test
+    fun `candidate duplicate position is shadow would-block but not execution denial`() {
+        Mockito.`when`(exposureService.getExposure(2L)).thenReturn(exposure())
+        Mockito.`when`(relationService.getRelations(Mockito.eq(2L), Mockito.anyLong())).thenReturn(
+            emptyRelations().copy(
+                positions = listOf(
+                    PortfolioRelationPositionDto(
+                        positionKey = "market-1|YES",
+                        marketId = "market-1",
+                        eventSlug = "event-1",
+                        outcome = "YES",
+                        category = "crypto",
+                        marketTitle = "Bitcoin market",
+                        currentValue = "10",
+                        quantity = "2",
+                        firstObservedAt = 1L,
+                        marketEndAt = null
+                    )
+                )
+            )
+        )
+
+        val fixedNowService = PortfolioRiskEvaluationService(
+            exposureService, marketRepository, decisionRepository, reservationService, dailyMetricsService,
+            buyControlService, relationService, relationClassifier, PortfolioRiskPolicy(), Gson()
+        )
+        val result = fixedNowService.evaluate(
+            PortfolioRiskEvaluationRequest(
+                accountId = 2,
+                side = "BUY",
+                amount = "1",
+                marketId = "market-1",
+                marketTitle = "Bitcoin market",
+                outcome = "YES",
+                eventSlug = "event-1",
+                category = "crypto",
+                requestId = "duplicate-1"
+            )
+        )
+
+        assertEquals("WOULD_BLOCK", result.rules.first { it.code == "POSITION_RELATIONSHIP" }.status)
+        assertEquals("WOULD_BLOCK", result.outcome)
+        assertEquals(true, result.executionAllowed)
+    }
+
+    @Test
     fun `manual account pause denies BUY even while threshold policy remains shadow`() {
         val pausedControl = Mockito.mock(PortfolioBuyControlService::class.java) { invocation ->
             if (invocation.method.name == "snapshot") PortfolioBuyControlSnapshot(true, "人工暂停", 10)
@@ -182,7 +236,7 @@ class PortfolioRiskEvaluationServiceTest {
         }
         val pausedService = PortfolioRiskEvaluationService(
             exposureService, marketRepository, decisionRepository, reservationService,
-            dailyMetricsService, pausedControl, PortfolioRiskPolicy(), Gson()
+            dailyMetricsService, pausedControl, relationService, relationClassifier, PortfolioRiskPolicy(), Gson()
         )
         Mockito.`when`(exposureService.getExposure(2L)).thenReturn(exposure())
 
@@ -220,5 +274,15 @@ class PortfolioRiskEvaluationServiceTest {
 
     private fun bucket(key: String, value: String, leaderId: Long? = null) = PortfolioExposureBucketDto(
         key, key, value, value, 1, "TEST", "EXACT", leaderId, value, "0", 1L, listOf("market-1|YES")
+    )
+
+    private fun emptyRelations() = PortfolioRelationResponse(
+        accountId = 2,
+        asOf = 1L,
+        positions = emptyList(),
+        relations = emptyList(),
+        countsByType = emptyMap(),
+        relatedValueByType = emptyMap(),
+        generatedAt = 1L
     )
 }

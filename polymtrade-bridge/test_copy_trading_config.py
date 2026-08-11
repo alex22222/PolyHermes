@@ -71,6 +71,7 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
             price_tolerance=Decimal("5"),
             delay_seconds=0,
             support_sell=True,
+            reverse_copy=False,
             min_order_depth=None,
             max_spread=None,
             min_price=None,
@@ -256,6 +257,36 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
         )
         self.assertIsNotNone(reason)
         self.assertIn("category mismatch", reason)
+
+    def test_reverse_copy_uses_opposite_price_for_price_band(self):
+        cfg = self._base_config(
+            reverse_copy=True,
+            min_price=Decimal("0.60"),
+            max_price=Decimal("0.80"),
+        )
+        reason = self.engine._check_filters(
+            cfg,
+            side="BUY",
+            title="NBA Finals",
+            price=Decimal("0.30"),
+            market_end_date_ms=None,
+            signal_timestamp_ms=None,
+            market_category="sports",
+        )
+        self.assertIsNone(reason)
+
+    def test_reverse_copy_rejects_non_binary_price(self):
+        cfg = self._base_config(reverse_copy=True)
+        reason = self.engine._check_filters(
+            cfg,
+            side="BUY",
+            title="NBA Finals",
+            price=Decimal("1"),
+            market_end_date_ms=None,
+            signal_timestamp_ms=None,
+            market_category="sports",
+        )
+        self.assertEqual(reason, "reverse copy requires binary price between 0 and 1")
 
     def test_primary_category_cross_match_passes(self):
         cfg = self._base_config(leader_category="politics")

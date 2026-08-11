@@ -76,7 +76,7 @@ class PortfolioRiskShadowReportServiceTest {
         val bucket = PortfolioExposureBucketDto("crypto", "crypto", "10", "10", 1, "TEST", "EXACT", null, "10", "0", 1, listOf("p"))
         return PortfolioRiskInputSnapshot(
             request = PortfolioRiskEvaluationRequest(
-                2, "BUY", "1", marketId = "market-1", eventSlug = "event-1",
+                2, "BUY", "1", marketId = "market-1", outcome = "YES", eventSlug = "event-1",
                 leaderAddress = "0xleader", category = "crypto", correlationId = correlationId, stage = stage
             ),
             resolvedCategory = "crypto",
@@ -85,6 +85,11 @@ class PortfolioRiskShadowReportServiceTest {
                 PortfolioExposureAccountDto(2, "Bridge", "0x", "50", "50", "0", "100", "COMPLETE", "50", "0", 1, 1, 1),
                 listOf(bucket.copy(key = "0xleader")), listOf(bucket), listOf(bucket.copy(key = "event-1")), listOf(bucket.copy(key = "market-1")),
                 PortfolioExposureCoverageDto(1, 0, 0, 0, 0, 0, if (stage == "FINAL" && correlationId == "corr-1" && capturedAt == 2L) insufficient else ready, ready, ready, ready)
+            ),
+            relation = PortfolioRiskRelationInput(
+                available = true,
+                candidatePositionKey = "CANDIDATE_BUY|market-1|YES",
+                relationCount = 0
             ),
             daily = PortfolioRiskDailyInput("0", "MIDNIGHT", 0, true, 0),
             capturedAt = capturedAt

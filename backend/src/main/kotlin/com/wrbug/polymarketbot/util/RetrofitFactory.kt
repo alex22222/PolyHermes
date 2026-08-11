@@ -8,6 +8,7 @@ import com.wrbug.polymarketbot.api.GitHubApi
 import com.wrbug.polymarketbot.api.PolymarketClobApi
 import com.wrbug.polymarketbot.api.PolymarketDataApi
 import com.wrbug.polymarketbot.api.PolymarketGammaApi
+import com.wrbug.polymarketbot.constants.BinanceConstants
 import com.wrbug.polymarketbot.constants.PolymarketConstants
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -304,7 +305,7 @@ class RetrofitFactory(
 
     private val binanceApi: BinanceApi by lazy {
         Retrofit.Builder()
-            .baseUrl("https://api.binance.com/")
+            .baseUrl(BinanceConstants.REST_BASE_URL)
             .client(sharedOkHttpClient)
             .addConverterFactory(GsonConverterFactory.create(gson))
             .build()

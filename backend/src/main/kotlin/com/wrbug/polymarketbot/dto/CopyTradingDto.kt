@@ -29,6 +29,7 @@ data class CopyTradingCreateRequest(
     val websocketReconnectInterval: Int? = null,
     val websocketMaxRetries: Int? = null,
     val supportSell: Boolean? = null,
+    val reverseCopy: Boolean = false,
     // 过滤条件
     val minOrderDepth: String? = null,  // 最小订单深度（USDC金额），NULL表示不启用
     val maxSpread: String? = null,  // 最大价差（绝对价格），NULL表示不启用
@@ -67,6 +68,7 @@ data class CopyTradingUpdateRequest(
     val websocketReconnectInterval: Int? = null,
     val websocketMaxRetries: Int? = null,
     val supportSell: Boolean? = null,
+    val reverseCopy: Boolean? = null,
     // 过滤条件
     val minOrderDepth: String? = null,
     val maxSpread: String? = null,
@@ -160,6 +162,7 @@ data class CopyTradingDto(
     val websocketReconnectInterval: Int,
     val websocketMaxRetries: Int,
     val supportSell: Boolean,
+    val reverseCopy: Boolean = false,
     // 过滤条件
     val minOrderDepth: String?,
     val maxSpread: String?,

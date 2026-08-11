@@ -69,6 +69,7 @@ class CopyTradingConfig:
     price_tolerance: Decimal
     delay_seconds: int
     support_sell: bool
+    reverse_copy: bool
     min_order_depth: Optional[Decimal]
     max_spread: Optional[Decimal]
     min_price: Optional[Decimal]
@@ -203,7 +204,7 @@ class CopyTradingRuleEngine:
             ct.copy_mode, ct.copy_ratio, ct.fixed_amount,
             ct.max_order_size, ct.min_order_size, ct.max_daily_loss,
             ct.max_daily_orders, ct.price_tolerance, ct.delay_seconds,
-            ct.support_sell, ct.min_order_depth, ct.max_spread,
+            ct.support_sell, ct.reverse_copy, ct.min_order_depth, ct.max_spread,
             ct.min_price, ct.max_price, ct.max_position_value,
             ct.max_price_deviation, ct.max_delay_seconds,
             ct.keyword_filter_mode, ct.keywords, ct.max_market_end_date,
@@ -248,6 +249,7 @@ class CopyTradingRuleEngine:
                     price_tolerance=Decimal(row["price_tolerance"] or 0),
                     delay_seconds=int(row["delay_seconds"] or 0),
                     support_sell=bool(row["support_sell"]),
+                    reverse_copy=bool(row["reverse_copy"]),
                     min_order_depth=Decimal(row["min_order_depth"]) if row["min_order_depth"] is not None else None,
                     max_spread=Decimal(row["max_spread"]) if row["max_spread"] is not None else None,
                     min_price=Decimal(row["min_price"]) if row["min_price"] is not None else None,
@@ -304,6 +306,10 @@ class CopyTradingRuleEngine:
         signal_timestamp_ms: Optional[int],
         market_category: Optional[str],
     ) -> Optional[str]:
+        effective_price = Decimal("1") - price if cfg.reverse_copy else price
+        if cfg.reverse_copy and not (Decimal("0") < price < Decimal("1")):
+            return "reverse copy requires binary price between 0 and 1"
+
         if side == "SELL" and not cfg.support_sell:
             return "support_sell=false"
 
@@ -317,10 +323,10 @@ class CopyTradingRuleEngine:
             if not is_category_allowed(cfg.leader_category, market_category):
                 return f"category mismatch: leader={cfg.leader_category}, market={market_category}"
 
-        if cfg.min_price is not None and price < cfg.min_price:
-            return f"price {price} < min_price {cfg.min_price}"
-        if cfg.max_price is not None and price > cfg.max_price:
-            return f"price {price} > max_price {cfg.max_price}"
+        if cfg.min_price is not None and effective_price < cfg.min_price:
+            return f"price {effective_price} < min_price {cfg.min_price}"
+        if cfg.max_price is not None and effective_price > cfg.max_price:
+            return f"price {effective_price} > max_price {cfg.max_price}"
 
         if cfg.max_market_end_date is not None and market_end_date_ms is not None:
             if market_end_date_ms > cfg.max_market_end_date:

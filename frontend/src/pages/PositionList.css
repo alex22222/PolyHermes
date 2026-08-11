@@ -1,0 +1,61 @@
+.positions-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.positions-page-header {
+  margin-bottom: 0;
+  padding: 18px 20px;
+  border: 1px solid #e6f0ff;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f8fbff 0%, #ffffff 70%);
+}
+
+.positions-summary-grid {
+  margin-bottom: 0;
+}
+
+.positions-summary-card {
+  height: 100%;
+  border-color: #edf0f5;
+  border-radius: 10px;
+}
+
+.positions-summary-card .ant-statistic {
+  margin-bottom: 4px;
+}
+
+.positions-summary-card .ant-statistic-title {
+  color: #667085;
+  font-size: 12px;
+}
+
+.positions-summary-card .ant-statistic-content {
+  font-size: 24px;
+}
+
+.positions-analysis-card,
+.positions-list-card {
+  margin-bottom: 0;
+  border-radius: 12px;
+}
+
+.positions-list-card {
+  border-color: #d9e7ff;
+}
+
+@media (max-width: 768px) {
+  .positions-page {
+    gap: 12px;
+  }
+
+  .positions-page-header {
+    padding: 14px;
+    border-radius: 10px;
+  }
+
+  .positions-summary-card .ant-statistic-content {
+    font-size: 20px;
+  }
+}

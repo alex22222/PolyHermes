@@ -1,6 +1,15 @@
 from types import SimpleNamespace
 
+import pytest
+
 from polymtrade_executor import PolymtradeExecutor
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_executor_treats_blank_proxy_as_disabled(monkeypatch, value):
+    monkeypatch.setenv("BROWSER_PROXY", value)
+
+    assert PolymtradeExecutor().proxy is None
 
 
 def test_executor_is_ready_rejects_closed_page():

@@ -65,6 +65,9 @@ data class CopyTrading(
     
     @Column(name = "support_sell", nullable = false)
     val supportSell: Boolean = true,  // 是否支持跟单卖出
+
+    @Column(name = "reverse_copy", nullable = false)
+    val reverseCopy: Boolean = false,  // 仅二元市场反向 outcome 跟单
     
     // 过滤条件字段
     @Column(name = "min_order_depth", precision = 20, scale = 8)

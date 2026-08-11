@@ -20,6 +20,8 @@ class PortfolioRiskEvaluationService(
     private val reservationService: PortfolioRiskReservationService,
     private val dailyMetricsService: PortfolioRiskDailyMetricsService,
     private val buyControlService: PortfolioBuyControlService,
+    private val relationService: PortfolioRelationService,
+    private val relationClassifier: PortfolioRelationClassifier,
     private val policy: PortfolioRiskPolicy,
     private val gson: Gson
 ) {
@@ -50,6 +52,9 @@ class PortfolioRiskEvaluationService(
             )
         } else PortfolioRiskReservationProjection(null)
         val exposure = if (side == "BUY") exposureService.getExposure(request.accountId) else null
+        val relation = if (side == "BUY") {
+            buildRelationInput(request, amount, category, eventSlug, evaluatedAt)
+        } else null
         val totalAssets = exposure?.account?.totalAssets?.toBigDecimalOrNull()
         val daily = if (side == "BUY" && exposure != null && totalAssets != null && totalAssets > BigDecimal.ZERO &&
             exposure.account.availableBalance?.toBigDecimalOrNull() != null && exposure.account.valuationStatus == "COMPLETE"
@@ -59,6 +64,7 @@ class PortfolioRiskEvaluationService(
             resolvedCategory = category,
             resolvedEventSlug = eventSlug,
             exposure = exposure,
+            relation = relation,
             daily = daily?.let { PortfolioRiskDailyInput(it.lossPercent?.strip(), it.baselineType, it.successfulBuyCount, it.orderCountComplete, it.dayStartAt) },
             reservation = reservationProjection.toInput(),
             buyControl = if (side == "BUY") buyControlService.snapshot(request.accountId) else PortfolioBuyControlSnapshot(),
@@ -118,6 +124,68 @@ class PortfolioRiskEvaluationService(
         request.eventSlug?.trim()?.takeIf { it.isNotBlank() }
             ?: request.marketId?.let { marketRepository.findByMarketId(it)?.eventSlug?.trim()?.takeIf(String::isNotBlank) }
 
+    private fun buildRelationInput(
+        request: PortfolioRiskEvaluationRequest,
+        amount: BigDecimal,
+        category: String?,
+        eventSlug: String?,
+        now: Long
+    ): PortfolioRiskRelationInput {
+        val marketId = request.marketId?.trim()?.takeIf { it.isNotBlank() }
+            ?: return PortfolioRiskRelationInput(false, "请求缺少 marketId，无法识别重复或相关仓位")
+        val outcome = request.outcome?.trim()?.takeIf { it.isNotBlank() }
+            ?: return PortfolioRiskRelationInput(false, "请求缺少 outcome，无法识别重复或相关仓位")
+        val marketTitle = request.marketTitle?.trim()?.takeIf { it.isNotBlank() } ?: marketId
+        val resolvedCategory = category?.takeIf { it.isNotBlank() }
+            ?: return PortfolioRiskRelationInput(false, "请求缺少领域归因，无法识别跨市场相关仓位")
+        val resolvedEventSlug = eventSlug?.takeIf { it.isNotBlank() }
+            ?: return PortfolioRiskRelationInput(false, "请求缺少 eventSlug，无法识别事件内相关仓位")
+        val existing = relationService.getRelations(request.accountId, now).positions.map {
+            PortfolioRelationPosition(
+                positionKey = it.positionKey,
+                marketId = it.marketId,
+                eventSlug = it.eventSlug,
+                outcome = it.outcome,
+                category = it.category,
+                marketTitle = it.marketTitle,
+                currentValue = it.currentValue?.toBigDecimalOrNull(),
+                quantity = it.quantity.toBigDecimalOrNull() ?: BigDecimal.ZERO,
+                firstObservedAt = it.firstObservedAt,
+                marketEndAt = it.marketEndAt
+            )
+        }
+        val candidateKey = "CANDIDATE_BUY|$marketId|${outcome.uppercase()}"
+        val marketEndAt = request.marketId?.let { marketRepository.findByMarketId(it)?.endDate }
+        val candidate = PortfolioRelationPosition(
+            positionKey = candidateKey,
+            marketId = marketId,
+            eventSlug = resolvedEventSlug,
+            outcome = outcome,
+            category = resolvedCategory,
+            marketTitle = marketTitle,
+            currentValue = amount,
+            quantity = BigDecimal.ONE,
+            firstObservedAt = now,
+            marketEndAt = marketEndAt
+        )
+        val relations = relationClassifier.classify(existing + candidate, now)
+            .filter { candidateKey in it.positionKeys }
+        val counts = relations.groupingBy { it.type }.eachCount().toSortedMap()
+        val valueByType = relations.groupBy { it.type }.mapValues { (_, items) ->
+            items.mapNotNull { it.relatedValue?.toBigDecimalOrNull() }.fold(BigDecimal.ZERO, BigDecimal::add).strip()
+        }.toSortedMap()
+        val blocking = BLOCKING_RELATION_TYPES.filter { (counts[it] ?: 0) > 0 }
+        return PortfolioRiskRelationInput(
+            available = true,
+            candidatePositionKey = candidateKey,
+            relationCount = relations.size,
+            countsByType = counts,
+            relatedValueByType = valueByType,
+            blockingTypes = blocking,
+            unknownCount = counts["UNKNOWN"] ?: 0
+        )
+    }
+
     private fun PortfolioRiskDecision.toResponse(): PortfolioRiskEvaluationResponse = PortfolioRiskEvaluationResponse(
         decisionId = requestId,
         policyVersion = policyVersion,
@@ -134,5 +202,6 @@ class PortfolioRiskEvaluationService(
     companion object {
         private const val MODE = "SHADOW"
         private val CATEGORIES = listOf("crypto", "sports", "finance", "politics")
+        private val BLOCKING_RELATION_TYPES = listOf("DUPLICATE", "PSEUDO_HEDGE", "RELATED")
     }
 }

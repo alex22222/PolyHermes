@@ -352,6 +352,7 @@ const AddModal: React.FC<AddModalProps> = ({
         websocketReconnectInterval: values.websocketReconnectInterval,
         websocketMaxRetries: values.websocketMaxRetries,
         supportSell: values.supportSell !== false,
+        reverseCopy: values.reverseCopy ?? false,
         minOrderDepth: values.minOrderDepth?.toString(),
         maxSpread: values.maxSpread?.toString(),
         minPrice: values.minPrice?.toString(),
@@ -415,6 +416,7 @@ const AddModal: React.FC<AddModalProps> = ({
             websocketReconnectInterval: 5000,
             websocketMaxRetries: 10,
             supportSell: true,
+            reverseCopy: false,
             pushFailedOrders: false,
             pushFilteredOrders: false,
             keywordFilterMode: 'DISABLED'
@@ -1013,6 +1015,15 @@ const AddModal: React.FC<AddModalProps> = ({
             label={t('copyTradingAdd.supportSell') || '跟单卖出'}
             name="supportSell"
             tooltip={t('copyTradingAdd.supportSellTooltip') || '是否跟单 Leader 的卖出订单'}
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+
+          <Form.Item
+            label="反向跟单"
+            name="reverseCopy"
+            tooltip="仅二元市场有效：YES/UP 反向为 NO/DOWN；无法确认对立 outcome 的信号将跳过"
             valuePropName="checked"
           >
             <Switch />

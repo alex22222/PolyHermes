@@ -8,8 +8,11 @@ import com.wrbug.polymarketbot.repository.AccountRepository
 import com.wrbug.polymarketbot.repository.CopyTradingRepository
 import com.wrbug.polymarketbot.repository.CopyTradingTemplateRepository
 import com.wrbug.polymarketbot.repository.LeaderRepository
+import com.wrbug.polymarketbot.repository.LeaderResearchCandidateRepository
 import com.wrbug.polymarketbot.service.copytrading.monitor.CopyTradingMonitorService
 import com.google.gson.Gson
+import com.wrbug.polymarketbot.dto.LeaderResearchLoopDiagnosticsRequest
+import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchLoopDiagnosticsService
 import com.wrbug.polymarketbot.util.IllegalBigDecimal
 import com.wrbug.polymarketbot.util.JsonUtils
 import com.wrbug.polymarketbot.util.toSafeBigDecimal
@@ -29,6 +32,8 @@ class CopyTradingService(
     private val accountRepository: AccountRepository,
     private val templateRepository: CopyTradingTemplateRepository,
     private val leaderRepository: LeaderRepository,
+    private val leaderResearchCandidateRepository: LeaderResearchCandidateRepository,
+    private val leaderResearchLoopDiagnosticsService: LeaderResearchLoopDiagnosticsService,
     private val monitorService: CopyTradingMonitorService,
     private val jsonUtils: JsonUtils,
     private val gson: Gson
@@ -95,6 +100,7 @@ class CopyTradingService(
                     websocketReconnectInterval = request.websocketReconnectInterval ?: template.websocketReconnectInterval,
                     websocketMaxRetries = request.websocketMaxRetries ?: template.websocketMaxRetries,
                     supportSell = request.supportSell ?: template.supportSell,
+                    reverseCopy = request.reverseCopy,
                     minOrderDepth = request.minOrderDepth?.toSafeBigDecimal() ?: template.minOrderDepth,
                     maxSpread = request.maxSpread?.toSafeBigDecimal() ?: template.maxSpread,
                     minPrice = request.minPrice?.toSafeBigDecimal() ?: template.minPrice,
@@ -126,6 +132,7 @@ class CopyTradingService(
                     websocketReconnectInterval = request.websocketReconnectInterval ?: 5000,
                     websocketMaxRetries = request.websocketMaxRetries ?: 10,
                     supportSell = request.supportSell ?: true,
+                    reverseCopy = request.reverseCopy,
                     minOrderDepth = request.minOrderDepth?.toSafeBigDecimal(),
                     maxSpread = request.maxSpread?.toSafeBigDecimal(),
                     minPrice = request.minPrice?.toSafeBigDecimal(),
@@ -138,6 +145,10 @@ class CopyTradingService(
                 )
             }
             
+            if (request.enabled) {
+                validateResearchLeaderCanBeEnabled(leader.id ?: request.leaderId)?.let { return Result.failure(it) }
+            }
+
             // 6. 创建跟单配置
             val copyTrading = CopyTrading(
                 accountId = request.accountId,
@@ -157,6 +168,7 @@ class CopyTradingService(
                 websocketReconnectInterval = config.websocketReconnectInterval,
                 websocketMaxRetries = config.websocketMaxRetries,
                 supportSell = config.supportSell,
+                reverseCopy = config.reverseCopy,
                 minOrderDepth = config.minOrderDepth,
                 maxSpread = config.maxSpread,
                 minPrice = config.minPrice,
@@ -210,6 +222,10 @@ class CopyTradingService(
             } else {
                 copyTrading.configName
             }
+
+            if (request.enabled == true) {
+                validateResearchLeaderCanBeEnabled(copyTrading.leaderId)?.let { return Result.failure(it) }
+            }
             
             // 更新字段（只更新提供的字段）
             val updated = copyTrading.copy(
@@ -228,6 +244,7 @@ class CopyTradingService(
                 websocketReconnectInterval = request.websocketReconnectInterval ?: copyTrading.websocketReconnectInterval,
                 websocketMaxRetries = request.websocketMaxRetries ?: copyTrading.websocketMaxRetries,
                 supportSell = request.supportSell ?: copyTrading.supportSell,
+                reverseCopy = request.reverseCopy ?: copyTrading.reverseCopy,
                 // 处理可选字段：空字符串表示要清空（设置为 null），null 表示不更新，转换失败保留旧值
                 minOrderDepth = if (request.minOrderDepth != null) {
                     if (request.minOrderDepth.isBlank()) {
@@ -371,6 +388,18 @@ class CopyTradingService(
             )
         )
     }
+
+    private fun validateResearchLeaderCanBeEnabled(leaderId: Long): IllegalStateException? {
+        val candidate = leaderResearchCandidateRepository.findByLeaderId(leaderId) ?: return null
+        val candidateId = candidate.id ?: return IllegalStateException("研究候选数据不完整，禁止启用真钱跟单")
+        val diagnostics = leaderResearchLoopDiagnosticsService.diagnose(
+            LeaderResearchLoopDiagnosticsRequest(candidateIds = listOf(candidateId), sampleLimit = 1)
+        )
+        val blocker = diagnostics.samples.firstOrNull { it.candidateId == candidateId }?.blocker
+            ?: "missing_strict_ready_evidence"
+        if (blocker == "strict_ready") return null
+        return IllegalStateException("研究候选未满足严格可试跟门槛，禁止启用真钱跟单：candidateId=$candidateId blocker=$blocker")
+    }
     
     /**
      * 查询跟单列表
@@ -405,9 +434,24 @@ class CopyTradingService(
                 copyTradings
             }
             
+            val accountsById = if (filtered.isEmpty()) {
+                emptyMap()
+            } else {
+                accountRepository.findAllById(filtered.map { it.accountId }.toSet())
+                    .filter { it.id != null }
+                    .associateBy { it.id!! }
+            }
+            val leadersById = if (filtered.isEmpty()) {
+                emptyMap()
+            } else {
+                leaderRepository.findByIdIn(filtered.map { it.leaderId }.toSet())
+                    .filter { it.id != null }
+                    .associateBy { it.id!! }
+            }
+
             val dtos = filtered.mapNotNull { copyTrading ->
-                val account = accountRepository.findById(copyTrading.accountId).orElse(null)
-                val leader = leaderRepository.findById(copyTrading.leaderId).orElse(null)
+                val account = accountsById[copyTrading.accountId]
+                val leader = leadersById[copyTrading.leaderId]
                 
                 if (account == null || leader == null) {
                     logger.warn("跟单配置数据不完整: ${copyTrading.id}")
@@ -532,6 +576,7 @@ class CopyTradingService(
             websocketReconnectInterval = copyTrading.websocketReconnectInterval,
             websocketMaxRetries = copyTrading.websocketMaxRetries,
             supportSell = copyTrading.supportSell,
+            reverseCopy = copyTrading.reverseCopy,
             minOrderDepth = copyTrading.minOrderDepth?.toPlainString(),
             maxSpread = copyTrading.maxSpread?.toPlainString(),
             minPrice = copyTrading.minPrice?.toPlainString(),
@@ -596,6 +641,7 @@ class CopyTradingService(
         val websocketReconnectInterval: Int,
         val websocketMaxRetries: Int,
         val supportSell: Boolean,
+        val reverseCopy: Boolean,
         val minOrderDepth: BigDecimal?,
         val maxSpread: BigDecimal?,
         val minPrice: BigDecimal?,

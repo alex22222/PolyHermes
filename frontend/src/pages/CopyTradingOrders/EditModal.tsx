@@ -86,6 +86,7 @@ const EditModal: React.FC<EditModalProps> = ({
             websocketReconnectInterval: found.websocketReconnectInterval,
             websocketMaxRetries: found.websocketMaxRetries,
             supportSell: found.supportSell,
+            reverseCopy: found.reverseCopy ?? false,
             minOrderDepth: found.minOrderDepth ? parseFloat(found.minOrderDepth) : undefined,
             maxSpread: found.maxSpread ? parseFloat(found.maxSpread) : undefined,
             minPrice: found.minPrice ? parseFloat(found.minPrice) : undefined,
@@ -231,6 +232,7 @@ const EditModal: React.FC<EditModalProps> = ({
         websocketReconnectInterval: values.websocketReconnectInterval,
         websocketMaxRetries: values.websocketMaxRetries,
         supportSell: values.supportSell,
+        reverseCopy: values.reverseCopy ?? false,
         // 对于可选字段，始终发送（即使为空也发送空字符串，让后端知道要清空）
         minOrderDepth: values.minOrderDepth != null ? values.minOrderDepth.toString() : '',
         maxSpread: values.maxSpread != null ? values.maxSpread.toString() : '',
@@ -866,6 +868,15 @@ const EditModal: React.FC<EditModalProps> = ({
             label={t('copyTradingEdit.supportSell') || '跟单卖出'}
             name="supportSell"
             tooltip={t('copyTradingEdit.supportSellTooltip') || '是否跟单 Leader 的卖出订单'}
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+
+          <Form.Item
+            label="反向跟单"
+            name="reverseCopy"
+            tooltip="仅二元市场有效：YES/UP 反向为 NO/DOWN；无法确认对立 outcome 的信号将跳过"
             valuePropName="checked"
           >
             <Switch />

@@ -6,6 +6,7 @@ data class PortfolioRiskEvaluationRequest(
     val amount: String,
     val marketId: String? = null,
     val marketTitle: String? = null,
+    val outcome: String? = null,
     val eventSlug: String? = null,
     val leaderAddress: String? = null,
     val category: String? = null,

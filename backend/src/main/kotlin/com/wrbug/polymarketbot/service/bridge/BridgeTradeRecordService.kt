@@ -179,6 +179,11 @@ class BridgeTradeRecordService(
             val successRecords = records.filter { it.status.equals("SUCCESS", ignoreCase = true) }
             val failedRecords = records.filter { it.status.equals("FAILED", ignoreCase = true) }
             val pendingRecords = records.filter { it.status.equals("PENDING", ignoreCase = true) }
+            val skippedRecords = records.filter { it.status.equals("SKIPPED", ignoreCase = true) }
+            val retryableFailureRecords = records.filter { it.status.equals("FAILED_RETRYABLE", ignoreCase = true) }
+            val unverifiedSubmissionRecords = records.filter {
+                it.status.equals("SUBMITTED_UNVERIFIED", ignoreCase = true)
+            }
             val buyRecords = records.filter { it.side.equals("BUY", ignoreCase = true) }
             val sellRecords = records.filter { it.side.equals("SELL", ignoreCase = true) }
             val successBuyRecords = successRecords.filter { it.side.equals("BUY", ignoreCase = true) }
@@ -257,6 +262,9 @@ class BridgeTradeRecordService(
                     successTrades = successRecords.size.toLong(),
                     failedTrades = failedRecords.size.toLong(),
                     pendingTrades = pendingRecords.size.toLong(),
+                    skippedTrades = skippedRecords.size.toLong(),
+                    retryableFailureTrades = retryableFailureRecords.size.toLong(),
+                    unverifiedSubmissionTrades = unverifiedSubmissionRecords.size.toLong(),
                     buyTrades = buyRecords.size.toLong(),
                     sellTrades = sellRecords.size.toLong(),
                     successBuyTrades = successBuyRecords.size.toLong(),

@@ -18,6 +18,10 @@ from pydantic import BaseModel, Field, ConfigDict, PrivateAttr
 from polymtrade_executor import LastMilePriceDriftError, PolymtradeExecutor
 from copy_trading_config import COPY_MODE_PROPORTIONAL_RISK, CopyTradingRuleEngine, infer_market_category
 from bridge_recorder import BridgeTradeRecorder
+from bridge_execution_state import (
+    STATUS_SUBMITTED_UNVERIFIED,
+    is_retryable_pre_submit_failure,
+)
 from position_ledger import PositionLedger
 from bridge_reliability_audit import (
     audit as run_bridge_reliability_audit,
@@ -88,6 +92,8 @@ SHORT_CYCLE_PORTFOLIO_RISK_TIMEOUT_SECONDS = float(
 SHORT_CYCLE_TRADE_LOCK_TIMEOUT_SECONDS = float(
     os.getenv("SHORT_CYCLE_TRADE_LOCK_TIMEOUT_SECONDS", "2")
 )
+UI_RETRY_ENABLED = os.getenv("BRIDGE_UI_RETRY_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+UI_RETRY_DELAY_SECONDS = max(0.0, float(os.getenv("BRIDGE_UI_RETRY_DELAY_SECONDS", "2")))
 
 # Singleton PID lock to prevent multiple bridge instances from competing for the
 # same browser profile and opening multiple Chrome windows.
@@ -204,6 +210,7 @@ _portfolio_lock = asyncio.Lock()
 _signal_queue: Optional[asyncio.Queue[LeaderTradeSignal]] = None
 _signal_workers: list[asyncio.Task] = []
 _verification_tasks: set[asyncio.Task] = set()
+_retry_record_ids: dict[str, int] = {}
 _accepting_signals = False
 _signal_drain_reason: Optional[str] = None
 _signal_drain_started_at: Optional[float] = None
@@ -1093,6 +1100,7 @@ async def _verify_submitted_buy(
             before_quantity=before_quantity,
         )
         metrics.buy_verifications_success += 1
+        metrics.trades_buy_success += 1
         logger.info(
             "BUY verified asynchronously by live portfolio increase: before=%s, after=%s",
             before_quantity,
@@ -1116,7 +1124,7 @@ async def _verify_submitted_buy(
             await _recorder_call(
                 "update_status",
                 record_id,
-                "SUCCESS",
+                STATUS_SUBMITTED_UNVERIFIED,
                 f"BUY submitted; asynchronous verification unconfirmed: {verify_error}",
             )
         metrics.observe_latency(
@@ -1144,6 +1152,7 @@ async def _verify_submitted_sell(
             before_quantity=before_quantity,
         )
         metrics.sell_verifications_success += 1
+        metrics.trades_sell_success += 1
         logger.info(
             "SELL verified asynchronously by live portfolio decrease: before=%s, after=%s",
             before_quantity,
@@ -1167,7 +1176,7 @@ async def _verify_submitted_sell(
             await _recorder_call(
                 "update_status",
                 record_id,
-                "SUCCESS",
+                STATUS_SUBMITTED_UNVERIFIED,
                 f"SELL submitted; asynchronous verification unconfirmed: {verify_error}",
             )
         metrics.observe_latency(
@@ -1393,7 +1402,13 @@ async def _execute_and_record(record_id: int, request: ExecuteRequest, external_
                 }
 
         logger.info(f"Manual trade executed: {external_trade_id}, result={result}")
-        await _recorder_call("update_status", record_id, "SUCCESS")
+        submitted_status = STATUS_SUBMITTED_UNVERIFIED if (buy_verification or sell_verification) else "SUCCESS"
+        submitted_message = (
+            f"{side_upper} submitted; awaiting asynchronous portfolio verification"
+            if submitted_status == STATUS_SUBMITTED_UNVERIFIED
+            else None
+        )
+        await _recorder_call("update_status", record_id, submitted_status, submitted_message)
         if side_upper == "BUY":
             metrics.trades_buy_submitted += 1
             await _complete_manual_buy_risk(manual_risk_correlation, "SUCCESS")
@@ -1428,6 +1443,7 @@ async def _evaluate_manual_buy_risk(
         "amount": str(request.amount_usdc),
         "marketId": request.condition_id or request.market_slug,
         "marketTitle": request.market_title,
+        "outcome": request.outcome,
         "category": infer_market_category(request.market_title),
         "requestId": f"{correlation_id}:{stage}",
         "correlationId": correlation_id,
@@ -1455,6 +1471,10 @@ async def _record_failed_signal(
     if not recorder:
         return
     try:
+        retry_record_id = _retry_record_ids.get(signal.transaction_hash)
+        if retry_record_id is not None:
+            await _recorder_call("update_status", retry_record_id, "FAILED", reason)
+            return
         await _recorder_call(
             "record_result",
             external_trade_id=signal.transaction_hash,
@@ -1472,6 +1492,24 @@ async def _record_failed_signal(
         )
     except Exception as rec_err:
         logger.warning(f"Failed to record skipped signal: {rec_err}")
+
+
+async def _retry_pre_submit_ui_failure_once(
+    signal: LeaderTradeSignal,
+    record_id: int,
+):
+    """Retry once after a known pre-submit browser failure.
+
+    This is deliberately opt-in. It re-enters the normal signal path so all
+    current price, stale-market, duplicate, and portfolio-risk checks run again.
+    """
+    await asyncio.sleep(UI_RETRY_DELAY_SECONDS)
+    logger.info("Retrying pre-submit UI failure once: tx=%s record=%s", signal.transaction_hash, record_id)
+    _retry_record_ids[signal.transaction_hash] = record_id
+    try:
+        await handle_signal(signal, retry_record_id=record_id, retry_attempt=1)
+    finally:
+        _retry_record_ids.pop(signal.transaction_hash, None)
 
 
 async def _evaluate_portfolio_buy_risk(
@@ -1497,6 +1535,7 @@ async def _evaluate_portfolio_buy_risk(
         "amount": str(amount),
         "marketId": signal.condition_id or signal.market_slug,
         "marketTitle": signal.title,
+        "outcome": signal.outcome,
         "leaderAddress": signal.leader_address,
         "category": infer_market_category(signal.title),
         "requestId": request_id,
@@ -1557,7 +1596,45 @@ def _execution_raw_payload(signal: LeaderTradeSignal, cfg=None) -> dict[str, Any
     payload["copyTradingId"] = getattr(cfg, "id", None) or signal.copy_trading_id
     config_id = payload["copyTradingId"]
     payload["portfolioRiskCorrelationId"] = f"bridge:{signal.transaction_hash}:{config_id}" if config_id is not None else None
+    payload["reverseCopy"] = bool(getattr(cfg, "reverse_copy", False))
     return payload
+
+
+_REVERSE_OUTCOMES = {
+    "yes": ("No", 1),
+    "no": ("Yes", 0),
+    "true": ("No", 1),
+    "false": ("Yes", 0),
+    "是": ("No", 1),
+    "否": ("Yes", 0),
+    "up": ("Down", 1),
+    "down": ("Up", 0),
+    "涨": ("Down", 1),
+    "跌": ("Up", 0),
+    "上涨": ("Down", 1),
+    "下跌": ("Up", 0),
+}
+
+
+def _signal_for_config(signal: LeaderTradeSignal, cfg) -> tuple[Optional[LeaderTradeSignal], Optional[str]]:
+    """Return the config-specific executable signal, failing closed for non-binary reversals."""
+    if not getattr(cfg, "reverse_copy", False):
+        return signal, None
+    if not (0 < signal.price < 1):
+        return None, "reverse copy requires binary price between 0 and 1"
+    if not signal.outcome:
+        return None, "reverse copy requires a recognized binary outcome"
+    opposite = _REVERSE_OUTCOMES.get(signal.outcome.strip().lower())
+    if opposite is None:
+        return None, f"reverse copy unsupported outcome: {signal.outcome}"
+    outcome, outcome_index = opposite
+    return signal.model_copy(
+        update={
+            "outcome": outcome,
+            "outcome_index": outcome_index,
+            "price": 1 - signal.price,
+        }
+    ), None
 
 
 def _proportional_risk_small_buyback_reason(
@@ -1601,14 +1678,19 @@ def _proportional_risk_small_buyback_reason(
     return None
 
 
-async def handle_signal(signal: LeaderTradeSignal):
+async def handle_signal(
+    signal: LeaderTradeSignal,
+    *,
+    retry_record_id: Optional[int] = None,
+    retry_attempt: int = 0,
+):
     try:
         if not signal.market_slug:
             logger.warning(f"Signal missing market_slug, cannot execute: {signal.transaction_hash}")
             return
 
         # Idempotency: skip if this external trade has already been processed
-        if recorder and await _recorder_call("exists", signal.transaction_hash):
+        if recorder and retry_record_id is None and await _recorder_call("exists", signal.transaction_hash):
             logger.debug(f"Signal {signal.transaction_hash} already processed, skipping")
             return
 
@@ -1630,13 +1712,29 @@ async def handle_signal(signal: LeaderTradeSignal):
 
         if not matching:
             logger.info(f"No copy-trading config matches leader {signal.leader_address}, skipping")
+            if retry_record_id is not None and recorder:
+                await _recorder_call(
+                    "update_status",
+                    retry_record_id,
+                    "FAILED",
+                    "Retry skipped: no copy-trading config currently matches the signal",
+                )
             return
 
-        side_upper = signal.side.upper()
-        has_executable_config = any(reason is None for _, reason in matching)
+        leader_signal = signal
+        configured_signals = []
+        for cfg, reason in matching:
+            execution_signal, reverse_reason = _signal_for_config(leader_signal, cfg)
+            configured_signals.append((cfg, reason or reverse_reason, execution_signal))
+        has_executable_config = any(
+            reason is None and execution_signal is not None
+            for _, reason, execution_signal in configured_signals
+        )
         filtered_signal_recorded = False
 
-        for cfg, reason in matching:
+        for cfg, reason, execution_signal in configured_signals:
+            signal = execution_signal or leader_signal
+            side_upper = signal.side.upper()
             if reason:
                 metrics.signals_filtered += 1
                 logger.info(f"Config {cfg.id} filtered for {signal.transaction_hash}: {reason}")
@@ -2028,7 +2126,15 @@ async def handle_signal(signal: LeaderTradeSignal):
                     continue
 
             record_id = None
-            if recorder:
+            if retry_record_id is not None:
+                record_id = retry_record_id
+                await _recorder_call(
+                    "update_status",
+                    record_id,
+                    "PENDING",
+                    f"Retry attempt {retry_attempt} after pre-submit UI failure",
+                )
+            elif recorder:
                 try:
                     record_id = await _recorder_call(
                         "record_pending",
@@ -2177,9 +2283,14 @@ async def handle_signal(signal: LeaderTradeSignal):
                             "before_quantity": live_quantity,
                         }
                 if record_id and recorder:
-                    await _recorder_call("update_status", record_id, "SUCCESS")
+                    submitted_status = STATUS_SUBMITTED_UNVERIFIED if (buy_verification or sell_verification) else "SUCCESS"
+                    submitted_message = (
+                        f"{side_upper} submitted; awaiting asynchronous portfolio verification"
+                        if submitted_status == STATUS_SUBMITTED_UNVERIFIED
+                        else None
+                    )
+                    await _recorder_call("update_status", record_id, submitted_status, submitted_message)
                 if side_upper == "BUY":
-                    metrics.trades_buy_success += 1
                     metrics.trades_buy_submitted += 1
                     await _complete_portfolio_buy_risk(cfg, signal, "SUCCESS")
                     if buy_verification:
@@ -2187,7 +2298,6 @@ async def handle_signal(signal: LeaderTradeSignal):
                             _verify_submitted_buy(**buy_verification)
                         )
                 else:
-                    metrics.trades_sell_success += 1
                     metrics.trades_sell_submitted += 1
                     if sell_verification:
                         _track_verification_task(
@@ -2227,7 +2337,16 @@ async def handle_signal(signal: LeaderTradeSignal):
                 else:
                     metrics.trades_sell_failed += 1
                 if record_id and recorder:
-                    await _recorder_call("update_status", record_id, "FAILED", str(exec_err))
+                    failure_reason = str(exec_err)
+                    await _recorder_call("update_status", record_id, "FAILED", failure_reason)
+                    if (
+                        UI_RETRY_ENABLED
+                        and retry_attempt == 0
+                        and is_retryable_pre_submit_failure(failure_reason)
+                    ):
+                        _track_verification_task(
+                            _retry_pre_submit_ui_failure_once(signal, record_id)
+                        )
     except Exception as e:
         logger.exception(f"Failed to handle signal: {e}")
 

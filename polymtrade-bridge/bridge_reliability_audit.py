@@ -23,6 +23,8 @@ import httpx
 import pymysql
 from dotenv import load_dotenv
 
+from bridge_execution_state import STATUS_FAILED_RETRYABLE, STATUS_SUBMITTED_UNVERIFIED
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 load_dotenv(SCRIPT_DIR / ".env")
@@ -1030,6 +1032,9 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
     reconciliations = load_reconciliations(args.reconciliation_file)
     pending_timeouts = []
     recent_failures = []
+    retryable_failures = []
+    unverified_submissions = []
+    skipped_count = 0
     for row in records:
         status = normalize_text(row.get("status")).upper()
         age_ms = now_ms - int(row.get("created_at") or row.get("updated_at") or now_ms)
@@ -1037,14 +1042,21 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
             item = record_summary(row)
             item["age_ms"] = age_ms
             pending_timeouts.append(item)
-        elif status == "FAILED":
+        elif status in {"FAILED", STATUS_FAILED_RETRYABLE}:
             item = record_summary(row)
             bucket = classify_failure_row(item)
             item["failure_bucket"] = bucket
+            item["retryable"] = status == STATUS_FAILED_RETRYABLE
             item["failure_actionability"] = FAILURE_BUCKET_ACTIONABILITY.get(bucket, "needs_triage")
             item["failure_next_action"] = FAILURE_BUCKET_NEXT_ACTION.get(bucket, FAILURE_BUCKET_NEXT_ACTION["other"])
             item["coverage_hint"] = failure_coverage_hint(item)
             recent_failures.append(item)
+            if status == STATUS_FAILED_RETRYABLE:
+                retryable_failures.append(item)
+        elif status == STATUS_SUBMITTED_UNVERIFIED:
+            unverified_submissions.append(record_summary(row))
+        elif status == "SKIPPED":
+            skipped_count += 1
 
     failure_buckets = failure_bucket_summary(recent_failures)
     next_action_candidates = actionable_failure_buckets(failure_buckets)
@@ -1160,6 +1172,9 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         "success_ledger_rows_checked": len(success_rows),
         "portfolio_position_count": len(positions),
         "pending_timeout_count": len(pending_timeouts),
+        "skipped_count": skipped_count,
+        "retryable_failure_count": len(retryable_failures),
+        "unverified_submission_count": len(unverified_submissions),
         **build_success_mismatch_metric_counts(
             total=len(success_position_mismatches),
             fresh=fresh_success_position_mismatches,
@@ -1182,6 +1197,8 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         "failure_buckets": failure_buckets,
         "next_action_candidates": next_action_candidates,
         "pending_timeouts": pending_timeouts,
+        "retryable_failures": retryable_failures,
+        "unverified_submissions": unverified_submissions,
         "success_position_mismatches": success_position_mismatches,
         "reconciliation_suggestions": reconciliation_suggestions,
         "unexpected_portfolio_positions": unexpected_portfolio_positions,

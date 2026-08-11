@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useRef } from 'react'
-import { Card, Table, Tag, message, Space, Input, Radio, Select, Button, Row, Col, Empty, Modal, Form, Descriptions } from 'antd'
+import { Card, Table, Tag, message, Space, Input, Radio, Select, Button, Row, Col, Empty, Modal, Form, Descriptions, Statistic, Typography } from 'antd'
 import { SearchOutlined, AppstoreOutlined, UnorderedListOutlined, UpOutlined, DownOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
@@ -11,6 +11,7 @@ import { useMediaQuery } from 'react-responsive'
 import { useWebSocketSubscription } from '../hooks/useWebSocket'
 import { wsManager } from '../services/websocket'
 import { formatUSDC, formatNumber as formatNumberUtil } from '../utils'
+import './PositionList.css'
 
 type PositionFilter = 'current' | 'historical'
 type ViewMode = 'card' | 'list'
@@ -1518,13 +1519,26 @@ const PositionList: React.FC = () => {
 
   const currentCount = filteredCurrentPositions.length
   const historicalCount = filteredHistoryPositions.length
+  const selectedAccountName = selectedAccountId == null
+    ? '全部账户'
+    : accounts.find(account => account.id === selectedAccountId)?.accountName || `账户 ${selectedAccountId}`
+  const totalAssets = portfolioExposure?.account.totalAssets == null
+    ? null
+    : Number(portfolioExposure.account.totalAssets)
+  const unrealizedPnl = portfolioExposure?.account.unrealizedPnl == null
+    ? positionTotals.totalPnl
+    : Number(portfolioExposure.account.unrealizedPnl)
+  const valuationComplete = portfolioExposure?.account.valuationStatus === 'COMPLETE'
 
   return (
-    <div>
-      <div style={{ marginBottom: '16px' }}>
+    <div className="positions-page">
+      <div className="positions-page-header">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', marginBottom: '12px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <h2 style={{ margin: 0 }}>仓位管理</h2>
+            <div>
+              <Typography.Title level={2} style={{ margin: 0 }}>仓位管理</Typography.Title>
+              <Typography.Text type="secondary">{selectedAccountName} · 余额、仓位与风险敞口统一视图</Typography.Text>
+            </div>
             {/* WebSocket 连接状态指示器 */}
             <Tag
               color={wsConnected ? 'green' : 'orange'}
@@ -1748,10 +1762,42 @@ const PositionList: React.FC = () => {
           </div>
         )}
       </div>
+      <Row gutter={[12, 12]} className="positions-summary-grid">
+        <Col xs={12} sm={12} lg={6}>
+          <Card size="small" className="positions-summary-card">
+            <Statistic title="账户总资产" value={totalAssets ?? 0} precision={2} prefix="$" valueStyle={{ color: totalAssets == null ? '#8c8c8c' : '#1d39c4' }} />
+            <Typography.Text type="secondary">{totalAssets == null ? '等待完整估值' : '余额 + 仓位 + 待赎回'}</Typography.Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={12} lg={6}>
+          <Card size="small" className="positions-summary-card">
+            <Statistic title="开放仓位价值" value={positionTotals.totalCurrentValue} precision={2} prefix="$" />
+            <Typography.Text type="secondary">当前筛选 {currentCount} 个仓位</Typography.Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={12} lg={6}>
+          <Card size="small" className="positions-summary-card">
+            <Statistic
+              title="未实现盈亏"
+              value={Math.abs(unrealizedPnl)}
+              precision={2}
+              prefix={unrealizedPnl >= 0 ? '+$' : '-$'}
+              valueStyle={{ color: unrealizedPnl >= 0 ? '#389e0d' : '#cf1322' }}
+            />
+            <Typography.Text type="secondary">{portfolioExposure ? '组合口径' : '当前列表口径'}</Typography.Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={12} lg={6}>
+          <Card size="small" className="positions-summary-card">
+            <Statistic title="数据状态" value={valuationComplete ? '完整' : '核验中'} valueStyle={{ fontSize: 20, color: valuationComplete ? '#389e0d' : '#d46b08' }} />
+            <Typography.Text type="secondary">{wsConnected ? '实时连接正常' : '实时连接中'}</Typography.Text>
+          </Card>
+        </Col>
+      </Row>
       <Card
         title="每日总资产快照"
         extra={<span style={{ color: '#999', fontSize: 12 }}>完整总资产 = 可用余额 + 开放持仓价值 + 待赎回价值；未知项不按 0 计算</span>}
-        style={{ marginBottom: 16 }}
+        className="positions-analysis-card"
       >
         {dailyAssets.length > 0 ? (
           <div ref={assetChartRef} style={{ width: '100%', height: isMobile ? 260 : 320 }} />
@@ -1760,7 +1806,7 @@ const PositionList: React.FC = () => {
         )}
       </Card>
 
-      <Card title="组合风险暴露" style={{ marginBottom: 16 }}>
+      <Card title="组合风险暴露" className="positions-analysis-card">
         {portfolioExposure ? (
           <>
             {exposurePositionKeys.length > 0 && (
@@ -1849,7 +1895,7 @@ const PositionList: React.FC = () => {
       <Card
         title="G3 历史回放与 Shadow 数据质量"
         extra={<span style={{ color: '#999', fontSize: 12 }}>只读报告；不改变 BUY/SELL 规则</span>}
-        style={{ marginBottom: 16 }}
+        className="positions-analysis-card"
       >
         {historicalReplay ? (
           <>
@@ -1888,7 +1934,7 @@ const PositionList: React.FC = () => {
       <Card
         title="重复、对冲与相关仓位"
         extra={<span style={{ color: '#999', fontSize: 12 }}>只读识别；相反 outcome 不会自动按全额抵消，任何处置都需人工预览和逐笔确认</span>}
-        style={{ marginBottom: 16 }}
+        className="positions-analysis-card"
       >
         {portfolioRelations ? (
           <>
@@ -1985,7 +2031,7 @@ const PositionList: React.FC = () => {
       </Modal>
 
       {(isMobile || viewMode === 'card') ? (
-        <Card loading={loading}>
+        <Card loading={loading} className="positions-list-card" title={positionFilter === 'current' ? '当前持仓明细' : '历史仓位明细'}>
           {renderCardView()}
           {/* 移动端分页 */}
           {filteredPositions.length > 0 && (
@@ -2045,7 +2091,7 @@ const PositionList: React.FC = () => {
           )}
         </Card>
       ) : (
-        <Card>
+        <Card className="positions-list-card" title={positionFilter === 'current' ? '当前持仓明细' : '历史仓位明细'}>
           <Table
             dataSource={filteredPositions}
             columns={columns}

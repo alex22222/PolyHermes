@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Card, Table, Button, Space, Tag, Popconfirm, Switch, message, Select, Dropdown, Spin, List, Empty, Tooltip } from 'antd'
 import { PlusOutlined, DeleteOutlined, BarChartOutlined, UnorderedListOutlined, EditOutlined, WalletOutlined, UserOutlined } from '@ant-design/icons'
@@ -9,14 +9,15 @@ import { useAccountStore } from '../store/accountStore'
 import type { CopyTrading, Leader } from '../types'
 import { useMediaQuery } from 'react-responsive'
 import { formatUSDC } from '../utils'
-import CopyTradingOrdersModal from './CopyTradingOrders/index'
-import StatisticsModal from './CopyTradingOrders/StatisticsModal'
-import FilteredOrdersModal from './CopyTradingOrders/FilteredOrdersModal'
-import EditModal from './CopyTradingOrders/EditModal'
-import AddModal from './CopyTradingOrders/AddModal'
 import LeaderSelect from '../components/LeaderSelect'
 
 const { Option } = Select
+
+const CopyTradingOrdersModal = lazy(() => import('./CopyTradingOrders/index'))
+const StatisticsModal = lazy(() => import('./CopyTradingOrders/StatisticsModal'))
+const FilteredOrdersModal = lazy(() => import('./CopyTradingOrders/FilteredOrdersModal'))
+const EditModal = lazy(() => import('./CopyTradingOrders/EditModal'))
+const AddModal = lazy(() => import('./CopyTradingOrders/AddModal'))
 
 const CopyTradingList: React.FC = () => {
   const { t } = useTranslation()
@@ -169,6 +170,16 @@ const CopyTradingList: React.FC = () => {
             ? `${t('copyTradingList.ratioMode') || '比例'} ${(parseFloat(record.copyRatio || '0') * 100).toFixed(2).replace(/\.0+$/, '')}%`
             : `${t('copyTradingList.fixedAmountMode') || '固定'} ${formatUSDC(record.fixedAmount || '0')}`
           }
+        </Tag>
+      )
+    },
+    {
+      title: '方向',
+      key: 'direction',
+      width: isMobile ? 76 : 90,
+      render: (_: any, record: CopyTrading) => (
+        <Tag color={record.reverseCopy ? 'volcano' : 'blue'}>
+          {record.reverseCopy ? '反向' : '正向'}
         </Tag>
       )
     },
@@ -533,38 +544,49 @@ const CopyTradingList: React.FC = () => {
         )}
       </Card>
       
-      {/* Modal 组件 */}
-      <CopyTradingOrdersModal
-        open={ordersModalOpen}
-        onClose={() => setOrdersModalOpen(false)}
-        copyTradingId={ordersModalCopyTradingId}
-        defaultTab={ordersModalTab}
-      />
-      <StatisticsModal
-        open={statisticsModalOpen}
-        onClose={() => setStatisticsModalOpen(false)}
-        copyTradingId={statisticsModalCopyTradingId}
-      />
-      <FilteredOrdersModal
-        open={filteredOrdersModalOpen}
-        onClose={() => setFilteredOrdersModalOpen(false)}
-        copyTradingId={filteredOrdersModalCopyTradingId}
-      />
-      <EditModal
-        open={editModalOpen}
-        onClose={() => setEditModalOpen(false)}
-        copyTradingId={editModalCopyTradingId}
-        onSuccess={() => {
-          fetchCopyTradings()
-        }}
-      />
-      <AddModal
-        open={addModalOpen}
-        onClose={() => setAddModalOpen(false)}
-        onSuccess={() => {
-          fetchCopyTradings()
-        }}
-      />
+      <Suspense fallback={null}>
+        {ordersModalOpen && (
+          <CopyTradingOrdersModal
+            open={ordersModalOpen}
+            onClose={() => setOrdersModalOpen(false)}
+            copyTradingId={ordersModalCopyTradingId}
+            defaultTab={ordersModalTab}
+          />
+        )}
+        {statisticsModalOpen && (
+          <StatisticsModal
+            open={statisticsModalOpen}
+            onClose={() => setStatisticsModalOpen(false)}
+            copyTradingId={statisticsModalCopyTradingId}
+          />
+        )}
+        {filteredOrdersModalOpen && (
+          <FilteredOrdersModal
+            open={filteredOrdersModalOpen}
+            onClose={() => setFilteredOrdersModalOpen(false)}
+            copyTradingId={filteredOrdersModalCopyTradingId}
+          />
+        )}
+        {editModalOpen && (
+          <EditModal
+            open={editModalOpen}
+            onClose={() => setEditModalOpen(false)}
+            copyTradingId={editModalCopyTradingId}
+            onSuccess={() => {
+              fetchCopyTradings()
+            }}
+          />
+        )}
+        {addModalOpen && (
+          <AddModal
+            open={addModalOpen}
+            onClose={() => setAddModalOpen(false)}
+            onSuccess={() => {
+              fetchCopyTradings()
+            }}
+          />
+        )}
+      </Suspense>
     </div>
   )
 }

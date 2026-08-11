@@ -355,6 +355,7 @@ export interface CopyTrading {
   websocketReconnectInterval: number
   websocketMaxRetries: number
   supportSell: boolean
+  reverseCopy: boolean
   // 过滤条件
   minOrderDepth?: string
   maxSpread?: string
@@ -1460,6 +1461,7 @@ export interface CopyTradingCreateRequest {
   websocketReconnectInterval?: number
   websocketMaxRetries?: number
   supportSell?: boolean
+  reverseCopy?: boolean
   // 过滤条件
   minOrderDepth?: string
   maxSpread?: string
@@ -1498,6 +1500,7 @@ export interface CopyTradingUpdateRequest {
   websocketReconnectInterval?: number
   websocketMaxRetries?: number
   supportSell?: boolean
+  reverseCopy?: boolean
   // 过滤条件
   minOrderDepth?: string
   maxSpread?: string
@@ -2821,6 +2824,9 @@ export interface BridgeTradeStatistics {
   successTrades: number
   failedTrades: number
   pendingTrades: number
+  skippedTrades: number
+  retryableFailureTrades: number
+  unverifiedSubmissionTrades: number
   buyTrades: number
   sellTrades: number
   successBuyTrades: number

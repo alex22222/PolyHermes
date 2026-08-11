@@ -7,6 +7,8 @@ BASE_URL="${BACKEND_BASE_URL:-http://127.0.0.1:8000}"
 STATE_FILE="${BACKEND_WATCHDOG_STATE_FILE:-/tmp/polyhermes-backend-watchdog.failures}"
 LOCK_DIR="${BACKEND_WATCHDOG_LOCK_DIR:-/tmp/polyhermes-backend-watchdog.lock}"
 LABEL="${BACKEND_LAUNCHD_LABEL:-com.polyhermes.backend-local}"
+PLIST="${BACKEND_LAUNCHD_PLIST:-$HOME/Library/LaunchAgents/${LABEL}.plist}"
+DOMAIN="gui/$(id -u)"
 THRESHOLD="${BACKEND_WATCHDOG_THRESHOLD:-3}"
 STARTUP_GRACE_SECONDS="${BACKEND_WATCHDOG_STARTUP_GRACE_SECONDS:-600}"
 SERVICE_PID="${BACKEND_WATCHDOG_SERVICE_PID:-$(pgrep -f 'backend-local\.jar' | head -n 1 || true)}"
@@ -74,4 +76,12 @@ if [[ "${BACKEND_WATCHDOG_DRY_RUN:-false}" == "true" ]]; then
 fi
 
 echo "Restarting $LABEL after $failures consecutive failures"
-launchctl kickstart -k "gui/$(id -u)/$LABEL"
+if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    if [[ ! -f "$PLIST" ]]; then
+        echo "Cannot restart $LABEL: launchd service is not loaded and plist is missing: $PLIST"
+        exit 1
+    fi
+    echo "Launchd service $LABEL is not loaded; bootstrapping $PLIST"
+    launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null || true
+fi
+launchctl kickstart -k "$DOMAIN/$LABEL"

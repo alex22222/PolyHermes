@@ -8,6 +8,8 @@ from typing import Optional
 import pymysql
 from dotenv import load_dotenv
 
+from bridge_execution_state import STATUS_FAILED, status_for_failure
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -84,7 +86,9 @@ class BridgeTradeRecorder:
         return record_id
 
     def update_status(self, record_id: int, status: str, error_message: Optional[str] = None):
-        """Update record status to SUCCESS or FAILED."""
+        """Update a record while retaining structured failure semantics."""
+        if status.upper() == STATUS_FAILED:
+            status = status_for_failure(error_message)
         now = int(time.time() * 1000)
         sql = """
         UPDATE bridge_trade_record
@@ -390,6 +394,8 @@ class BridgeTradeRecorder:
         raw_payload: Optional[dict] = None,
     ) -> int:
         """One-shot insert a completed record (used for manual /execute)."""
+        if status.upper() == STATUS_FAILED:
+            status = status_for_failure(error_message)
         now = int(time.time() * 1000)
         sql = """
         INSERT INTO bridge_trade_record

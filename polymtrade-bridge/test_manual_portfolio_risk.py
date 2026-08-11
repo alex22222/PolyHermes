@@ -43,7 +43,11 @@ class TestManualPortfolioRisk(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(executor.execute_trade.await_args.kwargs["verify"])
         verify_buy.assert_awaited_once()
         complete.assert_awaited_once_with("bridge:manual-1:manual", "SUCCESS")
-        recorder.update_status.assert_called_with(1, "SUCCESS")
+        recorder.update_status.assert_called_with(
+            1,
+            main.STATUS_SUBMITTED_UNVERIFIED,
+            "BUY submitted; awaiting asynchronous portfolio verification",
+        )
 
     async def test_manual_sell_skips_buy_risk(self):
         executor = SimpleNamespace(execute_trade=AsyncMock(return_value={"verified": True}))

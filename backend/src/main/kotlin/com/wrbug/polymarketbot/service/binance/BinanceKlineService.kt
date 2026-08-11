@@ -1,5 +1,6 @@
 package com.wrbug.polymarketbot.service.binance
 
+import com.wrbug.polymarketbot.constants.BinanceConstants
 import com.wrbug.polymarketbot.util.createClient
 import com.wrbug.polymarketbot.util.toSafeBigDecimal
 import kotlinx.coroutines.CoroutineScope
@@ -28,7 +29,7 @@ class BinanceKlineService {
     private val logger = LoggerFactory.getLogger(BinanceKlineService::class.java)
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-    private val wsBase = "wss://stream.binance.com:9443"
+    private val wsBase = BinanceConstants.WS_BASE_URL
     private val client by lazy {
         createClient().build()
     }

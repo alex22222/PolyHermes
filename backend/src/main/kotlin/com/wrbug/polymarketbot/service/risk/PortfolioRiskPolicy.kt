@@ -23,12 +23,24 @@ data class PortfolioRiskReservationInput(
     val recoveredAtFinal: Boolean = false
 )
 
+data class PortfolioRiskRelationInput(
+    val available: Boolean,
+    val reason: String? = null,
+    val candidatePositionKey: String? = null,
+    val relationCount: Int = 0,
+    val countsByType: Map<String, Int> = emptyMap(),
+    val relatedValueByType: Map<String, String> = emptyMap(),
+    val blockingTypes: List<String> = emptyList(),
+    val unknownCount: Int = 0
+)
+
 data class PortfolioRiskInputSnapshot(
     val policyVersion: String = PortfolioRiskPolicy.POLICY_VERSION,
     val request: PortfolioRiskEvaluationRequest,
     val resolvedCategory: String? = null,
     val resolvedEventSlug: String? = null,
     val exposure: PortfolioExposureResponse? = null,
+    val relation: PortfolioRiskRelationInput? = null,
     val daily: PortfolioRiskDailyInput? = null,
     val reservation: PortfolioRiskReservationInput = PortfolioRiskReservationInput(),
     val buyControl: PortfolioBuyControlSnapshot? = PortfolioBuyControlSnapshot(),
@@ -88,6 +100,7 @@ class PortfolioRiskPolicy {
             dimensionRule("MAX_EVENT_EXPOSURE", snapshot.resolvedEventSlug, exposure.events, exposure.coverage.event, amount.add(reservation.otherEventAmount.decimal()), totalAssets, MAX_EVENT_EXPOSURE_PERCENT, "事件"),
             dimensionRule("MAX_LEADER_EXPOSURE", snapshot.request.leaderAddress?.lowercase(), exposure.leaders, exposure.coverage.leader, amount.add(reservation.otherLeaderAmount.decimal()), totalAssets, MAX_LEADER_EXPOSURE_PERCENT, "Leader"),
             dimensionRule("MAX_CATEGORY_EXPOSURE", snapshot.resolvedCategory, exposure.categories, exposure.coverage.category, amount.add(reservation.otherCategoryAmount.decimal()), totalAssets, MAX_CATEGORY_EXPOSURE_PERCENT, "领域"),
+            relationRule(snapshot.relation),
             dailyLossRule(snapshot.daily),
             dailyOrdersRule(snapshot.daily, reservation)
         )
@@ -115,6 +128,32 @@ class PortfolioRiskPolicy {
         return thresholdRule(code, projected, threshold, projected > threshold, "下单后 $label 暴露占总资产比例")
     }
 
+    private fun relationRule(relation: PortfolioRiskRelationInput?): PortfolioRiskRuleResultDto {
+        if (relation == null || !relation.available) {
+            return insufficient("POSITION_RELATIONSHIP", relation?.reason ?: "未生成候选 BUY 与现有持仓的关系快照")
+        }
+        if (relation.blockingTypes.isNotEmpty()) {
+            val actual = relation.blockingTypes.joinToString(",")
+            return rule(
+                "POSITION_RELATIONSHIP",
+                "WOULD_BLOCK",
+                actual,
+                "NONE",
+                "候选 BUY 会形成重复或相关仓位：$actual，需人工确认或先减仓"
+            )
+        }
+        if (relation.unknownCount > 0) {
+            return insufficient("POSITION_RELATIONSHIP", "存在 ${relation.unknownCount} 个关系判断缺少元数据，不能证明仓位独立")
+        }
+        return rule(
+            "POSITION_RELATIONSHIP",
+            "PASS",
+            relation.countsByType.entries.joinToString(",") { "${it.key}:${it.value}" }.ifBlank { "NONE" },
+            "NO_BLOCKING_RELATION",
+            "未发现候选 BUY 与现有仓位形成重复或高相关暴露"
+        )
+    }
+
     private fun outcome(side: String, rules: List<PortfolioRiskRuleResultDto>) = when {
         side == "SELL" -> "SELL_PRIORITY"
         rules.any { it.status == "WOULD_BLOCK" } -> "WOULD_BLOCK"
@@ -131,8 +170,8 @@ class PortfolioRiskPolicy {
     private fun BigDecimal.strip() = stripTrailingZeros().toPlainString()
 
     companion object {
-        const val POLICY_VERSION = "G3-SHADOW-V4"
-        val SUPPORTED_POLICY_VERSIONS = setOf("G3-SHADOW-V3", POLICY_VERSION)
+        const val POLICY_VERSION = "G3-SHADOW-V5"
+        val SUPPORTED_POLICY_VERSIONS = setOf("G3-SHADOW-V3", "G3-SHADOW-V4", POLICY_VERSION)
         private val HUNDRED = BigDecimal("100")
         private val MIN_CASH_RESERVE_PERCENT = BigDecimal("20")
         private val MAX_SINGLE_ORDER_PERCENT = BigDecimal("2")
