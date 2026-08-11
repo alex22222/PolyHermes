@@ -29,6 +29,7 @@ for expected in 1 2; do
     BACKEND_BASE_URL=http://127.0.0.1:1 \
         BACKEND_WATCHDOG_STATE_FILE="$STATE_FILE" \
         BACKEND_WATCHDOG_LOCK_DIR="$LOCK_DIR" \
+        BACKEND_WATCHDOG_STARTUP_GRACE_SECONDS=0 \
         BACKEND_WATCHDOG_DRY_RUN=true \
         "$PROJECT_ROOT_REAL/scripts/backend-watchdog.sh" >/dev/null
     actual=$(cat "$STATE_FILE")
@@ -37,8 +38,17 @@ done
 BACKEND_BASE_URL=http://127.0.0.1:1 \
     BACKEND_WATCHDOG_STATE_FILE="$STATE_FILE" \
     BACKEND_WATCHDOG_LOCK_DIR="$LOCK_DIR" \
+    BACKEND_WATCHDOG_STARTUP_GRACE_SECONDS=0 \
     BACKEND_WATCHDOG_DRY_RUN=true \
     "$PROJECT_ROOT_REAL/scripts/backend-watchdog.sh" | grep -q 'would restart'
 [[ ! -e "$STATE_FILE" ]] || { echo "failure state was not reset" >&2; exit 1; }
+
+BACKEND_BASE_URL=http://127.0.0.1:1 \
+    BACKEND_WATCHDOG_STATE_FILE="$STATE_FILE" \
+    BACKEND_WATCHDOG_LOCK_DIR="$LOCK_DIR" \
+    BACKEND_WATCHDOG_SERVICE_PID="$$" \
+    BACKEND_WATCHDOG_STARTUP_GRACE_SECONDS=240 \
+    "$PROJECT_ROOT_REAL/scripts/backend-watchdog.sh" | grep -q 'Backend startup grace active'
+[[ ! -e "$STATE_FILE" ]] || { echo "startup grace must clear failure state" >&2; exit 1; }
 
 echo "runtime guard tests passed"

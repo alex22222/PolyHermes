@@ -32,6 +32,10 @@ export ENCRYPTION_KEY="${ENCRYPTION_KEY:-${JWT_SECRET}}"
 # 本地开发默认 Bridge webhook
 export BRIDGE_WEBHOOK_URL="${BRIDGE_WEBHOOK_URL:-http://localhost:8080/signal}"
 
+# 本地开发先提供 HTTP 服务，按需初始化 JPA Repository，避免大量查询校验
+# 阻塞页面启动。生产环境不使用此本地启动脚本。
+export SPRING_DATA_JPA_REPOSITORIES_BOOTSTRAP_MODE="${SPRING_DATA_JPA_REPOSITORIES_BOOTSTRAP_MODE:-lazy}"
+
 SOURCE_JAR="$SCRIPT_DIR/backend/build/libs/polyhermes-backend-1.0.0.jar"
 RUNTIME_DIR="$SCRIPT_DIR/.runtime"
 RUNTIME_JAR="$RUNTIME_DIR/backend-local.jar"

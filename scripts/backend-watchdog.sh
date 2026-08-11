@@ -8,11 +8,41 @@ STATE_FILE="${BACKEND_WATCHDOG_STATE_FILE:-/tmp/polyhermes-backend-watchdog.fail
 LOCK_DIR="${BACKEND_WATCHDOG_LOCK_DIR:-/tmp/polyhermes-backend-watchdog.lock}"
 LABEL="${BACKEND_LAUNCHD_LABEL:-com.polyhermes.backend-local}"
 THRESHOLD="${BACKEND_WATCHDOG_THRESHOLD:-3}"
+STARTUP_GRACE_SECONDS="${BACKEND_WATCHDOG_STARTUP_GRACE_SECONDS:-600}"
+SERVICE_PID="${BACKEND_WATCHDOG_SERVICE_PID:-$(pgrep -f 'backend-local\.jar' | head -n 1 || true)}"
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     exit 0
 fi
 trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+elapsed_seconds_for_pid() {
+    local elapsed="$1"
+    local days=0
+    local first second third
+
+    if [[ "$elapsed" == *-* ]]; then
+        days="${elapsed%%-*}"
+        elapsed="${elapsed#*-}"
+    fi
+    IFS=: read -r first second third <<< "$elapsed"
+    if [[ -z "$third" ]]; then
+        third="$second"
+        second="$first"
+        first=0
+    fi
+    printf '%s\n' $((days * 86400 + first * 3600 + second * 60 + third))
+}
+
+if [[ -n "$SERVICE_PID" && "$STARTUP_GRACE_SECONDS" =~ ^[0-9]+$ ]]; then
+    elapsed=$(ps -o etime= -p "$SERVICE_PID" 2>/dev/null | tr -d ' ' || true)
+    elapsed_seconds=$(elapsed_seconds_for_pid "$elapsed" 2>/dev/null || true)
+    if [[ "$elapsed_seconds" =~ ^[0-9]+$ ]] && (( elapsed_seconds < STARTUP_GRACE_SECONDS )); then
+        rm -f "$STATE_FILE"
+        echo "Backend startup grace active (${elapsed_seconds}s/${STARTUP_GRACE_SECONDS}s): pid=$SERVICE_PID"
+        exit 0
+    fi
+fi
 
 actuator=$(curl -fsS --max-time 8 "$BASE_URL/actuator/health" 2>/dev/null || true)
 business=$(curl -fsS --max-time 8 -X POST "$BASE_URL/api/auth/check-first-use" 2>/dev/null || true)

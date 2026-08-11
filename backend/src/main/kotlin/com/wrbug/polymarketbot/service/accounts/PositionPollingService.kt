@@ -1,11 +1,12 @@
 package com.wrbug.polymarketbot.service.accounts
 
 import com.wrbug.polymarketbot.dto.PositionListResponse
-import jakarta.annotation.PostConstruct
 import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import org.slf4j.LoggerFactory
+import org.springframework.boot.context.event.ApplicationReadyEvent
+import org.springframework.context.event.EventListener
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
 import java.util.concurrent.ConcurrentHashMap
@@ -45,9 +46,10 @@ class PositionPollingService(
     private val lock = Any()
 
     /**
-     * 初始化服务（后端启动时直接启动轮训）
+     * 在 Spring 容器完全就绪后启动轮询，避免启动阶段的仓位查询与 Bean
+     * 初始化中的 Repository 指标注册相互等待。
      */
-    @PostConstruct
+    @EventListener(ApplicationReadyEvent::class)
     fun init() {
         logger.info("PositionPollingService 初始化，启动仓位轮训任务，轮训间隔: ${pollingInterval}ms")
         startPolling()
