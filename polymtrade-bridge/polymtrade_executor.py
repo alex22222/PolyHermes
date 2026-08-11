@@ -626,6 +626,9 @@ class PolymtradeExecutor:
         if not self.page:
             return {"error": "page not initialized"}
         try:
+            bring_to_front = getattr(self.page, "bring_to_front", None)
+            if bring_to_front:
+                await bring_to_front()
             await self._goto_with_retry(f"{self.base_url}/portfolio", max_retries=6)
             rendered = await self._wait_for_portfolio_rows(timeout=12.0)
             self._record_portfolio_render_result(rendered)
@@ -1598,6 +1601,10 @@ class PolymtradeExecutor:
         if not self._logged_in:
             logger.error("Cannot trade: not logged in to Polymtrade")
             raise RuntimeError("Not logged in")
+
+        bring_to_front = getattr(self.page, "bring_to_front", None)
+        if bring_to_front:
+            await bring_to_front()
 
         side = side.upper()
         if side not in ("BUY", "SELL"):
