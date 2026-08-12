@@ -27,7 +27,17 @@ ssh -i ~/.ssh/polymtrade_vultr_ed25519 root@66.135.16.16 \
   'docker cp /opt/polyhermes/polymtrade-bridge/polymtrade_executor.py polymtrade-bridge:/app/polymtrade_executor.py && docker restart polymtrade-bridge'
 ```
 
-For backend changes, build `backend/build/libs/*.jar`, transfer it to `/tmp`, copy it to `/app/app.jar`, restart `polyhermes`, and wait for the application startup health check. Check the production Flyway checksum before building; never edit `flyway_schema_history` or overwrite the database to make a deployment pass.
+For backend changes, use the guarded deployment script. It builds an exact Git commit in a clean archive, compares its Flyway migration manifest with the running JAR, verifies the upload checksum, backs up the running JAR, checks container and business health, and rolls back on failure:
+
+```bash
+# Safe default: build and validate only; production is unchanged.
+scripts/deploy-backend-vps.sh --commit <commit>
+
+# Replace production only after the validation succeeds.
+scripts/deploy-backend-vps.sh --commit <commit> --execute
+```
+
+New migrations are rejected by default. Use `--allow-new-migrations` only when the exact migrations have been separately reviewed and explicitly authorized. Modified or removed existing migrations are always rejected. Never edit `flyway_schema_history` or overwrite the database to make a deployment pass.
 
 For frontend-only changes, build `frontend/dist`, copy the dist directory into `/usr/share/nginx/html` in `polyhermes`, then restart or commit the app image as appropriate. Verify the public page and its referenced asset URLs return 200.
 
