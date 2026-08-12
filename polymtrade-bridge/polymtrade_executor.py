@@ -612,6 +612,22 @@ class PolymtradeExecutor:
             return {"error": "page not initialized"}
         try:
             with self._page_scope(page):
+                result = await self._fetch_portfolio_positions_on_active_page()
+            if result.get("portfolio_complete") is not False:
+                return result
+
+            logger.warning("Portfolio page returned an incomplete shell; retrying with a fresh page")
+            try:
+                await page.close()
+            except Exception as e:
+                logger.debug(f"Could not close incomplete portfolio page: {e}")
+            if page is self.portfolio_page:
+                self.portfolio_page = None
+
+            fresh_page = await self._ensure_portfolio_page()
+            if not fresh_page:
+                return result
+            with self._page_scope(fresh_page):
                 return await self._fetch_portfolio_positions_on_active_page()
         finally:
             self._schedule_portfolio_page_idle_close()
