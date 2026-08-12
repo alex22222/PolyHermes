@@ -109,6 +109,55 @@ class VpsServiceWatchdogTest(unittest.TestCase):
             self.assertEqual(1, len(notifier.messages))
             self.assertIn("未自动重启 Bridge", notifier.messages[0][1])
 
+    def test_restarts_app_once_when_app_failure_joins_bridge_incident(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "state.json"
+            state_file.write_text(
+                json.dumps({"failures": 3, "incident": True, "incident_started_at": 900}),
+                encoding="utf-8",
+            )
+            restarts = []
+            monitor = watchdog_module.Watchdog(
+                config=self.config(state_file, threshold=1),
+                notifier=FakeNotifier(),
+                issue_collector=lambda: [
+                    "bridge_health: HTTP 503",
+                    "app_health: unhealthy",
+                ],
+                app_diagnostics=lambda: None,
+                app_restarter=lambda: restarts.append("polyhermes") or True,
+                now=lambda: 1000,
+            )
+
+            monitor.run_once()
+            monitor.run_once()
+
+            self.assertEqual(["polyhermes"], restarts)
+
+    def test_new_app_failure_can_restart_after_app_recovers_during_bridge_incident(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "state.json"
+            issues = [
+                ["bridge_health: HTTP 503", "app_health: unhealthy"],
+                ["bridge_health: HTTP 503"],
+                ["bridge_health: HTTP 503", "app_health: unhealthy"],
+            ]
+            restarts = []
+            monitor = watchdog_module.Watchdog(
+                config=self.config(state_file, threshold=1),
+                notifier=FakeNotifier(),
+                issue_collector=lambda: issues.pop(0),
+                app_diagnostics=lambda: None,
+                app_restarter=lambda: restarts.append("polyhermes") or True,
+                now=lambda: 1000,
+            )
+
+            monitor.run_once()
+            monitor.run_once()
+            monitor.run_once()
+
+            self.assertEqual(["polyhermes", "polyhermes"], restarts)
+
     def test_bridge_status_accepts_ready_logged_in_runtime_with_stale_trade_error(self):
         self.assertTrue(
             watchdog_module.is_bridge_runtime_ready(

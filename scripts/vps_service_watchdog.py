@@ -205,12 +205,16 @@ class Watchdog:
 
         app_issue = any(issue.startswith(self.APP_ISSUE_PREFIXES) for issue in issues)
         action = ""
-        if app_issue and self.config.auto_restart_app and not state.get("incident"):
+        if app_issue and self.config.auto_restart_app and not state.get("app_restart_attempted"):
             self.app_diagnostics()
             restarted = self.app_restarter()
+            state["app_restart_attempted"] = True
             action = "已自动重启主应用 polyhermes。" if restarted else "自动重启主应用失败。"
         elif any(issue.startswith("bridge_") for issue in issues):
             action = "未自动重启 Bridge，以保护浏览器登录态和正在执行的交易。"
+
+        if not app_issue:
+            state.pop("app_restart_attempted", None)
 
         should_alert = not state.get("incident") or (
             now - int(state.get("last_alert_at", 0)) >= self.config.reminder_seconds
