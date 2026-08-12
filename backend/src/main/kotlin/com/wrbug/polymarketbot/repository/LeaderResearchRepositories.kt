@@ -275,6 +275,7 @@ interface LeaderActivityEventRepository : JpaRepository<LeaderActivityEvent, Lon
     fun findTopByOrderByEventTimeDesc(): LeaderActivityEvent?
     fun findByNormalizedWalletAndEventTimeBetweenOrderByEventTimeAsc(normalizedWallet: String, start: Long, end: Long): List<LeaderActivityEvent>
     fun findByUsableForDiscoveryTrueAndEventTimeGreaterThanEqual(eventTime: Long): List<LeaderActivityEvent>
+    fun findByUsableForDiscoveryTrueOrderByEventTimeDesc(pageable: Pageable): Page<LeaderActivityEvent>
     fun findByPaperProcessingStatusInAndUsableForPaperTrueOrderByEventTimeAsc(statuses: Collection<LeaderPaperProcessingStatus>, pageable: Pageable): Page<LeaderActivityEvent>
 
     @Query(

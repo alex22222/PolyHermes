@@ -84,6 +84,9 @@ class LeaderScannerService(
     // 候选池每类最大 PENDING 数量，防止无限膨胀
     private val MAX_PENDING_PER_CATEGORY = 500
 
+    // Activity 表是持续增长的事件流。发现层只需要近期样本，禁止 findAll() 将整表实体载入 JVM。
+    private val MAX_RECENT_ACTIVITY_EVENTS = 20_000
+
     // 政治/金融是当前主要策略方向，本地活跃市场不足时要主动从 Gamma 扩展。
     private val PRIORITY_CATEGORIES = setOf("politics", "finance")
     private val MIN_PRIORITY_MARKETS = 30
@@ -360,7 +363,7 @@ class LeaderScannerService(
 
     private fun inferMarketIdsFromActivityEvents(category: String): Set<String> {
         return try {
-            activityEventRepository.findAll()
+            recentActivityEvents()
                 .filter { event ->
                     CategoryValidator.inferMarketCategory(event.marketTitle, event.marketSlug) == category
                 }
@@ -372,6 +375,12 @@ class LeaderScannerService(
             emptySet()
         }
     }
+
+    private fun recentActivityEvents() = activityEventRepository
+        .findByUsableForDiscoveryTrueOrderByEventTimeDesc(
+            PageRequest.of(0, MAX_RECENT_ACTIVITY_EVENTS)
+        )
+        .content
 
     /**
      * 从 candidate_pool 读取 PENDING 候选，按 discovery_score 降序
@@ -408,9 +417,9 @@ class LeaderScannerService(
         // 源 1: activity events
         try {
             val events = if (marketIds.isNotEmpty()) {
-                activityEventRepository.findAll().filter { it.marketId in marketIds }
+                recentActivityEvents().filter { it.marketId in marketIds }
             } else {
-                activityEventRepository.findAll().filter {
+                recentActivityEvents().filter {
                     CategoryValidator.inferMarketCategory(it.marketTitle, it.marketSlug) == category
                 }
             }
@@ -555,7 +564,7 @@ class LeaderScannerService(
         }
 
         try {
-            val allEvents = activityEventRepository.findAll()
+            val allEvents = recentActivityEvents()
             val filteredEvents = if (marketIds.isNotEmpty()) {
                 allEvents.filter { it.marketId in marketIds }
             } else {
