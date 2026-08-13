@@ -25,11 +25,13 @@ class Config:
         failure_threshold=3,
         reminder_seconds=1800,
         auto_restart_app=True,
+        auto_restart_bridge=False,
     ):
         self.state_file = Path(state_file)
         self.failure_threshold = failure_threshold
         self.reminder_seconds = reminder_seconds
         self.auto_restart_app = auto_restart_app
+        self.auto_restart_bridge = auto_restart_bridge
         self.public_url = os.getenv(
             "POLYHERMES_PUBLIC_URL",
             "https://polyhermes.66-135-16-16.sslip.io/",
@@ -53,6 +55,8 @@ class Config:
             failure_threshold=int(os.getenv("WATCHDOG_FAILURE_THRESHOLD", "3")),
             reminder_seconds=int(os.getenv("WATCHDOG_REMINDER_SECONDS", "1800")),
             auto_restart_app=os.getenv("WATCHDOG_AUTO_RESTART_APP", "true").lower()
+            == "true",
+            auto_restart_bridge=os.getenv("WATCHDOG_AUTO_RESTART_BRIDGE", "false").lower()
             == "true",
         )
 
@@ -167,6 +171,7 @@ class Watchdog:
         issue_collector=None,
         app_diagnostics=None,
         app_restarter=None,
+        bridge_restarter=None,
         now=None,
     ):
         self.config = config
@@ -174,6 +179,7 @@ class Watchdog:
         self.issue_collector = issue_collector or self.collect_issues
         self.app_diagnostics = app_diagnostics or self.capture_app_diagnostics
         self.app_restarter = app_restarter or self.restart_app
+        self.bridge_restarter = bridge_restarter or self.restart_bridge
         self.now = now or (lambda: int(time.time()))
 
     def run_once(self):
@@ -204,17 +210,28 @@ class Watchdog:
             return False
 
         app_issue = any(issue.startswith(self.APP_ISSUE_PREFIXES) for issue in issues)
+        bridge_issue = any(issue.startswith("bridge_") for issue in issues)
         action = ""
         if app_issue and self.config.auto_restart_app and not state.get("app_restart_attempted"):
             self.app_diagnostics()
             restarted = self.app_restarter()
             state["app_restart_attempted"] = True
             action = "已自动重启主应用 polyhermes。" if restarted else "自动重启主应用失败。"
-        elif any(issue.startswith("bridge_") for issue in issues):
-            action = "未自动重启 Bridge，以保护浏览器登录态和正在执行的交易。"
+        elif bridge_issue and self.config.auto_restart_bridge and not state.get("bridge_restart_attempted"):
+            restarted = self.bridge_restarter()
+            state["bridge_restart_attempted"] = True
+            action = (
+                "已在确认登录态、空队列并关闭新信号入口后自动重启 Bridge。"
+                if restarted
+                else "Bridge 不满足安全重启条件，未自动重启。"
+            )
+        elif bridge_issue:
+            action = "未自动重启 Bridge：自动自愈未启用或本次故障已尝试过一次。"
 
         if not app_issue:
             state.pop("app_restart_attempted", None)
+        if not bridge_issue:
+            state.pop("bridge_restart_attempted", None)
 
         should_alert = not state.get("incident") or (
             now - int(state.get("last_alert_at", 0)) >= self.config.reminder_seconds
@@ -277,6 +294,45 @@ class Watchdog:
 
     def restart_app(self):
         return self._command(["docker", "restart", "polyhermes"], check=False).strip() == "polyhermes"
+
+    def restart_bridge(self):
+        """Restart Bridge only when login is preserved and all work is drained."""
+        try:
+            status = self._fetch_json(f"{self.config.bridge_url}/status")
+            metrics = self._fetch_json(f"{self.config.bridge_url}/metrics").get("metrics", {})
+            if status.get("logged_in") is not True:
+                print("PolyHermes watchdog: Bridge restart refused because login is absent")
+                return False
+            if int(metrics.get("signal_queue_depth", -1)) != 0:
+                print("PolyHermes watchdog: Bridge restart refused because signal queue is not empty")
+                return False
+
+            drain_script = (
+                "import urllib.request; "
+                "r=urllib.request.urlopen(urllib.request.Request("
+                "'http://127.0.0.1:8080/admin/drain?reason=watchdog_auto_recovery',"
+                "data=b'',method='POST'),timeout=5); print(r.read().decode())"
+            )
+            drain_body = self._command(
+                ["docker", "exec", "polymtrade-bridge", "python", "-c", drain_script],
+                check=False,
+            )
+            drain_result = json.loads(drain_body)
+            if drain_result.get("status") != "draining":
+                print("PolyHermes watchdog: Bridge restart refused because drain failed")
+                return False
+
+            drained_metrics = self._fetch_json(f"{self.config.bridge_url}/metrics").get("metrics", {})
+            if int(drained_metrics.get("signal_queue_depth", -1)) != 0 or drained_metrics.get("accepting_signals") is not False:
+                print("PolyHermes watchdog: Bridge restart refused because admission did not drain")
+                return False
+
+            return self._command(
+                ["docker", "restart", "polymtrade-bridge"], check=False
+            ).strip() == "polymtrade-bridge"
+        except (OSError, ValueError, TypeError, urllib.error.URLError) as exc:
+            print(f"PolyHermes watchdog: safe Bridge restart failed: {exc}")
+            return False
 
     def capture_app_diagnostics(self):
         """Save a bounded, redacted snapshot before restarting a wedged app."""
@@ -380,6 +436,10 @@ class Watchdog:
                 issues.append(f"{name}: unexpected response")
         except (OSError, ValueError, urllib.error.URLError) as exc:
             issues.append(f"{name}: {exc}")
+
+    def _fetch_json(self, url):
+        with urllib.request.urlopen(url, timeout=self.config.request_timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
 
     @staticmethod
     def _command(command, check=False, stderr=False):

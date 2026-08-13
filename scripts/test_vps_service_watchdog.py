@@ -42,12 +42,13 @@ class FakeHttpResponse:
 
 
 class VpsServiceWatchdogTest(unittest.TestCase):
-    def config(self, state_file, threshold=2):
+    def config(self, state_file, threshold=2, auto_restart_bridge=False):
         return watchdog_module.Config(
             state_file=state_file,
             failure_threshold=threshold,
             reminder_seconds=1800,
             auto_restart_app=True,
+            auto_restart_bridge=auto_restart_bridge,
         )
 
     def test_restarts_only_main_app_after_consecutive_app_failures(self):
@@ -108,6 +109,82 @@ class VpsServiceWatchdogTest(unittest.TestCase):
             self.assertEqual([], restarts)
             self.assertEqual(1, len(notifier.messages))
             self.assertIn("未自动重启 Bridge", notifier.messages[0][1])
+
+    def test_safely_restarts_bridge_once_after_consecutive_bridge_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "state.json"
+            restarts = []
+            monitor = watchdog_module.Watchdog(
+                config=self.config(state_file, threshold=1, auto_restart_bridge=True),
+                notifier=FakeNotifier(),
+                issue_collector=lambda: ["bridge_status: ready=false"],
+                bridge_restarter=lambda: restarts.append("polymtrade-bridge") or True,
+                now=lambda: 1000,
+            )
+
+            monitor.run_once()
+            monitor.run_once()
+
+            self.assertEqual(["polymtrade-bridge"], restarts)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertTrue(state["bridge_restart_attempted"])
+
+    def test_bridge_restart_attempt_resets_after_bridge_issue_clears(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "state.json"
+            issues = [["bridge_status: ready=false"], ["backend_business: HTTP 502"]]
+            monitor = watchdog_module.Watchdog(
+                config=self.config(state_file, threshold=1, auto_restart_bridge=True),
+                notifier=FakeNotifier(),
+                issue_collector=lambda: issues.pop(0),
+                app_diagnostics=lambda: None,
+                app_restarter=lambda: True,
+                bridge_restarter=lambda: True,
+                now=lambda: 1000,
+            )
+
+            monitor.run_once()
+            monitor.run_once()
+
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertNotIn("bridge_restart_attempted", state)
+
+    def test_bridge_restart_requires_login_empty_queue_and_successful_drain(self):
+        config = self.config(Path("/tmp/unused-state.json"), threshold=1, auto_restart_bridge=True)
+        monitor = watchdog_module.Watchdog(config=config, notifier=FakeNotifier())
+
+        with mock.patch.object(monitor, "_fetch_json", side_effect=[
+            {"logged_in": True},
+            {"metrics": {"signal_queue_depth": 1, "accepting_signals": True}},
+        ]), mock.patch.object(monitor, "_command") as command:
+            self.assertFalse(monitor.restart_bridge())
+            command.assert_not_called()
+
+    def test_bridge_restart_drains_before_restarting_container(self):
+        config = self.config(Path("/tmp/unused-state.json"), threshold=1, auto_restart_bridge=True)
+        monitor = watchdog_module.Watchdog(config=config, notifier=FakeNotifier())
+        responses = [
+            {"logged_in": True},
+            {"metrics": {"signal_queue_depth": 0, "accepting_signals": True}},
+            {"metrics": {"signal_queue_depth": 0, "accepting_signals": False}},
+        ]
+
+        with mock.patch.object(monitor, "_fetch_json", side_effect=responses), mock.patch.object(
+            monitor,
+            "_command",
+            side_effect=['{"status":"draining"}', "polymtrade-bridge"],
+        ) as command:
+            self.assertTrue(monitor.restart_bridge())
+
+        self.assertEqual("exec", command.call_args_list[0].args[0][1])
+        self.assertEqual(["docker", "restart", "polymtrade-bridge"], command.call_args_list[1].args[0])
+
+        with mock.patch.object(monitor, "_fetch_json", side_effect=[
+            {"logged_in": False},
+            {"metrics": {"signal_queue_depth": 0, "accepting_signals": True}},
+        ]), mock.patch.object(monitor, "_command") as command:
+            self.assertFalse(monitor.restart_bridge())
+            command.assert_not_called()
 
     def test_restarts_app_once_when_app_failure_joins_bridge_incident(self):
         with tempfile.TemporaryDirectory() as tmp:
