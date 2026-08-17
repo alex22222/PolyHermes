@@ -10,4 +10,12 @@ class LeaderResearchMarketCategoryPatternsTest {
         assertTrue(LeaderResearchMarketCategoryPatterns.matches("finance", "Will AT&T Q2 total revenue be above 31.4B?"))
         assertTrue(LeaderResearchMarketCategoryPatterns.matches("finance", "Will Honeywell Q2 sales be above 1.85B?"))
     }
+
+    @Test
+    fun `classifies equity ticker markets as finance`() {
+        assertTrue(LeaderResearchMarketCategoryPatterns.matches("finance", "Will Apple (AAPL) hit (LOW) $296 in August?"))
+        assertTrue(LeaderResearchMarketCategoryPatterns.matches("finance", "Google (GOOGL) Up or Down on August 17?"))
+        assertTrue(LeaderResearchMarketCategoryPatterns.matches("finance", "Will NVIDIA (NVDA) finish week above $225?"))
+        assertTrue(LeaderResearchMarketCategoryPatterns.matches("finance", "Rocket Lab (RKLB) Up or Down on August 14?"))
+    }
 }

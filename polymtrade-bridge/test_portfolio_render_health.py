@@ -50,3 +50,29 @@ def test_portfolio_shell_discards_page_and_retries_with_fresh_page():
     assert result["portfolio_complete"] is True
     assert executor._ensure_portfolio_page.await_count == 2
     stale_page.close.assert_awaited_once()
+
+
+def test_complete_portfolio_snapshot_is_cached_without_reloading_page():
+    executor = _live_executor()
+    page = SimpleNamespace(is_closed=lambda: False)
+    executor._portfolio_snapshot_cache_ttl_seconds = 60
+    executor._ensure_portfolio_page = AsyncMock(return_value=page)
+    executor._fetch_portfolio_positions_on_active_page = AsyncMock(
+        return_value={"positions": [{"marketTitle": "Cached"}], "portfolio_complete": True}
+    )
+    executor._schedule_portfolio_page_idle_close = lambda: None
+
+    first = asyncio.run(executor.fetch_portfolio_positions())
+    first["positions"][0]["marketTitle"] = "Mutated by caller"
+    second = asyncio.run(executor.fetch_portfolio_positions())
+
+    assert second["positions"][0]["marketTitle"] == "Cached"
+    assert executor._fetch_portfolio_positions_on_active_page.await_count == 1
+
+
+def test_cached_wallet_address_does_not_navigate_portfolio_page():
+    executor = PolymtradeExecutor()
+    executor._cached_wallet_address = "0xabc"
+    executor._cached_wallet_at = int(__import__("time").time() * 1000)
+
+    assert asyncio.run(executor.get_wallet_address()) == "0xabc"

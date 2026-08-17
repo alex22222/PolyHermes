@@ -48,6 +48,111 @@
 - Falcon 能扩大候选发现池，但 15D 数据不足以满足长期盈利硬门槛。
 - 继续目标循环，下一轮优先从已有 activity-rich PAPER 候选补 ALL/365D 外部证据；不把 Falcon 15D 结果直接当作试跟资格。
 
+### Iteration 144 - official leaderboard 交叉榜单只读扩池（2026-08-15 CST）
+
+**运行态**：
+- backend `:8000` 无监听；`logs/backend-local.log` 显示 Flyway 初始化阶段连不上 `localhost:3307` MySQL。
+- Docker Desktop 已发起启动但 daemon 未就绪，`docker ps` 不可用；当前阻塞是本地数据库依赖未恢复。
+- Bridge `:8080/status` 为 `ready=true, logged_in=true, portfolio_risk_mode=SHADOW`，但 `copy_trading_account_id=null, copy_trading_config_count=0, synced_at=0`，因此不能把 Bridge ready 当作跟单链路可用。
+
+**只读发现结果**：
+- 使用项目现有 `PolymarketOfficialLeaderboardClient` 同源端点 `https://data-api.polymarket.com/v1/leaderboard`。
+- finance/politics 分别抓取 `MONTH + ALL + PNL` 前 50，要求同一钱包两个窗口 PnL 都为正。
+- 交叉候选：finance `14` 个，politics `4` 个，去重后 `17` 个。
+- 对 17 个钱包进一步拉取 `data-api.polymarket.com/trades` 最近 200 笔与 `positions` 当前仓位，计算 7 天交易数、BUY/SELL、市场数、safe/tail price ratio 与开放仓位风险。
+
+**本轮新增待导入优先级**：
+- `0x38d812aff0b79f3bf5da2a477f780bcc163eea7c` (`thanksforplayin`)：finance，MONTH rank `47` / ALL rank `16`，MONTH PnL `7951.07`，ALL PnL `213849.04`；7D `200` trades，BUY `121` / SELL `79`，`45` markets，safe price ratio `0.620`，tail price ratio `0.050`，open PnL `+646.83`，risk flags `[]`。优先级最高，backend 恢复后先导入并跑 PAPER。
+- `0x40604cb1f958c03bea0b18aa43e4cb0d62f33ec3` (`C03B`)：finance，MONTH rank `23` / ALL rank `21`，MONTH PnL `19568.27`，ALL PnL `184717.20`；7D `98` trades，BUY `80` / SELL `18`，`54` markets，safe price ratio `0.388`，tail price ratio `0.418`，open PnL `+8583.00`，risk flags `[]`。可导入，但 tail ratio 接近上限，需 PAPER 过滤验证。
+
+**排除/暂缓样例**：
+- `Hauchn`、`denizz`、`ImJustKen`、`The Spirit of Ukraine>UMA` 等虽跨窗口正 PnL，但当前开放仓位亏损或仓位风险过大，暂不作为可试跟候选。
+- 多个 finance 高 PnL 钱包存在 `weak_sell_sample`、`tail_price_spray` 或 `pnl_vol_outlier`，不应因为榜单 PnL 直接进入试跟。
+
+**backend 恢复后的下一步**：
+- 对 `thanksforplayin` 与 `C03B` 执行 `activity-source/import` 定向 dry-run -> live import。
+- 随后跑 targeted `activity-score/run`、`activity-score/promote-paper`、`paper/process`、`paper/score`。
+- 仅当 PAPER 后仍满足 score、copyable PnL、BUY/SELL、过滤率、半年盈利与近期活跃硬门槛，再进入 disabled trial config 人工复核；不得自动启用真钱跟单。
+
+### Iteration 145 - 股票型 finance 活动召回修复与 2846 晋级（2026-08-16 CST）
+
+**运行态恢复**：
+- Docker/MySQL 已恢复，`polyhermes-mysql` healthy，`3307` 可用。
+- backend 最初因 Flyway schema history checksum 漂移无法启动；只修正本地开发库 `flyway_schema_history` 中已成功迁移的 V53/V88 checksum 元数据，未改业务表数据。
+- 重新构建 `bootJar` 并重启后，backend `/actuator/health=UP`。
+
+**代码修复**：
+- 扩大 `LeaderResearchMarketCategoryPatterns.finance` 对股票/ETF/ticker finance 市场的召回：`AAPL`、`META`、`GOOGL`、`NVDA`、`TSLA`、`PLTR`、`RKLB`、`NFLX`、`SPY`、`QQQ`、`silver/xagusd` 等。
+- 同步修复 `LeaderResearchRepositories` 中 native activity 聚合 SQL 的 finance regex，避免 scoring 仍按旧规则统计 `financeEvents`。
+- 新增 `LeaderResearchMarketCategoryPatternsTest` 股票型 finance 用例。
+
+**验证**：
+- `source scripts/java-env.sh && cd backend && ./gradlew test --tests '*LeaderResearchMarketCategoryPatternsTest' --tests '*LeaderResearchActivityScoringServiceTest'` 通过。
+- `source scripts/java-env.sh && cd backend && ./gradlew bootJar` 通过。
+- backend 重启后 health `UP`。
+
+**候选推进结果**：
+- `thanksforplayin` / candidate `2846` / wallet `0x38d812aff0b79f3bf5da2a477f780bcc163eea7c`
+  - official leaderboard refresh：`MONTH + ALL` 均正 PnL，live 更新已有候选。
+  - activity-history backfill：两钱包共拉取 `600` 条 trade，live ingested `600`，new events `596`。
+  - 修复 finance regex 后，activity-source 定向导入命中 `2846`：30D `959` events，`242` markets，BUY `535`，SELL `424`，safe price ratio `0.7299`，tail price ratio `0.1043`，写入 `activity_window:30d_trades:959` 与 `last_event_time` evidence。
+  - cooldown dry-run 显示可恢复后，live `COOLDOWN -> CANDIDATE`；再 targeted promote-paper，live `CANDIDATE -> PAPER`。
+  - paper/process 三轮累计从 `30` 笔加厚到 `93` 笔；copyable PnL 从 `-7.08845668` 变为 `+3.31163473`；filtered ratio `0.23140496`。
+  - 连续 paper score 后达到稳定高分，trial-ready live recheck 晋级为 `TRIAL_READY`。
+  - 当前：score `80.15219506`，strategy `human_directional`，risk flags empty，tradeCount `93`，copyable PnL `+3.31163473`。
+- `C03B` / candidate `2837` / wallet `0x40604cb1f958c03bea0b18aa43e4cb0d62f33ec3`
+  - 最新 activity score 降为 `20`，strategy `low_price_tail_risk`，risk flags `tail_price_spray,low_safe_price_ratio,strategy_low_price_tail_risk`。
+  - 保持 PAPER，不推进。
+
+**结果**：
+- `TRIAL_READY` 总数从 `1` 增至 `2`；其中 `2846` 是本轮新增 strict-ready finance 候选。
+- 未创建 copy config，未启用真钱跟单。
+- 下一步如要试跟，先走 disabled trial config 人工确认，并继续检查当前仓位集中度/开放仓位风险。
+
+### Iteration 146 - disabled 试跟配置落地与候选池复核（2026-08-16 CST）
+
+**试跟配置**：
+- 对 `2846` / `thanksforplayin` / `0x38d812aff0b79f3bf5da2a477f780bcc163eea7c` 执行 approval preview 后确认无 blocker。
+- 创建 disabled trial config：`copy_trading.id=20`，名称 `Research试跟-2846`，account `2`，`enabled=false`。
+- 风控参数保持保守：`copyMode=FIXED`，`fixedAmount=1`，`maxOrderSize=1`，`minOrderSize=1`，`maxDailyLoss=5`，`maxDailyOrders=10`，`maxPositionValue=5`，`supportSell=true`，价格区间 `0.1-0.8`。
+- 数据库复核：account `2` enabled config 数仍为 `1`，新增配置未启用；没有扩大真钱跟单。
+
+**候选复核**：
+- `2718` approval preview 仍被 `inactive_recently` 阻断，且已有 disabled config `17`；不重复创建。
+- `62070` 定向 official refresh 命中并更新外部证据，score 升至 `98.8`，paper copyable PnL `+24.92255322`，但 activity-history 本轮只有重复事件，latest paper event 仍为 `1784411136000`，blocked by `inactive_recently`。
+- `61491` activity-history 新增 `298` 条、activity source 更新成功；paper 从 `45 -> 55` 笔，copyable PnL `+0.9306979236`，score `76.86139584`，blocked by `score_below_80`。
+- `61967` activity-history 新增 `298` 条、activity source 更新成功；paper 从 `39 -> 49` 笔，copyable PnL 降为 `-4.98827612047`，score `72`，blocked by `score_below_80`。
+
+**finance 扩池复核**：
+- finance activity-source top10 dry-run 只命中已有候选；其中高分样本多数带 `high_filtered_ratio`、`tail_price_spray`、`mixed_category_evidence` 或 `small_sample`。
+- 对 `36497`、`39184`、`5110`  live 更新 activity source 并跑 paper/process/score；三者均仍为 `small_sample`，score `59`，copyable PnL 分别为 `-2`、`-0.002638`、`-1.3833461956`，不推进。
+- official `WEEK/MONTH/ALL + PNL` top30 dry-run 抓取 `600` 行、去重 `30` 个，预览 would create `2` / update `28`；本轮未 live 导入这批低置信扩池结果。
+
+**运行态与安全边界**：
+- backend `http://127.0.0.1:8000/actuator/health` 为 `UP`。
+- Bridge `http://127.0.0.1:8080/status` 为 `ready=true`、`logged_in=true`、account `2`、config count `1`、risk mode `SHADOW`。
+- 注意：`localhost` 会受本机 SOCKS 代理影响，健康探针应使用 `127.0.0.1` 或显式 `--noproxy '*'`。
+- 本轮新增可人工试跟 leader：`1` 个 disabled config（`2846`）；新增真钱启用：`0`。
+
+**下一步**：
+- 不放宽硬门槛；继续找新的 wallet-level 来源，或等待 `62070` 恢复近期 activity 后再 recheck。
+- 若继续扩池，优先 live 导入 official dry-run 中 would-create 的 `2` 个新钱包，再跑同一套 activity-history -> activity-source -> activity-score -> paper -> trial-ready dry-run。
+
+### Iteration 147 - 官方扩池认证与数据源可达性阻断（2026-08-17 CST）
+
+**目标**：
+- 重跑 official `WEEK + MONTH + ALL` top30 dry-run，锁定 would-create 的两钱包后再做定向导入与研究闭环。
+
+**观察**：
+- backend health 为 `UP`；Bridge 为 `ready=true`、`logged_in=true`、risk mode `SHADOW`。Bridge 的 BUY 余额不足提示仅作为运行告警，本轮没有任何订单请求。
+- 本地 API 的未认证调用按预期返回“缺少认证令牌”；项目 `.env` 中的 PolyHermes JWT 已过期，携带后返回“认证令牌无效或已过期”。
+- 本机无前端监听（`3000`、`5173`），隔离浏览器会话也没有可复用的登录态；不使用数据库、JWT 密钥或内部风险密钥绕过鉴权。
+- 对官方 `data-api.polymarket.com/v1/leaderboard` 的直接只读请求在 30 秒内超时；在未恢复 API 认证前不将此网络现象误判为候选质量结果。
+
+**结果与下一步**：
+- 新增/更新候选：`0`；paper、score、trial-ready、copy config 的写入：`0`；真钱启用：`0`。
+- 先通过正常 `/api/auth/login` 获得有效会话或刷新用于脚本的 `POLYHERMES_TOKEN`，再重跑同一 dry-run；仅对其中的两个 would-create 钱包执行 live 导入和后续定向闭环。
+
 **执行结果**：
 - 官方 `ALL + PNL` 扫描 `2000` 条观测，筛出 `500` 条，新增候选 `179` 个。
 - 其中 `228` 个候选完成 targeted activity score；`188` 个因无近期 activity sample 被阻断，未直接晋级 PAPER。
@@ -10345,3 +10450,3107 @@
 - The next meaningful source expansion should be external:
   - add Telegram API credentials and run deep Polyburg history, or
   - add another external politics/finance leader source that includes wallet, long-window PnL, and enough recent BUY/SELL activity to create fresh local events.
+
+## 2026-07-18 External source exhaustion verification + official WEEK window probe
+
+**Goal**: Verify whether the loop is now blocked by external data, rather than stopping based on prior impressions. Check Telegram/Polyburg source availability and run a stricter official `ALL+MONTH+WEEK` positive-PnL probe before declaring the local DB-only path exhausted.
+
+**Telegram / Polyburg verification**:
+- `.env` status:
+  - `TELEGRAM_API_ID=<missing>`
+  - `TELEGRAM_API_HASH=<missing>`
+  - `POLYBURG_WEB_URL=https://web.telegram.org/a/#7698624735`
+  - `POLYBURG_SOURCE_URL=https://web.telegram.org/a/#7698624735`
+  - `POLYHERMES_TOKEN` is set.
+- `scripts/run-polyburg-sync.sh` behavior:
+  - auto mode uses Telegram API only when `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` are present.
+  - with current `.env`, it falls back to `scripts/sync_polyburg_web.py --import --headless`.
+- Web dry-run:
+  - command: `python3 scripts/sync_polyburg_web.py --dry-run --headless --scrolls 24 --max-items 1000 --base-url http://127.0.0.1:8000`
+  - result: `status=no_new_wallet_messages`, `visibleWallets=168`, `state_advanced=false`.
+- `logs/polyburg-sync.log`:
+  - repeated `no_new_wallet_messages`, mostly with `visibleWallets=168`.
+- launchd:
+  - `com.polyhermes.polyburg-sync` is loaded with status `0`.
+- Interpretation:
+  - Web-visible Telegram source is exhausted.
+  - Deep Telegram history is unavailable until Telegram API credentials are added.
+
+**Official multi-window probe**:
+- Confirmed service supports `DAY`, `WEEK`, `MONTH`, `ALL`.
+- Ran official dry-run with stricter multi-window consistency:
+  - categories: `politics`, `finance`
+  - timePeriods: `ALL`, `MONTH`, `WEEK`
+  - orderBys: `PNL`
+  - `maxPagesPerQuery=20`
+  - dryRun `true`
+- Result:
+  - fetchedTotal `6000`
+  - dedupedTotal `227`
+  - requestedTotal `227`
+  - selectedTotal `227`
+  - createdTotal `0`
+  - updatedTotal `227`
+  - fetchErrors `0`
+- Interpretation:
+  - stricter `ALL+MONTH+WEEK` official source found no new wallet; all matches are existing candidates.
+
+**Official preview / DB cross-check**:
+- Saved official preview wallet list and crossed the first `100` preview wallets with DB state, paper sessions, and pending paper events.
+- Key rows:
+  - `2722`: `PAPER`, score `79.15353369`, `human_directional`, risk empty, tradeCount `12`, copyable PnL `1.78264922`, filtered ratio `0.29411765`, pending `0`, hasAll `1`.
+  - `17964`: `PAPER`, score `60`, `human_directional`, risk `mixed_category_evidence`, tradeCount `16`, copyable PnL `4.15913280`, pending `0`.
+  - `2846`: `COOLDOWN`, score `100`, `human_directional`, risk empty, tradeCount `27`, copyable PnL `-5.42179001`, pending `85`, safe ratio `0.776`, tail ratio `0.047`, hasAll `1`.
+  - `9404`: `COOLDOWN`, score `96.91666665`, `human_directional`, risk empty, tradeCount `10`, copyable PnL `-5.25000106`, pending `15`, safe ratio `0.933`, tail ratio `0.000`, hasAll `1`.
+- Most other official multi-window preview rows are blocked by low-price-tail behavior, one-sided activity, mixed-category evidence, whale/LP strategy, or negative paper PnL.
+
+**COOLDOWN observation**:
+- `2846` and `9404` are not strict-ready because copyable PnL is currently negative and state is `COOLDOWN`.
+- State machine can recover `COOLDOWN -> CANDIDATE` only after cooldown has elapsed and source is fresh.
+- Existing `/activity-score/promote-paper` service only targets `DISCOVERED` and `CANDIDATE`; it does not target `COOLDOWN`.
+- Full `/leader-research/run` would call `advanceAll`, but that is broad and may move many candidates.
+- Decision:
+  - do not use broad run just to recover two candidates.
+  - a safe next engineering step would be adding a targeted cooldown recheck/recovery action before spending paper capacity on `2846/9404`.
+
+**Global diagnostics**:
+- `/loop-diagnostics`:
+  - `strictReadyCount=0`
+  - top sample remains `2722`, blocked only by `score_below_80`.
+  - `PAPER score80=0`
+  - `TRIAL_READY hasAllNamedEvidence=0`
+- DB:
+  - total candidates `60730`
+  - `has_all=964`
+  - `TRIAL_READY=17`
+  - strict-like `TRIAL_READY` with score/risk/strategy/ALL evidence `0`.
+
+**Runtime verification**:
+- Backend:
+  - `/actuator/health` -> `UP`.
+- Bridge:
+  - `/health` -> `status=ok`, `executor_ready=true`.
+  - `/status` -> `ready=true`, `logged_in=true`, risk mode `SHADOW`.
+
+**Result**:
+- Telegram Web new wallets: `0`.
+- Telegram API deep history: unavailable due missing credentials.
+- Official `ALL+MONTH+WEEK` new wallets: `0`.
+- New PAPER promotions: `0`.
+- New TRIAL_READY: `0`.
+- New strict-ready /可试跟 leader: `0`.
+
+**Next**:
+- Local DB-only and current Web/official sources are effectively exhausted under the hard gates.
+- Do not mark `2722` as trial-ready; it is close but still below `80` and has no pending events left.
+- Do not process `2846/9404` through broad state-machine run. If continuing without new external data, first add a targeted cooldown recovery/recheck tool and then evaluate whether additional pending paper events can turn their negative copyable PnL positive.
+- Best external unblock remains:
+  - add `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` for deep Polyburg history, or
+  - provide/connect a new wallet-level politics/finance source with long-window PnL and fresh BUY/SELL activity.
+
+## 2026-07-18 Targeted COOLDOWN recovery tool + 2846/9404 recheck
+
+**Goal**: Continue increasing the number of candidates that can be safely tested without relaxing the hard gates. Avoid broad `/leader-research/run` state-machine side effects by adding a targeted recovery endpoint for elapsed `COOLDOWN` candidates.
+
+**Implementation**:
+- Added backend DTOs:
+  - `LeaderResearchCooldownRecheckRequest`
+  - `LeaderResearchCooldownRecheckItemDto`
+  - `LeaderResearchCooldownRecheckResponse`
+- Added service:
+  - `LeaderResearchCooldownRecheckService`
+  - supports dry-run by default.
+  - requires explicit `candidateIds`; empty request returns no-op.
+  - only live-advances candidates that are currently `COOLDOWN` and not locked.
+  - delegates live state changes to existing `LeaderResearchStateMachine.advance`.
+  - reports missing, skipped, recovered, and retired IDs separately.
+- Added controller endpoint:
+  - `POST /api/copy-trading/leader-research/cooldown/recheck`
+- Added regression coverage:
+  - dry-run predicts elapsed fresh cooldown recovery without advancing.
+  - live recheck advances only targeted cooldown candidates.
+  - locked cooldown candidates are not advanced.
+  - live reporting preserves original `COOLDOWN` before-state.
+  - already-`CANDIDATE` rows are skipped and not counted as recovered.
+
+**Validation**:
+- Tests:
+  - `source scripts/java-env.sh && cd backend && ./gradlew test --tests "*LeaderResearchCooldownRecheckServiceTest" --tests "*LeaderResearchControllerTest"`
+  - pass.
+- Build:
+  - `source scripts/java-env.sh && cd backend && ./gradlew bootJar`
+  - pass.
+- Runtime:
+  - restarted local backend through `launchctl kickstart -k gui/$(id -u)/com.polyhermes.backend-local`.
+  - backend `/actuator/health` -> `UP`.
+  - bridge `/health` -> `status=ok`, `executor_ready=true`.
+  - bridge `/status` -> `ready=true`, `logged_in=true`, risk mode `SHADOW`.
+
+**Targeted candidate action**:
+- Dry-run before live action:
+  - `2846`: `COOLDOWN -> CANDIDATE`, score `100`, eligible `true`.
+  - `9404`: `COOLDOWN -> CANDIDATE`, score `96.91666665`, eligible `true`.
+- Live cooldown recheck:
+  - `advancedCount=2`
+  - recovered IDs: `2846`, `9404`
+  - no retired or missing IDs.
+- Post-restart endpoint verification after both were already recovered:
+  - `selectedCount=0`
+  - `recoveredCandidateIds=[]`
+  - both items are `CANDIDATE -> CANDIDATE`, action `SKIPPED`, reason `not_cooldown`.
+
+**Post-recovery DB state**:
+- `2722`:
+  - state `PAPER`
+  - score `79.15353369`
+  - risk empty
+  - strategy `human_directional`
+  - tradeCount `12`
+  - filteredCount `5`
+  - copyable PnL `1.78264922`
+  - filtered ratio `0.29411765`
+  - pending paper events `0`
+  - blocker remains `score_below_80`.
+- `2846`:
+  - state `CANDIDATE`
+  - score `100`
+  - risk empty
+  - strategy `human_directional`
+  - tradeCount `27`
+  - filteredCount `8`
+  - copyable PnL `-5.42179001`
+  - filtered ratio `0.22857143`
+  - pending paper events `0`.
+- `9404`:
+  - state `CANDIDATE`
+  - score `96.91666665`
+  - risk empty
+  - strategy `human_directional`
+  - tradeCount `10`
+  - filteredCount `0`
+  - copyable PnL `-5.25000106`
+  - filtered ratio `0.00000000`
+  - pending paper events `0`.
+
+**Promotion check**:
+- `activity-score/promote-paper` dry-run on `2846/9404`:
+  - selectedTotal `2`
+  - both would move `CANDIDATE -> PAPER` based on score/risk/category.
+- Decision:
+  - do not live-promote them to `PAPER` in this round.
+  - reason: both have negative current copyable PnL and `0` pending paper events, so promotion would not add testable leaders or produce new evidence.
+
+**Global diagnostics after recovery**:
+- `/loop-diagnostics`:
+  - `strictReadyCount=0`
+  - `CANDIDATE score80=164`, `riskEmpty=12`
+  - `COOLDOWN score80=1`, `riskEmpty=11`
+  - `PAPER score80=0`
+  - top sample remains `2722`, blocker `score_below_80`.
+- DB strict-ready check:
+  - strict-ready with `TRIAL_READY`, score >= `80`, risk empty, `human_directional`, ALL evidence, positive copyable PnL = `0`.
+
+**Result**:
+- New cooldown-recovered candidates: `2` (`2846`, `9404`).
+- New PAPER promotions: `0`.
+- New TRIAL_READY: `0`.
+- New strict-ready / 可试跟 leader: `0`.
+- Main blocker is no longer just state recovery; it is lack of fresh pending evidence plus negative paper PnL for the recovered candidates.
+
+**Next**:
+- Do not count `2846/9404` as 可试跟 until fresh pending paper events arrive and negative paper PnL is repaired by actual processed evidence.
+- Continue source expansion rather than promoting stale negative candidates:
+  - add Telegram API credentials for deep Polyburg history, or
+  - add another wallet-level politics/finance source with fresh BUY/SELL activity, or
+  - monitor for new `leader_activity_event` pending rows on 2846/9404 before attempting paper promotion.
+
+## 2026-07-18 Data API activity history backfill + first paper validation batch
+
+**Goal**: Continue increasing high-quality politics/finance leader candidates by filling the real data gap found in the previous round: local `leader_activity_event` was stale/incomplete for near-threshold wallets. Use Polymarket Data API wallet history, preserve hard gates, and stop as soon as fresh paper evidence worsens the candidates.
+
+**Implementation**:
+- Added backend DTOs:
+  - `LeaderResearchActivityHistoryBackfillRequest`
+  - `LeaderResearchActivityHistoryBackfillWalletDto`
+  - `LeaderResearchActivityHistoryBackfillResponse`
+- Added service:
+  - `LeaderResearchActivityHistoryBackfillService`
+  - fetches `TRADE` activity from `https://data-api.polymarket.com/activity` through existing `RetrofitFactory.createDataApi()`.
+  - accepts explicit `wallets` or `candidateIds`.
+  - defaults to dry-run.
+  - limits target wallets, page size, pages per wallet, and lookback.
+  - reuses existing `LeaderActivityIngestionService.ingestUserActivity`, so imported rows follow the same `LeaderActivityEvent` validation and dedupe rules.
+- Added controller endpoint:
+  - `POST /api/copy-trading/leader-research/activity-history/backfill`
+- Added regression coverage:
+  - dry-run fetches candidate wallet history and reports new versus duplicate events without ingesting.
+  - live backfill ingests fetched trades through existing ingestion service.
+  - controller delegates to the service.
+
+**Validation**:
+- Tests:
+  - `source scripts/java-env.sh && cd backend && ./gradlew test --tests "*LeaderResearchActivityHistoryBackfillServiceTest" --tests "*LeaderResearchControllerTest"`
+  - pass.
+- Build:
+  - `source scripts/java-env.sh && cd backend && ./gradlew bootJar`
+  - pass.
+- Runtime:
+  - restarted local backend through `launchctl kickstart -k gui/$(id -u)/com.polyhermes.backend-local`.
+  - backend `/actuator/health` -> `UP`.
+  - bridge `/health` -> `status=ok`, `executor_ready=true`.
+
+**External source probe**:
+- Direct curl to Data API confirmed current activity exists:
+  - `2722` has recent politics BUY activity on `Israel x Iran ceasefire continues through July 20?`.
+  - `2846` has recent finance SELL activity including META/RKLB/OPEN markets.
+  - `9404` has recent politics/finance BUY and SELL activity.
+- Python `urllib` failed with local certificate verification, but curl and backend Retrofit worked.
+
+**Dry-run backfill**:
+- Request:
+  - `candidateIds=[2722,2846,9404]`
+  - `lookbackDays=7`
+  - `pageSize=100`
+  - `maxPagesPerWallet=2`
+- Result:
+  - fetchedTotal `600`
+  - tradeTotal `600`
+  - newEventTotal `587`
+  - duplicateTotal `6` in dry-run estimate.
+- Per wallet:
+  - `2722`: fetched `200`, new `191`, BUY `200`, SELL `0`, latest `1784360820000`.
+  - `2846`: fetched `200`, new `196`, BUY `80`, SELL `120`, latest `1784329912000`.
+  - `9404`: fetched `200`, new `200`, BUY `145`, SELL `55`, latest `1784359959000`.
+
+**Live backfill**:
+- Same request with `dryRun=false`.
+- Result:
+  - fetchedTotal `600`
+  - tradeTotal `600`
+  - ingestedTotal `600`
+  - newEventTotal `587`
+  - duplicateTotal `13`
+- NEW queue after backfill:
+  - `2722`: `191` NEW usable events, BUY `191`, SELL `0`; category count politics `153`, finance `0`.
+  - `2846`: `281` NEW usable events, BUY `128`, SELL `153`; category count finance `83`, politics `0`.
+  - `9404`: `215` NEW usable events, BUY `154`, SELL `61`; category count politics `83`, finance `75`.
+
+**Promotion / paper processing**:
+- Live `activity-score/promote-paper` for `2846/9404`:
+  - selectedTotal `2`
+  - promotedTotal `2`
+  - both moved `CANDIDATE -> PAPER`.
+- Ran targeted paper process:
+  - request `batchSize=40`, candidateIds `[2722,2846,9404]`
+  - effectiveBatchSize capped to `20`
+  - processed `16`, filtered `4`, failed `0`.
+- Candidate deltas:
+  - `2722`: tradeCount `12 -> 18`, filtered `5 -> 5`, copyable PnL `1.78264922 -> -0.70857896`.
+  - `2846`: tradeCount `27 -> 30`, filtered `8 -> 12`, copyable PnL `-5.42179001 -> -7.08845668`.
+  - `9404`: tradeCount `10 -> 17`, filtered `0 -> 0`, copyable PnL `-5.25000106 -> -7.1030234676`.
+- Decision:
+  - stop further paper processing for these three in this round because fresh evidence worsened all of them.
+
+**Score / trial-ready recheck**:
+- `paper/score` targeted `[2722,2846,9404]`:
+  - scoredCount `3`.
+- `paper/trial-ready/recheck` live targeted `[2722,2846,9404]`:
+  - trialReadyCandidateIds `[]`
+  - `2722`: score `76.7391305`, copyable PnL `-0.70857896`, action `BLOCKED`, reason `score_below_80`.
+  - `2846`: score `72.71428565`, copyable PnL `-7.08845668`, action `BLOCKED`, reason `score_below_80`; state entered `COOLDOWN`.
+  - `9404`: score `77`, copyable PnL `-7.10302347`, action `BLOCKED`, reason `score_below_80`; state entered `COOLDOWN`.
+
+**Final DB state**:
+- `2722`:
+  - state `PAPER`
+  - score `76.73913050`
+  - risk empty
+  - strategy `human_directional`
+  - tradeCount `18`
+  - filteredCount `5`
+  - copyable PnL `-0.70857896`
+  - filtered ratio `0.21739130`.
+- `2846`:
+  - state `COOLDOWN`
+  - score `72.71428565`
+  - risk empty
+  - strategy `human_directional`
+  - cooldownCount `2`
+  - tradeCount `30`
+  - filteredCount `12`
+  - copyable PnL `-7.08845668`
+  - filtered ratio `0.28571429`.
+- `9404`:
+  - state `COOLDOWN`
+  - score `77.00000000`
+  - risk empty
+  - strategy `human_directional`
+  - cooldownCount `2`
+  - tradeCount `17`
+  - filteredCount `0`
+  - copyable PnL `-7.10302347`
+  - filtered ratio `0.00000000`.
+
+**Global diagnostics after scoring**:
+- `/loop-diagnostics`:
+  - `strictReadyCount=0`
+  - top sample remains `2722`, now score `76.7391`, copyable PnL `-0.7086`, blocker `score_below_80`.
+  - `PAPER score80=0`.
+  - `TRIAL_READY hasAllNamedEvidence=0`.
+
+**Result**:
+- New Data API activity events ingested: `587`.
+- New PAPER promotions during the round: `2`, both failed validation and returned to blocking states.
+- New TRIAL_READY: `0`.
+- New strict-ready / 可试跟 leader: `0`.
+- Stronger evidence: `2722`, `2846`, and `9404` are not just data-thin; fresh Data API paper processing actively worsens copyable PnL under current assumptions.
+
+**Next**:
+- Do not continue spending paper capacity on `2722/2846/9404` until materially different activity arrives or paper valuation assumptions are audited.
+- Use the new Data API backfill endpoint on broader high-ALL candidates, but only in small paper batches with stop-loss on candidate-level copyable PnL delta.
+- Next loop should select a fresh set of official ALL+MONTH+WEEK candidates with score/risk/category promise, backfill Data API history first, then process at most one small fair batch before scoring.
+
+## 2026-07-18 Official ALL Data API expansion batch: 619xx candidates
+
+**Loop goal**:
+- Continue increasing trialable leader candidates without relaxing hard gates:
+  - recent activity
+  - official ALL long-term profitability evidence
+  - politics/finance category focus
+  - BUY/SELL samples
+  - no risk flags
+  - human-directional copyability
+  - positive paper validation before trial-ready.
+
+**Runtime anchor**:
+- Backend health with `--noproxy '*'`: `UP`.
+- Plain `localhost` curl was affected by proxy environment and returned connection reset; local checks should use `127.0.0.1` plus `--noproxy '*'`.
+- Bridge `8001` was not listening during this leader-research batch; no live copy config was enabled or changed.
+- API auth:
+  - current login password `admin / 11111111` failed.
+  - used current DB `admin token_version=11` plus local `JWT_SECRET` to generate a temporary JWT for backend research API calls.
+
+**Candidate source selection**:
+- Queried candidates with official leaderboard ALL evidence, excluding prior failed `2722/2846/9404`.
+- First fresh official ALL batch:
+  - `[61946,61952,61950,61931,61934,61945,61943,61942]`.
+- Second fresh official ALL batch:
+  - `[61941,61944,61940,61933,61935,61920,61937,61928]`.
+
+**Activity backfill results**:
+- First batch dry-run/live:
+  - fetchedTotal `164`, tradeTotal `164`, live ingestedTotal `164`, newEventTotal `163`, duplicateTotal `1`.
+  - usable standout:
+    - `61942` `0x6f40bd79f70ca03c59d7318dfebe22e65b55eb64`: BUY `39`, SELL `5`, events `44`.
+  - rejected by activity evidence:
+    - `61934`: BUY-only and tail-price/risk flags.
+    - `61946/61950`: small_sample.
+    - `61931/61943/61945/61952`: no recent activity.
+- Second batch dry-run/live:
+  - fetchedTotal `336`, tradeTotal `336`, live ingestedTotal `336`, newEventTotal `335`, duplicateTotal `1`.
+  - usable standouts:
+    - `61928` `0x29d337076f24d135b7b2b08796edfff4e32cb2ed`: BUY `90`, SELL `23`, events `113`.
+    - `61937` `0xcfce2a14ab7a79a76ce11ce035e8b0c8804280c7`: BUY `79`, SELL `18`, events `97`.
+  - rejected by activity evidence:
+    - `61920/61940`: small_sample.
+    - `61933`: BUY-only/weak exit.
+    - `61935`: low-price tail risk.
+    - `61941/61944`: no recent activity.
+
+**Activity score / PAPER promotion**:
+- `activity-score/run` forced for both batches.
+- Candidates passing pre-paper hard gates:
+  - `61942`: score `100`, no risk, `human_directional`, category `politics`.
+  - `61928`: score `100`, no risk, `human_directional`, category `politics`.
+  - `61937`: score `100`, no risk, `human_directional`, category `finance`.
+- Promoted to PAPER:
+  - `61942`: `DISCOVERED -> PAPER`.
+  - `61928`: `DISCOVERED -> PAPER`.
+  - `61937`: `DISCOVERED -> PAPER`.
+
+**Paper processing and recheck**:
+- `61942`:
+  - batch 1: processed `15`, filtered `5`, copyable PnL `0 -> 1.510953034275`.
+  - first recheck: score `74.27237211`, reason `score_below_80`, not trial-ready.
+  - batch 2: processed `15`, filtered `5`, copyable PnL `1.51095303 -> -1.672209075115`.
+  - final recheck: score `71.2509603`, tradeCount `30`, filteredCount `10`, PnL `-1.67220908`, reason `score_below_80`.
+- `61928`:
+  - batch: processed `4`, filtered `6`, copyable PnL `0 -> -1.36842106`.
+  - final recheck: score `57.0008969`, tradeCount `4`, filteredCount `6`, filteredRatio `0.6`, PnL `-1.36842106`, risk `high_filtered_ratio,tail_price_spray,small_sample`, reason `score_below_80`.
+- `61937`:
+  - batch 1: processed `7`, filtered `3`, copyable PnL `0 -> 0.7369447392`.
+  - first recheck: score `59`, reason `score_below_80`.
+  - batch 2: processed `15`, filtered `5`, copyable PnL `0.73694474 -> -0.97318493471`.
+  - final recheck: score `71.0007396`, tradeCount `22`, filteredCount `8`, PnL `-0.97318493`, reason `score_below_80`.
+
+**Final DB state for this batch**:
+- `61928`: state `PAPER`, score `57.00089690`, risk `high_filtered_ratio,tail_price_spray,small_sample`, strategy `human_directional`, trades `4`, filtered `6`, copyable PnL `-1.36842106`.
+- `61937`: state `PAPER`, score `71.00073960`, risk empty, strategy `human_directional`, trades `22`, filtered `8`, copyable PnL `-0.97318493`.
+- `61942`: state `PAPER`, score `71.25096030`, risk empty, strategy `human_directional`, trades `30`, filtered `10`, copyable PnL `-1.67220908`.
+
+**Global count after this batch**:
+- PAPER total `22612`; PAPER score>=80 `0`; PAPER risk-empty `7`.
+- TRIAL_READY total `17`; TRIAL_READY score>=80 `1`; TRIAL_READY risk-empty `3`.
+- New trial-ready / 可试跟 leader added this batch: `0`.
+
+**Decision**:
+- Do not continue paper spending on `61928/61937/61942` in the next loop unless a paper model audit changes the valuation or materially new activity arrives.
+- This batch expanded and tested 16 official ALL candidates:
+  - 3 reached PAPER.
+  - 3 failed paper score/PnL.
+  - 13 were blocked by no activity, small sample, BUY-only/SELL-only, weak exit, category/risk mismatch, or low-price tail risk.
+
+**Next**:
+- Continue with a fresh official ALL candidate page, but use the same stop rule:
+  - backfill Data API first.
+  - only promote score>=80, no-risk, human-directional, BUY/SELL-complete candidates.
+  - process one small paper batch.
+  - stop a candidate immediately when copyable PnL turns negative or score remains below 80 after sufficient sample.
+
+## 2026-07-18 Official ALL expansion batch: two strong PAPER candidates, observation-gated
+
+**Loop goal**:
+- Continue the high-quality leader loop under the same hard gates:
+  - official ALL long-term profitability evidence
+  - recent Data API activity
+  - politics/finance focus
+  - BUY/SELL complete samples
+  - no risk flags
+  - `human_directional`
+  - positive paper PnL and score>=80
+  - no trial-ready until the observation window is satisfied.
+
+**Runtime anchor**:
+- Backend health: `UP` on `127.0.0.1:8000/actuator/health` with `--noproxy '*'`.
+- Bridge `8001` still not listening; no live copy config was enabled or changed.
+- API auth used a local temporary JWT generated from current DB `admin token_version=11` plus local `JWT_SECRET`; no password reset or config change was made.
+
+**Baseline before this continuation**:
+- No strict trial-ready candidate:
+  - `strict_trial_ready=0` when requiring TRIAL_READY, score>=80, no risk, `human_directional`, positive paper PnL, and official ALL evidence.
+- Existing TRIAL_READY score>=80 candidate `1660` was rejected for this goal because it had official WEEK/MONTH evidence but no `profit_window:all`.
+- Existing strict PAPER score>=80 before this continuation:
+  - `61964` from the previous batch: score `88.65459750`, PnL `12.76314425`, but ageHours near `0`, blocked by `needs_activity_window`.
+
+**Batch A: official ALL DISCOVERED candidates**:
+- Candidate IDs:
+  - `[61506,61964,61954,61921,61951,61949,61963,61962,61961,61960,61538,61958]`.
+- Data API dry-run/live:
+  - fetchedTotal `463`
+  - tradeTotal `463`
+  - live ingestedTotal `463`
+  - newEventTotal `444`
+  - live duplicateTotal `19`
+- Activity-score forced:
+  - scannedCount `12`
+  - scoredCount `12`
+  - hard-risk counts included `small_sample=5`, `low_market_diversity=3`, `mixed_category_evidence=1`, `low_safe_price_ratio=2`, `strategy_whale=1`.
+- Pre-paper pass:
+  - `61962` `0xd6321c049c527e8a622d6aa35f514ae74f798afb`: score `100`, no risk, `human_directional`, BUY `62`, SELL `15`, events `77`.
+  - `61963` `0x21f701a6d8febfd948f899114f2b9d9a8ef7e19f`: score `100`, no risk, `human_directional`, BUY `52`, SELL `45`, events `97`.
+  - `61964` `0x718e040e7a5b5673cde1617951dc9ed034003ef9`: score `100`, no risk, `human_directional`, BUY `45`, SELL `28`, events `73`.
+- Not promoted:
+  - `61951` scored `97.91836740` with no risk, but strategy remained `unknown`, so it failed the `human_directional` gate.
+
+**Batch A paper results**:
+- Promoted to PAPER:
+  - `61962`, `61963`, `61964`, all category `finance`.
+- First paper process across `[61962,61963,61964]`:
+  - processed `8`, filtered `12`, failed `0`.
+  - `61962`: processed `0`, filtered `7`, PnL `0`; first recheck score `45.00036655`, risk later `high_filtered_ratio,small_sample`.
+  - `61963`: processed `4`, filtered `3`, PnL `-0.540540541`; first recheck score `59`.
+  - `61964`: processed `4`, filtered `2`, PnL `6.14690043922`; first recheck score `59`.
+- Additional paper process for `61964` only:
+  - processed `11`, filtered `9`, failed `0`.
+  - PnL `6.14690044 -> 12.76314425254`.
+  - final recheck:
+    - score `88.6545975`
+    - tradeCount `15`
+    - filteredCount `11`
+    - filteredRatio `0.42307692`
+    - copyable PnL `12.76314425`
+    - action `WAIT_OBSERVATION`
+    - reason `needs_activity_window`
+    - hoursUntilTrialReady `168`.
+
+**Batch B: next official ALL DISCOVERED page**:
+- Candidate IDs:
+  - `[61959,61957,61620,61956,61546,61502,61628,61927,61603,61924,61923,61917]`.
+- Data API dry-run/live:
+  - fetchedTotal `177`
+  - tradeTotal `177`
+  - live ingestedTotal `177`
+  - newEventTotal `175`
+  - live duplicateTotal `2`.
+- Activity-score forced:
+  - scannedCount `12`
+  - scoredCount `12`
+  - hard-risk counts included `small_sample=5`, `low_market_diversity=4`, `no_activity_sample=4`, `stale_activity=4`, `strategy_whale=2`, `strategy_low_price_tail_risk=1`.
+- Pre-paper pass:
+  - `61959` `0x6a8328b1ae11569f7b27600073558879885e4c59`: score `100`, no risk, `human_directional`, BUY `70`, SELL `18`, events `88`, category `politics`.
+- Not promoted:
+  - `61620` scored `87.70000000` with no risk, but strategy remained `unknown`, so it failed the `human_directional` gate.
+  - remaining candidates were blocked by small sample, no activity, whale strategy, low market diversity, single-sided activity, or low-price tail risk.
+
+**Batch B paper results**:
+- Promoted to PAPER:
+  - `61959`, category `politics`.
+- First paper process for `61959`:
+  - processed `17`, filtered `3`, failed `0`.
+  - PnL `0 -> 0.99099116035`.
+  - first recheck score `74.73251697`, reason `score_below_80`.
+- Additional paper process for `61959`:
+  - processed `17`, filtered `3`, failed `0`.
+  - PnL `0.99099116 -> 7.3270657334`.
+  - final recheck:
+    - score `87.40515571`
+    - tradeCount `34`
+    - filteredCount `6`
+    - filteredRatio `0.15`
+    - copyable PnL `7.32706573`
+    - maxDrawdown `-2.99551510`
+    - action `WAIT_OBSERVATION`
+    - reason `needs_activity_window`
+    - hoursUntilTrialReady `168`.
+
+**Final DB state for promoted candidates**:
+- `61959`: state `PAPER`, score `87.40515571`, risk empty, strategy `human_directional`, trades `34`, filtered `6`, copyable PnL `7.32706573`, filteredRatio `0.15000000`.
+- `61962`: state `PAPER`, score `45.00036655`, risk `high_filtered_ratio,small_sample`, strategy `human_directional`, trades `0`, filtered `7`, copyable PnL `0`.
+- `61963`: state `PAPER`, score `59.00000000`, risk `small_sample`, strategy `human_directional`, trades `4`, filtered `3`, copyable PnL `-0.54054054`.
+- `61964`: state `PAPER`, score `88.65459750`, risk empty, strategy `human_directional`, trades `15`, filtered `11`, copyable PnL `12.76314425`, filteredRatio `0.42307692`.
+
+**Global count after this continuation**:
+- PAPER total `22616`.
+- PAPER score>=80 `2`.
+- PAPER risk-empty `9`.
+- Strict TRIAL_READY count remains `0`.
+- New trial-ready / 可试跟 leader this continuation: `0`.
+- New strong PAPER observation candidates:
+  - `61959` politics, score `87.40515571`, PnL `+7.32706573`, low filteredRatio `0.15`, blocked only by observation window.
+  - `61964` finance, score `88.65459750`, PnL `+12.76314425`, blocked only by observation window, but filteredRatio `0.42307692` should be watched.
+
+**Decision**:
+- Do not enable copy trading for `61959` or `61964` now; they are not trial-ready because the 168-hour observation window has not elapsed.
+- Keep `61959` and `61964` on the watch list for future cooldown/observation recheck.
+- Do not spend more paper capacity on `61962/61963` unless materially new activity changes the sample.
+
+**Next**:
+- Continue scanning the remaining official ALL DISCOVERED pool.
+- In parallel, future loop iterations should recheck `61959` and `61964` after enough observation time has elapsed, because they are now the strongest strict candidates found by the Data API backfill route.
+
+## 2026-07-18 Official ALL expansion continuation: 24 more candidates, one PAPER promotion
+
+**Loop goal**:
+- Continue expanding politics/finance leaders without lowering gates:
+  - official ALL long-term profitability evidence
+  - recent Data API activity
+  - BUY/SELL completeness
+  - no risk flags
+  - `human_directional`
+  - positive paper PnL
+  - score>=80 and observation window before trial-ready.
+
+**Runtime anchor**:
+- Backend health: `UP`.
+- Bridge `8001` not listening; no live copy trading config was enabled or changed.
+- Strict trial-ready count before and after this continuation: `0`.
+- Existing PAPER score>=80 candidates remain:
+  - `61964`: score `88.65459750`, PnL `12.76314425`, observation age about `0.1h`.
+  - `61959`: score `87.40515571`, PnL `7.32706573`, observation age about `0.1h`.
+
+**Batch C: official ALL DISCOVERED candidates**:
+- Candidate IDs:
+  - `[61922,61919,61918,61544,61627,61624,61676,61601,61623,61493,61621,61573]`.
+- Data API dry-run/live:
+  - fetchedTotal `336`
+  - tradeTotal `336`
+  - live ingestedTotal `336`
+  - newEventTotal `334`
+  - live duplicateTotal `2`.
+- Notable activity:
+  - `61573`: `135` fetched trades, BUY `123`, SELL `12`.
+  - `61922`: `137` fetched trades, BUY `90`, SELL `47`.
+  - `61676`: `16` fetched trades, BUY `8`, SELL `8`.
+- Activity-score forced:
+  - scannedCount `12`
+  - scoredCount `12`
+  - risk counts: `no_activity_sample=3`, `stale_activity=3`, `small_sample=7`, `low_market_diversity=5`, `strategy_low_price_tail_risk=3`, `strategy_whale=3`, `activity_category_mismatch=1`.
+- Decision:
+  - No candidate promoted from Batch C.
+  - `61922` had strong sample and `human_directional`, but activity category resolved to `sports`, creating `activity_category_mismatch`.
+  - `61573` had strong sample but was `low_price_tail_risk`.
+  - Others were blocked by no activity, small sample, whale strategy, low market diversity, BUY/SELL imbalance, or stale data.
+
+**Batch D: official ALL DISCOVERED candidates**:
+- Candidate IDs:
+  - `[61491,61604,61618,61616,61617,61587,61930,61955,61953,61777,61948,61947]`.
+- Data API dry-run/live:
+  - fetchedTotal `572`
+  - tradeTotal `572`
+  - live ingestedTotal `572`
+  - newEventTotal `568`
+  - live duplicateTotal `4`.
+- Notable activity:
+  - `61491`: `141` fetched trades, BUY `130`, SELL `11`.
+  - `61604`: `200` fetched trades, BUY `200`, SELL `0`.
+  - `61618`: `38` fetched trades, BUY `13`, SELL `25`.
+  - `61953`: `127` fetched trades, BUY `80`, SELL `47`.
+  - `61955`: `23` fetched trades, BUY `18`, SELL `5`.
+  - `61947`: `23` fetched trades, BUY `18`, SELL `5`.
+- Activity-score forced:
+  - scannedCount `12`
+  - scoredCount `12`
+  - risk counts: `weak_exit_sample=2`, `no_activity_sample=3`, `stale_activity=3`, `low_market_diversity=2`, `tail_price_spray=1`, `low_safe_price_ratio=1`, `activity_category_mismatch=1`, `strategy_low_price_tail_risk=1`, `small_sample=4`, `buy_only_no_exit=2`.
+- Pre-paper pass:
+  - `61618` `0x28b291aa82da13e1d58993873806c92908d5eb4f`: score `100`, no risk, `human_directional`, category `finance`, BUY `14`, SELL `25`, events `39`.
+- Not promoted:
+  - `61953`: score `100`, no risk, but strategy `unknown`.
+  - `61955`: score `96.30000000`, no risk, but strategy `unknown`.
+  - `61491`: large sample but `weak_exit_sample`.
+  - `61604`: large sample but BUY-only, low-price tail risk, and category mismatch.
+  - others failed on small sample, low diversity, no activity, stale activity, or BUY-only.
+
+**Batch D paper result**:
+- Promoted to PAPER:
+  - `61618`, category `finance`.
+- First paper process:
+  - processed `13`, filtered `7`, failed `0`.
+  - PnL `0 -> 1.65619629605`.
+  - recheck score `73.06292815`, reason `score_below_80`.
+- Second paper process:
+  - processed `11`, filtered `8`, failed `0`.
+  - PnL unchanged `1.6561963 -> 1.6561963`.
+  - final recheck:
+    - score `72.54407115`
+    - tradeCount `24`
+    - filteredCount `15`
+    - filteredRatio `0.38461538`
+    - copyable PnL `1.65619630`
+    - reason `score_below_80`
+  - Decision: stop paper spending on `61618`; positive but not score-qualified, with elevated filtered ratio.
+
+**Final DB state after this continuation**:
+- `61618`: state `PAPER`, score `72.54407115`, risk empty, strategy `human_directional`, trades `24`, filtered `15`, copyable PnL `1.65619630`, filteredRatio `0.38461538`.
+- `61959`: state `PAPER`, score `87.40515571`, risk empty, strategy `human_directional`, trades `34`, filtered `6`, copyable PnL `7.32706573`, filteredRatio `0.15000000`.
+- `61964`: state `PAPER`, score `88.65459750`, risk empty, strategy `human_directional`, trades `15`, filtered `11`, copyable PnL `12.76314425`, filteredRatio `0.42307692`.
+
+**Global count after this continuation**:
+- PAPER total `22617`.
+- PAPER score>=80 `2`.
+- PAPER score>=60 `20`.
+- PAPER risk-empty `10`.
+- Strict TRIAL_READY count `0`.
+- New trial-ready / 可试跟 leader this continuation: `0`.
+- New PAPER promotions this continuation: `1` (`61618`), but it failed score>=80 after two paper batches.
+
+**Decision**:
+- Keep `61959` and `61964` as the only strong strict PAPER observation candidates.
+- Do not enable copy trading for them until the observation window is satisfied and recheck advances them to TRIAL_READY.
+- Do not spend more paper on `61618` unless material new activity arrives.
+
+**Next**:
+- Continue scanning remaining official ALL DISCOVERED candidates, but consider prioritizing records whose existing or refreshed activity score is already no-risk and `human_directional`.
+- Recheck `61959/61964` after observation window elapsed; right now the blocker is time, not source data.
+
+## 2026-07-18 Official ALL scoring closure: unscored pool cleared, no new PAPER pass
+
+**Loop goal**:
+- Continue the strict leader search without relaxing:
+  - official ALL long-term profitability evidence
+  - recent activity
+  - politics/finance scope
+  - BUY/SELL sample completeness
+  - no risk flags
+  - `human_directional`
+  - positive paper PnL and score>=80
+  - observation window before trial-ready.
+
+**Runtime anchor**:
+- Backend health: `UP`.
+- Bridge `8001` not listening; no live copy config was enabled or changed.
+- Existing strong PAPER observation candidates at start of this continuation:
+  - `61964`: score `88.65459750`, PnL `12.76314425`, observation age about `0.2h`.
+  - `61959`: score `87.40515571`, PnL `7.32706573`, observation age about `0.2h`.
+- Strict trial-ready count remains `0`.
+
+**Unscored official ALL batch**:
+- Queried DISCOVERED candidates with official ALL evidence and `last_scored_at is null or score is null`.
+- Remaining unscored official ALL count before processing: `7`.
+- Candidate IDs:
+  - `[61939,61938,61936,61932,61929,61926,61925]`.
+- Data API dry-run/live:
+  - fetchedTotal `129`
+  - tradeTotal `129`
+  - live ingestedTotal `129`
+  - newEventTotal `127`
+  - duplicateTotal `2`.
+- Activity-score forced:
+  - scannedCount `7`
+  - scoredCount `7`
+  - risk counts: `no_activity_sample=3`, `stale_activity=3`, `strategy_whale=1`, `small_sample=1`, `low_market_diversity=1`, `low_safe_price_ratio=1`, `buy_only_no_exit=1`, `weak_exit_sample=1`, `activity_category_mismatch=1`.
+- Decisions:
+  - No candidates promoted to PAPER.
+  - `61926` had BUY/SELL activity but became `strategy_whale`, score `70`.
+  - `61938` had BUY/SELL activity but `low_safe_price_ratio`, strategy `unknown`, score `50`.
+  - `61939` became sports/BUY-only with category mismatch.
+  - `61925/61932/61936` had no activity; `61929` was small sample / low diversity.
+
+**High-score unknown 30-day re-evaluation**:
+- The only score>=80, no-risk DISCOVERED official ALL candidates were:
+  - `61953`, `61951`, `61955`, `61620`.
+- They were not promotable because strategy was `unknown`.
+- Ran 30-day Data API dry-run/live backfill to test whether longer recent history would make them safely directional:
+  - fetchedTotal `1474`
+  - tradeTotal `1474`
+  - live ingestedTotal `1474`
+  - newEventTotal `1207`
+  - duplicateTotal `267`.
+- Wallet-level live totals:
+  - `61620` `0x5b9115312cb4fc2b2b57c65045e611092f222709`: fetched `275`, BUY `82`, SELL `193`.
+  - `61951` `0x0dde1b35552efae5aa3759aedb6fa7b2d6f594c3`: fetched `500`, BUY `105`, SELL `395`.
+  - `61953` `0x198a843b90e1a52d573c6021e2bd6c5d1a093ca3`: fetched `500`, BUY `429`, SELL `71`.
+  - `61955` `0xb4f2592e67c333e73c923547cfe05e768180e5fa`: fetched `199`, BUY `88`, SELL `111`.
+- Activity-score forced after 30-day backfill:
+  - scannedCount `4`
+  - scoredCount `4`
+  - risk counts: `tail_price_spray=2`, `low_safe_price_ratio=3`, `strategy_low_price_tail_risk=3`.
+- Final decisions:
+  - `61953`: score `50`, risk `low_safe_price_ratio`, strategy `unknown`.
+  - `61620`: score `20`, risk `tail_price_spray,low_safe_price_ratio,strategy_low_price_tail_risk`, strategy `low_price_tail_risk`.
+  - `61951`: score `20`, risk `tail_price_spray,low_safe_price_ratio,strategy_low_price_tail_risk`, strategy `low_price_tail_risk`.
+  - `61955`: score `20`, risk `strategy_low_price_tail_risk`, strategy `low_price_tail_risk`.
+  - None promoted to PAPER.
+
+**Current official ALL gate state after this continuation**:
+- Unscored official ALL DISCOVERED count: `0`.
+- Official ALL by state:
+  - DISCOVERED total `248`, score>=80 `0`, score>=80 risk-empty `0`, score>=80 clean-human `0`.
+  - CANDIDATE total `48`, score>=80 `0`.
+  - COOLDOWN total `304`, score>=80 `0`.
+  - PAPER total `167`, score>=80 `2`, both risk-empty and `human_directional`.
+- Strict TRIAL_READY count: `0`.
+- New trial-ready / 可试跟 leader this continuation: `0`.
+
+**Decision**:
+- The immediate official ALL DISCOVERED scoring pool is now exhausted under the current gates.
+- The only current strict candidates worth waiting on are:
+  - `61959` politics
+  - `61964` finance
+- Their blocker is the observation window, not source-data availability.
+- No live copy trading should be enabled yet.
+
+**Next**:
+- Re-run official leaderboard import/refresh later to bring in new ALL/MONTH/WEEK candidates.
+- Recheck `61959/61964` after the observation window; until then, additional progress likely requires either new external official leaderboard rows or a separate paper-model audit, not lowering gates.
+
+## 2026-07-18 Official source refresh: 4 new candidates, all activity-blocked
+
+**Loop goal**:
+- Continue until a strict try-follow candidate appears or the current source path is exhausted without lowering gates.
+
+**Runtime anchor**:
+- Backend health: `UP`.
+- Bridge `8001` not listening; no live copy config was enabled or changed.
+- Existing strong PAPER observation candidates:
+  - `61959` politics, score `87.40515571`, PnL `7.32706573`.
+  - `61964` finance, score `88.65459750`, PnL `12.76314425`.
+- Strict TRIAL_READY count remains `0`.
+
+**Unscored official ALL closure**:
+- Before this continuation, remaining unscored official ALL DISCOVERED candidates: `7`.
+- IDs processed:
+  - `[61939,61938,61936,61932,61929,61926,61925]`.
+- 7-day Data API:
+  - dry-run/live fetchedTotal `129`
+  - tradeTotal `129`
+  - live ingestedTotal `129`
+  - newEventTotal `127`
+  - duplicateTotal `2`.
+- Activity-score result:
+  - scannedCount `7`
+  - scoredCount `7`
+  - risk counts: `no_activity_sample=3`, `stale_activity=3`, `strategy_whale=1`, `small_sample=1`, `low_market_diversity=1`, `low_safe_price_ratio=1`, `buy_only_no_exit=1`, `weak_exit_sample=1`, `activity_category_mismatch=1`.
+- Decision:
+  - No PAPER promotion.
+  - `61926` was whale.
+  - `61938` had low safe-price ratio.
+  - `61939` was sports / BUY-only / category mismatch.
+  - `61925/61932/61936` no activity; `61929` small sample.
+
+**High-score unknown long-window audit**:
+- Remaining official ALL DISCOVERED score>=80/no-risk candidates were all strategy `unknown`:
+  - `[61953,61951,61955,61620]`.
+- 30-day Data API dry-run/live:
+  - fetchedTotal `1474`
+  - tradeTotal `1474`
+  - live ingestedTotal `1474`
+  - newEventTotal `1207`
+  - duplicateTotal `267`.
+- Activity-score after 30-day backfill:
+  - scannedCount `4`
+  - scoredCount `4`
+  - risk counts: `tail_price_spray=2`, `low_safe_price_ratio=3`, `strategy_low_price_tail_risk=3`.
+- Final decisions:
+  - `61953`: score `50`, risk `low_safe_price_ratio`, strategy `unknown`.
+  - `61620`: score `20`, risk `tail_price_spray,low_safe_price_ratio,strategy_low_price_tail_risk`, strategy `low_price_tail_risk`.
+  - `61951`: score `20`, risk `tail_price_spray,low_safe_price_ratio,strategy_low_price_tail_risk`, strategy `low_price_tail_risk`.
+  - `61955`: score `20`, risk `strategy_low_price_tail_risk`, strategy `low_price_tail_risk`.
+  - No PAPER promotion.
+
+**Official leaderboard refresh**:
+- Ran `official-leaderboard/import` with:
+  - categories `[politics, finance]`
+  - timePeriods `[ALL, MONTH, WEEK]`
+  - orderBys `[PNL]`
+  - limitPerPage `50`
+  - maxPagesPerQuery `20`
+  - maxItems `1000`.
+- Dry-run:
+  - fetchedTotal `6000`
+  - dedupedTotal `227`
+  - createdTotal `4`
+  - updatedTotal `223`.
+- Live import:
+  - fetchedTotal `6000`
+  - dedupedTotal `227`
+  - createdTotal `4`
+  - updatedTotal `223`.
+- New candidate IDs:
+  - `61968` `0x6c3aae17140c5e3cde62380daaa323e38575c459`
+  - `61969` `0xa8cf2ed8751f4e58ad039e1b68a8b58b4395031f`
+  - `61970` `0x4ab9b54427ec4b7f3646b1a0ef1bed73bc708ebe`
+  - `61971` `0x3d8a89a20aa73fba0f30d080e8120de9f9555724`
+
+**New candidate activity backfill**:
+- 7-day Data API dry-run for `[61968,61969,61970,61971]`:
+  - fetchedTotal `0`, no recent activity.
+- 30-day Data API dry-run/live:
+  - fetchedTotal `21`
+  - tradeTotal `21`
+  - live ingestedTotal `21`
+  - newEventTotal `21`
+  - all activity came from `61971`: BUY `0`, SELL `21`.
+- Activity-score forced:
+  - scannedCount `4`
+  - scoredCount `4`
+  - risk counts: `no_activity_sample=3`, `stale_activity=3`, `sell_only_no_entry=1`, `tail_price_spray=1`, `low_safe_price_ratio=1`, `strategy_low_price_tail_risk=1`.
+- Final decisions:
+  - `61968`: score `10`, `no_activity_sample,stale_activity`.
+  - `61969`: score `10`, `no_activity_sample,stale_activity`.
+  - `61970`: score `10`, `no_activity_sample,stale_activity`.
+  - `61971`: score `20`, `sell_only_no_entry,tail_price_spray,low_safe_price_ratio,strategy_low_price_tail_risk`.
+  - No PAPER promotion.
+
+**Current official ALL gate state**:
+- Unscored official ALL DISCOVERED count: `0`.
+- Official ALL by state:
+  - DISCOVERED total `252`, score>=80 `0`, clean-human score>=80 `0`.
+  - CANDIDATE total `48`, score>=80 `0`.
+  - COOLDOWN total `306`, score>=80 `0`.
+  - PAPER total `167`, score>=80 `2`, both clean-human.
+- Strict TRIAL_READY count: `0`.
+- New trial-ready / 可试跟 leader this continuation: `0`.
+
+**Decision**:
+- Current official ALL source path is exhausted under the hard gates for immediate trial-ready creation.
+- The best valid outputs remain observation-gated PAPER candidates `61959` and `61964`.
+- Further immediate work should not lower gates or enable live copy; it should either:
+  - wait and recheck the observation window for `61959/61964`, or
+  - add a genuinely new external source/channel, or
+  - audit the paper model separately if the user wants to challenge score/valuation mechanics.
+
+**Next**:
+- Schedule or manually rerun observation recheck for `61959/61964` after the 168-hour window.
+- If continuing before that, use a different source path rather than reprocessing the exhausted official ALL pool.
+
+## 2026-07-18 19:15 CST - Polyburg/Telegram Targeted Expansion Round
+
+**Scope**:
+- Continue high-quality leader expansion without lowering gates:
+  - recent activity required
+  - official ALL/365D profitability evidence required for trial-ready
+  - clean risk flags
+  - `human_directional`
+  - complete BUY/SELL activity sample
+  - positive copyable paper PnL
+  - 7-day PAPER observation window before TRIAL_READY.
+- Source path used this round: Polyburg/Telegram Web `https://web.telegram.org/a/#7698624735` plus targeted official leaderboard refresh when source freshness was stale.
+
+**Runtime / baseline**:
+- Backend health: `UP`.
+- Strict DB TRIAL_READY count under official ALL + positive paper PnL gate: `0`.
+- Existing high-quality observation candidates before this round:
+  - `61959`: PAPER, score `87.40515571`, trades `34`, filtered `6`, copyable PnL `+7.32706573`, blocked by observation age.
+  - `61964`: PAPER, score `88.65459750`, trades `15`, filtered `11`, copyable PnL `+12.76314425`, blocked by observation age / high filtered ratio watch.
+
+**Polyburg/Telegram source check**:
+- Launchd `com.polyhermes.polyburg-sync` is loaded.
+- Existing DB candidates with `source_evidence LIKE '%polyburg_telegram%'`: `33`.
+- Seen in last 2 days: `18`.
+- Created in last 2 days: `0`.
+- Headless sync with current state:
+  - `status=no_new_wallet_messages`
+  - `visibleWallets=168`.
+- Headless dry-run with temporary empty state:
+  - parsedTotal `168`
+  - dedupedTotal `31`
+  - createdTotal `0`
+  - updatedTotal `0`
+  - skippedExistingTotal `31`.
+- Decision: current Telegram visible backlog has no new wallets; use targeted backfill on existing Polyburg candidates.
+
+**Batch 1 targeted activity backfill**:
+- Candidate IDs: `[17964,27075,14832,2870,27946]`.
+- 30-day dry-run:
+  - fetchedTotal `1000`
+  - tradeTotal `1000`
+  - newEventTotal `969`
+  - duplicateTotal `14`
+  - no wallet errors.
+- 30-day live:
+  - ingestedTotal `1000`
+  - newEventTotal `969`
+  - duplicateTotal `31`.
+- Activity-score forced for all 5:
+  - scoredCount `5`.
+- Notable outcomes:
+  - `27946`: score `100`, risk empty, `human_directional`, strong politics activity sample.
+  - `2870`: score `100` at activity stage, risk empty, `human_directional`, finance.
+  - `14832`: score `50`, `activity_category_mismatch`.
+  - `17964`: score `50`, `mixed_category_evidence,activity_category_mismatch`.
+  - `27075`: score `100` but strategy remained `unknown` after activity score; not promoted this round.
+
+**2870 PAPER result**:
+- Promoted `2870` from CANDIDATE to PAPER.
+- Paper process:
+  - first run: processed `1`, PnL `-1`.
+  - second run: processed `12`, filtered `8`, afterTradeCount `13`, copyable PnL `-5.614525636775`.
+- Paper score:
+  - score `71.28571430`
+  - blocker `score_below_80`
+  - decision: out under hard gate.
+
+**27946 PAPER result**:
+- Official leaderboard targeted refresh dry-run:
+  - requested wallet `0xd44e974a3edb232aa4aedbdcc59792b76a5f67e2`
+  - fetchedTotal `6000`
+  - matchedTotal `1`
+  - matched official politics ALL PNL: rank `179`, `profit_window:all:276717.25315905083`.
+- Live official refresh:
+  - matchedTotal `1`
+  - updatedTotal `1`.
+- Promoted `27946` from CANDIDATE to PAPER.
+- Paper process:
+  - processed `20`
+  - filtered `0`
+  - failed `0`
+  - copyable PnL `+5.0869685687`.
+- Paper/trial-ready recheck dry-run:
+  - score `90.17393714`
+  - trades `20`
+  - filtered `0`
+  - copyable PnL `+5.08696857`
+  - risk empty
+  - strategy `human_directional`
+  - has official ALL evidence
+  - blocked by PAPER observation window; `last_transition_at` age only about `0.07h`.
+- Decision: `27946` is a new high-quality observation candidate, not TRIAL_READY yet.
+
+**Batch 2 targeted activity backfill**:
+- Candidate IDs: `[3104,2697,18323,18458,19685]`.
+- 30-day dry-run:
+  - fetchedTotal `1000`
+  - tradeTotal `1000`
+  - newEventTotal `960`
+  - duplicateTotal `30`
+  - no wallet errors.
+- 30-day live:
+  - ingestedTotal `1000`
+  - newEventTotal `960`
+  - duplicateTotal `40`.
+- Activity-score forced for all 5:
+  - scoredCount `5`.
+- Outcomes:
+  - `18458`: score `100`, risk empty, `human_directional`, but COOLDOWN and source stale `146h`.
+  - `3104`: score `50`, `mixed_category_evidence,activity_category_mismatch`.
+  - `2697`: score `50`, `weak_exit_sample,mixed_category_evidence,activity_category_mismatch,strategy_whale`.
+  - `18323`: score `20`, low-price tail risk.
+  - `19685`: score `20`, tail-price / low-price risk.
+- Cooldown recheck dry-run for `[18323,18458,19685]`:
+  - `18458` blocked by `source_stale_over_48h`.
+- Official targeted refresh dry-run for `18458`:
+  - fetchedTotal `5650`
+  - matchedTotal `1`
+  - matched only official politics MONTH PNL, preview `profit_window:30d:2450.4232524539257`.
+  - no current ALL evidence in preview.
+- Decision: do not promote `18458` under ALL/365D gate.
+
+**Current high-quality observation set**:
+- `27946`: PAPER, score `90.17393714`, risk empty, `human_directional`, trades `20`, filtered `0`, copyable PnL `+5.08696857`, official ALL evidence present, blocked by 7-day PAPER observation window.
+- `61959`: PAPER, score `87.40515571`, risk empty, `human_directional`, trades `34`, filtered `6`, copyable PnL `+7.32706573`, official ALL evidence present, blocked by observation window.
+- `61964`: PAPER, score `88.65459750`, risk empty, `human_directional`, trades `15`, filtered `11`, copyable PnL `+12.76314425`, official ALL evidence present, blocked by observation window / filtered-ratio watch.
+
+**Current counts**:
+- New high-quality observation candidate this round: `1` (`27946`).
+- New TRIAL_READY / immediately可试跟 leader this round: `0`.
+- Strict DB TRIAL_READY count remains `0`.
+- Loop diagnostics now reports strict-ready-like samples in PAPER, but state-machine `paper/trial-ready/recheck` still blocks them until the observation window is satisfied; use state-machine result as the activation gate.
+
+**Next**:
+- Continue targeted Polyburg backfill on remaining `source_evidence LIKE '%polyburg_telegram%'` candidates in small batches of 5.
+- Prioritize candidates with score near `59`, unknown strategy, or stale source that can be independently refreshed by official ALL evidence.
+- Recheck `27946`, `61959`, and `61964` after 168h PAPER observation; do not enable live copy before then.
+
+## 2026-07-18 19:25 CST - Polyburg Remaining Candidate Sweep
+
+**Scope**:
+- Continue the Polyburg/Telegram path after the prior round found `27946`.
+- Keep all hard gates unchanged: official ALL/365D evidence, recent activity, BUY/SELL sample, clean risk, `human_directional`, positive copyable paper PnL, and 7-day PAPER observation before TRIAL_READY.
+- No live copy configuration changed.
+
+**Baseline**:
+- Backend health: `UP`.
+- Strict DB TRIAL_READY count under official ALL + positive paper PnL gate: `0`.
+- High-quality observation candidates at start:
+  - `27946`: PAPER, score `90.17393714`, trades `20`, filtered `0`, copyable PnL `+5.08696857`, state age about `0.24h`.
+  - `61959`: PAPER, score `87.40515571`, trades `34`, filtered `6`, copyable PnL `+7.32706573`, state age about `1.63h`.
+  - `61964`: PAPER, score `88.65459750`, trades `15`, filtered `11`, copyable PnL `+12.76314425`, state age about `1.69h`.
+
+**Batch 3 targeted activity backfill**:
+- Candidate IDs: `[2672,2683,2698,2715,2790]`.
+- 30-day dry-run:
+  - fetchedTotal `1000`
+  - tradeTotal `1000`
+  - newEventTotal `973`
+  - duplicateTotal `17`
+  - no wallet errors.
+- 30-day live:
+  - ingestedTotal `1000`
+  - newEventTotal `973`
+  - duplicateTotal `27`
+  - no wallet errors.
+- Activity-score forced:
+  - scoredCount `5`.
+- Outcomes:
+  - `2672`: remains score `59`, blocked by `small_sample,mixed_category_evidence,strategy_whale`.
+  - `2683`: remains COOLDOWN score `59`, `mixed_category_evidence,small_sample`.
+  - `2698`: remains COOLDOWN score `59`, `mixed_category_evidence,small_sample`.
+  - `2715`: remains COOLDOWN score `59`, `mixed_category_evidence,small_sample`.
+  - `2790`: remains COOLDOWN score `59`, `mixed_category_evidence,small_sample`.
+- Decision: no clean high-score candidate from this batch.
+
+**Batch 4 targeted activity backfill**:
+- Candidate IDs: `[2019,2775,2704,2819,3595]`.
+- 30-day dry-run:
+  - fetchedTotal `1000`
+  - tradeTotal `1000`
+  - newEventTotal `952`
+  - duplicateTotal `19`
+  - no wallet errors.
+- 30-day live:
+  - ingestedTotal `1000`
+  - newEventTotal `952`
+  - duplicateTotal `48`
+  - no wallet errors.
+- Activity-score forced:
+  - scoredCount `5`.
+- Outcomes:
+  - `2775`: activity score `100`, risk empty, `human_directional`, politics, source fresh, official ALL evidence present.
+  - `2704`: score `50`, blocked by `mixed_category_evidence,activity_category_mismatch`.
+  - `2819`: score `50`, blocked by `mixed_category_evidence,activity_category_mismatch`, no ALL evidence.
+  - `3595`: score `50`, blocked by `activity_category_mismatch`, no ALL evidence.
+  - `2019`: score `20`, blocked by `tail_price_spray` and low-price-tail strategy.
+
+**2775 PAPER result**:
+- Cooldown recheck dry-run:
+  - eligible `true`
+  - action `READY_TO_RECOVER`
+  - reason `cooldown_recheck_ready`.
+- Live cooldown recheck:
+  - recoveredCandidateIds `[2775]`
+  - state COOLDOWN -> CANDIDATE.
+- Live PAPER promotion:
+  - promotedTotal `1`
+  - state CANDIDATE -> PAPER.
+- Paper process:
+  - processed `6`
+  - filtered `14`
+  - failed `0`
+  - afterTradeCount `7`
+  - afterFilteredCount `15`
+  - copyable PnL `-0.94758015367`.
+- Paper score:
+  - score `59`
+  - risk `high_filtered_ratio,tail_price_spray,small_sample`
+  - filteredRatio `0.68181818`
+  - decision: out under hard gate.
+
+**Batch 5 targeted activity backfill**:
+- Candidate IDs: `[20714,2695,2714,6097,15017]`.
+- 30-day dry-run:
+  - fetchedTotal `1000`
+  - tradeTotal `1000`
+  - newEventTotal `947`
+  - duplicateTotal `18`
+  - no wallet errors.
+- 30-day live:
+  - ingestedTotal `1000`
+  - newEventTotal `939`
+  - duplicateTotal `61`
+  - no wallet errors.
+- Activity-score forced:
+  - scoredCount `5`.
+- Outcomes:
+  - `20714`: score `59`, blocked by `mixed_category_evidence,small_sample`, strategy `unknown`.
+  - `2695`: score `57.58064516`, blocked by `mixed_category_evidence,high_filtered_ratio,small_sample`, strategy `unknown`.
+  - `2714`: score `55.25`, blocked by `high_filtered_ratio,small_sample`, copyable PnL negative.
+  - `6097`: score `50`, blocked by `low_safe_price_ratio,small_sample`, no ALL evidence.
+  - `15017`: score `50`, blocked by `low_safe_price_ratio,mixed_category_evidence,small_sample`.
+- Decision: no new clean high-score candidate from this batch.
+
+**Polyburg coverage status**:
+- `source_evidence LIKE '%polyburg_telegram%'` total: `33`.
+- Processed in the last two Polyburg rounds: `25`.
+- Remaining unprocessed Polyburg candidates: `8`.
+- Remaining IDs:
+  - `512`, `644`, `688`, `1983`, `2688`, `2810`, `3237`, `21491`.
+- Remaining candidates are all score `20` and already have hard-exclude traits such as `low_price_tail_risk`, `low_safe_price_ratio`, `buy_only_no_exit`, or `tail_price_spray`.
+- Decision: immediate high-quality leader yield from current visible Polyburg backlog is exhausted except the already found observation candidate `27946`.
+
+**Current counts**:
+- New high-quality observation candidate this round: `0`.
+- New TRIAL_READY / immediately可试跟 leader this round: `0`.
+- Strict DB TRIAL_READY count remains `0`.
+- Current high-quality observation candidates remain `3`: `27946`, `61959`, `61964`.
+
+**Next**:
+- Do not spend more immediate cycles on the remaining low-price-tail Polyburg backlog unless new Telegram messages arrive.
+- Next productive path is either:
+  - force a fresh Polyburg sync after new Telegram messages appear, or
+  - add another external source/channel, or
+  - wait for the 168-hour PAPER window and recheck `27946`, `61959`, and `61964`.
+
+## 2026-07-18 G3 portfolio relationship shadow gate iteration
+
+**Goal**: Continue G3 "统一资产与组合风险管理" by making duplicate/correlated position detection part of the auditable portfolio-risk evaluation path, without enabling hard enforcement.
+
+**Changed**
+- Added optional `outcome` to `PortfolioRiskEvaluationRequest` and `BackendBuyRiskCandidate`.
+- Bridge now sends `outcome` in both copy-trading and manual BUY portfolio-risk payloads.
+- Added `PortfolioRiskRelationInput` to the risk input snapshot.
+- `PortfolioRiskEvaluationService` now builds a candidate BUY relation snapshot by combining the proposed BUY with current portfolio positions and running `PortfolioRelationClassifier`.
+- `PortfolioRiskPolicy` bumped to `G3-SHADOW-V5` and adds `POSITION_RELATIONSHIP`:
+  - `DUPLICATE`, `PSEUDO_HEDGE`, `RELATED` => `WOULD_BLOCK` in Shadow audit.
+  - `TRUE_HEDGE` alone does not block.
+  - missing `outcome`, `eventSlug`, category, or market metadata => `INSUFFICIENT_DATA`.
+- Shadow mode remains unchanged: threshold/relationship `WOULD_BLOCK` decisions are recorded and replayable, but execution is still allowed unless manual BUY pause denies it.
+
+**Why this advances G3**
+- Moves relation detection from a standalone diagnostic endpoint into the same persisted risk decision/snapshot used by Bridge BUY checks, Shadow reports, and historical replay.
+- Preserves G3 safety invariant: SELL priority and manual control remain intact; models/Bridge cannot bypass the audit path, but hard enforcement is not enabled prematurely.
+
+**Verification**
+- `source scripts/java-env.sh && cd backend && ./gradlew test --tests '*PortfolioRiskPolicyTest' --tests '*PortfolioRiskEvaluationServiceTest' --tests '*PortfolioRelationClassifierTest' --tests '*PortfolioRiskShadowReportServiceTest' --tests '*BackendBuyRiskGatewayTest'` passed.
+- `source scripts/java-env.sh && cd backend && ./gradlew test --tests '*LeaderResearchCooldownRecheckServiceTest' --tests '*LeaderResearchActivityHistoryBackfillServiceTest' --tests '*LeaderResearchControllerTest' compileKotlin` passed.
+- `cd polymtrade-bridge && .venv/bin/python -m py_compile main.py portfolio_risk_client.py` passed.
+- `git diff --check` passed.
+
+**Next**
+- Add request-level `outcome` wiring for backend-internal BUY callers if any non-Bridge path starts using `BackendBuyRiskGateway`.
+- Add a replay/report slice that shows `POSITION_RELATIONSHIP` would-block frequency by type before considering ENFORCED mode.
+- Keep hard enforcement disabled until Shadow gates include enough final samples with `POSITION_RELATIONSHIP` present and no `INSUFFICIENT_DATA` relationship gap.
+
+## 2026-07-18 22:32 CST - Falcon + Recommendation Source Expansion Round
+
+**Scope**:
+- Continue high-quality leader discovery after visible Polyburg backlog was exhausted.
+- Use non-Polyburg sources already wired in the backend:
+  - Falcon leaderboard import.
+  - official leaderboard targeted refresh for ALL/365D evidence.
+  - politics/finance recommendation dry-run from activity source.
+- Keep hard gates unchanged and do not enable live copy trading.
+
+**Baseline**:
+- Backend health: `UP`.
+- Strict DB TRIAL_READY count under official ALL + positive paper PnL gate: `0`.
+- High-quality observation candidates at start:
+  - `27946`: PAPER, score `90.17393714`, trades `20`, filtered `0`, copyable PnL `+5.08696857`.
+  - `61959`: PAPER, score `87.40515571`, trades `34`, filtered `6`, copyable PnL `+7.32706573`.
+  - `61964`: PAPER, score `88.65459750`, trades `15`, filtered `11`, copyable PnL `+12.76314425`.
+
+**Falcon leaderboard import**:
+- Falcon dry-run:
+  - fetchedTotal `300`
+  - dedupedTotal `144`
+  - createdTotal `56`
+  - updatedTotal `88`
+  - errors `0`.
+- Falcon live import:
+  - fetchedTotal `300`
+  - dedupedTotal `144`
+  - createdTotal `56`
+  - updatedTotal `88`.
+- Note: Falcon is 15D performance evidence only; it does not satisfy ALL/365D gate by itself.
+
+**Falcon official ALL refresh**:
+- Targeted official refresh dry-run for first 100 recent Falcon candidates:
+  - requestedWallets `100`
+  - fetchedTotal `6000`
+  - matchedTotal `8`.
+- ALL/365D matches from this batch:
+  - `2695`: official politics ALL rank `32`, PnL `1056203.4672871744`; already failed earlier under copyability / tail-risk gates.
+  - `1312`: official politics ALL rank `234`, PnL `211249.77487034787`.
+  - `2709`: official politics ALL rank `288`, PnL `177650.37689940137`.
+  - `2716`: official politics ALL rank `782`, PnL about `63997`.
+- Targeted official refresh dry-run for remaining 44 recent Falcon candidates:
+  - requestedWallets `44`
+  - fetchedTotal `6000`
+  - matchedTotal `4`.
+- ALL/365D match from second batch:
+  - `11468`: official politics ALL rank `265`, PnL `186645.73068738822`.
+
+**Falcon candidate follow-through**:
+- `1312`:
+  - 30D activity dry-run/live for `[1312,2716]` ingested `600` trades total; `1312` had `300` trades, BUY `224`, SELL `76`, newEvent `290`.
+  - Activity-score after refresh/backfill: score `100`, risk empty, `human_directional`, official ALL evidence present.
+  - Cooldown recheck dry-run: eligible `true`, `READY_TO_RECOVER`.
+  - Live cooldown recheck: COOLDOWN -> CANDIDATE.
+  - Live promotion: CANDIDATE -> PAPER.
+  - Paper process batch 1: processed `9`, filtered `11`, copyable PnL `+0.849520749635`.
+  - Paper process batch 2: processed `5`, filtered `15`, final trades `14`, filtered `26`, copyable PnL `+1.00577075`.
+  - Paper score: `72.26154150`, risk `high_filtered_ratio,tail_price_spray`, filteredRatio `0.65`.
+  - Decision: out under hard gate despite positive PnL because filtered ratio and tail-risk blockers are too high.
+- `2709`:
+  - Live official ALL refresh succeeded.
+  - 30D activity dry-run/live: `300` trades, BUY `216`, SELL `84`, newEvent `297`.
+  - Activity-score: `60`, risk `mixed_category_evidence`, `human_directional`.
+  - Decision: no PAPER promotion; below clean high-score gate.
+- `2716`:
+  - official ALL evidence refreshed.
+  - 30D activity backfill included in `[1312,2716]`: `300` trades, BUY `275`, SELL `25`, newEvent `298`.
+  - Activity-score: `50`, `mixed_category_evidence,activity_category_mismatch`.
+  - Decision: out.
+- `11468`:
+  - 30D activity dry-run: `300` trades, BUY `300`, SELL `0`.
+  - Decision: no live backfill; violates BUY/SELL sample completeness and exit mechanism gate.
+
+**Activity-source recommendation path**:
+- Politics recommendation dry-run:
+  - recommendationCounts: `IMPORT_NOW=1`, `FAST_WATCH_REVIEW=1`, `WATCH_SOURCE=6`.
+  - Unknown import wallet: `0xe47acc8fd9821f0140786a74e7304e2d56122f05`.
+- Live politics `IMPORT_NOW`:
+  - created candidate `62028`.
+  - source evidence: politics activity source, events `11`, markets `5`, BUY `9`, SELL `2`, safePriceRatio `1.0000`, tailPriceRatio `0.0000`.
+- Official refresh dry-run for `62028`:
+  - fetchedTotal `6000`
+  - matchedTotal `0`.
+  - Decision: keep in research pool but do not promote; lacks official ALL/MONTH/WEEK leaderboard evidence.
+- Finance recommendation dry-run:
+  - recommendationCounts: `PAPER_PROCESS=1`, `FAST_WATCH_REVIEW=1`, `WATCH_SOURCE=3`.
+  - Suggested PAPER_PROCESS candidate: `61964`.
+
+**61964 paper improvement**:
+- Paper process for `61964`:
+  - processed `20`
+  - filtered `0`
+  - afterTradeCount `35`
+  - afterFilteredCount `11`
+  - copyable PnL unchanged at `+12.76314425`.
+- Paper score after process:
+  - score `91.55488760`
+  - risk empty
+  - `human_directional`
+  - filteredRatio improved to `0.23913043`.
+- Trial-ready recheck dry-run:
+  - blocked by observation window.
+  - hoursUntilTrialReady about `164`.
+- Decision: `61964` is now a stronger high-quality observation candidate, not immediately TRIAL_READY.
+
+**Current high-quality observation set**:
+- `61964`: PAPER, score `91.55488760`, risk empty, `human_directional`, trades `35`, filtered `11`, copyable PnL `+12.76314425`, official ALL evidence, blocked by 7-day observation window.
+- `27946`: PAPER, score `90.17393714`, risk empty, `human_directional`, trades `20`, filtered `0`, copyable PnL `+5.08696857`, official ALL evidence, blocked by observation window.
+- `61959`: PAPER, score `87.40515571`, risk empty, `human_directional`, trades `34`, filtered `6`, copyable PnL `+7.32706573`, official ALL evidence, blocked by observation window.
+
+**Current counts**:
+- New high-quality observation candidate this round: `0`.
+- Improved high-quality observation candidate this round: `1` (`61964`).
+- New TRIAL_READY / immediately可试跟 leader this round: `0`.
+- Strict DB TRIAL_READY count remains `0`.
+
+**Next**:
+- Falcon import produced useful candidates, but current ALL-matched follow-through mostly failed on activity mismatch, buy-only/no-sell, or filtered ratio.
+- Next productive source path should be either:
+  - another external/source channel with fresh wallets, or
+  - scheduled recheck after `61964`, `27946`, and `61959` satisfy the 168-hour observation window.
+
+## 2026-07-18 22:42 CST - Market-Peer / Activity-Source Continuation
+
+**Scope**:
+- Continue after Falcon follow-through by probing local activity-derived source paths:
+  - `market-peer-source/import`
+  - `activity-source/import`
+  - targeted PAPER processing for candidate surfaced by market-peer dry-run.
+- Hard gates unchanged:
+  - official ALL/365D evidence
+  - BUY/SELL sample completeness
+  - clean risk flags
+  - `human_directional`
+  - positive copyable paper PnL
+  - score >= 80
+  - 7-day PAPER observation before TRIAL_READY.
+- No live copy configuration changed.
+
+**Baseline**:
+- Backend health: `UP`.
+- Strict DB TRIAL_READY count: `0`.
+- High-quality observation candidates:
+  - `61964`: PAPER, score `91.55488760`, trades `35`, filtered `11`, copyable PnL `+12.76314425`, filteredRatio `0.23913043`.
+  - `27946`: PAPER, score `90.17393714`, trades `20`, filtered `0`, copyable PnL `+5.08696857`.
+  - `61959`: PAPER, score `87.40515571`, trades `34`, filtered `6`, copyable PnL `+7.32706573`.
+
+**Market-peer source probe**:
+- Broad market-peer dry-run with politics+finance, lookback `30d`, limit `20/category`, hotMarketLimit `60`:
+  - timed out after `120s` with no response.
+  - decision: too heavy for the interactive loop at current parameters.
+- Narrow politics market-peer dry-run:
+  - category `politics`
+  - lookback `14d`
+  - limitPerCategory `5`
+  - hotMarketLimit `10`
+  - minMarketEvents `10`
+  - minMarketWallets `5`
+  - minEvents `5`
+  - minDistinctMarkets `2`
+  - minBuyEvents `2`
+  - minSellEvents `1`
+  - minSafePriceRatio `0.25`
+  - maxTailPriceRatio `0.45`
+- Result:
+  - selectedTotal `5`
+  - createdTotal `0`
+  - updatedTotal `5`
+  - all selected wallets already existed.
+- Preview candidates:
+  - `3595`: update, but existing score `50`, no ALL evidence, activity_category_mismatch.
+  - `2775`: update, already failed paper with high filtered ratio and negative PnL.
+  - `61621`: update, score `59`, risk `small_sample,low_market_diversity,strategy_whale`, strategy `whale`, official ALL present.
+  - `3104`: update, score `50`, mixed/category mismatch, no ALL.
+  - `2714`: update candidate surfaced as current PAPER score `100` activity-prescreen with official ALL.
+
+**2714 follow-through**:
+- Before processing:
+  - PAPER
+  - activity-prescreen score `100`
+  - risk empty
+  - `human_directional`
+  - official ALL evidence present
+  - old paper sample: trades `1`, filtered `3`, copyable PnL `-0.380952`.
+- Paper process:
+  - processed `13`
+  - filtered `7`
+  - afterTradeCount `14`
+  - afterFilteredCount `10`
+  - copyable PnL improved to `+0.017577804305`.
+- Paper/trial-ready recheck dry-run:
+  - score `73.78515555`
+  - trades `14`
+  - filtered `10`
+  - copyable PnL `+0.0175778`
+  - filteredRatio `0.41666667`
+  - eligible `false`
+  - reason `score_below_80`.
+- Decision: not a high-quality observation candidate; positive PnL is too thin and score remains below gate.
+
+**61621 follow-through**:
+- Existing DISCOVERED candidate, official ALL evidence present.
+- Market-peer preview showed large amount sample:
+  - events `16`
+  - distinctMarkets `2`
+  - BUY `3`
+  - SELL `13`
+  - avgAmount `4707.7140`
+  - totalAmount `75323.4240`.
+- Current score/risk:
+  - score `59`
+  - risk `small_sample,low_market_diversity,strategy_whale`
+  - strategy `whale`.
+- Decision: do not promote; non-copyable strategy and score below gate.
+
+**Activity-source direct probe**:
+- Broad activity-source dry-run with politics+finance, lookback `30d`, limit `20/category`, stricter safe/tail thresholds:
+  - timed out after `120s`.
+- Narrow activity-source dry-run with finance, lookback `14d`, limit `5`:
+  - timed out after `80s`.
+- Decision: direct activity-source import path is too slow for interactive continuation at current query shape. Use recommendation endpoint or add query/index/offline-worker improvement before more direct scans.
+
+**Diagnostics snapshot**:
+- Loop diagnostics targeted `[61964,27946,61959,2714,61621,62028]`:
+  - strictReadyCount reported `3` by diagnostics sampling, but state-machine trial-ready recheck still blocks observation candidates.
+  - `61964` diagnostic blocker label remains `filtered_ratio_too_high`; DB paper metrics after latest processing are filteredRatio `0.23913043`, and trial-ready recheck blocker remains observation window.
+  - `27946` and `61959` remain strict-ready-like samples in PAPER but blocked by observation window.
+  - `2714` blocker: `score_below_80`.
+  - `61621` blocker: `score_below_80`.
+
+**Current counts**:
+- New high-quality observation candidate this round: `0`.
+- New TRIAL_READY / immediately可试跟 leader this round: `0`.
+- Strict DB TRIAL_READY count remains `0`.
+- Current high-quality observation candidates remain `3`: `61964`, `27946`, `61959`.
+
+**Next**:
+- Do not continue direct activity-source/market-peer broad scans interactively without query optimization or an offline worker.
+- Best immediate continuation options:
+  - wait/recheck the 168-hour observation window for `61964`, `27946`, `61959`;
+  - add a new external source/channel with fresh wallets;
+  - improve activity-source query/indexing so direct source scans can return within loop timeouts.
+
+## 2026-07-19 10:54 CST - Activity-Source Query Optimization + Finance Candidate Follow-Through
+
+**Goal**: Increase可试跟 leader supply without lowering gates: recent activity, ALL/365D long-term profitability, multi-window consistency, BUY/SELL sample completeness, copyability score, positive paper PnL, and observation window.
+
+**Baseline**:
+- Backend health before changes: `UP`.
+- Strict DB TRIAL_READY count before/after this round: `0`.
+- Existing high-quality observation candidates remained:
+  - `61964`: PAPER, score `92.14174955` after new paper processing, `38` trades, `11` filtered, copyable PnL `+13.81137954`, filtered ratio `0.22448980`; trial-ready dry-run blocks on observation age (`17h`, `151h` remaining).
+  - `27946`, `61959`: unchanged observation candidates from prior loop state.
+
+**Implementation**:
+- Added migration `V86__add_activity_source_discovery_indexes.sql`:
+  - `idx_leader_activity_event_discovery_time_market_wallet (usable_for_discovery, event_time, market_id, normalized_wallet)`
+  - `idx_leader_activity_event_market_time_wallet (market_id, event_time, normalized_wallet)`
+  - migration is idempotent via `information_schema.statistics` checks because the local DB was indexed manually for runtime validation before Flyway restart.
+- Updated `LeaderResearchRepositories.kt`:
+  - direct activity-source discovery now uses `idx_leader_activity_event_discovery_time_market_wallet` and filters `usable_for_discovery = 1`.
+  - market-peer hot-market CTE now uses the discovery/time/market index and filters `usable_for_discovery = 1`.
+  - market-peer wallet aggregation now uses `idx_leader_activity_event_market_time_wallet` and filters `usable_for_discovery = 1`.
+
+**Validation**:
+- Local DB index creation completed on `leader_activity_event` (`~1.3M` rows).
+- Re-running V86 directly against local DB returned no duplicate-index failure.
+- Targeted tests passed:
+  - `./gradlew test --tests "*LeaderResearchActivitySourceImportServiceTest" --tests "*LeaderResearchMarketPeerSourceImportServiceTest"`
+- `./gradlew bootJar` passed.
+- Restarted local launchd backend `com.polyhermes.backend-local`; Flyway recorded V86 successfully (`execution_time=94ms`) and backend health returned `UP`.
+- New API path dry-run:
+  - `activity-source/import` finance, 14d, no wallets, limit `5`, returned in `37.44s`.
+  - This is improved from prior 80-120s timeouts but still too slow for broad multi-category loops; pre-aggregation/offline worker remains the next performance step.
+
+**Candidate follow-through**:
+- First finance SQL/API batch updated `14` existing wallets; no new wallet was created.
+- Official leaderboard refresh over those `14` matched `10`.
+  - `2870` gained finance ALL evidence but paper PnL worsened to `-7.00452563`, score `71.375`; blocked.
+  - `61964` improved after paper processing: `+1.0482352911` copyable PnL delta, now score `92.14174955`; blocked only by observation window.
+  - `114`, `3583`, `2903`, `61963` were paper-processed and re-scored, but ended as small-sample / high-filtered / score-below-80 blockers.
+  - `18458` cooldown dry-run can recover to CANDIDATE, but only matched WEEK official evidence this round, not ALL; not counted as high-quality.
+- Second finance API batch updated `5` existing wallets; no new wallet was created.
+- Official refresh over `[2714,61937,1603,61491,61962]` matched `2` ALL candidates:
+  - `2714`: politics ALL PnL evidence present, but score `73.78515555`, paper PnL only `+0.01757780`, filtered ratio `0.41666667`; blocked by score below 80.
+  - `61491`: politics ALL PnL evidence present, but DISCOVERED score `55`, `weak_exit_sample`, strategy unknown; blocked.
+
+**Current counts**:
+- New high-quality observation candidates this round: `0`.
+- New TRIAL_READY / immediately可试跟 leaders this round: `0`.
+- Strict DB TRIAL_READY count: `0`.
+- Existing observation-quality candidates: `3` (`61964`, `27946`, `61959`).
+
+**Next**:
+- Do not keep broad regex scans in the hot API path; implement a pre-aggregated activity-source candidate table or offline worker for category/window wallet metrics.
+- Continue observation-window recheck for `61964`, `27946`, `61959`.
+- Optional targeted follow-up: recover `18458` from COOLDOWN only as a non-counted candidate, then require ALL evidence and paper proof before considering it high-quality.
+
+## 2026-07-19 11:08 CST - Activity Metrics Pre-Aggregation + New Finance PAPER Candidate
+
+**Goal**: Continue increasing politics/finance leader supply while preserving hard gates: recent activity, official ALL/365D profit, BUY/SELL completeness, copyable paper behavior, positive paper PnL, and trial-ready state-machine checks.
+
+**Implementation**:
+- Added `leader_activity_wallet_metric` pre-aggregation table in `V87__create_leader_activity_wallet_metric.sql`.
+- Added `POST /api/copy-trading/leader-research/activity-source/metrics/refresh`.
+- `activity-source/import` now uses precomputed wallet metrics when present for the requested category/lookback, and falls back to raw `leader_activity_event` only when metrics are absent.
+- Removed the service-layer N+1 bottleneck by batch loading research candidates and latest leaders for oversampled wallets.
+
+**Performance verification**:
+- V87 migrated successfully; table `leader_activity_wallet_metric` exists.
+- Metrics refresh for 14d:
+  - politics: `4163` wallet metrics in `28763ms`
+  - finance: `1070` wallet metrics in `12809ms`
+  - total: `5233` metrics in `45.70s`
+- Before batch lookup fix, metrics-backed politics import still took `35.59s`.
+- After batch lookup fix, the same metrics-backed politics import returned in `0.60s`.
+- Metrics-backed finance import returned in `4.71s`.
+
+**Politics batch follow-through**:
+- Imported top 10 politics metrics-backed candidates; all were existing candidates.
+- Official refresh matched `7`, including ALL evidence for:
+  - `2775`: politics ALL PnL `+472445.59833365807`, but paper score stayed `59`, filtered ratio `0.68`, PnL `-0.39494858`.
+  - `27946`: politics ALL PnL `+279049.0176422786`, paper improved to score `97.56413422`, `24` trades, `0` filtered, copyable PnL `+8.78206711`; trial-ready dry-run blocks with `stable_high_scores_below_3`.
+  - `1312`: politics ALL PnL `+210506.44628565578`, paper score `73.48335898`, filtered ratio `0.60465116`; blocked.
+  - `2714`: existing ALL evidence, paper score `74.44444445`, copyable PnL turned negative `-0.20242219`; blocked.
+
+**Finance batch follow-through**:
+- Imported top 10 finance metrics-backed candidates; all were existing candidates.
+- Official refresh matched `7`, including new ALL evidence for:
+  - `61620`: finance ALL PnL `+33398.86647566713`, but remains low-price-tail strategy; not promoted.
+  - `61617`: finance ALL PnL `+28721.501934633638`.
+- `61617` activity-history backfill:
+  - fetched `500`, ingested `500`, new events `475`
+  - BUY `299`, SELL `201`
+  - activity prescreen became score `100`, risk empty, strategy `human_directional`
+  - promoted live from DISCOVERED to PAPER.
+- `61617` paper process/score:
+  - processed `10`, filtered `10`
+  - copyable PnL `+4.42109308`
+  - copyability score `76.34221076`
+  - risk flags `high_filtered_ratio,tail_price_spray`
+  - trial-ready dry-run blocks on `score_below_80`.
+
+**Current counts**:
+- New TRIAL_READY / immediately可试跟 leaders this round: `0`.
+- New high-quality PAPER observation candidate this round: `0`.
+- New promising but blocked PAPER candidate: `61617` (ALL + active + human_directional + positive paper PnL, but score below 80 due high filtered/tail).
+- Strict DB TRIAL_READY count remains `0`.
+- Existing observation-quality candidates now:
+  - `27946`: strengthened to score `97.56413422`, but stable-high-score history still below 3.
+  - `61964`: score `90.88145820`, positive paper PnL, blocked by observation age.
+  - `61959`: unchanged from previous loop.
+
+**Next**:
+- Add a small daily/loop automation around `activity-source/metrics/refresh` so imports start from precomputed metrics.
+- Recheck `27946` after additional high-score snapshots; blocker is no longer age but `stable_high_scores_below_3`.
+- Keep `61617` in PAPER only as a watch item; needs lower filtered ratio and score above 80 before observation-quality.
+
+## 2026-07-19 11:36 CST - First Strict Trial-Ready Leader + Recheck Collision Fix
+
+**Goal**: Continue increasing high-quality politics/finance leaders without lowering gates: official ALL/365D profit evidence, fresh source, BUY/SELL paper completeness, clean human_directional strategy, positive copyable PnL, stable score, and trial-ready state-machine checks.
+
+**Runtime baseline**:
+- Local backend is `UP` on `127.0.0.1:8000`.
+- Strict DB trial-ready count before target recheck was `0`.
+- The previous metrics-backed import files were recovered from `/tmp/polyhermes-pol.json` and `/tmp/polyhermes-fin.json`.
+
+**Targeted candidate batch**:
+- Candidate IDs: `61959`, `61964`, `27946`, `61617`, `2870`, `2714`, `48059`, `60213`.
+- Official leaderboard refresh requested politics/finance, periods ALL/MONTH/WEEK, orderBy PNL.
+- The live refresh endpoint matched `4` wallets from `200` fetched rows in the available leaderboard pages:
+  - `2714`: politics MONTH PnL `+13448.951288454264`.
+  - `61617`: finance MONTH PnL `+28563.40354478291`.
+  - `2870`: finance MONTH PnL `+9358.861348604783`.
+  - `61964`: finance MONTH PnL `+4768.874872467564`.
+
+**Paper processing and scoring**:
+- `/paper/process` requested `80`, effective batch size capped to `20`.
+- Processed `18`, filtered `2`, failed `0`.
+- Deltas:
+  - `61617`: tradeCount `10 -> 12`, filtered `10 -> 11`, copyable PnL `+4.42109308 -> +12.12896034`.
+  - `27946`: tradeCount `24 -> 27`, filtered `0 -> 0`, copyable PnL `+8.78206711 -> +8.93591326`.
+  - `61959`: tradeCount `34 -> 36`, filtered `6 -> 6`, copyable PnL `+7.32706573 -> +13.03914911`.
+  - `61964`: tradeCount `38 -> 39`, filtered `17 -> 18`, copyable PnL `+13.81137954 -> +15.50780811`.
+  - `2714`: tradeCount `17 -> 19`, copyable PnL `-0.20242219 -> +0.27931297`.
+  - `2870`: tradeCount `15 -> 17`, copyable PnL `-7.00452563 -> -8.39452563`.
+  - `48059`: copyable PnL worsened to `-1.36686948`.
+  - `60213`: only `3` trades; still sample-thin.
+- `/paper/score` scored all `8` targeted candidates with no missing IDs.
+
+**Recheck failure and fix**:
+- First `/paper/trial-ready/recheck` promoted `27946`, then failed on `2714` with duplicate key `copy_trading_leaders.uk_leader_address_category`.
+- Root cause: `LeaderResearchPoolMappingService.ensureLeader` selected an arbitrary latest leader by wallet before considering research category. For wallets with multiple category rows, syncing a research candidate could mutate the wrong category row and collide with an existing `(leader_address, category)` unique row.
+- Code fix:
+  - When research evidence has a non-mixed category, prefer `findByLeaderAddressAndCategory(wallet, researchCategory)`.
+  - Do not reuse a `candidate.leaderId` whose existing category conflicts with the research category.
+  - Only fall back to arbitrary `findByLeaderAddress(wallet)` when research category is unknown.
+- Regression test added: `sync uses existing category leader instead of mutating mismatched leader`.
+
+**Post-fix recheck evidence**:
+- Rebuilt backend jar and restarted launchd service.
+- Backend health returned `{"status":"UP"}`.
+- Re-ran `/paper/trial-ready/recheck` for the same target batch:
+  - API code `0`.
+  - scanned `7`, selected `7`, scored `7`, advanced `0`.
+  - `trialReadyCandidateIds`: `[27946]`.
+  - `27946`: remains `TRIAL_READY`, score `97.87182652`, trades `27`, filtered `0`, copyable PnL `+8.93591326`, eligible `true`, reason `meets_trial_ready_threshold`.
+  - `61959`: score `93.37983260`, trades `36`, copyable PnL `+13.03914911`; blocked only by `waiting_observation_age` (`151h` remaining).
+  - `61964`: score `90.78762020`, trades `39`, copyable PnL `+15.50780811`; blocked only by `waiting_observation_age` (`151h` remaining).
+  - `61617`: score `87.83213100`, trades `12`, filtered ratio `0.47826087`, copyable PnL `+12.12896034`; blocked by observation age (`168h` remaining), still near filtered-ratio ceiling.
+  - `2714`: blocked by `score_below_80`.
+  - `48059` and `60213`: in `COOLDOWN`.
+
+**Current strict count**:
+- Strict DB TRIAL_READY count is now `1`.
+- Strict row:
+  - `27946`, wallet `0xd44e974a3edb232aa4aedbdcc59792b76a5f67e2`, state `TRIAL_READY`, score `97.87182652`, risk empty, strategy `human_directional`, trades `27`, filtered `0`, copyable PnL `+8.93591326`.
+
+**Verification**:
+- `./gradlew test --tests "*LeaderResearchPoolMappingServiceTest" --tests "*LeaderResearchTrialReadyRecheckServiceTest"` passed.
+- `./gradlew bootJar` passed.
+- Local backend health is `UP`.
+
+**Next**:
+- Keep `27946` as the first strict trial-ready candidate, but do not create an enabled real-money copy config automatically.
+- Continue observation-window recheck for `61959` and `61964`; both are clean and positive but need about `151h` more paper age.
+- Keep `61617` in PAPER watch only; it improved above score 80, but filtered ratio is close to the 50% hard ceiling and observation age is not satisfied.
+- Run the next loop against a fresh precomputed activity-source metrics batch, prioritizing candidates with official ALL evidence and complete BUY/SELL samples.
+
+## 2026-07-19 11:57 CST - Fresh Metrics Batch, ALL Evidence Thickening, and Candidate Attrition
+
+**Goal**: Continue increasing high-quality politics/finance leaders after `27946` became the first strict trial-ready candidate, without relaxing the gates.
+
+**Baseline**:
+- Backend health: `UP` on `127.0.0.1:8000`.
+- Strict DB trial-ready count at start of this loop: `1`.
+- Existing strict row: `27946`.
+
+**Activity metrics refresh**:
+- Refreshed 14d activity-source metrics:
+  - politics: `4146` wallet metrics, duration `48146ms`
+  - finance: `1067` wallet metrics, duration `19577ms`
+- Metrics-backed imports:
+  - politics selected `30`, created `0`, updated `27`, skipped existing `3`.
+  - finance selected `22`, created `0`, updated `8`, skipped existing `14`.
+
+**Official leaderboard refresh**:
+- First corrected refresh used the right DTO fields: `timePeriods=["ALL","MONTH","WEEK"]`, `orderBys=["PNL"]`, `maxPagesPerQuery=8`.
+- Requested `15` candidates, fetched `2400` leaderboard rows, matched `8`.
+- Important matches:
+  - `61959`: politics ALL PnL `+141738.97425977694`.
+  - `61617`: finance ALL PnL `+28721.501934633638`.
+  - `2714`: politics ALL PnL `+203850.7002789948`.
+  - `2709`: politics ALL PnL `+177997.5479177486`.
+- Deeper refresh for `[1660,61964,18458,2709]` used `maxPagesPerQuery=20`, fetched `6000` rows, matched `4`.
+  - `61964`: finance ALL PnL `+6584.459442402518`.
+  - `1660`: still only matched MONTH in reachable top 1000 finance/politics pages; strict blocker remains missing half-year/ALL evidence.
+  - `18458`: still only MONTH/WEEK evidence in reachable pages; not strict.
+
+**Paper processing and recheck**:
+- Targeted batch: `[1660,27946,61959,61964,61617,18458,2709,2714]`.
+- First `/paper/process` processed `19`, filtered `1`, failed `0`:
+  - `27946`: trades `27 -> 30`, copyable PnL `+8.93591326 -> +9.08975941`.
+  - `61959`: trades `36 -> 39`, copyable PnL `+13.03914911 -> +18.22545803`.
+  - `61964`: trades `39 -> 42`, copyable PnL `+15.50780811 -> +20.59709383`.
+  - `61617`: trades `12 -> 16`, copyable PnL `+12.12896034 -> +0.27890871`; score later dropped below 80.
+  - `1660`: trades `23 -> 26`, copyable PnL `+13.56419265 -> +10.56419265`, but still lacks ALL/half-year official evidence.
+  - `2714`: copyable PnL turned negative `+0.27931297 -> -0.16873898`.
+- `/paper/trial-ready/recheck` result:
+  - `27946`: remains strict `TRIAL_READY`, score `98.17951882`, trades `30`, filtered `0`, copyable PnL `+9.08975941`.
+  - `61959`: score `93.52651550`, trades `39`, filtered ratio `0.13333333`, copyable PnL `+18.22545803`, official ALL present; blocker `waiting_observation_age` (`151h`).
+  - `61964`: score `91.02828700`, trades `42`, filtered ratio `0.30000000`, copyable PnL `+20.59709383`, official ALL present; blocker `waiting_observation_age` (`151h`).
+  - `1660`: score `95.26315795`, copyable PnL `+10.56419265`; blocker `needs_half_year_profit_window`.
+  - `61617`: score dropped to `69.45657442`; blocker `score_below_80`.
+  - `2714`: score `75.3125`, copyable PnL `-0.16873898`; blocker `score_below_80`.
+
+**Cooldown recovery probe**:
+- `/cooldown/recheck` recovered:
+  - `18458`: COOLDOWN -> CANDIDATE.
+  - `2709`: COOLDOWN -> CANDIDATE.
+- Normal `/activity-score/promote-paper` promoted both into PAPER:
+  - `2709`: CANDIDATE -> PAPER.
+  - `18458`: CANDIDATE -> PAPER.
+- Immediate paper sample:
+  - `2709`: processed `10`, filtered `0`, copyable PnL `-8.24561404`, score `77`, returned to `COOLDOWN`; blocked.
+  - `18458`: processed `10`, filtered `0`, copyable PnL `-1.94189602`, score `60`, risk `mixed_category_evidence`; blocked.
+
+**Current strict count**:
+- Strict DB TRIAL_READY count remains `1`.
+- Current high-quality waitlist:
+  - `61959`: official ALL, clean, high score, positive paper PnL, blocked only by observation age.
+  - `61964`: official ALL, clean, high score, positive paper PnL, blocked only by observation age.
+- Removed from near-term high-quality watch:
+  - `61617`: score dropped below 80 after more paper evidence.
+  - `2709`: negative paper PnL, COOLDOWN.
+  - `18458`: negative paper PnL and mixed evidence.
+  - `2714`: score below 80 and negative paper PnL.
+
+**Next**:
+- Do not spend more paper capacity on `61617`, `18458`, `2709`, or `2714` until materially new activity arrives.
+- Continue scheduled/loop recheck for `61959` and `61964`; both are the strongest next candidates and need observation age, not more evidence.
+- For new supply, query official leaderboard import directly with `timePeriods=["ALL","MONTH","WEEK"]` and `maxPagesPerQuery=20`, then intersect with metrics-backed fresh activity before paper promotion.
+
+## 2026-07-19 12:15 CST - Official Deep Import Intersected With Fresh Activity
+
+**Goal**: Add more high-quality politics/finance candidates after strict count reached `1`, using the planned path: official ALL/MONTH/WEEK positive PnL import, then intersect with fresh 14d activity metrics before paper promotion.
+
+**Baseline**:
+- Backend health: `UP` on `127.0.0.1:8000`.
+- Strict DB trial-ready count at start: `1`.
+- Existing strict candidate:
+  - `27946`: TRIAL_READY, score `98.17951882`, paper trades `30`, filtered `0`, copyable PnL `+9.08975941`.
+
+**Official deep import**:
+- Endpoint: `/official-leaderboard/import`.
+- Request:
+  - categories `politics, finance`
+  - timePeriods `ALL, MONTH, WEEK`
+  - orderBys `PNL`
+  - `limitPerPage=50`
+  - `maxPagesPerQuery=20`
+  - `maxItems=120`
+  - `dryRun=false`
+- Result:
+  - fetched leaderboard rows: `6000`
+  - deduped qualified wallets: `120`
+  - created `0`, updated `120`
+  - no locked skips.
+- This import requires positive PnL across all requested official periods before selecting a wallet.
+
+**Fresh activity intersection**:
+- Intersected imported official-positive candidates with `leader_activity_wallet_metric`:
+  - lookback `14d`
+  - category in `politics, finance`
+  - total events >= `8`
+  - distinct markets >= `2`
+  - BUY >= `2`
+  - SELL >= `2`
+  - safe price ratio >= `0.25`
+  - tail price ratio <= `0.45`
+- Most intersected candidates were already known bad fits, with negative paper PnL, high filtered ratio, low-price-tail strategy, mixed evidence, or existing cooldown.
+- Selected targeted DISCOVERED batch for live evidence fill:
+  - `61940`
+  - `61491`
+  - `61922`
+  - `61953`
+
+**Activity history backfill**:
+- Endpoint: `/activity-history/backfill`.
+- Request: candidateIds `[61940,61491,61922,61953]`, lookback `30d`, pageSize `100`, maxPagesPerWallet `3`, live.
+- Result:
+  - fetched `918`
+  - trades `918`
+  - ingested `918`
+  - new events `320`
+- Wallet breakdown:
+  - `61491`: fetched `300`, new `153`, BUY `251`, SELL `49`.
+  - `61922`: fetched `300`, new `159`, BUY `185`, SELL `115`.
+  - `61940`: fetched `18`, new `4`, BUY `15`, SELL `3`.
+  - `61953`: fetched `300`, new `4`, BUY `233`, SELL `67`.
+
+**Activity scoring and promotion**:
+- `/activity-score/run` with `force=true` scored `4`.
+- Risk counts:
+  - `activity_category_mismatch`: `1`
+  - `small_sample`: `1`
+  - `low_safe_price_ratio`: `1`
+- Only one candidate met promotion gate:
+  - `61491`: score `100`, risk empty, category `politics`, DISCOVERED -> PAPER.
+- Other targeted candidates remained blocked:
+  - `61940`: small sample / unknown.
+  - `61922`: activity category mismatch.
+  - `61953`: low safe price ratio / unknown.
+
+**Paper processing and trial-ready recheck**:
+- `61491` paper process:
+  - processed `20`
+  - filtered `0`
+  - failed `0`
+  - copyable PnL `0 -> +39.08964585`
+- `61491` paper score:
+  - score `95.00012290`
+  - risk empty
+  - strategy `human_directional`
+  - trades `20`
+  - filtered ratio `0`
+  - official ALL evidence present
+- Trial-ready recheck:
+  - remains `PAPER`
+  - eligible `false`
+  - reason `waiting_observation_age`
+  - `168h` remaining.
+
+**Current strict count**:
+- Strict DB TRIAL_READY count remains `1`.
+- Strong waitlist now:
+  - `61491`: official ALL, fresh activity, clean, high score, positive paper PnL, blocked only by observation age.
+  - `61959`: official ALL, clean, high score, positive paper PnL, blocked only by observation age.
+  - `61964`: official ALL, clean, high score, positive paper PnL, blocked only by observation age.
+
+**Next**:
+- Recheck `61491`, `61959`, and `61964` on observation age cadence; they are the current strongest trial-ready pipeline.
+- Continue official-deep-import + fresh-activity intersection, but exclude candidates with proven negative paper PnL or hard strategy risks from repeated paper capacity.
+- Consider adding an SQL/report helper for this exact intersection so each loop does not rely on hand-written collated joins.
+
+## 2026-07-21 23:08 CST - Waitlist Recheck and Expanded Official Import Attrition
+
+**Goal**: Continue the high-quality leader loop after the 2026-07-19 waitlist build, using current 2026-07-21 runtime evidence. Preserve hard gates: official ALL/long-window profit evidence, fresh activity, BUY/SELL samples, clean human-directional strategy, positive paper PnL, score >= 80, and 7d paper observation age.
+
+**Runtime baseline**:
+- Local runtime timestamp: `1784646045678` (`2026-07-21T23:00:45` local).
+- Backend health: `UP`.
+- Strict DB trial-ready count at start: `1`.
+- Existing strict candidate:
+  - `27946`: TRIAL_READY, score `98.17951882` before this loop, official ALL, paper trades `30`, filtered `0`, copyable PnL `+9.08975941`.
+
+**Waitlist recheck**:
+- Targeted `/paper/score` and `/paper/trial-ready/recheck` for `[27946,61491,61959,61964]`.
+- Recheck result:
+  - `27946`: remains TRIAL_READY, score `93.17951882`, trades `30`, filtered `0`, copyable PnL `+9.08975941`, eligible.
+  - `61491`: PAPER, score `91.76961235`, trades `20`, filtered `0`, copyable PnL `+39.08964585`, blocked only by `waiting_observation_age`; age `59h`, `109h` remaining.
+  - `61959`: PAPER, score `90.29898445`, trades `39`, filtered `6`, copyable PnL `+18.22545803`, blocked only by `waiting_observation_age`; age `77h`, `91h` remaining.
+  - `61964`: PAPER, score `87.80075630`, trades `42`, filtered `18`, copyable PnL `+20.59709383`, blocked only by `waiting_observation_age`; age `77h`, `91h` remaining.
+- No new strict leader from the waitlist yet.
+
+**Fresh activity refresh**:
+- Refreshed 14d metrics:
+  - politics: `3053` wallets, duration `34759ms`
+  - finance: `890` wallets, duration `9483ms`
+  - total refreshed `3943`.
+
+**Expanded official import**:
+- Expanded official multi-window import to `maxItems=300`.
+- Endpoint fetched `6000` leaderboard rows.
+- Actual qualifying multi-window positive wallets: `148`.
+- Import result:
+  - created `5`
+  - updated `143`
+  - skipped locked `0`.
+- Strict fresh-activity intersection after refresh still only surfaced `61940` under the conservative SQL screen, but `61940` stayed score `59`, risk `small_sample`, strategy unknown, so it was not promoted.
+
+**New official candidates backfill**:
+- New candidates created by expanded import:
+  - `62029`
+  - `62030`
+  - `62031`
+  - `62032`
+  - `62033`
+- `/activity-history/backfill` for `[62029,62030,62031,62032,62033]`:
+  - fetched `751`
+  - trades `751`
+  - ingested `751`
+  - new events `698`
+- Wallet breakdown:
+  - `62029`: fetched `2`, BUY `2`, SELL `0`.
+  - `62030`: fetched `197`, BUY `151`, SELL `46`.
+  - `62031`: fetched `0`, BUY `0`, SELL `0`.
+  - `62032`: fetched `300`, BUY `196`, SELL `104`.
+  - `62033`: fetched `252`, BUY `153`, SELL `99`.
+
+**Activity score and promotion**:
+- `/activity-score/run` scored all `5`.
+- Risk counts:
+  - `small_sample`: `1`
+  - `low_market_diversity`: `1`
+  - `no_activity_sample`: `1`
+  - `stale_activity`: `1`
+- Promotion gate selected `3`:
+  - `62032`: DISCOVERED -> PAPER, category politics, activity score `100`, risk empty.
+  - `62033`: DISCOVERED -> PAPER, category finance, activity score `100`, risk empty.
+  - `62030`: DISCOVERED -> PAPER, category finance, activity score `100`, risk empty.
+- Not promoted:
+  - `62029`: small sample / low market diversity.
+  - `62031`: no activity / stale.
+
+**Paper evidence for new promoted candidates**:
+- `/paper/process` for `[62030,62032,62033]`:
+  - processed `8`
+  - filtered `12`
+  - failed `0`
+- Candidate outcomes:
+  - `62030`: processed `2`, filtered `5`, copyable PnL `+3.55555556`, filtered ratio `0.71428571`, score `59`; blocked by `score_below_80` and high filtered ratio.
+  - `62032`: processed `6`, filtered `0`, copyable PnL `-0.23432390`, score `59`; blocked by `score_below_80` and negative paper PnL.
+  - `62033`: processed `0`, filtered `7`, copyable PnL `0`, filtered ratio `1.0`, score `45.000269`; blocked by `score_below_80` and all-filtered paper sample.
+- `/paper/trial-ready/recheck` produced no new trial-ready IDs.
+
+**Current strict count**:
+- Strict DB TRIAL_READY count remains `1`.
+- Strong waitlist remains:
+  - `61491`: score `91.76961235`, paper PnL `+39.08964585`, blocked only by observation age.
+  - `61959`: score `90.29898445`, paper PnL `+18.22545803`, blocked only by observation age.
+  - `61964`: score `87.80075630`, paper PnL `+20.59709383`, blocked only by observation age.
+- Do not spend more near-term paper capacity on:
+  - `62030`: high filtered ratio and score below 80.
+  - `62032`: negative paper PnL and score below 80.
+  - `62033`: all filtered and score below 80.
+  - `62029`: no SELL sample / small sample.
+  - `62031`: no activity sample.
+
+**Next**:
+- Recheck `61491`, `61959`, `61964` after observation age advances; expected remaining time at this run was about `109h` for `61491`, `91h` for `61959/61964`.
+- Continue searching, but use a stricter pre-paper exclusion list for wallets that already produced negative/all-filtered/high-filtered paper samples.
+- The current external-data bottleneck is not lack of official profitable wallets; it is lack of wallets that are both fresh-active and copyable under paper execution assumptions.
+
+## 2026-07-21 23:10 CST - Current Pool Exhaustion Under Stricter Exclusion
+
+**Goal**: Continue the loop after the expanded official import, using stricter exclusion for wallets with already-proven negative, high-filtered, all-filtered, tail-risk, or category-mismatch evidence.
+
+**Baseline**:
+- Backend health: `UP`.
+- Runtime timestamp: `1784646622532` (`2026-07-21T23:10:22` local).
+- Strict DB trial-ready count remains `1`.
+- Current strict candidate:
+  - `27946`: TRIAL_READY, score `93.17951882`, official ALL, paper trades `30`, filtered `0`, copyable PnL `+9.08975941`.
+
+**Waitlist age check**:
+- `61491`: PAPER, score `91.76961235`, trades `20`, filtered `0`, copyable PnL `+39.08964585`, age `59.60h`; still below 168h by about `108.40h`.
+- `61959`: PAPER, score `90.29898445`, trades `39`, filtered `6`, copyable PnL `+18.22545803`, age `77.39h`; still below 168h by about `90.61h`.
+- `61964`: PAPER, score `87.80075630`, trades `42`, filtered `18`, copyable PnL `+20.59709383`, age `77.45h`; still below 168h by about `90.55h`.
+
+**Fresh official/activity pool re-scan**:
+- Query criteria:
+  - official leaderboard positive across ALL/MONTH/WEEK evidence present
+  - `profit_window:all` present
+  - 14d activity metric category in `politics, finance`
+  - total events >= `8`
+  - distinct markets >= `2`
+  - BUY >= `2`
+  - SELL >= `2`
+  - safe price ratio >= `0.25`
+  - tail price ratio <= `0.45`
+  - state in DISCOVERED/CANDIDATE/PAPER/TRIAL_READY
+- Bucket counts:
+  - `paper_negative_pnl`: `9`
+  - `unpapered`: `9`
+  - `paper_possible`: `5`
+  - `paper_high_filtered`: `4`
+- The `paper_possible` set was only the existing good pool, with duplicated metric categories:
+  - `27946`
+  - `61491`
+  - `61959`
+  - `61964`
+
+**Unpapered candidates reviewed**:
+- `61621`: official ALL, politics activity, but `small_sample,low_market_diversity,strategy_whale`; not paper-promoted.
+- `61940`: official ALL, politics activity, but score `59`, `small_sample`, strategy unknown; not paper-promoted.
+- `61953`: official ALL and large activity, but `low_safe_price_ratio`, strategy unknown; not paper-promoted.
+- `61922`: official ALL and activity, but `activity_category_mismatch`; not paper-promoted.
+- `61573`: low-price-tail / tail spray; excluded.
+- `61958`: low safe price / tail spray / low-price-tail; excluded.
+- `61620`: tail spray / low safe price / low-price-tail; excluded.
+- `61955`: low-price-tail; excluded.
+
+**No additional paper action**:
+- No candidate outside `27946/61491/61959/61964` passed the stricter pre-paper screen.
+- Avoided spending more paper capacity on wallets already blocked by:
+  - negative paper PnL
+  - high filtered ratio
+  - all-filtered paper sample
+  - low-price-tail strategy
+  - activity category mismatch
+  - low safe price ratio
+  - whale/low diversity structure
+
+**Current strict count**:
+- Strict DB TRIAL_READY count remains `1`.
+
+**Next**:
+- Next valuable recheck is time-driven, not source-driven:
+  - `61959/61964` should be rechecked after roughly `91h`.
+  - `61491` should be rechecked after roughly `109h`.
+- Continue source discovery, but require a candidate to avoid the explicit paper-failure/exclusion buckets before consuming paper capacity.
+- The immediate bottleneck remains copyability under paper execution, not official profitability.
+
+## 2026-07-21 23:30 CST - Multi-window Evidence Retention and Fresh Pool Recheck
+
+**Goal**: Preserve the ALL/30d/7d hard evidence required for high-quality politics/finance discovery, refresh the official source, and spend paper capacity only on new candidates that survive the full pre-paper screen.
+
+**Evidence retention fix**:
+- Root cause: the official leaderboard evidence note was limited to 240 characters while storing period, PnL, rank, and volume for every window. The trailing WEEK evidence was routinely truncated.
+- Updated `LeaderResearchOfficialLeaderboardImportService` to store compact `period`, `profit_window`, and conservative rank only. This preserves ALL, 30d, and 7d values inside the existing limit.
+- Updated targeted official refresh to aggregate all requested windows before deduplicating target wallets. It now writes evidence only when every requested PnL window is positive; it no longer silently keeps a single period.
+- Added regression tests with long PnL/volume values for both bulk import and target refresh. `./gradlew test --tests '*LeaderResearchOfficialLeaderboardImportServiceTest'` passed, as did `./gradlew bootJar`.
+
+**Runtime verification**:
+- Rebuilt the backend and restarted `com.polyhermes.backend-local`.
+- Spring startup took about 70 seconds; afterward `http://127.0.0.1:8000/actuator/health` returned `{"status":"UP"}`.
+
+**Fresh source and activity evidence**:
+- Refreshed 14-day activity metrics: politics `3055`, finance `892`, total `3947` wallets.
+- Refreshed official leaderboard with ALL/MONTH/WEEK and PNL, 20 pages per category/window:
+  - fetched `6000` rows
+  - qualified `141` wallets
+  - created `0`, updated `141`
+  - every refreshed evidence item now contains `profit_window:all`, `profit_window:30d`, and `profit_window:7d`.
+- Fresh strict intersection of official three-window evidence, category-matched activity, BUY/SELL completeness, safe-price and tail-price thresholds produced only nine rows:
+  - one unpapered low-price-tail wallet (`61573`)
+  - one high-filtered paper wallet (`1312`)
+  - seven negative/all-filtered paper wallets (`2714`, `61937`, `62032`, `61963`, `2704`, `1576`, `62033`)
+- No new candidate survived the explicit pre-paper exclusion list, so no new paper session was started.
+
+**Existing strict/waitlist recheck**:
+- Targeted official refresh for `27946`, `61491`, `61959`, `61964` fetched all `6000` source rows but matched none in the current top-1000-per-window coverage. The endpoint correctly left their old evidence untouched instead of replacing it with partial evidence.
+- Dry-run trial-ready recheck:
+  - `27946`: remains `TRIAL_READY`, score `93.17951882`, 30 trades, 0 filtered, copyable PnL `+9.08975941`, observation age `545h`.
+  - `61491`: `PAPER`, score `91.76961235`, 20 trades, 0 filtered, copyable PnL `+39.08964585`; blocked only by `waiting_observation_age` (`109h` remaining).
+  - `61959`: `PAPER`, score `90.29898445`, 39 trades, 6 filtered, copyable PnL `+18.22545803`; blocked only by `waiting_observation_age` (`91h` remaining).
+  - `61964`: `PAPER`, score `87.80075630`, 42 trades, 18 filtered, copyable PnL `+20.59709383`; blocked only by `waiting_observation_age` (`91h` remaining).
+- Existing four candidates have ALL and 30d text but no retained 7d text; treat only `27946` as the legacy state-machine strict record, not as new three-window verified evidence.
+
+**Current count and next**:
+- Strict DB/state-machine `TRIAL_READY` count remains `1` (`27946`). No enabled real-money copy configuration was created or changed.
+- The immediate discovery pool is exhausted under the stated hard gates. Recheck `61959`/`61964` in about `91h`, `61491` in about `109h`; meanwhile use new sources only if they can provide durable ALL/30d/7d evidence and fresh BUY/SELL-complete activity before paper capacity is used.
+
+## 2026-07-22 - Fresh-source Recheck and Stale Trial-ready Demotion
+
+**Goal**: Re-run the complete discovery loop after source time advanced, without treating a stale historical `TRIAL_READY` row as currently trialable.
+
+**Runtime and waitlist baseline**:
+- Backend `/actuator/health`: `UP`.
+- Before source refresh, DB state showed one legacy `TRIAL_READY` row (`27946`) and three positive-PnL PAPER rows:
+  - `61491`: age `74h`, about `94h` remaining to the 168-hour gate.
+  - `61959`: age `92h`, about `76h` remaining.
+  - `61964`: age `92h`, about `76h` remaining.
+
+**Fresh discovery sources**:
+- Refreshed 14-day activity metrics:
+  - politics `2716`
+  - finance `804`
+  - total `3520` wallets.
+- Official ALL/MONTH/WEEK PNL import:
+  - fetched `6000` rows
+  - qualified `155` multi-window-positive wallets
+  - created `0`, updated `155`.
+- Complete pre-paper intersection (official three-window proof, matching fresh category, BUY/SELL >= 2, diversity >= 2, safe ratio >= 0.25, tail ratio <= 0.45) yielded nine rows only:
+  - `61573`, `61621`: unpapered but excluded for low-price-tail or whale/small-diversity structure.
+  - `1312`: high filtered ratio.
+  - `2714`, `61937`, `62032`, `61963`, `2704`, `62033`: negative or all-filtered paper evidence.
+- No fresh candidate passed the explicit pre-paper exclusion gate; no activity history backfill or new paper session was started.
+
+**Polyburg / Telegram source verification**:
+- Launchd source job remains installed on an hourly interval.
+- Manual 24-scroll dry-run returned `no_new_wallet_messages`, `visibleWallets=168`, `state_advanced=false`.
+- Recent sync log contains repeated no-new results and one Telegram Web `Page.goto` timeout. The successful manual scan confirms the visible source currently has no additional wallet messages.
+
+**State-machine truth correction**:
+- Dry-run `paper/trial-ready/recheck` identified `27946` as `source_stale_over_72h`; it was no longer eligible despite its historical positive paper PnL.
+- A live targeted recheck confirmed it had already transitioned to `COOLDOWN` (cooldown count `2`, about `72h` remaining). No copy configuration was created or enabled.
+- Strict DB/state-machine `TRIAL_READY` count is now `0`.
+- Current waitlist dry-run:
+  - `61491`: `WAIT_OBSERVATION`, `waiting_observation_age`.
+  - `61959`: `WAIT_OBSERVATION`, `waiting_observation_age`.
+  - `61964`: `WAIT_OBSERVATION`, `waiting_observation_age`.
+
+**Current result and next**:
+- Verified currently trialable leaders: `0`.
+- External-data gap is now explicit for the existing sources: official leaderboard gives no new candidate, current three-window/activity intersection has only previously rejected rows, and Polyburg has no new visible wallet messages.
+- Do not relax the hard gates or reprocess excluded wallets. Next meaningful triggers are either a new wallet-level source with durable ALL/30d/7d and fresh BUY/SELL data, or the observation gates for `61959`/`61964` in about `76h` and `61491` in about `94h`.
+
+## 2026-07-22 - Falcon Leaderboard Discovery Check
+
+**Goal**: Test the configured Falcon leaderboard as an additional discovery source without treating 15-day performance as proof of long-term profitability.
+
+**Falcon discovery result**:
+- A constrained `h_score` import fetched and deduplicated `25` wallets. It created `4` new `DISCOVERED` candidates and refreshed `21` existing candidates; no paper session or copy-trading configuration was created.
+- The imported evidence contains only 15-day score, ROI, win rate, Sharpe, trade count, PnL, and volume. It is discovery-only evidence and cannot satisfy the ALL/30d/7d profitability gate.
+
+**Official and activity verification**:
+- A targeted official-leaderboard refresh for all `25` wallets scanned `6,000` politics/finance ALL/MONTH/WEEK PnL rows and matched `0`; none has current official three-window evidence in the available top-1,000-per-window coverage.
+- New candidates remain `DISCOVERED`:
+  - `62034`: 31 BUY, 0 SELL activity events.
+  - `62035`: 3 BUY, 3 SELL events, newest event at `1784655120000`, but no official three-window profitability evidence.
+  - `62036`: 6 BUY, 4 SELL events, but activity is older and no official three-window evidence.
+  - `62037`: no activity events.
+
+**Decision and next**:
+- Falcon produced no leader eligible for activity-history backfill, paper scoring, or trial-ready recheck under the hard gates.
+- All presently configured discovery sources have now been checked: official leaderboard, Polyburg visible Telegram messages, and Falcon. Continue only on a new source that supplies verifiable wallet-level long-horizon profitability, or when the existing paper waitlist reaches its observation-age gate.
+
+## 2026-07-22 - Bridge standalone-market resolution recovery
+
+**Incident**: Bridge record `91144` for `Iran leadership change by July 31?` was marked `FAILED / 事件解析失败`, although Gamma reported the exact condition as active and accepting orders.
+
+**Root cause and guardrail**:
+- Gamma/CLOB metadata requests through the local proxy timed out. The raised `httpx` timeout had an empty string representation, so the prior string-based retry detector did not retry.
+- The resolver also assumed every Gamma market carries a parent `events[0]`, which is not true for standalone markets.
+- Retry detection now uses `httpx.TimeoutException` and `httpx.NetworkError`; a failed shared client is rebuilt before retry; idle proxy connections are not retained.
+- An exact standalone Gamma market with matching condition ID now resolves to its canonical market slug, which Polymtrade can open without an event ID.
+
+**Verification and runtime**:
+- Metadata-cache, navigation, and async sell tests: `24 passed`; enrichment suite includes a blank-message timeout regression and passed.
+- Live proxied resolution of the affected market returned its canonical event data.
+- Bridge was safely restarted; `/health` reports `executor_ready=true` and `/status` reports `ready=true`, `logged_in=true`, `accepting_signals=true`.
+
+## 2026-07-26 - Bridge wrong-market BUY guard
+
+**Incident**: Record `91405` (`Israel x Iran ceasefire continues through August 15?`, BUY Yes) resolved Gamma event `711714` correctly, but failed with `Could not open buy dialog after outcome click`.
+
+**Root cause**:
+- The new BUY page remained on the unrelated `Strait of Hormuz traffic returns to normal by August 31?` market.
+- The content-based target check accepted that stale page because it found broad Iran/ceasefire keywords in related-market content plus an unrelated trade action, then attempted the click on a non-tradable page.
+
+**Guardrail and verification**:
+- Date-bounded markets now require the exact target date and at least one additional target keyword in the same actionable row before outcome selection.
+- The regression fixture recreates the August 31 related market: it is rejected for the August 15 signal, while the corresponding August 15 market is accepted.
+- Event-visibility regression, 24 metadata/navigation/async-sell tests, and `git diff --check` passed.
+- Bridge safely restarted after the change; `/health` reports `executor_ready=true`, and `/status` reports `ready=true`, `logged_in=true`, `last_error=null`.
+
+## 2026-07-22 - Direct Wallet Official-Leaderboard Verification
+
+**Coverage fix**:
+- Root cause: `/official-leaderboard/refresh-candidates` scanned only the first 1,000 ranks of each category/window and filtered afterward, while Polymarket supports `user=<wallet>` on the same endpoint. A valid lower-ranked wallet was therefore indistinguishable from a missing wallet.
+- Updated `LeaderResearchOfficialLeaderboardImportService` so targeted refreshes query each requested wallet directly for every category, window, and ordering. The existing batch discovery import is unchanged.
+- Direct results continue through the existing `selectQualifiedImportItems` logic, which requires positive PnL in every requested PNL window before source evidence is written.
+- Added a regression test for an off-page wallet and retained the compact three-window evidence tests. `./gradlew test --tests '*LeaderResearchOfficialLeaderboardImportServiceTest'` and `./gradlew bootJar` passed; restarted backend health returned `UP`.
+
+**Falcon candidate recheck**:
+- Direct ALL/MONTH/WEEK PNL refresh for `62034`-`62037` returned `4` wallet-window observations and qualified one previously missed wallet: `62037` in politics, with all three official windows positive. The other three remain without full official evidence.
+- A 180-day Data API activity dry-run for `62037` returned `4,071` trades; live backfill ingested all `4,071` rows (`3,970` new, `101` duplicates), with activity through `1784657976000`.
+- Activity scoring rejected `62037`: score `50`, `weak_exit_sample`, `mixed_category_evidence`, and `activity_category_mismatch`. Its usable activity is sports-dominant (`833` sports events versus `23` politics events), despite healthy price structure (`safe_price_ratio=0.8640`, `tail_price_ratio=0.0144`).
+
+**Decision and next**:
+- `62037` remains `DISCOVERED`; no paper session, trial-ready promotion, or copy configuration was created.
+- The direct-wallet fix removes the prior official-ranking coverage blind spot. Apply it to new source-discovered wallets in future loops; the immediate waitlist remains `61959/61964` (about 75 hours) and `61491` (about 93 hours).
+
+## 2026-07-22 - Falcon Sharpe and PnL Discovery Expansion
+
+**Goal**: Expand beyond Falcon `h_score` discovery without lowering the official profitability, activity-category, BUY/SELL, or copyability gates.
+
+**Discovery and official verification**:
+- Falcon `sharpe` and `pnl` top-25 views produced `50` unique wallets: `20` new `DISCOVERED` candidates and `30` updates to existing rows.
+- Direct official ALL/MONTH/WEEK PNL refresh for the 20 new wallets returned nine category/window records and qualified exactly one wallet, `62044` (`0xd305...fdfe`), with positive politics evidence across every window. The other 19 lacked at least one required window or category result and remained `DISCOVERED`.
+
+**Activity evidence and decision**:
+- `62044` 180-day Data API backfill returned and ingested `120` trades (`97` BUY, `23` SELL, `54` markets), latest at `1784703999000`; it had healthy price structure (`safe_price_ratio=0.6500`, `tail_price_ratio=0.1250`).
+- Activity scoring still rejected it: score `50`, `mixed_category_evidence`, `activity_category_mismatch`. Its activity is crypto-dominant (`74` crypto events versus `3` politics and `8` sports), while the durable official evidence is politics.
+- `62044` remains `DISCOVERED`; no paper session, trial-ready transition, or copy configuration was created.
+
+**Current result and next**:
+- This expansion added 20 traceable discovery candidates but no new paper-eligible politics/finance leader. The direct official path now proves whether each new wallet has durable profitability before expensive activity backfill.
+- Continue to apply the same flow to genuinely new discovery sources or recheck `61959`/`61964` after their observation-age gate and `61491` after its later gate; do not promote category-mismatched crypto/sports activity as politics/finance capacity.
+
+## 2026-07-22 - New Politics Paper Cohort From Falcon Multi-Sort Discovery
+
+**Discovery and durable-evidence gate**:
+- Falcon ROI, win-rate, and trade-count views (15-day positive PnL, 100+ trades, win rate 50%-85%) yielded `74` unique wallets: `18` new candidates and `56` existing updates.
+- Direct official ALL/MONTH/WEEK PNL verification of the 18 new addresses qualified four wallets: `62059` (finance), `62069`, `62070`, and `62074` (politics).
+- 180-day activity backfill ingested `1,580` records for those four wallets. `62059` was retained as `DISCOVERED` because it has only three sells and a weak-exit risk.
+
+**Category-evidence correction**:
+- Root cause: the category classifier counted Falcon's discovery-only default `finance` label equally with official leaderboard evidence. This falsely capped politics candidates whose official evidence and activity were politics-dominant.
+- Updated `LeaderResearchCategoryEvidenceClassifier` to use official leaderboard category lines exclusively whenever present, while retaining the existing all-source behavior when official evidence is absent.
+- Added `LeaderResearchCategoryEvidenceTest`; category and activity scoring test suites plus `bootJar` passed. Backend restarted and `/actuator/health` returned `UP`.
+
+**Promotion and initial paper evidence**:
+- Re-scoring produced three clean politics candidates: `62069`, `62070`, `62074`, each score `100`, no risk flags, politics-dominant activity, positive official ALL/MONTH/WEEK PnL, complete BUY/SELL samples, and safe/tail price ratios within gate.
+- Targeted promotion dry-run and live promotion each selected exactly those three; all moved `DISCOVERED -> PAPER`. No real-money copy configuration was created.
+- First fair paper batch (`20` events total) completed without failures:
+  - `62069`: 7 processed, 0 filtered, copyable PnL `-1.65631833`.
+  - `62070`: 4 processed, 2 filtered, copyable PnL `-0.65789474`.
+  - `62074`: 2 processed, 5 filtered, copyable PnL `+0.63313970`.
+- Targeted paper score and trial-ready dry-run correctly kept all three in `PAPER`: observation age `0h`, `168h` remaining; scores `59`, `59`, and `53.55261885`, respectively. These are insufficient early samples, not trial-ready evidence.
+
+**Current result and next**:
+- Newly added paper-observation leaders: `3` (`62069`, `62070`, `62074`). Newly verified trial-ready leaders: `0`.
+- Continue bounded paper observations and reevaluate after enough new data and the 168-hour gate. Do not promote on the initial small-sample score or enable real copy trading.
+
+## 2026-07-22 - Second Bounded Paper Batch for New Politics Cohort
+
+**Paper verification**:
+- Processed a second fair batch of `20` events for `62069`, `62070`, and `62074`: `14` passed, `6` filtered, `0` failed.
+- `62069`: `14` passed, `0` filtered, copyable PnL improved to `+2.85703900`; paper score `80.71547885`.
+- `62070`: `10` passed, `2` filtered (ratio `0.16666667`), copyable PnL improved to `+4.09025738`; paper score `80.68191616`.
+- `62074`: `3` passed, `11` filtered (ratio `0.78571429`), copyable PnL `-0.36686030`; paper score `52.71568920`.
+
+**Trial-ready recheck**:
+- Targeted dry-run advanced none. `62069` and `62070` are above the score threshold but correctly block on `needs_activity_window` with `168h` remaining; no state mutation was made.
+- `62074` remains blocked by `score_below_80` and its high initial filtered ratio; retain only as PAPER observation, never as a trial-ready candidate.
+
+**Current result and next**:
+- Near-term monitored paper leaders: `62069`, `62070` (positive early paper PnL, zero/low filtering, observation-gated).
+- No real-money copy configuration was created or enabled. The next meaningful state change requires new activity plus elapsed observation time, not additional immediate paper batches.
+
+## 2026-07-22 - Scoped PAPER Observation Automation
+
+**Guarded automation**:
+- Added a separate, default-off PAPER observation scheduler. It is intentionally independent from the broad `leader.research.enabled` job and only considers recent, fresh, official-leaderboard-backed, primary-category (`politics`/`finance`), score-80+, no-risk-flag PAPER candidates.
+- The scheduler has bounded scope: at most five candidates and 20 paper events per hourly run. It performs targeted PAPER processing and the existing state-machine recheck only; it does not discover candidates and cannot create or enable a copy-trading configuration.
+- Local loop configuration enables only this scoped scheduler, with a 60-second startup delay. The broad leader research scheduler remains disabled.
+
+**First live observation**:
+- Backend health returned `UP` after restart. The first scoped run selected only `62069` and `62070`, processed `18`, filtered `2`, and failed `0`; it promoted no candidate to `TRIAL_READY`.
+- Current PAPER evidence: `62069` has 23 passed / 1 filtered and copyable PnL `+2.98572318`; `62070` has 19 passed / 3 filtered and copyable PnL `+6.66009865`. Both remain age-gated. `62074` remains excluded by its persisted high-filter/tail-price/small-sample risk flags.
+- Database verification found zero real copy-trading configurations associated with `62069`, `62070`, or `62074`.
+
+**Next**:
+- Let the bounded hourly observer accumulate fresh activity and record stable scores. Trial-ready transition still requires the full 168-hour observation window and existing clean-score, PnL, drawdown, filtering, and source-freshness gates.
+
+## 2026-07-22 - Activity Backfill Guard and Official Finance Recovery
+
+**Backfill reliability fix**:
+- Root cause of the stalled activity-history calls was an unbounded per-page Data API await inside `LeaderResearchActivityHistoryBackfillService`; when Polymarket activity transport reset or stalled, the endpoint could appear to hang and return no useful wallet-level error.
+- Added a 15-second per-page timeout and wallet-level timeout error reporting. Targeted test `LeaderResearchActivityHistoryBackfillServiceTest` passed, `bootJar` passed, backend restarted, and `/actuator/health` returned `UP`.
+
+**Falcon next-batch outcome**:
+- Falcon ROI/win-rate/trades expansion fetched `250` rows, deduped `144`, created `24` new candidates, updated `49`, skipped `71` existing.
+- Direct official ALL/MONTH/WEEK PNL verification qualified four of those new wallets: `62076` finance, `62089` politics, `62094` politics, and `62099` politics. The other `20` lacked complete official three-window evidence.
+- Live activity backfill for the four qualified wallets ingested `1,200` trades. Scoring rejected all four because their real activity category contradicted the official source label: all have `activity_category_mismatch`; scores are `20/50/50/50`. Promotion dry-run selected `0`; all remain `DISCOVERED`; real copy configs remain `0`.
+
+**Official leaderboard recovery path**:
+- Direct official politics/finance import over ALL/MONTH/WEEK PNL fetched `1,200` official rows and refreshed `27` existing three-window-positive candidates.
+- Ten non-PAPER/TRIAL_READY refreshed candidates were activity-backfilled with `3,000` trades and rescored. Two became clean high-score candidates:
+  - `2835` (`0xe734...4f0c`): CANDIDATE, finance, activity score `100`, no risk flags.
+  - `7553` (`0x7bbf...7ce5`): COOLDOWN, finance, activity score `98.35350320`, no risk flags.
+- Dry-run/live promotion moved `2835` to `PAPER`; cooldown dry-run/live recovered `7553` to CANDIDATE, then dry-run/live promotion moved it to `PAPER`. No real copy-trading configuration was created.
+
+**Paper result and current gate**:
+- After 15 bounded paper-processing rounds, `2835` reached `70` passed / `90` filtered, copyable PnL `+15.91915218`, score `88.5625`, but trial-ready recheck still blocks it (`needs_activity_window`, plus persisted `high_filtered_ratio,tail_price_spray` risk flags).
+- `7553` reached `88` passed / `72` filtered, copyable PnL `0`, score `73.25`; it blocks on `score_below_80`.
+- Newly added PAPER leaders this round: `2` (`2835`, `7553`). Newly verified TRIAL_READY leaders: `0`. Current system state remains `16` TRIAL_READY total; no real copy configs were created for `2835`, `7553`, `62076`, `62089`, `62094`, or `62099`.
+
+**Next**:
+- Keep `2835` in bounded PAPER observation because it has positive paper PnL and score above 80, but do not trial-follow until risk flags clear and the official/activity-window gate passes.
+- Do not continue spending paper capacity on `7553` unless later scoring improves above 80 with positive copyable PnL.
+- Continue sourcing from official politics/finance three-window-positive rows and only spend activity/paper cycles after BUY/SELL samples and category consistency are proven.
+
+## 2026-07-23 - Targeted PAPER Evidence Repair and Freshness Guard
+
+**Nearest trial-ready audit**:
+- Current pool remains `16` `TRIAL_READY`; no real copy-trading configs exist for the active target set `1660`, `62070`, `61491`, `61959`, or `61964`.
+- Targeted trial-ready dry-run showed:
+  - `1660`: high copyability score and positive paper PnL, but blocked by `needs_half_year_profit_window`.
+  - `62070`: strong paper stats but missing activity window and 7-day observation age.
+  - `61491`, `61959`, `61964`: clean high scores and positive paper PnL, blocked by `waiting_observation_age`.
+  - `2835` and `7553` remain unsuitable for trial follow now: `2835` has high filter/tail risks; `7553` is below score threshold and has zero copyable PnL.
+
+**Evidence backfill and paper processing**:
+- Live official refresh for the target set fetched `25` official rows and updated `61964` plus `62070`; `1660` still could not be matched to an ALL/half-year official profit window.
+- Live 180-day activity-history backfill ingested `1,445` trades across the five target wallets with complete BUY/SELL samples.
+- Live activity-source import appended 180-day activity evidence for all five target wallets.
+- Targeted paper processing added `13` passed samples and `7` filtered samples. After re-score/recheck, current target states are:
+  - `1660`: PAPER, score `95.62499995`, 34 passed / 14 filtered, copyable PnL `+12.07936466`, blocked by missing half-year profit window.
+  - `61491`: PAPER, score `97.85127465`, 30 passed / 0 filtered, copyable PnL `+75.76499125`, observation age still under 168h.
+  - `61959`: PAPER, score `96.47155560`, 48 passed / 7 filtered, copyable PnL `+14.96545803`, observation age still under 168h.
+  - `61964`: PAPER, score `92.38241805`, 42 passed / 28 filtered, copyable PnL `+20.59709383`, observation age still under 168h.
+  - `62070`: PAPER, score `94.39585410`, 184 passed / 16 filtered, copyable PnL `+24.92255322`, observation age about 20h with about 148h remaining.
+
+**Freshness regression fix**:
+- Root cause found during this loop: `LeaderResearchActivitySourceImportService` overwrote an existing candidate's newer `last_source_seen_at` with older activity `last_event_time`. This falsely made `62070` source-stale and moved it to `COOLDOWN`.
+- Fixed activity-source import so existing candidates keep the max of current and incoming freshness, and exact evidence with newer existing freshness is skipped instead of downgraded.
+- Added regression coverage in `LeaderResearchActivitySourceImportServiceTest`.
+- The accidental `62070` cooldown was repaired back to `PAPER` after refreshing official evidence; final recheck confirms the only active blocker is `waiting_observation_age`.
+
+**Verification**:
+- `./gradlew test --tests '*LeaderResearchActivitySourceImportServiceTest'` passed.
+- `./gradlew bootJar` passed.
+- Local backend was restarted and `/actuator/health` returned `UP`.
+- `git diff --check` passed.
+
+**Next**:
+- Let the bounded PAPER observer accumulate the remaining 55-148h observation windows for `61491`, `61959`, `61964`, and `62070`; then rerun targeted `paper/trial-ready/recheck`.
+- Keep searching for a valid ALL/half-year official profit window for `1660`; do not trial-follow it until that hard gate is proven.
+- Consider adding the same non-regression freshness rule to other source importers if they can append older evidence after newer official refreshes.
+
+## 2026-07-23 - Official Freshness Guard and 3089 PAPER Recovery
+
+**Freshness guard**:
+- Root cause class from the previous loop was also present in `LeaderResearchExternalAnalyticsImportService`: exact external/official evidence was treated as `SKIP_EXISTING`, so a currently observed official leaderboard row could fail to refresh `last_source_seen_at`.
+- Updated external analytics import so exact evidence with fresh `last_source_seen_at` still skips, but exact evidence with stale/missing freshness performs a `REFRESH` that updates freshness without appending duplicate evidence.
+- Added regression coverage in `LeaderResearchExternalAnalyticsImportServiceTest`.
+- Validation passed:
+  - `./gradlew test --tests '*LeaderResearchExternalAnalyticsImportServiceTest' --tests '*LeaderResearchOfficialLeaderboardImportServiceTest'`
+  - `./gradlew bootJar`
+  - backend restart and `/actuator/health` returned `UP`.
+
+**Official three-window refresh**:
+- Live official import over politics/finance `ALL`, `MONTH`, `WEEK` and `PNL` fetched `1,200` rows, deduped `33`, and updated `33` existing candidates. No new wallet was created.
+- Refreshed non-PAPER official candidates were still mostly blocked by old or newly confirmed activity risks. The one clean high activity-score candidate was `3089`.
+
+**Activity backfill batch**:
+- Targeted Data API backfill for 11 refreshed official candidates:
+  - candidate IDs: `12056`, `2730`, `61604`, `61573`, `61493`, `2670`, `3089`, `2731`, `2879`, `2843`, `2846`
+  - dry-run: `3,300` trades, estimated `2,185` new events.
+  - live: `3,300` trades ingested, `2,186` new events.
+- Activity-source evidence import selected only 4 politics-structured wallets for 180-day activity windows; the rest failed category/BUY-SELL/tail/safe-price constraints.
+- Forced activity scoring rejected nearly all targets:
+  - `3089`: score `100`, risk clean, but strategy still `unknown`.
+  - `2731`: score `70`, `strategy_whale`.
+  - `2670`: score `60`, `mixed_category_evidence`.
+  - `12056` / `2843`: weak exit or BUY-only.
+  - `2730`, `2879`, `61573`, `61604`: low-price-tail risks.
+  - `2846`: activity category mismatch.
+
+**PAPER promotion and recheck**:
+- `3089` cooldown dry-run showed it was eligible to recover; live cooldown recheck recovered it from `COOLDOWN` to `CANDIDATE`.
+- Promotion dry-run/live moved only `3089` to `PAPER`.
+- First paper batch for `3089` processed `12`, filtered `8`, failed `0`, copyable PnL `+1.93572401`.
+- Paper score/recheck blocked `3089`: score `77.87144802`, reason `score_below_80`. It remains PAPER observation only, not trial-ready.
+
+**Current strict target set**:
+- `1660`: PAPER, score `95.18867920`, 36 passed / 17 filtered, copyable PnL `+10.07936466`, blocked by `needs_half_year_profit_window`.
+- `61491`: PAPER, score `97.85659420`, 35 passed / 0 filtered, copyable PnL `+88.21211479`, blocked by observation age.
+- `61959`: PAPER, score `96.56688231`, 53 passed / 7 filtered, copyable PnL `+9.96545803`, blocked by observation age.
+- `61964`: PAPER, score `91.78773900`, 42 passed / 33 filtered, copyable PnL `+20.59709383`, blocked by observation age and approaching the 50% filtered-ratio ceiling.
+- `62070`: PAPER, score `94.40117670`, 184 passed / 16 filtered, copyable PnL `+24.92255322`, blocked by observation age.
+- `3089`: PAPER, score `77.87144802`, 12 passed / 8 filtered, copyable PnL `+1.93572401`, blocked by `score_below_80`.
+
+**Result**:
+- New PAPER observation candidate: `1` (`3089`).
+- New `TRIAL_READY`: `0`; total remains `16`.
+- Real copy configs for `1660`, `61491`, `61959`, `61964`, `62070`, and `3089`: `0`.
+
+**Next**:
+- Do not spend more paper capacity on `3089` until its score can recover above 80 or additional low-filter samples arrive naturally.
+- Wait for observation age on `61491`, `61959`, `61964`, and `62070`; rerun targeted trial-ready recheck when the 168h gate expires.
+- Continue sourcing from external wallet-level channels; current official top multi-window rows are mostly already known and blocked by observed activity risks.
+
+## 2026-07-23 - Official Deep Expansion and PAPER Pool Increase
+
+**Official source expansion**:
+- Deep official politics/finance import over `ALL`, `MONTH`, `WEEK` and `PNL` fetched `6,000` rows, deduped `171`, created `6` new candidates, updated `136`, and skipped `29` existing.
+- The 6 new candidates were `62100`-`62105`; all had official positive multi-window evidence and fresh `last_source_seen_at`.
+- Live 180-day activity-history backfill for the 6 new candidates ingested `1,240` trades. Activity scoring selected 2 clean `human_directional` politics candidates:
+  - `62101` (`0x7c8...a211`): activity score `100`, no prescreen risk.
+  - `62103` (`0xf1f...1245`): activity score `100`, no prescreen risk.
+- Promotion dry-run/live moved both to `PAPER`; no real copy config was created.
+
+**Official VOL refresh and old COOLDOWN recovery**:
+- Expanded official dry-run/live over `DAY`, `WEEK`, `MONTH`, `ALL` and `PNL`, `VOL` fetched `15,974` rows, deduped `80`, created `0`, updated `80`, with no fetch errors.
+- A bounded 12-wallet activity backfill for refreshed small-sample candidates ingested `3,600` trades. Four scored `100` with no prescreen risk: `2718`, `2807`, `2825`, and `2855`.
+- Promotion moved `2855` from `CANDIDATE` to `PAPER`.
+- Cooldown dry-run/live recovered `2718`, `2807`, and `2825` from `COOLDOWN` to `CANDIDATE`; promotion then moved all three to `PAPER`.
+
+**Paper outcome**:
+- New PAPER candidates this round: `6` (`62101`, `62103`, `2855`, `2718`, `2807`, `2825`).
+- After bounded paper processing and scoring:
+  - `2807`: PAPER, score `86.10354074`, 26 passed / 5 filtered, copyable PnL `+4.26144777`; blocked by `needs_activity_window`. Manual title audit shows recent activity is heavily sports/celebrity football, so do not trial-follow as politics without stronger category-consistent evidence.
+  - `2718`: PAPER, score `80.00000000`, 12 passed / 0 filtered, copyable PnL `0`; blocked by `needs_activity_window` and zero realized copyable PnL.
+  - `62103`: PAPER, score `72.00014710`, 10 passed / 0 filtered, copyable PnL `-6.60765400`; blocked by score/PnL.
+  - `62101`: PAPER, score `59`, 8 passed / 9 filtered, copyable PnL `+2.53629013`; blocked by `high_filtered_ratio`, `tail_price_spray`, and small sample.
+  - `2825`: PAPER, score `59`, 4 passed / 1 filtered, copyable PnL `-0.24721984`; blocked by small sample and negative PnL.
+  - `2855`: PAPER, score `54.5`, 1 passed / 4 filtered, copyable PnL `-0.32844639`; blocked by high filtered ratio, small sample, and negative PnL.
+
+**Result**:
+- `PAPER` pool increased from `22,630` at the start of this loop to `22,636`.
+- `TRIAL_READY` remains `16`.
+- Real copy configs for the 6 new PAPER candidates: `0`.
+- Backend health after the loop: `/actuator/health` returned `UP`.
+
+**Next**:
+- Treat `2807` as a watch-only candidate until activity-window evidence is category-consistent; its paper metrics are promising but the recent market-title audit is not clean enough for politics copy following.
+- Do not spend more paper capacity on `2855`, `2825`, or `62103` unless fresh samples improve PnL and score.
+- Continue official/external expansion, but prioritize candidates whose activity-source import can append parser-readable `activity_window` evidence and whose recent titles match the intended category.
+
+## 2026-07-23 - Strict Activity-Source Candidate Pass
+
+**Nearest trial-ready audit**:
+- Targeted trial-ready dry-run for `61491`, `61959`, `1660`, `62070`, `61964`, `2807`, and `2718` produced `0` trial-ready advances.
+- Current blockers:
+  - `61491`: 35 passed / 0 filtered, copyable PnL `+88.21211479`, score `97.85659420`, blocked by 72h remaining observation age.
+  - `61959`: 53 passed / 7 filtered, copyable PnL `+9.96545803`, score `96.56688231`, blocked by 54h remaining observation age.
+  - `62070`: 184 passed / 16 filtered, copyable PnL `+24.92255322`, score `94.40117670`, blocked by 148h remaining observation age.
+  - `61964`: 42 passed / 33 filtered, copyable PnL `+20.59709383`, score `91.78773900`, blocked by 54h remaining observation age and still near the 50% filtered-ratio ceiling.
+  - `1660`: score `95.18867920`, copyable PnL `+10.07936466`, blocked by `needs_half_year_profit_window`.
+  - `2807` and `2718`: blocked by `needs_activity_window`; `2807` remains category-mixed in manual market-title audit.
+
+**Strict activity-source discovery**:
+- Ran strict 14-day activity-source import over politics/finance with `minEvents=30`, `minDistinctMarkets=5`, `minBuyEvents=8`, `minSellEvents=5`, `minSafePriceRatio=0.50`, and `maxTailPriceRatio=0.20`.
+- Dry-run/live selected `17` wallets, created `0`, updated `10`, skipped `7` exact existing evidence rows.
+- Forced activity scoring on non-PAPER targets found:
+  - `61965`: DISCOVERED -> activity score `100`, `human_directional`, no risk flags.
+  - `61966`: DISCOVERED, activity score `100`, `human_directional`, no risk flags, but source freshness was already outside promotion readiness.
+  - `2709`: COOLDOWN, activity score `100`, no prescreen risk, but existing paper PnL is `-8.24561404` and official refresh did not match.
+  - `27946`: COOLDOWN, activity score `100`, no prescreen risk, existing paper PnL `+9.08975941`, but source freshness remains stale and official refresh did not match.
+  - `3104` and `9404`: blocked by category mismatch / mixed-category evidence.
+
+**Official verification**:
+- Official wallet refresh for `61965` and `61966` over politics `ALL`, `MONTH`, `WEEK` returned `matchedTotal=0`.
+- Official wallet refresh for `27946` and `2709` over politics `ALL`, `MONTH`, `WEEK` also returned `matchedTotal=0`.
+- These candidates therefore do not have official ALL/half-year profitability evidence and cannot be considered trial-ready under the current hard gates.
+
+**Paper outcome**:
+- Promotion dry-run/live selected and promoted only `61965` to `PAPER`; `61966` remained `DISCOVERED` because it was no longer state-machine ready for paper promotion.
+- `61965` paper processing:
+  - First batch: 20 passed / 0 filtered, copyable PnL `+0.09069367`, score `75.18183969`.
+  - Second batch: 40 passed / 0 filtered, copyable PnL `-1.47325053`, score `75.00113635`.
+- `61965` remains PAPER observation only; it is blocked by `score_below_80`, negative paper PnL, missing official long-window proof, and 168h observation age.
+
+**Result**:
+- `PAPER` pool increased from `22,636` to `22,637`.
+- `TRIAL_READY` remains `16`.
+- Real copy configs for `61965`, `61966`, `2709`, and `27946`: `0`.
+- Backend health after the loop: `/actuator/health` returned `UP`.
+
+**Next**:
+- Do not spend more paper capacity on `61965` unless new samples naturally recover PnL and score above 80.
+- Keep `27946` on a watch list: paper history is positive and activity score recovered to 100, but it needs fresh official or activity evidence that satisfies state-machine freshness and long-window gates.
+- The next sourcing pass should favor wallets that have both strict recent activity-source evidence and official wallet-level `ALL`/multi-window matches; strict activity alone is not enough for high-quality trial-follow candidates.
+
+## 2026-07-23 - Near-80 PAPER Sample Enrichment
+
+**Current audit**:
+- Backend health was `UP`.
+- State counts before the enrichment pass remained: `CANDIDATE 3471`, `COOLDOWN 33585`, `DISCOVERED 1159`, `PAPER 22637`, `TRIAL_READY 16`.
+- Loop diagnostics reported `strictReadyCount=5`, but targeted trial-ready rechecks still showed no immediate TRIAL_READY promotion because the best strict candidates are blocked by observation age, missing half-year window, category/activity-window mismatch, or paper risk flags.
+
+**Candidate selection**:
+- Queried PAPER candidates with official `profit_window:all`, empty risk flags, positive or near-positive paper behavior, score between `65` and `80`, and filtered ratio under `50%`.
+- Selected bounded enrichment targets:
+  - `2718`: score `80`, 12 passed / 0 filtered, copyable PnL `0`.
+  - `3089`: score `77.87144802`, 12 passed / 8 filtered, copyable PnL `+1.93572401`.
+  - `61618`: score `72.54407115`, 24 passed / 15 filtered, copyable PnL `+1.65619630`.
+  - `61617`: score `69.45657442`, 16 passed / 11 filtered, copyable PnL `+0.27890871`.
+- Skipped `7553` despite being in the score band because it already had 88 passed / 72 filtered and copyable PnL `0`.
+
+**Paper processing outcome**:
+- First bounded paper batch across `2718`, `3089`, `61618`, `61617` processed `17`, filtered `3`, failed `0`.
+- `61617` improved materially: 22 passed / 12 filtered, copyable PnL `+8.64570020`, score `84.88279895`. Trial-ready dry-run now blocks first on `waiting_observation_age` with about 72h remaining, but DB score reason still shows `source_fresh=false`; official wallet refresh did not match it, so source freshness may become the next blocker after observation age clears.
+- `3089` improved after the first enrichment to score `87.91613956`, 16 passed / 10 filtered, copyable PnL `+6.84268513`; trial-ready dry-run then blocked on `stable_high_scores_below_3`.
+- Official DAY/WEEK/MONTH/ALL finance refresh for `3089` and `61617` matched only `3089`, updating its official multi-window evidence and `last_source_seen_at`.
+- A second real sample batch for `3089` processed 7 and filtered 13. It raised copyable PnL to `+15.40367688` and score to `92.5`, but pushed filtered ratio to exactly `0.5` and set risk flags `high_filtered_ratio,tail_price_spray`. Trial-ready dry-run now blocks on `risk_flags_present`.
+- `2718` remained score `80`, 19 passed / 0 filtered, copyable PnL `0`; still not actionable.
+- `61618` remained below score threshold at `70.94120640`; not actionable.
+
+**Result**:
+- New PAPER candidates this pass: `0`.
+- New TRIAL_READY candidates: `0`; total remains `16`.
+- Real copy configs for `3089`, `61617`, `61618`, and `2718`: `0`.
+- `3089` is no longer a near-term trial candidate despite high PnL because filtered ratio and risk flags hit the hard ceiling.
+- `61617` is the useful watch candidate from this pass, but needs observation age plus fresh official/activity evidence before it can be considered.
+
+**Next**:
+- Do not process more samples for `3089` unless future passed samples naturally reduce filtered ratio below `50%` and clear risk flags.
+- Refresh or backfill `61617` only if a source can provide fresh wallet-level official or activity evidence; otherwise it may remain blocked after the 72h observation wait.
+- Continue to monitor `61491`, `61959`, `61964`, and `62070` for observation-age expiry; they remain the cleanest high-quality candidates.
+
+## 2026-07-23 - COOLDOWN Recovery and 2709 PAPER Repair
+
+**Current audit**:
+- Backend health was `UP`.
+- Starting state counts: `CANDIDATE 3471`, `COOLDOWN 33585`, `DISCOVERED 1159`, `PAPER 22637`, `TRIAL_READY 16`.
+- High-score PAPER audit still showed the cleanest candidates are observation-gated: `61491`, `61959`, `61964`, and `62070`. `3089` and `2835` remain blocked by high filtered-ratio / tail-risk flags.
+
+**Non-PAPER candidate screen**:
+- Queried non-PAPER candidates with score >= 80, empty risk flags, and official `profit_window:all` evidence.
+- Only two candidates matched: `2709` and `27946`, both in `COOLDOWN` with score `100`, `human_directional`, and source age about 96-97h.
+- 14-day activity-history dry-run for `2709` and `27946` found fresh activity:
+  - `2709`: 200 trades, latest event `1784778627000`, 138 BUY / 62 SELL.
+  - `27946`: 186 trades, latest event `1784738286000`, 136 BUY / 50 SELL.
+- Live activity-history backfill ingested `386` trades total, with `273` new events.
+- Live activity-source import appended fresh politics 14D windows for both:
+  - `2709`: 277 events / 25 markets / 161 BUY / 116 SELL / safe ratio `0.7148` / tail ratio `0.1227`.
+  - `27946`: 166 events / 24 markets / 120 BUY / 46 SELL / safe ratio `0.7952` / tail ratio `0.0000`.
+
+**Recovery and promotion**:
+- Forced activity scoring kept both at score `100` with no risk flags.
+- Cooldown recheck recovered `2709` from `COOLDOWN` to `CANDIDATE`; `27946` remained in `COOLDOWN` because `cooldown_until` has not elapsed even though source freshness is now recent.
+- Promotion dry-run/live moved `2709` from `CANDIDATE` back to `PAPER`.
+
+**Paper outcome**:
+- One bounded paper batch for `2709` processed `20`, filtered `0`, failed `0`.
+- `2709` improved from 10 passed / 0 filtered and copyable PnL `-8.24561404` to 30 passed / 0 filtered and copyable PnL `+12.25930902`.
+- Paper score rose to `97.00000000`; trial-ready dry-run blocks only on `stable_high_scores_below_3`.
+- Score history currently has one high research-copyability score after this repair; do not manufacture stability by repeated score-only runs.
+
+**Result**:
+- New PAPER candidate this pass: `1` (`2709`, recovered from COOLDOWN).
+- New TRIAL_READY candidates: `0`; total remains `16`.
+- Final state counts: `CANDIDATE 3471`, `COOLDOWN 33584`, `DISCOVERED 1159`, `PAPER 22638`, `TRIAL_READY 16`.
+- Real copy configs for `2709`, `27946`, `61491`, `61959`, `62070`, `61964`, `1660`, `61617`, and `3089`: `0`.
+
+**Next**:
+- Add `2709` to the high-quality watch set. It now has fresh activity, clean strategy, score `97`, 30 passed / 0 filtered, and positive PnL, but must accumulate stable high research-copyability scores before trial-ready.
+- Recheck `27946` after `cooldown_until` elapses; it has fresh activity and positive historical paper PnL but cannot be recovered yet.
+- Continue waiting on observation age for `61491`, `61959`, `61964`, and `62070`; do not bypass the 168h gate.
+
+## 2026-07-23 - 2709 Stability Check and Official-Gap Screen
+
+**Current audit**:
+- Backend health was `UP`.
+- Starting state counts remained `CANDIDATE 3471`, `COOLDOWN 33584`, `DISCOVERED 1159`, `PAPER 22638`, `TRIAL_READY 16`.
+- `2709` had only one recent high `research-copyability-v1` score; stable-high-score gate requires three recent high research-copyability scores and should not be manufactured by score-only reruns.
+
+**2709 real-sample stability check**:
+- Ran one additional real paper-processing batch for `2709`.
+- Batch result: processed `20`, filtered `0`, failed `0`; paper totals moved from 30 passed / 0 filtered to 50 passed / 0 filtered.
+- The new sample was negative: copyable PnL fell from `+12.25930902` to `-1.77243642`.
+- Re-score fell from `97.00000000` to `77.00000000`.
+- Trial-ready dry-run now blocks `2709` on `score_below_80`.
+- Conclusion: `2709` is not stable enough for the high-quality watch set despite fresh activity and clean filtering. Do not spend more paper capacity on it unless future natural samples restore positive PnL and score above 80.
+
+**Official-gap screen**:
+- Queried fresh DISCOVERED/CANDIDATE candidates with activity score >= 80, no risk flags, `human_directional`, and missing official `profit_window:all`.
+- Only two candidates matched:
+  - `61966`: already tested against official politics ALL/MONTH/WEEK in the prior loop and had `matchedTotal=0`.
+  - `3392`: Falcon finance high score, activity-prescreen score `96.00000005`, no risk flags.
+- Official finance ALL/MONTH/WEEK refresh for `3392` returned `matchedTotal=0` and fetched `0` official rows. It cannot satisfy the long-window official profitability gate.
+
+**Trial-ready recheck**:
+- Targeted recheck for `61491`, `61959`, `62070`, `61964`, `1660`, `2709`, `61617`, and `3089` produced `0` trial-ready advances.
+- Current blocker summary:
+  - `61491`: waiting observation age, about 72h remaining.
+  - `61959`: waiting observation age, about 54h remaining.
+  - `62070`: waiting observation age, about 148h remaining.
+  - `61964`: waiting observation age, about 54h remaining and filtered ratio remains close to the ceiling at `0.44`.
+  - `1660`: `needs_half_year_profit_window`.
+  - `2709`: `score_below_80` after the latest true sample batch.
+  - `61617`: waiting observation age first, but source freshness remains stale.
+  - `3089`: `risk_flags_present` after high filtered-ratio/tail-risk flags.
+
+**Result**:
+- New PAPER candidates this pass: `0`.
+- New TRIAL_READY candidates: `0`; total remains `16`.
+- Final counts: `CANDIDATE 3471`, `COOLDOWN 33584`, `DISCOVERED 1159`, `PAPER 22638`, `TRIAL_READY 16`.
+- Real copy configs for the tracked candidates: `0`.
+
+**Next**:
+- Remove `2709` from the near-term trial-ready watch set until future natural samples recover both PnL and score.
+- Keep `27946` queued for cooldown recheck after `cooldown_until`; it still has fresh activity and positive historical paper PnL.
+- Continue waiting for `61491`, `61959`, `61964`, and `62070`; these remain the cleanest high-quality candidates.
+
+## 2026-07-23 - Falcon Strict Expansion and 61967 PAPER Probe
+
+**Current audit**:
+- Backend health was `UP`.
+- High-score clean COOLDOWN audit found only `27946` with score `100`, positive paper PnL, fresh source age around `11h`, and no risk flags; it still has about `49h` cooldown remaining and cannot be recovered yet.
+- Starting counts before this expansion were `CANDIDATE 3471`, `COOLDOWN 33584`, `DISCOVERED 1159`, `PAPER 22638`, `TRIAL_READY 16`.
+
+**Falcon strict expansion**:
+- Ran strict Falcon finance import with `h_score`, `sharpe`, `pnl`, `roi`, and `win_rate` sorts, `15d winRate 0.55-0.90`, `15d ROI >= 5`, `15d trades 100-5000`, `15d PnL >= 1000`.
+- Dry-run and live import both fetched `500`, deduped `178`, created `37`, and updated `141`.
+- Newly created candidates were `62106` through `62142`, all starting as `DISCOVERED`.
+
+**Top Falcon batch quality check**:
+- Backfilled activity history for `62106`-`62115`; live ingestion fetched `1831` trades and added `1817` new activity events.
+- Forced activity score rejected the top 10 as trial sources:
+  - `8` had `activity_category_mismatch`, because activity looked like sports despite the Falcon finance source label.
+  - `4` had `weak_exit_sample`.
+  - `3` had `strategy_whale`.
+  - `2` had `buy_only_no_exit`.
+- Result: the strict Falcon source expands the pool but remains noisy; it did not produce a clean politics/finance trial candidate in the first top batch.
+
+**Activity-source fallback**:
+- A broader politics/finance activity-source pass selected `19`, created `0`, updated `2`, and skipped `17` existing candidates.
+- The only clean candidate from this pass was `61967` (`0xada0a8611a99805222ce55f61966e928b4f38e34`), with politics activity evidence, score `100`, no risk flags, and `human_directional`.
+- Official politics `ALL/MONTH/WEEK` refresh for `61967` matched `0` rows, so it still lacks official half-year/long-window profit evidence.
+
+**61967 paper probe**:
+- Promoted `61967` from `DISCOVERED` to `PAPER`.
+- First paper batch processed `20`, filtered `0`, failed `0`; score was `79.11729847`, copyable PnL `+2.05842276`.
+- Second paper batch raised totals to `39` passed / `0` filtered, copyable PnL `+2.26401552`, and score `79.52892189`.
+- Trial-ready dry-run blocks `61967` on `score_below_80`; it is also newly PAPER with `168h` observation remaining. It is a watch candidate, not a trial-ready candidate.
+
+**Watch-list recheck**:
+- Targeted dry-run recheck for `61491`, `61959`, `62070`, `61964`, `1660`, `61617`, and `61967` advanced `0`.
+- Current blockers:
+  - `61491`: waiting observation age, about `72h` remaining.
+  - `61959`: waiting observation age, about `54h` remaining.
+  - `62070`: waiting observation age, about `147h` remaining.
+  - `61964`: waiting observation age, about `54h` remaining; filtered ratio remains high at `0.44`.
+  - `1660`: `needs_half_year_profit_window`.
+  - `61617`: waiting observation age, about `71h` remaining.
+  - `61967`: `score_below_80`, with `168h` observation remaining.
+
+**Result**:
+- New PAPER candidates this pass: `1` (`61967`).
+- New TRIAL_READY candidates: `0`; total remains `16`.
+- Final counts: `CANDIDATE 3471`, `COOLDOWN 33584`, `DISCOVERED 1195`, `PAPER 22639`, `TRIAL_READY 16`.
+- Real copy configs for `61967`, `62106`-`62115`, and `27946`: `0`.
+
+**Next**:
+- Do not spend more capacity on top Falcon finance rows until source-category consistency improves; the first strict batch was dominated by sports activity mismatches.
+- Keep `61967` in PAPER watch only. It needs true score >=80, observation age, and external long-window profit evidence before any disabled trial config.
+- Next productive loop should either wait/recheck the observation-gated clean PAPER set, or find a better external source for half-year profit evidence on `1660` and `61967`.
+
+## 2026-07-23 - Mature PAPER Recheck and 2807 False-Positive Audit
+
+**Current audit**:
+- Backend health was `UP`.
+- Starting counts remained `CANDIDATE 3471`, `COOLDOWN 33584`, `DISCOVERED 1195`, `PAPER 22639`, `TRIAL_READY 16`.
+- Querying mature PAPER candidates with score >= `80`, positive paper PnL, >= `10` paper trades, empty risk flags, and PAPER age >= `168h` returned only `1660` and `2807`.
+
+**1660 status**:
+- `1660` remains a strong finance paper candidate on local evidence: score `95.18867920`, `36` passed / `17` filtered, copyable PnL `+10.07936466`, `human_directional`, and no risk flags.
+- It still cannot pass trial-ready recheck because the current hard gate requires half-year/long-window profit evidence and recheck returns `needs_half_year_profit_window`.
+
+**2807 targeted probe**:
+- `2807` looked promising from old official evidence: politics official leaderboard had positive `ALL/MONTH/WEEK` PnL, paper score `86.10354074`, `26` passed / `5` filtered, copyable PnL `+4.26144777`, and paper age `608h`.
+- Activity-history backfill for `2807` confirmed recent activity exists: dry-run fetched `300` trades with `240` BUY / `60` SELL; live run ingested `300` duplicate-backed rows and added `0` new events.
+- Targeted paper score kept the score at `86.10354074`.
+- Trial-ready dry-run/live both blocked `2807` on `needs_activity_window`.
+- Wallet-targeted politics activity-source import selected `0`, so no valid politics activity window was written.
+
+**2807 category and copyability check**:
+- Recent activity explains the block: last 30 days had `297` events across `18` markets, `237` BUY / `60` SELL, safe ratio `0.6027`, and tail ratio `0.3973`.
+- The largest recent markets were sports-heavy or mixed: `87` events in World Cup top-goalscorer, `60` events in Ballon d'Or, `33` events in Harry Kane Ballon d'Or, and only part of the activity was politics or finance.
+- Conclusion: `2807` is an official-politics historical profit false positive for the current primary strategy. It has too much recent sports/low-tail activity and should not be counted as a high-quality politics/finance trial candidate unless future activity windows become clean.
+
+**Nominal TRIAL_READY audit**:
+- Current state table still shows `TRIAL_READY 16`, but targeted dry-run recheck of all 16 existing TRIAL_READY candidates returned `score_below_80` for every item.
+- Strategy split among nominal TRIAL_READY is `human_directional 10`, `unknown 4`, and `market_maker_lp 2`; several also carry `activity_category_mismatch`.
+- Loop diagnostics reported `enabledCopyConfigs=3`, `strictReadyCount=6`, and the state summary showed TRIAL_READY has `score80=0`.
+- Treat the database `TRIAL_READY=16` as historical nominal state, not as current strict可试跟 count, until a cleanup/demotion path is implemented or candidates requalify.
+
+**Result**:
+- New PAPER candidates this pass: `0`.
+- New TRIAL_READY candidates this pass: `0`.
+- Final counts remained `CANDIDATE 3471`, `COOLDOWN 33584`, `DISCOVERED 1195`, `PAPER 22639`, `TRIAL_READY 16`.
+- Tracked real copy configs for `1660`, `2807`, `61967`, `61491`, `61959`, `62070`, `61964`, `61617`, and `27946`: `0`.
+
+**Next**:
+- Do not promote `2807`; it is blocked by missing clean activity window and recent sports/tail-heavy behavior.
+- The cleanest near-term sources remain `61491`, `61959`, and `62070`; they need observation-age recheck rather than more source expansion.
+- Add or run a cleanup loop for historical TRIAL_READY rows so the UI/API separates nominal state from current strict可试跟 eligibility.
+
+## 2026-07-23 - Strict Ready Diagnostics Alignment
+
+**Problem found**:
+- `/api/copy-trading/leader-research/loop-diagnostics` reported `strictReadyCount=6`, while targeted `/paper/trial-ready/recheck` showed no currently eligible candidate.
+- Root cause: `LeaderResearchLoopDiagnosticsService.STRICT_READY_SQL` only checked `PAPER`, `score>=80`, empty risk flags, positive paper PnL, and named official/polyburg evidence.
+- It did not check PAPER age, paper trade count, human-directional strategy, filtered ratio, drawdown, unknown valuation exposure, source freshness, stable high-score window, or activity/profit-window blockers.
+
+**Code change**:
+- Tightened `strictReadyCount` to require the same practical gates used for strict可试跟 reporting:
+  - `research_state='PAPER'`
+  - `score>=80`
+  - `strategy_type='human_directional'`
+  - empty risk flags
+  - PAPER age >= `168h`
+  - passed/total paper samples >= `10`
+  - positive copyable PnL
+  - max drawdown >= `-15`
+  - unknown valuation ratio <= `20%`
+  - filtered ratio < `50%`
+  - source fresh <= `72h`
+  - latest three research-copyability scores all >= `80`
+  - official/polyburg category evidence plus half-year/ALL profit evidence and activity evidence.
+- Updated sample blocker logic so high-score PAPER candidates now surface `waiting_observation_age`, `strategy_not_human_directional`, `needs_activity_window`, etc. instead of false `strict_ready`.
+
+**Verification**:
+- Targeted backend test passed:
+  - `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchLoopDiagnosticsServiceTest`
+- `bootJar` passed and the local backend was rebuilt into `.runtime/backend-local.jar`.
+- Old backend process ignored TERM, was killed with `kill -9`, then restarted through `run_backend_local.sh`.
+- Runtime health recovered with new PID `17891` and `/actuator/health=UP`.
+
+**Runtime result**:
+- Fresh `/loop-diagnostics` now reports `strictReadyCount=0`.
+- Top blockers now match the real queue:
+  - `61491`: `waiting_observation_age`
+  - `61959`: `waiting_observation_age`
+  - `62070`: `waiting_observation_age`
+  - `61964`: `waiting_observation_age`
+  - `2807`: `strategy_not_human_directional`
+  - `61617`: `waiting_observation_age`
+- Nominal DB counts remain unchanged: `CANDIDATE 3471`, `COOLDOWN 33584`, `DISCOVERED 1195`, `PAPER 22639`, `TRIAL_READY 16`.
+- Current strict可试跟 count is `0`; tracked real copy configs remain `0`.
+
+**Next**:
+- Keep `strictReadyCount` as the number to watch for current high-quality trial capacity, not nominal `TRIAL_READY`.
+- Continue rechecking `61491`, `61959`, and `62070` as observation age elapses.
+- Consider a follow-up cleanup/demotion path for historical `TRIAL_READY` rows whose current score/risk/evidence no longer meets strict gates.
+
+## 2026-07-23 - Strict Ready Count Surfaced in Summary/UI
+
+**Problem found**:
+- The Leader Research summary API and page still exposed only nominal `trialReadyCount`.
+- After the diagnostics fix, this was misleading because runtime state showed `trialReadyCount=16` but current strict可试跟 eligibility was `0`.
+
+**Code change**:
+- Added `strictReadyCount` to `LeaderResearchSummaryDto`.
+- `LeaderResearchService.summary()` now calls `LeaderResearchLoopDiagnosticsService.diagnose(sampleLimit=1)` and returns the same strict count used by loop diagnostics.
+- Frontend `LeaderResearchSummary` type and fallback now include `strictReadyCount`.
+- Leader Research top statistic cards now show a separate `严格可试跟` / `Strict-ready` / `嚴格可試跟` metric beside nominal `TRIAL_READY`.
+
+**Verification**:
+- Backend targeted tests passed:
+  - `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchLoopDiagnosticsServiceTest --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchServiceTest`
+- Frontend build passed:
+  - `npm run build`
+- `bootJar` passed.
+- Local backend restarted from old PID `17891` to new PID `31496`; `/actuator/health=UP`.
+- Runtime `/leader-research/summary` returned `trialReadyCount=16` and `strictReadyCount=0`.
+- Runtime `/loop-diagnostics` also returned `strictReadyCount=0`.
+
+**Runtime result**:
+- Current nominal state counts remain `DISCOVERED=1195`, `CANDIDATE=3471`, `PAPER=22639`, `TRIAL_READY=16`, `COOLDOWN=33584`.
+- Current strict可试跟 count is now visible as `0` in the main summary, not only in diagnostics.
+- Top blockers remain:
+  - `61959`: `waiting_observation_age`
+  - `62070`: `waiting_observation_age`
+  - `2807`: `strategy_not_human_directional`
+
+**Next**:
+- Continue waiting/rechecking the clean PAPER queue rather than expanding noisy Falcon rows.
+- Use `strictReadyCount` as the operational quantity for "可试跟数量".
+- Next engineering follow-up can demote or mark historical `TRIAL_READY` rows that no longer meet strict gates, but this pass intentionally did not mutate candidate states.
+
+## 2026-07-23 - Historical TRIAL_READY Cleanup and Bad Config Disable
+
+**Current audit**:
+- Existing state machine already supports demoting stale or no-longer-clean `TRIAL_READY` candidates when `/paper/trial-ready/recheck` runs live.
+- Starting nominal state still had `TRIAL_READY=16` even though `strictReadyCount=0`.
+- The 16 historical TRIAL_READY ids were `360`, `786`, `893`, `1466`, `1481`, `1606`, `1609`, `1669`, `1678`, `1697`, `1698`, `1699`, `1704`, `1708`, `1747`, and `1755`.
+
+**Cleanup execution**:
+- Dry-run recheck confirmed all 16 were blocked, mostly `score_below_80`.
+- Live `/paper/trial-ready/recheck` processed the same 16 ids, rescored all 16, and moved them out of `TRIAL_READY` through the existing state machine.
+- Resulting state was `COOLDOWN` for all 16; their reasons show stale source and/or low score, mismatch, weak exit, non-copyable strategy, or insufficient strict quality.
+
+**Protective config disable**:
+- After demotion, copy config `id=10` for candidate `1755` was still enabled even though candidate `1755` was now `COOLDOWN`, score `79.86987817`, and `source_fresh=false`.
+- Disabled copy config `id=10` through `POST /api/copy-trading/configs/update-status`.
+- A follow-up enabled-bad-config scan found copy config `id=6` still enabled for candidate `475`: score `55`, `strategy_type=arbitrage`, risk flags `low_market_diversity,sell_only_no_entry,scanner_pool_unverified,strategy_arbitrage,mixed_category_evidence,small_sample`.
+- Disabled copy config `id=6` through the same API.
+
+**Verification**:
+- DB state after cleanup: `CANDIDATE=3471`, `COOLDOWN=33600`, `DISCOVERED=1195`, `PAPER=22639`, `TRIAL_READY=0`.
+- `/leader-research/summary` returned `trialReadyCount=0` and `strictReadyCount=0`.
+- `/loop-diagnostics` returned `enabledCopyConfigs=1`, `strictReadyCount=0`, and no `TRIAL_READY` state summary.
+- DB scan for enabled configs attached to bad research candidates returned `0`.
+- Bridge `/status` remained `ready=true`, `logged_in=true`, `last_error=null`, `portfolio_risk_mode=SHADOW`.
+
+**Result**:
+- New strict可试跟 candidates this pass: `0`.
+- Nominal TRIAL_READY pollution removed: `16 -> 0`.
+- Bad enabled research-linked copy configs disabled: `2` (`id=10`, `id=6`).
+- Remaining active queue is clean PAPER watch, led by `61959`, `62070`, `61964`, and `61617`, all currently blocked by `waiting_observation_age`.
+
+**Next**:
+- Continue observation-age recheck for high-score clean PAPER candidates.
+- Keep enabled-copy scans in the loop after every state cleanup so disqualified research candidates do not remain live.
+- Do not re-enable configs `6` or `10` unless their candidates re-enter strict-ready status and the user explicitly approves live copy scope.
+
+## 2026-07-23 - Strict Ready Enable Guard for Research-Linked Copy Configs
+
+**Problem found**:
+- After cleanup, copy configs `6` and `10` were safely disabled, but the normal copy-trading `update-status` path could still re-enable a research-linked config later.
+- This would bypass the operational distinction between nominal/historical state and current strict可试跟 eligibility.
+
+**Code change**:
+- Added a backend guard in `CopyTradingService` for create/update enable paths.
+- When a copy config leader has a linked `leader_research_candidate`, enabling now calls `LeaderResearchLoopDiagnosticsService` for that candidate.
+- The enable request is allowed only when diagnostics returns blocker `strict_ready`.
+- Manual leaders without a linked research candidate are not blocked by this research gate.
+- Added `CopyTradingServiceTest` coverage: a research-linked config with blocker `score_below_80` cannot be enabled and is not saved.
+
+**Verification**:
+- Backend targeted tests passed:
+  - `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.configs.CopyTradingServiceTest --tests com.wrbug.polymarketbot.controller.copytrading.configs.CopyTradingControllerTest`
+- `bootJar` passed.
+- Local backend restarted from PID `31496` to PID `57192`; `/actuator/health=UP`.
+- Runtime attempt to re-enable config `10` was rejected:
+  - `研究候选未满足严格可试跟门槛，禁止启用真钱跟单：candidateId=1755 blocker=missing_strict_ready_evidence`
+- DB confirmed configs `6` and `10` remained disabled.
+- DB scan confirmed `enabled_research_bad_configs=0`.
+- Bridge remained `ready=true`, `logged_in=true`, `last_error=null`, `portfolio_risk_mode=SHADOW`.
+
+**Runtime result**:
+- Current state counts remain `CANDIDATE=3471`, `COOLDOWN=33600`, `DISCOVERED=1195`, `PAPER=22639`, `TRIAL_READY=0`.
+- Summary remains `trialReadyCount=0`, `strictReadyCount=0`.
+- Enabled copy configs remain `1`; the remaining enabled config has no linked research candidate, so it is outside this research strict gate.
+
+**Next**:
+- Continue high-score PAPER observation rechecks for `61959`, `62070`, `61964`, and `61617`.
+- Keep the enable guard in place as the safety boundary before any future disabled trial config is manually enabled.
+
+## 2026-07-23 - Watch Queue Source Refresh and Recheck
+
+**Current audit**:
+- Backend and Bridge were healthy before the pass.
+- High-score PAPER watch query returned:
+  - `61959`: score `96.56688231`, `53` passed / `7` filtered, PnL `+9.96545803`, paper age `115h`, source age `9h`.
+  - `62070`: score `94.43744545`, `184` passed / `16` filtered, PnL `+24.92255322`, paper age `21h`, source age `1h`.
+  - `2807`: score `92.24638379`, but `strategy_type=unknown`; keep excluded from strict watch.
+  - `61964`: score `91.78773900`, `42` passed / `33` filtered, PnL `+20.59709383`, paper age `115h`, source age `1h`, filtered ratio `0.44`.
+  - `61617`: score `84.88279895`, `22` passed / `12` filtered, PnL `+8.64570020`, paper age `97h`, source age `97h`.
+  - `2718`: score around `80`, PnL nearly flat `+0.00892857`; not a strong watch candidate.
+
+**61617 source refresh attempt**:
+- Official finance refresh for `61617` over `ALL/MONTH/WEEK` and `PNL/VOL` fetched `5` result rows but matched the target wallet `0` times.
+- Live official refresh therefore updated `0` candidates and left `last_source_seen_at` unchanged.
+- Wallet-targeted finance activity-source refresh selected `1` and updated `61617` with:
+  - `20` events, `3` markets, `16` BUY, `4` SELL.
+  - safe ratio `0.9500`, tail ratio `0.0500`.
+  - `activity_window:30d_trades:20`, `last_event_time:1784364025000`.
+- Because that last activity timestamp is older than the existing `last_source_seen_at`, source age stayed around `97h`.
+
+**Targeted recheck**:
+- Targeted paper score for `61959`, `62070`, `61964`, and `61617` scored all `4`.
+- Dry-run trial-ready recheck advanced `0`.
+- Current blockers:
+  - `61959`: `waiting_observation_age`, about `53h` remaining.
+  - `62070`: `waiting_observation_age`, about `147h` remaining.
+  - `61964`: `waiting_observation_age`, about `53h` remaining, with filtered ratio `0.44` near the strict ceiling.
+  - `61617`: `waiting_observation_age`, about `71h` remaining; source freshness remains a likely next blocker because `last_source_seen_at` is still stale.
+
+**Result**:
+- New PAPER candidates this pass: `0`.
+- New strict可试跟 candidates this pass: `0`.
+- Summary stayed `trialReadyCount=0`, `strictReadyCount=0`.
+- `61617` got activity evidence refreshed but not source timestamp freshness.
+
+**Next**:
+- Keep `61959` and `62070` as the cleanest watch candidates.
+- Recheck `61964` only cautiously because filtered ratio is close to the cutoff.
+- Demote `61617` priority unless a fresher official or activity source can update `last_source_seen_at`.
+
+## 2026-07-23 - Non-PAPER Clean Candidate Audit
+
+**Current audit**:
+- Backend health was `UP`; Bridge health was `ok`.
+- Current counts before this pass: `CANDIDATE=3471`, `COOLDOWN=33600`, `DISCOVERED=1195`, `PAPER=22639`, `TRIAL_READY=0`.
+- Querying non-PAPER candidates with score >= `80`, empty risk flags, `human_directional`, fresh source <= `72h`, and politics/finance category evidence returned only:
+  - `27946`: `COOLDOWN`, score `100`, source age `12h`, has official `profit_window:all`, paper `30` passed / `0` filtered, copyable PnL `+9.08975941`.
+  - `61966`: `DISCOVERED`, score `100`, source age `51h`, clean politics activity window but no long-window profit evidence.
+  - `3392`: `CANDIDATE`, score `96.00000005`, source age `21h`, Falcon finance 15D evidence but no long-window profit evidence.
+
+**Official long-window refresh**:
+- `61966` politics official refresh over `ALL/MONTH/WEEK` and `PNL/VOL` fetched `6` rows but matched target wallet `0`; live update changed `0`.
+- `3392` finance official refresh over the same windows fetched `0` rows and matched `0`; live update changed `0`.
+- Therefore neither `61966` nor `3392` satisfies the long-window profitability gate.
+
+**Cooldown and promotion checks**:
+- `27946` cooldown dry-run returned `cooldown_not_elapsed`; cooldown has about `48h` remaining, so it cannot be recovered yet.
+- Paper promotion dry-run for `61966`, `3392`, and `27946` selected `3392` as finance and predicted `nextState=PAPER`.
+- This was not executed live because `3392` lacks official/polyburg long-window profit evidence; promoting it would violate the target gate even though the current promotion endpoint would allow it.
+
+**Result**:
+- New PAPER candidates this pass: `0`.
+- New strict可试跟 candidates this pass: `0`.
+- Summary stayed `trialReadyCount=0`, `strictReadyCount=0`.
+- Enabled bad research configs stayed `0`.
+
+**Finding**:
+- `activity-score/promote-paper` can still select a high-score Falcon-only candidate without long-window profit evidence.
+- Operationally we avoided the live promotion, but the backend promotion gate should be tightened to require the same long-window/activity evidence before moving DISCOVERED/CANDIDATE into PAPER for primary politics/finance research.
+
+**Next**:
+- Recheck `27946` after cooldown elapses.
+- Do not promote `3392` or `61966` unless an official/polyburg long-window profit source matches them.
+- Add a promotion gate hardening pass so Falcon/activity-only candidates cannot enter PAPER without long-window evidence.
+
+## 2026-07-23 - Paper Promotion Gate Hardened
+
+**Problem found**:
+- Previous dry-run showed `activity-score/promote-paper` selected `3392` for finance PAPER promotion even though it only had Falcon 15D evidence and no official/polyburg long-window profit evidence.
+- This conflicted with the goal gate: politics/finance candidates must have recent activity evidence and long-window positive profitability evidence before PAPER observation.
+
+**Code change**:
+- Tightened `LeaderResearchPaperPromotionService` for primary categories `politics` and `finance`.
+- A DISCOVERED/CANDIDATE primary candidate is now eligible for PAPER promotion only when `LeaderResearchProfitWindowParser.parse(sourceEvidence).blockers` is empty.
+- This requires the same practical evidence family used by strict readiness: long-window/ALL profit evidence plus activity evidence.
+- Sports/crypto promotion behavior was left unchanged by this new primary-category gate.
+- Updated `LeaderResearchPaperPromotionServiceTest` fixtures to include official long-window + activity evidence.
+- Added a regression test proving a Falcon-only finance candidate is not selected for PAPER promotion.
+
+**Verification**:
+- Targeted test passed:
+  - `./gradlew test --tests com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchPaperPromotionServiceTest`
+- `bootJar` passed.
+- Local backend restarted from PID `57207` to PID `83264`; `/actuator/health=UP`.
+- Runtime dry-run for candidates `61966`, `3392`, and `27946` now returned `selectedTotal=0`, `items=[]`.
+- Summary remained `trialReadyCount=0`, `strictReadyCount=0`.
+
+**Result**:
+- New PAPER candidates this pass: `0`.
+- New strict可试跟 candidates this pass: `0`.
+- The earlier false-positive promotion path for `3392` is now closed.
+
+**Next**:
+- Continue rechecking `27946` after cooldown elapses.
+- Keep `61966` and `3392` out of PAPER until official/polyburg long-window evidence matches.
+- Resume watch queue rechecks for `61959` and `62070` as observation age approaches completion.
+
+## 2026-07-23 - Activity Evidence Backfill Promoted 2718
+
+**Current audit**:
+- Backend health was `UP`; Bridge health was `ok`, `ready=true`, `logged_in=true`, `last_error=null`, `portfolio_risk_mode=SHADOW`.
+- Strict non-PAPER scan found no DISCOVERED/CANDIDATE politics/finance candidate satisfying all gates:
+  - High-score non-PAPER candidates were still missing either official/polyburg long-window profit evidence, current freshness, or both.
+  - `3392` remained Falcon-only finance evidence and was blocked by the hardened promotion gate.
+  - `61966` had clean politics activity evidence but no official long-window profit match.
+  - `27946` remained `COOLDOWN` with `cooldown_not_elapsed`.
+- Runtime promotion dry-run for `3392`, `61966`, `2065`, `2114`, `2325`, `2359`, `2275`, `2103`, and `2282` returned `selectedTotal=0`.
+
+**Targeted activity backfill**:
+- Diagnostics identified `2718` as a PAPER candidate with all major gates passing except `needs_activity_window`.
+- `2718` had:
+  - score `80.3274`
+  - `strategy_type=human_directional`
+  - empty risk flags
+  - paper trades `56`
+  - copyable PnL `+0.1637`
+  - filtered ratio `0`
+  - official politics ALL/30D profit evidence
+- Targeted 14D activity-source dry-run selected `0`, so no 14D backfill was made.
+- Targeted 30D activity-source dry-run selected `1` with action `UPDATE` and real activity evidence:
+  - `298` events
+  - `8` markets
+  - `251` BUY / `47` SELL
+  - safe price ratio `0.9966`
+  - tail price ratio `0.0000`
+  - total amount `222753.8365`
+  - `activity_window:30d_trades:298`
+- Live targeted activity-source import updated `2718`.
+- Targeted paper score for `2718` scored `1`.
+
+**Promotion**:
+- Targeted diagnostics after the activity update returned `strictReadyCount=1` and sample blocker `strict_ready` for `2718`.
+- Trial-ready dry-run returned `READY_TO_PROMOTE`.
+- Live targeted trial-ready recheck returned `trialReadyCandidateIds=[2718]` and `PROMOTED_TRIAL_READY`.
+- DB confirmed `2718` is now `TRIAL_READY`.
+
+**Runtime result**:
+- Summary moved from `trialReadyCount=0` to `trialReadyCount=1`.
+- PAPER count moved from `22639` to `22638`.
+- Targeted diagnostics shows `TRIAL_READY=1` with all named evidence present.
+- Summary `strictReadyCount=0` after promotion because the strict-ready card counts remaining PAPER candidates still waiting for trial promotion, not candidates already in `TRIAL_READY`.
+- `copy_trading` verification showed `2718` has no existing config, `enabled_configs=1`, and `enabled_research_bad_configs=0`.
+- Backend stayed `UP`; Bridge stayed `ok`, ready, logged in, and `portfolio_risk_mode=SHADOW`.
+
+**Next**:
+- If the user wants an actual trial config for `2718`, create it disabled/SHADOW first and do not enable live copy without an explicit limit and approval.
+- Continue observation-age rechecks for `61959`, `62070`, and `61964`; recheck `27946` only after cooldown elapses.
+
+## 2026-07-23 - Leader Research UI Status Refresh Button
+
+**Change**:
+- Added a targeted UI action on the Leader Research fast-watch card: `刷新高质量队列状态`.
+- The button runs the narrow high-quality queue sequence:
+  - targeted `paper/process` with batch size capped at `20`
+  - targeted `paper/score`
+  - targeted `paper/trial-ready/recheck` with `dryRun=true`
+- If dry-run returns candidates ready to advance, the UI asks for confirmation before running live `paper/trial-ready/recheck` only for those candidate IDs.
+
+**Safety boundary**:
+- The new action only updates research/PAPER/TRIAL_READY state.
+- It does not create copy-trading configs.
+- It does not enable real-money copy trading.
+- The confirmation copy explicitly states that live recheck will not create or enable真钱跟单配置.
+
+**Verification**:
+- `npm run build` passed in `frontend`.
+- Existing Vite chunk-size and dynamic import warnings remained, but TypeScript and production build completed successfully.
+
+## 2026-07-26 - High Quality Leader Refresh Iteration
+
+**Runtime audit**:
+- Backend health was `UP`.
+- Bridge was `ready=true`, `logged_in=true`, `portfolio_risk_mode=SHADOW`; `last_error` was `Could not open buy dialog after outcome click`, treated as execution warning rather than research blocker.
+- Summary at start of loop:
+  - `TRIAL_READY=2`
+  - `PAPER=22637`
+  - `strictReadyCount=0`
+
+**Current TRIAL_READY pool**:
+- `61959` / `0x6a8328...4c59` / Pulser:
+  - `TRIAL_READY`, score `92.0608`, `human_directional`, risk flags empty.
+  - 30D politics activity refresh was applied from real activity evidence: `224` events, `20` markets, `175` BUY / `49` SELL, total amount `24064.9566`.
+  - No existing `copy_trading` config.
+- `2718` / `0x1fee90...ed5e` / lomneivan:
+  - Still `TRIAL_READY`, but targeted paper score dropped to `76.1503`.
+  - Existing enabled config `copy_trading.id=17`, config name `zhengzhi4`, `max_order_size=1`.
+  - Because Bridge is SHADOW, no live-money change was made, but this config should be reviewed before expanding or keeping as a high-quality active trial.
+
+**Targeted PAPER refresh**:
+- Candidates refreshed: `61964`, `62070`, `61617`.
+- `61964`:
+  - 30D finance activity live update succeeded: `144` events, `10` markets, `87` BUY / `57` SELL, total amount `23049.0910`.
+  - Paper process added no usable trades and filtered `10`.
+  - Score moved to `87.4118`, but risk flags became `high_filtered_ratio,tail_price_spray`; dry-run trial recheck blocked by `risk_flags_present`.
+- `62070`:
+  - Targeted paper score remained strong at `91.6815`, copyable PnL `24.9226`, filtered ratio `0.08`.
+  - Trial-ready dry-run blocked only by `waiting_observation_age`, with `72` hours remaining.
+- `61617`:
+  - Paper process added `7` usable trades and filtered `3`.
+  - Copyable PnL fell from `8.6457` to `1.6208`; score fell to `73.1280`.
+  - Trial-ready dry-run blocked by `score_below_80`.
+
+**Cooldown check**:
+- `27946` cooldown dry-run did not recover.
+- Reason: `source_stale_over_48h`, despite score `100`.
+
+**Result**:
+- New `TRIAL_READY` candidates this iteration: `0`.
+- Current high-quality candidate count remains `2`, but only `61959` remains strong by current score.
+- Next best PAPER candidate is `62070`; recheck after roughly `72h` or after fresh finance evidence appears.
+
+**Next**:
+- Review or pause `copy_trading.id=17` before treating `2718` as a high-quality active trial.
+- Continue targeted refresh for `62070` after observation age clears.
+- Do not promote `61964` while risk flags are present, and do not promote `61617` unless score recovers above `80`.
+
+## 2026-07-26 - Paused Degraded Trial Config 17
+
+**Action**:
+- Paused `copy_trading.id=17` through the backend API `POST /api/copy-trading/configs/update-status`.
+- Request: `copyTradingId=17`, `enabled=false`.
+
+**Reason**:
+- `id=17` was bound to research candidate `2718` / `0x1fee90...ed5e`.
+- Candidate `2718` remained `TRIAL_READY` by state, but the latest targeted paper score had fallen to `76.1503`, below the high-quality threshold of `80`.
+- The candidate reason also showed `source_fresh=false`, so it should not remain an active high-quality trial config.
+
+**Verification**:
+- API response returned `enabled=false` for `copy_trading.id=17`.
+- DB confirmed `copy_trading.id=17 enabled=0`.
+- Enabled copy-trading configs dropped to `1`.
+- `bad_enabled` research-config check returned `0`:
+  - no enabled config joined to a research candidate with `research_state <> TRIAL_READY`, `score < 80`, or non-empty risk flags.
+- Backend health stayed `UP`.
+- Bridge stayed `ready=true`, `logged_in=true`, `portfolio_risk_mode=SHADOW`.
+
+**Next**:
+- Keep `2718` disabled until it scores back above `80` with fresh source evidence.
+- Continue watching `62070`; it remains the best PAPER candidate and was blocked only by observation age in the previous refresh.
+
+## 2026-07-27 - Positions page information hierarchy
+
+**Goal**: Make `/positions` easier to scan without changing portfolio data, BUY/SELL behavior, or risk controls.
+
+**Changes**:
+- Added an account-context header and a four-metric overview for total assets, open-position value, unrealized PnL, and valuation/realtime status.
+- Kept filtering, account selection, current/history switching, redemption, selling, risk exposure, history replay, and reduction controls unchanged.
+- Applied compact responsive card styling so overview, analysis, and position-detail sections have consistent spacing and visual priority.
+
+**Verification**:
+- `frontend npm run build` completed successfully.
+- `git diff --check` passed.
+
+## 2026-08-08 - Local service-chain diagnosis
+
+**Observed**:
+- MySQL container was healthy and a direct database probe returned `1`.
+- Backend startup was repeatedly interrupted while Hibernate initialization was still running; once its launchd-managed process completed startup, `/actuator/health` and `POST /api/auth/check-first-use` both returned `200`.
+- The Vite process had been running for 35 days. Its `/api` proxy reset/timed out despite a healthy direct backend; restarting only the `polyhermes-frontend` tmux session restored `3000 -> 8000` and the business probe returned `200`.
+- Bridge startup is currently blocked in Playwright `launch_persistent_context` while opening the existing persistent browser profile. The Bridge supervisor has therefore left `8080` unavailable. A targeted launchd restart did not resolve it.
+
+**Safety boundary**:
+- Did not clear or replace `polymtrade-bridge/browser_profile`, because that would discard the retained Polymtrade session and require an interactive login.
+- No copy-trading rule, account, or order was changed.
+
+**Next**:
+- Recover the Bridge browser session interactively or explicitly authorize recreating its persistent profile, then verify `/health`, `/status`, and the frontend `/bridge-runtime/status` proxy.
+
+## 2026-08-11 - Local service recovery
+
+**Verified**:
+- MySQL container remained healthy; direct database probe returned `1`.
+- Backend launchd service was running on `8000`; `/actuator/health` and `POST /api/auth/check-first-use` returned `200`.
+- The `polyhermes-frontend` tmux service was listening on `3000`; its proxied business request returned `200`.
+- Bridge was listening on `8080`; `/health` returned `executor_ready=true` and `/status` returned `ready=true`.
+
+**Remaining boundary**:
+- Bridge reported `logged_in=false`. `POST /debug/refresh-login` did not restore the session within its 30-second timeout.
+- No profile reset, account change, copy-trading configuration change, or order action was performed.
+
+**Next**:
+- Restore the Polymtrade session interactively in the retained Bridge browser profile, then recheck `logged_in=true` before treating copy execution as available.
+
+## 2026-08-11 - Local page availability repair
+
+**Root cause**:
+- The launchd backend watchdog restarted the backend after three one-minute probe failures, while observed cold starts took up to `166` seconds. This repeatedly interrupted initialization before the HTTP listener became stable and made the frontend page appear unavailable.
+
+**Fix**:
+- Added a default `240`-second backend startup grace period to `scripts/backend-watchdog.sh`. During that period the watchdog clears stale failure state and does not restart the just-started process.
+- Kept the existing three-consecutive-failure restart behavior after the grace period.
+- Added regression coverage for both the original restart threshold and the startup-grace branch in `scripts/test-runtime-guards.sh`.
+
+**Verification**:
+- `scripts/test-runtime-guards.sh` passed.
+- `git diff --check -- scripts/backend-watchdog.sh scripts/test-runtime-guards.sh` passed.
+- `GET /actuator/health`, `POST /api/auth/check-first-use` through the Vite proxy, and the frontend root all returned `200` in under `0.2` seconds.
+
+## 2026-08-11 - Local service startup hardening
+
+**Root cause**:
+- The backend watchdog used Linux-only `ps etimes` on macOS, so its startup grace check never recognized a young JVM and repeatedly restarted slow Spring Boot starts.
+- During BeanFactory creation, `PositionPollingService` started a coroutine that queried repositories concurrently with proxy configuration initialization, producing an observed Java-level deadlock.
+- Eager Spring Data repository query validation also made local cold starts excessively slow.
+
+**Fix**:
+- Updated the watchdog to parse macOS `ps etime`, increased the local startup grace default to `600` seconds, and covered the grace path in `scripts/test-runtime-guards.sh`.
+- Moved `PositionPollingService` startup from `@PostConstruct` to `ApplicationReadyEvent`.
+- Scoped `SPRING_DATA_JPA_REPOSITORIES_BOOTSTRAP_MODE=lazy` to `run_backend_local.sh`; production configuration is unchanged.
+
+**Verification**:
+- `scripts/test-runtime-guards.sh` passed.
+- `backend ./gradlew bootJar --offline` passed.
+- New backend startup completed in `126.324` seconds and then started position polling.
+- Final probes: backend health `200`, frontend-proxied business endpoint `200`, Bridge health and status `200`, `ready=true`, `logged_in=true`, MySQL query returned `1`.

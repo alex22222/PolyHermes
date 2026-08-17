@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import copy
 import contextvars
 import json
 import logging
@@ -57,6 +58,15 @@ class PolymtradeExecutor:
         self._ready = False
         self._logged_in = False
         self._last_portfolio_synced_at: int = 0
+        self._portfolio_snapshot_cache: Optional[dict] = None
+        self._portfolio_snapshot_cached_at: float = 0.0
+        # /portfolio is polled by both the backend synchronizer and the UI. Keep
+        # one completed snapshot briefly so those readers do not repeatedly
+        # reload the headed Polymtrade page.
+        self._portfolio_snapshot_cache_ttl_seconds = max(
+            0.0,
+            float(os.getenv("BRIDGE_PORTFOLIO_SNAPSHOT_CACHE_TTL_SECONDS", "55")),
+        )
         self._cached_wallet_address: Optional[str] = None
         self._cached_wallet_at: int = 0
         # Wallet address changes rarely; cache aggressively to keep /account fast
@@ -391,6 +401,9 @@ class PolymtradeExecutor:
 
     async def get_wallet_address(self) -> Optional[str]:
         """Extract the currently logged-in wallet address from the portfolio page."""
+        cached_address = self.cached_wallet_address
+        if cached_address:
+            return cached_address
         if not self.page or not self._logged_in:
             return None
         page = await self._ensure_portfolio_page()
@@ -607,6 +620,10 @@ class PolymtradeExecutor:
             self._schedule_portfolio_page_idle_close()
 
     async def fetch_portfolio_positions(self) -> dict:
+        cached_snapshot = self._cached_portfolio_snapshot()
+        if cached_snapshot:
+            return cached_snapshot
+
         page = await self._ensure_portfolio_page()
         if not page:
             return {"error": "page not initialized"}
@@ -614,6 +631,7 @@ class PolymtradeExecutor:
             with self._page_scope(page):
                 result = await self._fetch_portfolio_positions_on_active_page()
             if result.get("portfolio_complete") is not False:
+                self._cache_portfolio_snapshot(result)
                 return result
 
             logger.warning("Portfolio page returned an incomplete shell; retrying with a fresh page")
@@ -628,9 +646,24 @@ class PolymtradeExecutor:
             if not fresh_page:
                 return result
             with self._page_scope(fresh_page):
-                return await self._fetch_portfolio_positions_on_active_page()
+                result = await self._fetch_portfolio_positions_on_active_page()
+            self._cache_portfolio_snapshot(result)
+            return result
         finally:
             self._schedule_portfolio_page_idle_close()
+
+    def _cached_portfolio_snapshot(self) -> Optional[dict]:
+        if not self._portfolio_snapshot_cache or self._portfolio_snapshot_cache_ttl_seconds <= 0:
+            return None
+        if time.monotonic() - self._portfolio_snapshot_cached_at >= self._portfolio_snapshot_cache_ttl_seconds:
+            return None
+        return copy.deepcopy(self._portfolio_snapshot_cache)
+
+    def _cache_portfolio_snapshot(self, result: dict) -> None:
+        if result.get("portfolio_complete") is not True:
+            return
+        self._portfolio_snapshot_cache = copy.deepcopy(result)
+        self._portfolio_snapshot_cached_at = time.monotonic()
 
     async def _fetch_portfolio_positions_on_active_page(self) -> dict:
         """Scrape current open positions from the Polymtrade portfolio page.
@@ -642,9 +675,6 @@ class PolymtradeExecutor:
         if not self.page:
             return {"error": "page not initialized"}
         try:
-            bring_to_front = getattr(self.page, "bring_to_front", None)
-            if bring_to_front:
-                await bring_to_front()
             await self._goto_with_retry(f"{self.base_url}/portfolio", max_retries=6)
             rendered = await self._wait_for_portfolio_rows(timeout=12.0)
             self._record_portfolio_render_result(rendered)

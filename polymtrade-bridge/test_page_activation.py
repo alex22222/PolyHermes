@@ -21,7 +21,7 @@ class FakePage:
 
 class PortfolioExecutor(PolymtradeExecutor):
     async def _goto_with_retry(self, *_args, **_kwargs):
-        assert self.page.activated is True
+        assert self.page.activated is False
 
     async def _wait_for_portfolio_rows(self, timeout=12.0):
         return True
@@ -34,7 +34,7 @@ class PortfolioExecutor(PolymtradeExecutor):
 
 
 @pytest.mark.asyncio
-async def test_portfolio_page_is_activated_before_navigation():
+async def test_portfolio_page_does_not_steal_focus_before_navigation():
     executor = PortfolioExecutor()
     executor.page = FakePage()
 

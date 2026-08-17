@@ -926,6 +926,20 @@ final latency distribution.
   `0.096 ms`, P95 `7.365 ms`, max `44.04 ms`, and all 27 execution records were protective filters.
   The previous 5m submit samples remain useful evidence for Iteration 56, but the new loaded code
   needs fresh BUY/SELL submit samples before the latency gates can pass.
+- [x] Iteration 58 compared the Bridge execution path with `citrolabs/ego-lite` without changing the
+  live runtime. ego-lite is a macOS Chromium/CDP browser automation layer with task spaces,
+  Playwright-style page helpers, and one-shot JavaScript execution; it is not a Polymtrade CLOB
+  client or an execution engine with market-specific price, position, or idempotency guarantees.
+  Its public performance claims benchmark complex AI browser tasks against agent-browser, not
+  Polymtrade order submission. Therefore it cannot establish a latency or execution-accuracy
+  improvement for Bridge without a shadow A/B harness.
+- [x] Iteration 58 live read-only evidence: `/health` was ok and `/status` was ready/logged in with
+  `last_error=null`. Current metrics contained four BUY submissions but no SELL submission. The
+  runtime aggregate for those BUYs was `buy_other_signal_to_submit_ms` P50 `15747.191 ms`, P95
+  `37910.141 ms`; the immediate submit-click stage was only P50 `182.094 ms` but had a 7.141 s
+  worst case. The latest-code report is pending with 55 webhook samples, P95 `408.519 ms`, and no
+  5m/15m classified submit samples. This is a materially worse and separate runtime window from
+  Iteration 56, so it must not be treated as proof that a browser replacement would help.
 
 ## Blocked / Escalated
 
