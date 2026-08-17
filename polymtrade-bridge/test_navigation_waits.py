@@ -192,7 +192,7 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(executor, "_goto_with_retry", goto),
             patch.object(executor, "_wait_for_page_ready", AsyncMock(return_value=True)) as wait_ready,
-            patch.object(executor, "_wait_for_event_url", AsyncMock(return_value=True)) as wait_event_url,
+            patch.object(executor, "_is_target_event_visible", AsyncMock(return_value=True)) as target_visible,
             patch.object(executor, "_is_network_modal_open", AsyncMock(return_value=False)),
             patch.object(executor, "_open_sell_dialog", AsyncMock()),
             patch.object(executor, "_is_sell_dialog_open", AsyncMock(return_value=True)) as is_sell_dialog_open,
@@ -228,7 +228,14 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
             market_slug="btc-updown-15m-1",
             outcome="Up",
         )
-        self.assertIn(call("1", timeout=2.0), wait_event_url.await_args_list)
+        target_visible.assert_awaited_once_with(
+            "Up",
+            market_slug="btc-updown-15m-1",
+            market_title="BTC Up or Down",
+            event_id="1",
+            event_slug="event",
+            timeout=2.5,
+        )
         is_sell_dialog_open.assert_awaited_once_with(timeout=1.25)
         click_sell_button.assert_awaited_once_with(timeout=2.0)
         confirm_trade.assert_awaited_once_with(timeout=1.25)
@@ -518,11 +525,12 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(executor, "_goto_with_retry", AsyncMock()),
             patch.object(executor, "_wait_for_page_ready", AsyncMock(return_value=True)),
-            patch.object(executor, "_wait_for_event_url", AsyncMock(return_value=False)) as wait_event_url,
+            patch.object(executor, "_is_target_event_visible", AsyncMock(return_value=False)) as target_visible,
+            patch.object(executor, "_open_target_market_from_portfolio_row", AsyncMock(return_value=False)),
             patch.object(executor, "_is_network_modal_open", AsyncMock(return_value=False)),
             patch("polymtrade_executor.asyncio.sleep", new=AsyncMock()),
         ):
-            with self.assertRaisesRegex(RuntimeError, "URL never appeared"):
+            with self.assertRaisesRegex(RuntimeError, "Target market content never appeared for SELL"):
                 await executor._execute_sell(
                     "1",
                     "event",
@@ -533,17 +541,15 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
                     market_title="BTC Up or Down",
                 )
 
-        self.assertEqual(3, wait_event_url.await_count)
+        self.assertEqual(2, target_visible.await_count)
 
     async def test_short_cycle_sell_can_navigate_without_event_id(self):
         executor = PolymtradeExecutor()
         goto = AsyncMock()
-        wait_event_url = AsyncMock(return_value=False)
-
         with (
             patch.object(executor, "_goto_with_retry", goto),
             patch.object(executor, "_wait_for_page_ready", AsyncMock(return_value=True)),
-            patch.object(executor, "_wait_for_event_url", wait_event_url),
+            patch.object(executor, "_is_target_event_visible", AsyncMock(return_value=True)),
             patch.object(executor, "_is_network_modal_open", AsyncMock(return_value=False)),
             patch.object(executor, "_open_sell_dialog", AsyncMock()),
             patch.object(executor, "_is_sell_dialog_open", AsyncMock(return_value=True)),
@@ -571,7 +577,68 @@ class TestNavigationWaits(unittest.IsolatedAsyncioTestCase):
             "https://polym.trade/portfolio?eventSlug=btc-updown-5m-1784131200&eventSource=polymarket",
             wait_until="commit",
         )
-        wait_event_url.assert_not_awaited()
+
+    async def test_sell_accepts_visible_target_panel_when_event_id_is_absent_from_url(self):
+        executor = PolymtradeExecutor()
+        with (
+            patch.object(executor, "_goto_with_retry", AsyncMock()),
+            patch.object(executor, "_wait_for_page_ready", AsyncMock(return_value=True)),
+            patch.object(executor, "_is_target_event_visible", AsyncMock(return_value=True)) as target_visible,
+            patch.object(executor, "_is_network_modal_open", AsyncMock(return_value=False)),
+            patch.object(executor, "_open_sell_dialog", AsyncMock()),
+            patch.object(executor, "_is_sell_dialog_open", AsyncMock(return_value=True)),
+            patch.object(
+                executor,
+                "_capture_sell_baseline",
+                AsyncMock(return_value={"position_quantity": 2.0}),
+            ),
+            patch.object(executor, "_enter_sell_shares", AsyncMock(return_value=True)),
+            patch.object(executor, "_click_sell_button", AsyncMock()),
+            patch.object(executor, "_confirm_trade", AsyncMock()),
+            patch("polymtrade_executor.asyncio.sleep", new=AsyncMock()),
+        ):
+            await executor._execute_sell(
+                "628311",
+                "us-iran-60-day-negotiation-period-extended",
+                "Yes",
+                0,
+                size_shares=1,
+                market_slug="us-iran-60-day-negotiation-period-extended",
+                market_title="US-Iran 60 day negotiation period extended?",
+            )
+
+        target_visible.assert_awaited()
+
+    async def test_search_fallback_clicks_only_the_exact_event_link(self):
+        executor = PolymtradeExecutor()
+        exact_href = "https://polym.trade/event/iran-oman-hormuz-agreement-by-august-31"
+
+        with (
+            patch.object(
+                executor,
+                "search_markets",
+                AsyncMock(
+                    return_value={
+                        "market_links": [
+                            {"href": "https://polym.trade/event/iran-oman-hormuz-agreement-by-august-22", "text": "Older market"},
+                            {"href": exact_href, "text": "Iran-Oman Hormuz Agreement by August 31?"},
+                        ]
+                    }
+                ),
+            ),
+            patch.object(
+                executor,
+                "_evaluate_with_navigation_retry",
+                AsyncMock(return_value={"clicked": True}),
+            ) as click_result,
+        ):
+            opened = await executor._open_target_market_from_search_results(
+                event_slug="iran-oman-hormuz-agreement-by-august-31",
+                market_title="Iran-Oman Hormuz Agreement by August 31?",
+            )
+
+        self.assertTrue(opened)
+        self.assertEqual([exact_href], click_result.await_args.args[1])
 
 
 if __name__ == "__main__":

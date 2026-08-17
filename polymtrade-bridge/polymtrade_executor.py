@@ -1306,6 +1306,61 @@ class PolymtradeExecutor:
             logger.exception(f"Market search failed: {e}")
             return {"error": str(e)}
 
+    async def _open_target_market_from_search_results(
+        self,
+        event_slug: Optional[str],
+        market_title: Optional[str],
+    ) -> bool:
+        """Click the exact event result from Polymtrade's in-page search.
+
+        A direct route can occasionally leave the SPA on its generic shell. A
+        search-result click uses the application's own navigation state, but
+        must only ever select the exact resolved event slug.
+        """
+        if not event_slug:
+            return False
+        try:
+            result = await self.search_markets(market_title or event_slug)
+            links = result.get("market_links", []) if isinstance(result, dict) else []
+            expected_slug = event_slug.strip().lower()
+            target_href = None
+            for link in links:
+                href = link.get("href") if isinstance(link, dict) else None
+                if not isinstance(href, str):
+                    continue
+                parsed = urllib.parse.urlparse(href)
+                slug = urllib.parse.unquote(parsed.path.rstrip("/")).rsplit("/", 1)[-1].lower()
+                if (
+                    parsed.hostname not in {"polym.trade", "www.polym.trade"}
+                    or not parsed.path.startswith("/event/")
+                    or slug != expected_slug
+                ):
+                    continue
+                target_href = href
+                break
+            if not target_href:
+                logger.warning("Search did not return exact event slug %s", event_slug)
+                return False
+
+            click_result = await self._evaluate_with_navigation_retry(
+                """(href) => {
+                    const target = Array.from(document.querySelectorAll('a[href]'))
+                        .find(anchor => anchor.href === href);
+                    if (!target) return {clicked: false};
+                    target.scrollIntoView({block: 'center', inline: 'center'});
+                    target.click();
+                    return {clicked: true};
+                }""",
+                [target_href],
+                label="open_search_market.evaluate",
+            )
+            if click_result and click_result.get("clicked"):
+                logger.info("Clicked exact search result for target market %s", event_slug)
+                return True
+        except Exception as e:
+            logger.warning("Failed to click exact search result for %s: %s", event_slug, e)
+        return False
+
     async def _gamma_request_with_retry(
         self,
         client: httpx.AsyncClient,
@@ -2525,8 +2580,14 @@ class PolymtradeExecutor:
         dialog_detect_timeout = self._dialog_detect_timeout_for_market(market_slug)
         root_event_route_attempted = False
         canonical_slug_attempted = False
+        search_result_attempted = False
         root_event_route_available = bool(event_id or event_slug) and not self._is_short_cycle_updown_market(market_slug)
-        extra_attempts = (1 if root_event_route_available else 0) + (1 if condition_id else 0)
+        search_result_route_available = bool(event_slug) and not self._is_short_cycle_updown_market(market_slug)
+        extra_attempts = (
+            (1 if root_event_route_available else 0)
+            + (1 if condition_id else 0)
+            + (1 if search_result_route_available else 0)
+        )
         for attempt in range(buy_attempts + extra_attempts):
             # The portfolio page auto-rotates through the user's position events.
             # Instead of waiting for the exact eventId to appear in the URL, we
@@ -2596,6 +2657,17 @@ class PolymtradeExecutor:
                             canonical_url,
                             wait_until=self._navigation_wait_until_for_market(market_slug),
                         )
+                        await asyncio.sleep(self._retry_navigation_settle_seconds_for_market(market_slug))
+                        continue
+                if not search_result_attempted and search_result_route_available:
+                    search_result_attempted = True
+                    logger.info(
+                        "Target market missing on direct routes; trying exact in-page search result"
+                    )
+                    if await self._open_target_market_from_search_results(
+                        event_slug=event_slug,
+                        market_title=market_title,
+                    ):
                         await asyncio.sleep(self._retry_navigation_settle_seconds_for_market(market_slug))
                         continue
                 await self._capture_target_market_diagnostics(
@@ -2770,8 +2842,7 @@ class PolymtradeExecutor:
         )
         self._observe_trade_stage("SELL", market_slug, "navigate", stage_started_at)
         page_ready_timeout = self._page_ready_timeout_for_market(market_slug)
-        initial_event_url_timeout = self._event_url_timeout_for_market(market_slug, 8.0)
-        retry_event_url_timeout = self._event_url_timeout_for_market(market_slug, 6.0)
+        target_visible_timeout = self._target_visible_timeout_for_market(market_slug)
         stage_started_at = time.perf_counter()
         if not await self._wait_for_page_ready(
             timeout=page_ready_timeout,
@@ -2782,12 +2853,6 @@ class PolymtradeExecutor:
         ):
             logger.warning("Event page content did not render in time for SELL; proceeding anyway")
         self._observe_trade_stage("SELL", market_slug, "page_ready", stage_started_at)
-
-        if event_id:
-            stage_started_at = time.perf_counter()
-            if not await self._wait_for_event_url(event_id, timeout=initial_event_url_timeout):
-                logger.warning(f"Target event {event_id} URL did not appear for SELL; proceeding anyway")
-            self._observe_trade_stage("SELL", market_slug, "event_url", stage_started_at)
 
         # Dismiss any network/token modal before trying to open the sell dialog.
         if await self._is_network_modal_open():
@@ -2809,17 +2874,52 @@ class PolymtradeExecutor:
         sell_dialog_open = False
         sell_dialog_attempts = self._sell_dialog_attempts_for_market(market_slug)
         dialog_detect_timeout = self._dialog_detect_timeout_for_market(market_slug)
-        for attempt in range(sell_dialog_attempts):
-            if event_id:
-                stage_started_at = time.perf_counter()
-                if not await self._wait_for_event_url(event_id, timeout=retry_event_url_timeout):
-                    self._observe_trade_stage("SELL", market_slug, "event_url_retry", stage_started_at)
-                    logger.warning(f"Target event {event_id} did not appear in URL before SELL attempt {attempt + 1}")
-                    if attempt < sell_dialog_attempts - 1:
-                        await asyncio.sleep(1.0)
+        search_result_attempted = False
+        search_result_route_available = bool(event_slug) and not self._is_short_cycle_updown_market(market_slug)
+        for attempt in range(sell_dialog_attempts + (1 if search_result_route_available else 0)):
+            stage_started_at = time.perf_counter()
+            if not await self._is_target_event_visible(
+                outcome,
+                market_slug=market_slug,
+                market_title=market_title,
+                event_id=event_id,
+                event_slug=event_slug,
+                timeout=target_visible_timeout,
+            ):
+                self._observe_trade_stage("SELL", market_slug, "target_visible", stage_started_at)
+                logger.warning(
+                    "Target market content not visible before SELL attempt %s", attempt + 1
+                )
+                if attempt < sell_dialog_attempts - 1:
+                    if await self._open_target_market_from_portfolio_row(
+                        market_slug=market_slug, market_title=market_title
+                    ):
+                        await asyncio.sleep(self._portfolio_row_settle_seconds_for_market(market_slug))
+                    else:
+                        await self._goto_with_retry(
+                            market_url,
+                            wait_until=self._navigation_wait_until_for_market(market_slug),
+                        )
+                        await asyncio.sleep(self._retry_navigation_settle_seconds_for_market(market_slug))
+                    continue
+                if not search_result_attempted and search_result_route_available:
+                    search_result_attempted = True
+                    if await self._open_target_market_from_search_results(
+                        event_slug=event_slug,
+                        market_title=market_title,
+                    ):
+                        await asyncio.sleep(self._retry_navigation_settle_seconds_for_market(market_slug))
                         continue
-                    raise RuntimeError(f"Target event {event_id} URL never appeared for SELL")
-                self._observe_trade_stage("SELL", market_slug, "event_url_retry", stage_started_at)
+                await self._capture_target_market_diagnostics(
+                    market_slug=market_slug,
+                    market_title=market_title,
+                    outcome=outcome,
+                    condition_id=None,
+                )
+                raise RuntimeError(
+                    f"Target market content never appeared for SELL: {market_title or market_slug}"
+                )
+            self._observe_trade_stage("SELL", market_slug, "target_visible", stage_started_at)
 
             try:
                 stage_started_at = time.perf_counter()
