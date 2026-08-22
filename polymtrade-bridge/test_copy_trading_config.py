@@ -70,6 +70,7 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
             max_daily_orders=100,
             price_tolerance=Decimal("5"),
             delay_seconds=0,
+            buy_enabled=True,
             support_sell=True,
             reverse_copy=False,
             min_order_depth=None,
@@ -172,6 +173,37 @@ class TestCopyTradingRuleEngineFilters(unittest.TestCase):
         reason = self.engine._check_filters(
             self.engine._configs[0],
             side="BUY",
+            title="NBA Finals",
+            price=Decimal("0.5"),
+            market_end_date_ms=None,
+            signal_timestamp_ms=None,
+            market_category="sports",
+        )
+        self.assertIsNone(reason)
+
+    def test_buy_disabled_filters_sports_and_non_sports_buys(self):
+        cfg = self._base_config(buy_enabled=False)
+        for title, category in (
+            ("NBA Finals", "sports"),
+            ("Fed rate decision", "finance"),
+        ):
+            with self.subTest(category=category):
+                reason = self.engine._check_filters(
+                    cfg,
+                    side="BUY",
+                    title=title,
+                    price=Decimal("0.5"),
+                    market_end_date_ms=None,
+                    signal_timestamp_ms=None,
+                    market_category=category,
+                )
+                self.assertEqual(reason, "buy_enabled=false")
+
+    def test_buy_disabled_does_not_filter_sell(self):
+        cfg = self._base_config(buy_enabled=False)
+        reason = self.engine._check_filters(
+            cfg,
+            side="SELL",
             title="NBA Finals",
             price=Decimal("0.5"),
             market_end_date_ms=None,

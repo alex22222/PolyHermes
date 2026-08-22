@@ -68,6 +68,7 @@ class CopyTradingConfig:
     max_daily_orders: int
     price_tolerance: Decimal
     delay_seconds: int
+    buy_enabled: bool
     support_sell: bool
     reverse_copy: bool
     min_order_depth: Optional[Decimal]
@@ -204,7 +205,7 @@ class CopyTradingRuleEngine:
             ct.copy_mode, ct.copy_ratio, ct.fixed_amount,
             ct.max_order_size, ct.min_order_size, ct.max_daily_loss,
             ct.max_daily_orders, ct.price_tolerance, ct.delay_seconds,
-            ct.support_sell, ct.reverse_copy, ct.min_order_depth, ct.max_spread,
+            ct.buy_enabled, ct.support_sell, ct.reverse_copy, ct.min_order_depth, ct.max_spread,
             ct.min_price, ct.max_price, ct.max_position_value,
             ct.max_price_deviation, ct.max_delay_seconds,
             ct.keyword_filter_mode, ct.keywords, ct.max_market_end_date,
@@ -248,6 +249,7 @@ class CopyTradingRuleEngine:
                     max_daily_orders=int(row["max_daily_orders"] or 0),
                     price_tolerance=Decimal(row["price_tolerance"] or 0),
                     delay_seconds=int(row["delay_seconds"] or 0),
+                    buy_enabled=bool(row["buy_enabled"]),
                     support_sell=bool(row["support_sell"]),
                     reverse_copy=bool(row["reverse_copy"]),
                     min_order_depth=Decimal(row["min_order_depth"]) if row["min_order_depth"] is not None else None,
@@ -309,6 +311,9 @@ class CopyTradingRuleEngine:
         effective_price = Decimal("1") - price if cfg.reverse_copy else price
         if cfg.reverse_copy and not (Decimal("0") < price < Decimal("1")):
             return "reverse copy requires binary price between 0 and 1"
+
+        if side == "BUY" and not cfg.buy_enabled:
+            return "buy_enabled=false"
 
         if side == "SELL" and not cfg.support_sell:
             return "support_sell=false"

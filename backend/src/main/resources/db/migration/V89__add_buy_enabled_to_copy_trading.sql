@@ -1,0 +1,2 @@
+ALTER TABLE copy_trading
+  ADD COLUMN buy_enabled BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否允许新增 BUY，关闭时仍保留 SELL';
