@@ -755,12 +755,15 @@ class PolymtradeExecutor:
                         href: href,
                         cardData: allData,
                         redeemable: String(allData['data-redeemable'] || '').toLowerCase() === 'true',
+                        _rawLines: lines,
                     });
                 }
                 return positions;
             }
             """
             positions = await self.page.evaluate(js)
+            for position in positions:
+                apply_portfolio_position_line_fallback(position)
 
             # Enrich with Gamma API metadata so the backend can map titles to
             # market/condition IDs and slugs without relying on its local cache.
@@ -5238,6 +5241,56 @@ class PolymtradeExecutor:
         except Exception as e:
             logger.warning(f"SELL verification failed with exception: {e}")
             return False
+
+
+def apply_portfolio_position_line_fallback(position: dict) -> None:
+    """Recover position fields when Polymtrade splits side, bullet, and quantity lines."""
+    lines = [str(line).strip() for line in position.pop("_rawLines", []) if str(line).strip()]
+    if not lines:
+        return
+
+    if not position.get("side") or not position.get("quantity"):
+        for index, line in enumerate(lines):
+            if "•" not in line:
+                continue
+            parts = [part.strip() for part in line.split("•", 1)]
+            side = parts[0] or (lines[index - 1] if index > 0 else "")
+            quantity_text = parts[1] or (lines[index + 1] if index + 1 < len(lines) else "")
+            quantity_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", quantity_text.replace(",", ""))
+            if not position.get("side"):
+                position["side"] = side
+            if not position.get("quantity") and quantity_match:
+                position["quantity"] = float(quantity_match.group(1))
+            break
+
+    if position.get("currentValue") is None:
+        value_line = next(
+            (line for line in lines if re.fullmatch(r"\$[0-9][0-9,]*(?:\.[0-9]+)?", line)),
+            None,
+        )
+        if value_line:
+            position["currentValue"] = float(value_line.replace("$", "").replace(",", ""))
+
+    if position.get("pnl") is None:
+        pnl_line = next(
+            (line for line in lines if re.fullmatch(r"[+-]\$[0-9][0-9,]*(?:\.[0-9]+)?", line)),
+            None,
+        )
+        if pnl_line:
+            position["pnl"] = float(pnl_line.replace("$", "").replace(",", ""))
+
+    if position.get("percentPnl") is None:
+        percent_line = next((line for line in lines if "%" in line), None)
+        percent_match = re.search(r"(-?[0-9]+(?:\.[0-9]+)?)%", percent_line or "")
+        if percent_match:
+            position["percentPnl"] = float(percent_match.group(1))
+    if (
+        position.get("percentPnl") is not None
+        and position.get("pnl") is not None
+        and position["pnl"] < 0
+        and position["percentPnl"] > 0
+    ):
+        position["percentPnl"] = -position["percentPnl"]
 
 
 def validate_portfolio_position(position: dict) -> bool:
