@@ -553,7 +553,6 @@ async def health():
 
 @app.get("/status")
 async def status():
-    await ensure_login_state()
     return bridge_runtime_status()
 
 

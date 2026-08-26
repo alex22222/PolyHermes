@@ -13,9 +13,18 @@ import urllib.request
 from pathlib import Path
 
 
+def bridge_runtime_issue(body):
+    """Describe the actionable Bridge runtime problem without masking login loss."""
+    if body.get("ready") is not True:
+        return "bridge_status: ready=false"
+    if body.get("logged_in") is not True:
+        return "bridge_status: logged_in=false"
+    return None
+
+
 def is_bridge_runtime_ready(body):
     """Treat completed trade errors as records, not a Bridge runtime outage."""
-    return body.get("ready") is True and body.get("logged_in") is True
+    return bridge_runtime_issue(body) is None
 
 
 class Config:
@@ -270,12 +279,7 @@ class Watchdog:
             lambda body: body.get("status") == "ok" and body.get("executor_ready") is True,
             issues,
         )
-        self._check_json(
-            f"{self.config.bridge_url}/status",
-            "bridge_status",
-            is_bridge_runtime_ready,
-            issues,
-        )
+        self._check_bridge_status(issues)
 
         memory = self._command(
             ["docker", "stats", "--no-stream", "--format", "{{.MemPerc}}", "polyhermes"]
@@ -436,6 +440,15 @@ class Watchdog:
                 issues.append(f"{name}: unexpected response")
         except (OSError, ValueError, urllib.error.URLError) as exc:
             issues.append(f"{name}: {exc}")
+
+    def _check_bridge_status(self, issues):
+        try:
+            body = self._fetch_json(f"{self.config.bridge_url}/status")
+            issue = bridge_runtime_issue(body)
+            if issue:
+                issues.append(issue)
+        except (OSError, ValueError, TypeError, urllib.error.URLError) as exc:
+            issues.append(f"bridge_status: {exc}")
 
     def _fetch_json(self, url):
         with urllib.request.urlopen(url, timeout=self.config.request_timeout) as response:

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Tests for online audit runtime readiness gating."""
 
+import asyncio
 from copy import deepcopy
+from unittest.mock import AsyncMock
 
+import main
 from main import apply_runtime_status_to_audit_result, runtime_block_reasons
 
 
@@ -59,6 +62,22 @@ def test_apply_runtime_status_blocks_when_unready_or_unconfigured():
         "copy_trading_config_empty",
         "last_error_present",
     ]
+
+
+def test_status_returns_cached_runtime_without_blocking_login_refresh(monkeypatch):
+    runtime = {
+        "ready": True,
+        "logged_in": False,
+        "last_error": None,
+        "copy_trading_account_id": 1,
+        "copy_trading_config_count": 4,
+    }
+    refresh = AsyncMock(return_value=False)
+    monkeypatch.setattr(main, "ensure_login_state", refresh)
+    monkeypatch.setattr(main, "bridge_runtime_status", lambda: runtime)
+
+    assert asyncio.run(main.status()) == runtime
+    refresh.assert_not_awaited()
 
 
 if __name__ == "__main__":

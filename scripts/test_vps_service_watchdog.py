@@ -250,6 +250,18 @@ class VpsServiceWatchdogTest(unittest.TestCase):
         self.assertFalse(watchdog_module.is_bridge_runtime_ready({"ready": False, "logged_in": True}))
         self.assertFalse(watchdog_module.is_bridge_runtime_ready({"ready": True, "logged_in": False}))
 
+    def test_bridge_status_issue_identifies_logged_out_runtime(self):
+        self.assertEqual(
+            "bridge_status: logged_in=false",
+            watchdog_module.bridge_runtime_issue({"ready": True, "logged_in": False}),
+        )
+
+    def test_bridge_status_issue_identifies_unready_runtime_first(self):
+        self.assertEqual(
+            "bridge_status: ready=false",
+            watchdog_module.bridge_runtime_issue({"ready": False, "logged_in": False}),
+        )
+
     def test_sends_recovery_notification_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             notifier = FakeNotifier()
