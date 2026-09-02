@@ -349,6 +349,23 @@ class FallbackGotoPage:
         raise Exception("Timeout waiting for domcontentloaded")
 
 
+class StaleAppShellPage:
+    def __init__(self):
+        self.goto_urls = []
+        self.url = "about:blank"
+
+    async def goto(self, url, **kwargs):
+        assert kwargs.get("wait_until") == "domcontentloaded", kwargs
+        self.goto_urls.append(url)
+        self.url = url
+
+    async def inner_text(self, selector, **_kwargs):
+        assert selector == "body"
+        if len(self.goto_urls) == 1:
+            return "Prediction markets on Polymarket\nThe app didn't load properly.\nReload"
+        return "Prediction markets on Polymarket\nPortfolio"
+
+
 async def test_is_target_event_visible_when_correct_event_rendered():
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -781,6 +798,20 @@ async def test_goto_with_retry_falls_back_to_commit_after_transient_failures():
     assert page.wait_for_load_state_calls == 1
 
 
+async def test_goto_with_retry_cache_busts_stale_app_shell():
+    target = "https://polym.trade/portfolio?eventSlug=market-one&eventSource=polymarket"
+    executor = PolymtradeExecutor()
+    page = StaleAppShellPage()
+    executor.page = page
+
+    await executor._goto_with_retry(target)
+
+    assert len(page.goto_urls) == 2
+    assert "eventSlug=market-one" in page.goto_urls[1]
+    assert "eventSource=polymarket" in page.goto_urls[1]
+    assert "bridge_cache_bust=" in page.goto_urls[1]
+
+
 if __name__ == "__main__":
     asyncio.run(test_is_target_event_visible_when_correct_event_rendered())
     asyncio.run(test_is_target_event_visible_with_chinese_trade_actions())
@@ -800,3 +831,4 @@ if __name__ == "__main__":
     asyncio.run(test_goto_with_retry_retries_err_aborted_navigation())
     asyncio.run(test_goto_with_retry_accepts_reached_target_after_abort())
     asyncio.run(test_goto_with_retry_falls_back_to_commit_after_transient_failures())
+    asyncio.run(test_goto_with_retry_cache_busts_stale_app_shell())

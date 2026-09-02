@@ -2447,6 +2447,49 @@ class PolymtradeExecutor:
         except Exception:
             return current_url.startswith(url)
 
+    async def _app_load_error_visible(self) -> bool:
+        """Return True when Polymtrade rendered its stale asset error shell."""
+        if not self.page:
+            return False
+        inner_text = getattr(self.page, "inner_text", None)
+        if not callable(inner_text):
+            return False
+        try:
+            body_text = await inner_text("body", timeout=1500)
+        except Exception as e:
+            logger.debug(f"Could not inspect Polymtrade app shell after navigation: {e}")
+            return False
+        return "The app didn't load properly." in body_text
+
+    @staticmethod
+    def _cache_busted_url(url: str) -> str:
+        parsed = urllib.parse.urlsplit(url)
+        query = [
+            (key, value)
+            for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+            if key != "bridge_cache_bust"
+        ]
+        query.append(("bridge_cache_bust", str(int(time.time() * 1000))))
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), parsed.fragment)
+        )
+
+    async def _recover_stale_app_shell(
+        self,
+        url: str,
+        *,
+        wait_until: str,
+        timeout_ms: int,
+    ) -> None:
+        if not await self._app_load_error_visible():
+            return
+
+        recovery_url = self._cache_busted_url(url)
+        logger.warning("Polymtrade app shell is stale; reloading with a cache-busting URL")
+        await self.page.goto(recovery_url, wait_until=wait_until, timeout=timeout_ms)
+        if await self._app_load_error_visible():
+            raise RuntimeError("Polymtrade app still failed to load after cache-busting reload")
+
     async def _goto_with_retry(
         self,
         url: str,
@@ -2461,6 +2504,11 @@ class PolymtradeExecutor:
         for attempt in range(max_retries):
             try:
                 await self.page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                await self._recover_stale_app_shell(
+                    url,
+                    wait_until=wait_until,
+                    timeout_ms=timeout_ms,
+                )
                 return
             except Exception as e:
                 last_error = e
@@ -2468,6 +2516,11 @@ class PolymtradeExecutor:
                     if self._navigation_target_reached(url):
                         logger.warning(
                             f"Navigation reported transient error but target URL is reached; continuing: {e}"
+                        )
+                        await self._recover_stale_app_shell(
+                            url,
+                            wait_until=wait_until,
+                            timeout_ms=timeout_ms,
                         )
                         return
                     logger.warning(f"Navigation transient failure (attempt {attempt + 1}/{max_retries}): {e}")
@@ -2495,6 +2548,11 @@ class PolymtradeExecutor:
                         f"Navigation reached {fallback_wait_until} but did not settle to "
                         f"{wait_until}: {settle_error}"
                     )
+                await self._recover_stale_app_shell(
+                    url,
+                    wait_until=wait_until,
+                    timeout_ms=timeout_ms,
+                )
                 return
             except Exception as fallback_error:
                 last_error = fallback_error
@@ -2502,6 +2560,11 @@ class PolymtradeExecutor:
                     logger.warning(
                         f"Fallback navigation reported transient error but target URL is reached; "
                         f"continuing: {fallback_error}"
+                    )
+                    await self._recover_stale_app_shell(
+                        url,
+                        wait_until=wait_until,
+                        timeout_ms=timeout_ms,
                     )
                     return
         raise RuntimeError(f"Navigation failed after {max_retries} attempts for {url}: {last_error}") from last_error
