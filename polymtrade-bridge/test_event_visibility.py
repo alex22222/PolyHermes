@@ -4,7 +4,7 @@
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from playwright.async_api import async_playwright
 
@@ -848,6 +848,23 @@ async def test_settled_navigation_recovers_error_that_appears_after_domcontentlo
     assert "bridge_cache_bust=" in page.goto_urls[1]
 
 
+async def test_login_detection_retries_after_late_app_shell_recovery():
+    executor = PolymtradeExecutor()
+    executor._detect_login_state = AsyncMock(side_effect=[False, True])
+    executor._recover_stale_app_shell = AsyncMock(return_value=True)
+
+    with patch("polymtrade_executor.asyncio.sleep", new=AsyncMock()):
+        logged_in = await executor._detect_login_state_with_app_recovery()
+
+    assert logged_in is True
+    assert executor._detect_login_state.await_count == 2
+    executor._recover_stale_app_shell.assert_awaited_once_with(
+        executor.base_url,
+        wait_until="domcontentloaded",
+        timeout_ms=60000,
+    )
+
+
 if __name__ == "__main__":
     asyncio.run(test_is_target_event_visible_when_correct_event_rendered())
     asyncio.run(test_is_target_event_visible_with_chinese_trade_actions())
@@ -869,3 +886,4 @@ if __name__ == "__main__":
     asyncio.run(test_goto_with_retry_falls_back_to_commit_after_transient_failures())
     asyncio.run(test_goto_with_retry_cache_busts_stale_app_shell())
     asyncio.run(test_settled_navigation_recovers_error_that_appears_after_domcontentloaded())
+    asyncio.run(test_login_detection_retries_after_late_app_shell_recovery())

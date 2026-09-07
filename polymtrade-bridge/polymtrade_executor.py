@@ -218,7 +218,7 @@ class PolymtradeExecutor:
             logger.info(f"Loaded {self.base_url}")
 
             # Check if already logged in (look for balance or wallet button)
-            self._logged_in = await self._detect_login_state()
+            self._logged_in = await self._detect_login_state_with_app_recovery()
             if self._logged_in:
                 logger.info("Already logged in to Polymtrade")
             else:
@@ -391,6 +391,20 @@ class PolymtradeExecutor:
         except Exception as e:
             logger.warning(f"Login detection error: {e}")
             return False
+
+    async def _detect_login_state_with_app_recovery(self) -> bool:
+        """Retry login detection after recovering a late-rendered error shell."""
+        if await self._detect_login_state():
+            return True
+        recovered = await self._recover_stale_app_shell(
+            self.base_url,
+            wait_until="domcontentloaded",
+            timeout_ms=60000,
+        )
+        if not recovered:
+            return False
+        await asyncio.sleep(3)
+        return await self._detect_login_state()
 
     async def refresh_login_state(self):
         """Re-evaluate login state without restarting the browser."""
