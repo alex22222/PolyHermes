@@ -4,6 +4,7 @@
 import asyncio
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 from playwright.async_api import async_playwright
 
@@ -362,6 +363,18 @@ class StaleAppShellPage:
     async def inner_text(self, selector, **_kwargs):
         assert selector == "body"
         if len(self.goto_urls) == 1:
+            return "Prediction markets on Polymarket\nThe app didn't load properly.\nReload"
+        return "Prediction markets on Polymarket\nPortfolio"
+
+
+class DelayedStaleAppShellPage(StaleAppShellPage):
+    def __init__(self):
+        super().__init__()
+        self.shell_failed = False
+
+    async def inner_text(self, selector, **_kwargs):
+        assert selector == "body"
+        if self.shell_failed and len(self.goto_urls) == 1:
             return "Prediction markets on Polymarket\nThe app didn't load properly.\nReload"
         return "Prediction markets on Polymarket\nPortfolio"
 
@@ -812,6 +825,29 @@ async def test_goto_with_retry_cache_busts_stale_app_shell():
     assert "bridge_cache_bust=" in page.goto_urls[1]
 
 
+async def test_settled_navigation_recovers_error_that_appears_after_domcontentloaded():
+    target = "https://polym.trade/"
+    executor = PolymtradeExecutor()
+    page = DelayedStaleAppShellPage()
+    executor.page = page
+    await page.goto(target, wait_until="domcontentloaded")
+
+    async def reveal_failed_shell(_seconds):
+        page.shell_failed = True
+
+    with patch("polymtrade_executor.asyncio.sleep", side_effect=reveal_failed_shell):
+        recovered = await executor._recover_stale_app_shell_after_settle(
+            target,
+            wait_until="domcontentloaded",
+            timeout_ms=60000,
+            settle_seconds=3,
+        )
+
+    assert recovered is True
+    assert len(page.goto_urls) == 2
+    assert "bridge_cache_bust=" in page.goto_urls[1]
+
+
 if __name__ == "__main__":
     asyncio.run(test_is_target_event_visible_when_correct_event_rendered())
     asyncio.run(test_is_target_event_visible_with_chinese_trade_actions())
@@ -832,3 +868,4 @@ if __name__ == "__main__":
     asyncio.run(test_goto_with_retry_accepts_reached_target_after_abort())
     asyncio.run(test_goto_with_retry_falls_back_to_commit_after_transient_failures())
     asyncio.run(test_goto_with_retry_cache_busts_stale_app_shell())
+    asyncio.run(test_settled_navigation_recovers_error_that_appears_after_domcontentloaded())

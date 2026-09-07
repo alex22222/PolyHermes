@@ -208,7 +208,12 @@ class PolymtradeExecutor:
                     logger.debug(f"Could not close restored browser page: {close_error}")
             await self._goto_with_retry(self.base_url, max_retries=4, timeout_ms=60000)
             # Give dynamic content / websockets a moment to settle
-            await asyncio.sleep(3)
+            await self._recover_stale_app_shell_after_settle(
+                self.base_url,
+                wait_until="domcontentloaded",
+                timeout_ms=60000,
+                settle_seconds=3,
+            )
 
             logger.info(f"Loaded {self.base_url}")
 
@@ -2480,15 +2485,32 @@ class PolymtradeExecutor:
         *,
         wait_until: str,
         timeout_ms: int,
-    ) -> None:
+    ) -> bool:
         if not await self._app_load_error_visible():
-            return
+            return False
 
         recovery_url = self._cache_busted_url(url)
         logger.warning("Polymtrade app shell is stale; reloading with a cache-busting URL")
         await self.page.goto(recovery_url, wait_until=wait_until, timeout=timeout_ms)
         if await self._app_load_error_visible():
             raise RuntimeError("Polymtrade app still failed to load after cache-busting reload")
+        return True
+
+    async def _recover_stale_app_shell_after_settle(
+        self,
+        url: str,
+        *,
+        wait_until: str,
+        timeout_ms: int,
+        settle_seconds: float,
+    ) -> bool:
+        """Catch app-shell failures that render after ``domcontentloaded``."""
+        await asyncio.sleep(settle_seconds)
+        return await self._recover_stale_app_shell(
+            url,
+            wait_until=wait_until,
+            timeout_ms=timeout_ms,
+        )
 
     async def _goto_with_retry(
         self,
