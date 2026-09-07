@@ -2493,6 +2493,35 @@ class PolymtradeExecutor:
             (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), parsed.fragment)
         )
 
+    async def _clear_stale_app_caches(self) -> None:
+        """Clear static app caches without touching cookies or local storage."""
+        await self.page.evaluate(
+            """
+            async () => {
+                const cacheNames = await caches.keys();
+                await Promise.all(cacheNames.map((name) => caches.delete(name)));
+                if ('serviceWorker' in navigator) {
+                    const registrations = await navigator.serviceWorker.getRegistrations();
+                    await Promise.all(registrations.map((registration) => registration.unregister()));
+                }
+            }
+            """
+        )
+        if not self.context:
+            return
+        session = None
+        try:
+            session = await self.context.new_cdp_session(self.page)
+            await session.send("Network.clearBrowserCache")
+        except Exception as e:
+            logger.debug(f"Could not clear Chromium network cache: {e}")
+        finally:
+            if session:
+                try:
+                    await session.detach()
+                except Exception:
+                    pass
+
     async def _recover_stale_app_shell(
         self,
         url: str,
@@ -2505,7 +2534,9 @@ class PolymtradeExecutor:
 
         recovery_url = self._cache_busted_url(url)
         logger.warning("Polymtrade app shell is stale; reloading with a cache-busting URL")
+        await self._clear_stale_app_caches()
         await self.page.goto(recovery_url, wait_until=wait_until, timeout=timeout_ms)
+        await asyncio.sleep(3)
         if await self._app_load_error_visible():
             raise RuntimeError("Polymtrade app still failed to load after cache-busting reload")
         return True

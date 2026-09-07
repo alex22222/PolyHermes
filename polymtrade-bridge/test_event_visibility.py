@@ -354,6 +354,7 @@ class StaleAppShellPage:
     def __init__(self):
         self.goto_urls = []
         self.url = "about:blank"
+        self.cache_cleanup_calls = 0
 
     async def goto(self, url, **kwargs):
         assert kwargs.get("wait_until") == "domcontentloaded", kwargs
@@ -365,6 +366,11 @@ class StaleAppShellPage:
         if len(self.goto_urls) == 1:
             return "Prediction markets on Polymarket\nThe app didn't load properly.\nReload"
         return "Prediction markets on Polymarket\nPortfolio"
+
+    async def evaluate(self, expression):
+        assert "caches.keys" in expression
+        assert "serviceWorker.getRegistrations" in expression
+        self.cache_cleanup_calls += 1
 
 
 class DelayedStaleAppShellPage(StaleAppShellPage):
@@ -823,6 +829,7 @@ async def test_goto_with_retry_cache_busts_stale_app_shell():
     assert "eventSlug=market-one" in page.goto_urls[1]
     assert "eventSource=polymarket" in page.goto_urls[1]
     assert "bridge_cache_bust=" in page.goto_urls[1]
+    assert page.cache_cleanup_calls == 1
 
 
 async def test_settled_navigation_recovers_error_that_appears_after_domcontentloaded():
