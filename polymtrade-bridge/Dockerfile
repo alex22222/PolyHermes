@@ -36,7 +36,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright browsers
-RUN playwright install chromium
+RUN playwright install --with-deps chromium
 
 # Copy application code and the optional local-only noVNC launcher.
 COPY *.py bridge-entrypoint.sh ./
