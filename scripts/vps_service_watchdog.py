@@ -300,7 +300,7 @@ class Watchdog:
         return self._command(["docker", "restart", "polyhermes"], check=False).strip() == "polyhermes"
 
     def restart_bridge(self):
-        """Restart Bridge only when login is preserved and all work is drained."""
+        """Restart Bridge only after a fresh browser login check and a full drain."""
         try:
             status = self._fetch_json(f"{self.config.bridge_url}/status")
             metrics = self._fetch_json(f"{self.config.bridge_url}/metrics").get("metrics", {})
@@ -309,6 +309,12 @@ class Watchdog:
                 return False
             if int(metrics.get("signal_queue_depth", -1)) != 0:
                 print("PolyHermes watchdog: Bridge restart refused because signal queue is not empty")
+                return False
+            live_login = self._post_json(
+                f"{self.config.bridge_url}/debug/refresh-login"
+            )
+            if live_login.get("logged_in") is not True:
+                print("PolyHermes watchdog: Bridge restart refused because live login refresh failed")
                 return False
 
             drain_script = (
@@ -452,6 +458,11 @@ class Watchdog:
 
     def _fetch_json(self, url):
         with urllib.request.urlopen(url, timeout=self.config.request_timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _post_json(self, url):
+        request = urllib.request.Request(url, data=b"", method="POST")
+        with urllib.request.urlopen(request, timeout=self.config.request_timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
     @staticmethod

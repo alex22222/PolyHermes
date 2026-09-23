@@ -1191,6 +1191,12 @@ async def receive_signal(signal: LeaderTradeSignal):
     started_at = time.perf_counter()
     if not executor or not executor.is_ready():
         raise HTTPException(status_code=503, detail="Executor not ready")
+    if not executor.is_logged_in():
+        raise HTTPException(
+            status_code=503,
+            detail="Browser session is not logged in",
+            headers={"Retry-After": "60"},
+        )
 
     metrics.signals_received += 1
     logger.debug(f"Received leader trade signal: {signal.side} {signal.outcome} @ {signal.market_slug}")

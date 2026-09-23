@@ -36,7 +36,11 @@ class TestSignalQueue(unittest.IsolatedAsyncioTestCase):
         measured = BridgeMetrics()
         try:
             with (
-                patch.object(main, "executor", SimpleNamespace(is_ready=lambda: True)),
+                patch.object(
+                    main,
+                    "executor",
+                    SimpleNamespace(is_ready=lambda: True, is_logged_in=lambda: True),
+                ),
                 patch.object(main, "_signal_queue", queue),
                 patch.object(main, "_accepting_signals", True),
                 patch.object(main, "handle_signal", AsyncMock(side_effect=slow_handler)),
@@ -63,7 +67,11 @@ class TestSignalQueue(unittest.IsolatedAsyncioTestCase):
         queue.put_nowait(self.signal())
 
         with (
-            patch.object(main, "executor", SimpleNamespace(is_ready=lambda: True)),
+            patch.object(
+                main,
+                "executor",
+                SimpleNamespace(is_ready=lambda: True, is_logged_in=lambda: True),
+            ),
             patch.object(main, "_signal_queue", queue),
             patch.object(main, "_accepting_signals", True),
         ):
@@ -73,9 +81,35 @@ class TestSignalQueue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(503, raised.exception.status_code)
         self.assertEqual("1", raised.exception.headers["Retry-After"])
 
+    async def test_receive_signal_rejects_when_browser_session_is_logged_out(self):
+        queue = asyncio.Queue(maxsize=1)
+        measured = BridgeMetrics()
+
+        with (
+            patch.object(
+                main,
+                "executor",
+                SimpleNamespace(is_ready=lambda: True, is_logged_in=lambda: False),
+            ),
+            patch.object(main, "_signal_queue", queue),
+            patch.object(main, "_accepting_signals", True),
+            patch.object(main, "metrics", measured),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                await main.receive_signal(self.signal())
+
+        self.assertEqual(503, raised.exception.status_code)
+        self.assertEqual("60", raised.exception.headers["Retry-After"])
+        self.assertEqual(0, queue.qsize())
+        self.assertEqual(0, measured.signals_received)
+
     async def test_receive_signal_rejects_while_admission_is_draining(self):
         with (
-            patch.object(main, "executor", SimpleNamespace(is_ready=lambda: True)),
+            patch.object(
+                main,
+                "executor",
+                SimpleNamespace(is_ready=lambda: True, is_logged_in=lambda: True),
+            ),
             patch.object(main, "_accepting_signals", False),
             patch.object(main, "_signal_drain_reason", "planned_restart"),
         ):

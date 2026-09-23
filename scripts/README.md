@@ -84,8 +84,8 @@ sudo systemctl enable --now polyhermes-bridge
 
 `polyhermes-watchdog.timer` 每分钟检查 Docker 容器、Backend 数据库业务接口、
 公网首页以及 Bridge `/health`、`/status`。连续失败三次后发送飞书告警；主应用异常时
-自动重启 `polyhermes`。启用 `WATCHDOG_AUTO_RESTART_BRIDGE=true` 后，Bridge 仅在登录态仍存在、
-信号队列为空且成功关闭新信号入口时自动重启，每个连续故障周期最多尝试一次。
+自动重启 `polyhermes`。启用 `WATCHDOG_AUTO_RESTART_BRIDGE=true` 后，Bridge 仅在实时重新检查
+浏览器登录态成功、信号队列为空且成功关闭新信号入口时自动重启，每个连续故障周期最多尝试一次。
 服务恢复后会发送一次恢复通知。
 
 ```bash

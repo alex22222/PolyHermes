@@ -257,8 +257,6 @@ class PolymtradeExecutor:
     def is_ready(self) -> bool:
         if not self._ready or self.page is None or self.context is None:
             return False
-        if self._portfolio_render_failures >= self._portfolio_render_unhealthy_after:
-            return False
         try:
             if self.page.is_closed():
                 return False
@@ -306,7 +304,7 @@ class PolymtradeExecutor:
         self._portfolio_render_failures += 1
         if self._portfolio_render_failures == self._portfolio_render_unhealthy_after:
             logger.error(
-                "Portfolio page failed to render %s consecutive times; marking executor unhealthy",
+                "Portfolio page failed to render %s consecutive times; portfolio data is degraded",
                 self._portfolio_render_failures,
             )
 
@@ -666,6 +664,8 @@ class PolymtradeExecutor:
                 return result
             with self._page_scope(fresh_page):
                 result = await self._fetch_portfolio_positions_on_active_page()
+                if result.get("portfolio_complete") is False:
+                    await self.refresh_login_state()
             self._cache_portfolio_snapshot(result)
             return result
         finally:

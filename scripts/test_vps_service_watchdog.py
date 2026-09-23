@@ -160,6 +160,21 @@ class VpsServiceWatchdogTest(unittest.TestCase):
             self.assertFalse(monitor.restart_bridge())
             command.assert_not_called()
 
+    def test_bridge_restart_requires_fresh_browser_login_confirmation(self):
+        config = self.config(Path("/tmp/unused-state.json"), threshold=1, auto_restart_bridge=True)
+        monitor = watchdog_module.Watchdog(config=config, notifier=FakeNotifier())
+
+        with mock.patch.object(monitor, "_fetch_json", side_effect=[
+            {"logged_in": True},
+            {"metrics": {"signal_queue_depth": 0, "accepting_signals": True}},
+        ]), mock.patch.object(
+            monitor,
+            "_post_json",
+            return_value={"logged_in": False},
+        ), mock.patch.object(monitor, "_command") as command:
+            self.assertFalse(monitor.restart_bridge())
+            command.assert_not_called()
+
     def test_bridge_restart_drains_before_restarting_container(self):
         config = self.config(Path("/tmp/unused-state.json"), threshold=1, auto_restart_bridge=True)
         monitor = watchdog_module.Watchdog(config=config, notifier=FakeNotifier())
@@ -170,6 +185,8 @@ class VpsServiceWatchdogTest(unittest.TestCase):
         ]
 
         with mock.patch.object(monitor, "_fetch_json", side_effect=responses), mock.patch.object(
+            monitor, "_post_json", return_value={"logged_in": True}
+        ), mock.patch.object(
             monitor,
             "_command",
             side_effect=['{"status":"draining"}', "polymtrade-bridge"],
