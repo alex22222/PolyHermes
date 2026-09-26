@@ -204,6 +204,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       label: t('menu.systemFlow') || '系统流程'
     },
     {
+      key: '/jev-fact-chain',
+      icon: <ExperimentOutlined />,
+      label: 'Jev 事实链研究'
+    },
+    {
       key: '/crypto-tail-management',
       icon: <LineChartOutlined />,
       label: t('menu.cryptoSpreadStrategy'),

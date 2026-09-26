@@ -1,0 +1,12 @@
+[
+  {
+    "market_slug": "replace-with-exact-market-slug",
+    "evidence": [
+      {
+        "source_url": "https://example.org/official-result",
+        "observed_at": "2026-09-23T10:00:00Z",
+        "text": "Replace with a short, dated excerpt from the market's resolution source."
+      }
+    ]
+  }
+]

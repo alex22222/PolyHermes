@@ -130,6 +130,9 @@ env/
 polymtrade-bridge/.last_leader_event_id
 polymtrade-bridge/.polymtrade-bridge.pid
 data/kalshi-xrp15m-shadow.jsonl
+data/jev-shadow.jsonl
+data/jev-shadow-monitor.jsonl
+data/jev-fact-chain.jsonl
 
 # Polyburg Telegram sync local auth/state
 .polyburg_telegram*

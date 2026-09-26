@@ -1,0 +1,11 @@
+services:
+  app:
+    environment:
+      - JEV_FACT_CHAIN_SNAPSHOT_PATH=/app/jev-fact-chain.jsonl
+    volumes:
+      - type: bind
+        source: ${JEV_FACT_CHAIN_SNAPSHOT_FILE:-./data/jev-fact-chain.jsonl}
+        target: /app/jev-fact-chain.jsonl
+        read_only: true
+        bind:
+          create_host_path: false
