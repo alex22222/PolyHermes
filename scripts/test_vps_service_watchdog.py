@@ -92,6 +92,80 @@ class VpsServiceWatchdogTest(unittest.TestCase):
             self.assertEqual(["captured"], diagnostics)
             self.assertEqual(["polyhermes"], restarts)
 
+    def test_public_only_failures_alert_without_restarting_healthy_services(self):
+        for issue in (
+            "public_site: <urlopen error [Errno -5] No address associated with hostname>",
+            "public_site: timeout",
+            "public_dns: [Errno -5] No address associated with hostname",
+        ):
+            with self.subTest(issue=issue), tempfile.TemporaryDirectory() as tmp:
+                notifier = FakeNotifier()
+                diagnostics = mock.Mock()
+                app_restarter = mock.Mock()
+                bridge_restarter = mock.Mock()
+                monitor = watchdog_module.Watchdog(
+                    config=self.config(Path(tmp) / "state.json", auto_restart_bridge=True),
+                    notifier=notifier,
+                    issue_collector=lambda: [issue],
+                    app_diagnostics=diagnostics,
+                    app_restarter=app_restarter,
+                    bridge_restarter=bridge_restarter,
+                    now=lambda: 1000,
+                )
+
+                monitor.run_once()
+                monitor.run_once()
+
+                diagnostics.assert_not_called()
+                app_restarter.assert_not_called()
+                bridge_restarter.assert_not_called()
+                self.assertEqual(1, len(notifier.messages))
+                self.assertIn(issue, notifier.messages[0][1])
+                self.assertIn("公网访问异常", notifier.messages[0][0])
+                self.assertIn("未重启", notifier.messages[0][1])
+
+    def test_public_failure_does_not_prevent_recovery_of_failed_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            restarter = mock.Mock(return_value=True)
+            monitor = watchdog_module.Watchdog(
+                config=self.config(Path(tmp) / "state.json", threshold=1),
+                notifier=FakeNotifier(),
+                issue_collector=lambda: ["public_dns: lookup failed", "backend_business: HTTP 502"],
+                app_diagnostics=lambda: None,
+                app_restarter=restarter,
+                now=lambda: 1000,
+            )
+
+            monitor.run_once()
+
+            restarter.assert_called_once_with()
+
+    def test_public_dns_error_is_classified_separately_from_http_failure(self):
+        monitor = watchdog_module.Watchdog(
+            config=self.config(Path("/tmp/unused-state.json")),
+            notifier=FakeNotifier(),
+        )
+        dns_error = watchdog_module.socket.gaierror(-5, "No address associated with hostname")
+        for error in (dns_error, watchdog_module.urllib.error.URLError(dns_error)):
+            with self.subTest(error=error), mock.patch.object(
+                watchdog_module.urllib.request, "urlopen", side_effect=error,
+            ):
+                issues = []
+                monitor._check_http(monitor.config.public_url, "public_site", issues)
+                self.assertEqual(1, len(issues))
+                self.assertTrue(issues[0].startswith("public_dns:"))
+
+        with mock.patch.object(
+            watchdog_module.urllib.request,
+            "urlopen",
+            side_effect=watchdog_module.urllib.error.HTTPError(
+                monitor.config.public_url, 502, "Bad Gateway", {}, None,
+            ),
+        ):
+            issues = []
+            monitor._check_http(monitor.config.public_url, "public_site", issues)
+            self.assertEqual(["public_site: HTTP Error 502: Bad Gateway"], issues)
+
     def test_bridge_failure_alerts_without_restarting_browser_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             notifier = FakeNotifier()
@@ -297,7 +371,7 @@ class VpsServiceWatchdogTest(unittest.TestCase):
             monitor.run_once()
 
             self.assertEqual(2, len(notifier.messages))
-            self.assertIn("服务不可用", notifier.messages[0][0])
+            self.assertIn("公网访问异常", notifier.messages[0][0])
             self.assertIn("服务已恢复", notifier.messages[1][0])
 
     def test_failed_recovery_notification_does_not_keep_incident_open(self):

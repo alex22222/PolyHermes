@@ -170,7 +170,6 @@ class Watchdog:
         "app_oom:",
         "backend_actuator:",
         "backend_business:",
-        "public_site:",
     )
 
     def __init__(
@@ -220,6 +219,7 @@ class Watchdog:
 
         app_issue = any(issue.startswith(self.APP_ISSUE_PREFIXES) for issue in issues)
         bridge_issue = any(issue.startswith("bridge_") for issue in issues)
+        public_only = all(issue.startswith(("public_site:", "public_dns:")) for issue in issues)
         action = ""
         if app_issue and self.config.auto_restart_app and not state.get("app_restart_attempted"):
             self.app_diagnostics()
@@ -236,6 +236,8 @@ class Watchdog:
             )
         elif bridge_issue:
             action = "未自动重启 Bridge：自动自愈未启用或本次故障已尝试过一次。"
+        elif public_only:
+            action = "本机服务检查正常；DNS/公网入口故障不能通过重启应用修复，未重启服务。"
 
         if not app_issue:
             state.pop("app_restart_attempted", None)
@@ -250,7 +252,7 @@ class Watchdog:
         if should_alert:
             details = "\n".join(f"- {issue}" for issue in issues)
             sent = self.notifier.send(
-                "🚨 PolyHermes 服务不可用",
+                "🚨 PolyHermes 公网访问异常" if public_only else "🚨 PolyHermes 服务不可用",
                 f"主机: {socket.gethostname()}\n连续失败: {failures} 次\n{details}\n{action}".rstrip(),
             )
             if sent:
@@ -435,6 +437,8 @@ class Watchdog:
                 if not 200 <= response.status < 400:
                     issues.append(f"{name}: HTTP {response.status}")
         except (OSError, urllib.error.URLError) as exc:
+            if name == "public_site" and isinstance(getattr(exc, "reason", exc), socket.gaierror):
+                name = "public_dns"
             issues.append(f"{name}: {exc}")
 
     def _check_json(self, url, name, validator, issues, method="GET"):
