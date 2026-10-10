@@ -30,8 +30,9 @@
 
 - Initial baseline: 37 unit tests passed; one browser-launch test failed inside the sandbox. Re-running with browser permission resolved the environment limitation.
 - Ten initial regression cases failed before implementation, then passed. Additional pre-BUY baseline and partial-parse cases also reproduced before their fixes.
-- First broad run: 265 passed plus 2 subtests. Narrow browser/parser/verification run: 65 passed. Final run and deployment evidence will be appended after completion.
+- First broad run: 265 passed plus 2 subtests. Narrow browser/parser/verification run: 65 passed.
 - Second broad run: 266 passed plus 2 subtests. The subsequent SELL precheck-recording regression was first reproduced, fixed, and verified with 21 focused tests.
+- Final full suite: **267 passed, 2 subtests passed**, 77.38 seconds. `py_compile` and final diff whitespace checks passed.
 
 ## Sources
 
@@ -40,4 +41,19 @@
 
 ## Deployment
 
-Pending final verification. Preserve unrelated dirty Jev/OpenSpec/research files and LOOP_STATE.md. Deploy only `main.py` and `polymtrade_executor.py`; production database and browser profile remain untouched.
+- Code commit `b0c3cb6`; pre-deployment evidence commit `b7d8d63`; both pushed to `origin/main`.
+- Two drain checks, separated by more than one minute, reported admission false, queue 0, verification tasks 0; recent PENDING database count 0. No orders replayed.
+- Only `main.py` and `polymtrade_executor.py` updated. Bridge restarted at **2026-10-10 16:07:08 UTC / 2026-10-11 00:07:08 Beijing**. App and MySQL start times remained 2026-10-02 and 2026-07-12 respectively.
+- Runtime/source SHA-256 matches local committed files:
+  - main.py: `7c4c66a25084d5e80e45f0cb7ade25df380fa4c00279b0a3fce7fdf387778615`
+  - polymtrade_executor.py: `8201636582e115514669613d0377dd4deaabe786cef04886965dad839a9eee05`
+- Ready true, logged_in true, last_error null, account 1, four configurations, risk ENFORCED. Portfolio complete with 86 positions and balance $41. Admission true and queue 0. Public HTTPS `/health` returns healthy.
+- Initial probes overlapping startup saw connection resets and one portfolio HTTP 500; subsequent completed-startup health/status/portfolio checks passed. These were not hidden as successful probes.
+- Same quoted-title search through deployed executor returned 15 candidate markets and an exact Rand Paul match. At acceptance, 126 Gamma request attempts and two failures across cold-cache enrichment; those counters include unrelated markets, not just this query.
+- Browser volume retained: `polymtrade-bridge_polymtrade-browser-profile`. Production `.env` SHA-256 unchanged: `14556aebd1c81779f941eba03c5354a7ff2db957ef058310fe515d6024415a8b`.
+- Image persisted as `polyhermes-bridge:reliability-b7d8d63`, ID `sha256:f127955de86fb88b5b8ca8b84661c85a2327c7ca7a73883cccfc3c59a7310565`; existing runtime/gui/linux-amd64/browser-upgrade aliases updated. Old image retained as `polyhermes-bridge:before-b7d8d63`; old source files retained under `/opt/polyhermes/backups/bridge-reliability-b7d8d63/`.
+- Unrelated dirty Jev/research files and LOOP_STATE.md preserved. No database/profile/config changes or test trades.
+
+## Remaining limitations
+
+This repairs query storms and stale/unknown holding evidence, not every market UI failure. Holdings changes remain portfolio-based verification, not independently attributed on-chain order fills. Historical SUBMITTED_UNVERIFIED records were not rewritten or resubmitted. Realized execution-rate improvements require new production observations; no success-rate claim is made.
