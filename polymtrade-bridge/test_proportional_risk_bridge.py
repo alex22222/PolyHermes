@@ -181,6 +181,22 @@ class TestProportionalRiskBridge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("FAILED", recorder.results[-1]["status"])
         self.assertIn("Short-cycle market stale", recorder.results[-1]["error_message"])
 
+    async def test_unknown_sell_portfolio_is_recorded_without_submission(self):
+        cfg = self._config()
+        recorder = FakeRecorder()
+        executor = SimpleNamespace(execute_trade=AsyncMock())
+        with (
+            patch.object(main, "rule_engine", FakeRuleEngine(cfg)),
+            patch.object(main, "recorder", recorder),
+            patch.object(main, "position_ledger", FakeLedger()),
+            patch.object(main, "executor", executor),
+            patch.object(main, "_get_live_position_quantity", AsyncMock(side_effect=RuntimeError("Live portfolio incomplete"))),
+            patch.object(main, "_short_cycle_market_stale_reason", return_value=None),
+        ):
+            await main.handle_signal(self._signal())
+        executor.execute_trade.assert_not_awaited()
+        self.assertEqual("Live portfolio incomplete", recorder.results[-1]["error_message"])
+
     async def test_insufficient_position_sell_does_not_count_as_executed(self):
         cfg = SimpleNamespace(id=13, account_id=2, copy_mode="RATIO")
         recorder = FakeRecorder()
@@ -230,6 +246,7 @@ class TestProportionalRiskBridge(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "_evaluate_portfolio_buy_risk", risk_check),
             patch.object(main, "_complete_portfolio_buy_risk", risk_complete),
             patch.object(main, "_verify_submitted_buy", verify_buy, create=True),
+            patch.object(main, "_get_live_position_quantity", AsyncMock(return_value=Decimal("5"))),
             patch.object(main, "metrics", measured),
             patch.object(main, "_tail_risk_low_price_buy_reason", return_value=None),
             patch.object(main, "_high_confidence_buy_reason", return_value=None),
@@ -249,6 +266,7 @@ class TestProportionalRiskBridge(unittest.IsolatedAsyncioTestCase):
         executor.execute_trade.assert_awaited_once()
         self.assertFalse(executor.execute_trade.await_args.kwargs["verify"])
         verify_buy.assert_awaited_once()
+        self.assertEqual(Decimal("5"), verify_buy.await_args.kwargs["before_quantity"])
         latency = measured.to_dict()["latency_ms"]
         self.assertIn("trade_lock_wait_ms", latency)
         self.assertIn("buy_other_ui_submit_ms", latency)
@@ -396,6 +414,7 @@ class TestProportionalRiskBridge(unittest.IsolatedAsyncioTestCase):
             is_ready=MagicMock(return_value=True),
             is_logged_in=MagicMock(return_value=True),
             fetch_portfolio_positions=AsyncMock(return_value={
+                "portfolio_complete": True,
                 "positions": [
                     {
                         "marketTitle": "Will MrBeast hit 508 million subscribers by July 31?",
@@ -420,6 +439,7 @@ class TestProportionalRiskBridge(unittest.IsolatedAsyncioTestCase):
             is_ready=MagicMock(return_value=True),
             is_logged_in=MagicMock(return_value=True),
             fetch_portfolio_positions=AsyncMock(return_value={
+                "portfolio_complete": True,
                 "positions": [
                     {
                         "conditionId": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

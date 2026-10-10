@@ -34,6 +34,7 @@ class TestManualPortfolioRisk(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "_evaluate_manual_buy_risk", check),
             patch.object(main, "_complete_manual_buy_risk", complete),
             patch.object(main, "_verify_submitted_buy", verify_buy, create=True),
+            patch.object(main, "_get_live_position_quantity", AsyncMock(return_value=main.Decimal("5"))),
         ):
             await main._execute_and_record(1, self.request(), "manual-1")
             await main._stop_verification_tasks()
@@ -42,6 +43,7 @@ class TestManualPortfolioRisk(unittest.IsolatedAsyncioTestCase):
         executor.execute_trade.assert_awaited_once()
         self.assertFalse(executor.execute_trade.await_args.kwargs["verify"])
         verify_buy.assert_awaited_once()
+        self.assertEqual(main.Decimal("5"), verify_buy.await_args.kwargs["before_quantity"])
         complete.assert_awaited_once_with("bridge:manual-1:manual", "SUCCESS")
         recorder.update_status.assert_called_with(
             1,
@@ -67,6 +69,20 @@ class TestManualPortfolioRisk(unittest.IsolatedAsyncioTestCase):
         check.assert_not_awaited()
         executor.execute_trade.assert_awaited_once()
         self.assertFalse(executor.execute_trade.await_args.kwargs["verify"])
+
+    async def test_manual_buy_unknown_baseline_blocks_before_submission(self):
+        executor = SimpleNamespace(execute_trade=AsyncMock())
+        recorder = MagicMock()
+        with (
+            patch.object(main, "executor", executor),
+            patch.object(main, "recorder", recorder),
+            patch.object(main, "_evaluate_manual_buy_risk", AsyncMock(return_value=PortfolioRiskCheck(True, True, "d", "ALLOW", "ENFORCED"))),
+            patch.object(main, "_complete_manual_buy_risk", AsyncMock()),
+            patch.object(main, "_get_live_position_quantity", AsyncMock(side_effect=RuntimeError("Live portfolio incomplete"))),
+        ):
+            await main._execute_and_record(1, self.request(), "manual-unknown")
+        executor.execute_trade.assert_not_awaited()
+        self.assertEqual("FAILED", recorder.update_status.call_args.args[1])
 
     async def test_manual_buy_denial_finishes_reservation_without_ui_execution(self):
         executor = SimpleNamespace(execute_trade=AsyncMock())

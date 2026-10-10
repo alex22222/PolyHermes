@@ -82,6 +82,8 @@ class PolymtradeExecutor:
         self._event_cache_ttl_seconds = 21600.0
         self._event_cache_max_entries = 2048
         self._http_client: Optional[httpx.AsyncClient] = None
+        self._gamma_query_cache: dict[tuple, tuple] = {}
+        self._gamma_query_inflight: dict[tuple, asyncio.Task] = {}
         self._portfolio_page_idle_close_seconds = float(
             os.getenv("BRIDGE_PORTFOLIO_PAGE_IDLE_CLOSE_SECONDS", "120")
         )
@@ -636,8 +638,8 @@ class PolymtradeExecutor:
         finally:
             self._schedule_portfolio_page_idle_close()
 
-    async def fetch_portfolio_positions(self) -> dict:
-        cached_snapshot = self._cached_portfolio_snapshot()
+    async def fetch_portfolio_positions(self, *, force_refresh: bool = False) -> dict:
+        cached_snapshot = None if force_refresh else self._cached_portfolio_snapshot()
         if cached_snapshot:
             return cached_snapshot
 
@@ -798,7 +800,7 @@ class PolymtradeExecutor:
             # Filter out positions with missing critical fields to avoid phantom holdings.
             valid_positions = [pos for pos in positions if validate_portfolio_position(pos)]
             empty_state_confirmed = bool(rendered and not positions)
-            portfolio_complete = bool(valid_positions) or empty_state_confirmed
+            portfolio_complete = bool(rendered and len(valid_positions) == len(positions))
             redeemable_positions = [pos for pos in valid_positions if pos.get("redeemable")]
             pending_redeem_value = sum(
                 float(pos.get("quantity") or 0) for pos in redeemable_positions
@@ -1420,13 +1422,63 @@ class PolymtradeExecutor:
         params: dict,
         max_retries: int = 3,
         base_delay: float = 1.0,
-    ) -> dict:
+    ):
+        """Coalesce identical metadata queries and cool down failures across scrapes."""
+        key = (url, tuple(sorted((str(k), str(v)) for k, v in params.items())))
+        cached = self._gamma_query_cache.get(key)
+        if cached and time.monotonic() < cached[0]:
+            if cached[3]:
+                raise RuntimeError(f"Gamma query cooldown: {cached[3]}")
+            return copy.deepcopy(cached[1])
+
+        task = self._gamma_query_inflight.get(key)
+        if task is None:
+            async def request_and_cache():
+                try:
+                    result = await self._perform_gamma_request(client, url, params, max_retries, base_delay)
+                except Exception as error:
+                    failures = min((cached[2] if cached else 0) + 1, 8)
+                    status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+                    delay = min(1800 * 2 ** (failures - 1), 21600) if status == 403 else min(60 * 2 ** (failures - 1), 900)
+                    if status == 429:
+                        try:
+                            delay = max(delay, float(error.response.headers.get("Retry-After", "0")))
+                        except ValueError:
+                            pass
+                    reason = f"HTTP {status}" if status else type(error).__name__
+                    self._gamma_query_cache[key] = (time.monotonic() + delay, None, failures, reason)
+                    logger.warning("Gamma query entered cooldown for %.0fs after %s", delay, reason)
+                    raise
+                else:
+                    self._gamma_query_cache[key] = (time.monotonic() + 300, result, 0, None)
+                    return result
+                finally:
+                    while len(self._gamma_query_cache) > self._metadata_cache_max_entries:
+                        self._gamma_query_cache.pop(next(iter(self._gamma_query_cache)))
+
+            task = asyncio.create_task(request_and_cache())
+            self._gamma_query_inflight[key] = task
+            def completed(done):
+                self._gamma_query_inflight.pop(key, None)
+                if not done.cancelled():
+                    done.exception()  # Retrieve failures even if all waiting scrapes were cancelled.
+            task.add_done_callback(completed)
+        return copy.deepcopy(await asyncio.shield(task))
+
+    async def _perform_gamma_request(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        params: dict,
+        max_retries: int,
+        base_delay: float,
+    ):
         """Make a Gamma API request with exponential backoff on transient errors."""
         last_error = None
-        resp = None
-        metrics.gamma_api_requests += 1
         for attempt in range(max_retries):
+            resp = None
             try:
+                metrics.gamma_api_requests += 1
                 resp = await client.get(url, params=params, timeout=20.0)
                 resp.raise_for_status()
                 return resp.json()
@@ -1460,14 +1512,13 @@ class PolymtradeExecutor:
         title: str,
         max_retries: int = 3,
     ) -> list:
-        """Search Gamma markets API by market title."""
-        async with self._http_client_context() as client:
-            return await self._gamma_request_with_retry(
-                client,
-                "https://gamma-api.polymarket.com/markets",
-                {"title": title, "limit": "10"},
-                max_retries=max_retries,
-            )
+        """Flatten official public-search events while retaining parent identity."""
+        events = await self._search_gamma_events_by_title(title, max_retries=max_retries)
+        return [
+            {**market, "events": [{"id": event.get("id"), "slug": event.get("slug")}]}
+            for event in events
+            for market in event.get("markets") or []
+        ]
 
     async def _search_gamma_markets_by_slug(
         self,
@@ -1488,14 +1539,15 @@ class PolymtradeExecutor:
         title: str,
         max_retries: int = 3,
     ) -> list:
-        """Search Gamma events API by event title."""
+        """Use Gamma's documented text search; list endpoints do not filter title."""
         async with self._http_client_context() as client:
-            return await self._gamma_request_with_retry(
+            result = await self._gamma_request_with_retry(
                 client,
-                "https://gamma-api.polymarket.com/events",
-                {"title": title, "limit": "10"},
+                "https://gamma-api.polymarket.com/public-search",
+                {"q": title, "limit_per_type": "10", "search_profiles": "false", "search_tags": "false"},
                 max_retries=max_retries,
             )
+            return result.get("events") or []
 
     async def _search_gamma_events_by_slug(
         self,

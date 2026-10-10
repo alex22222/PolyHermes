@@ -974,14 +974,14 @@ async def _get_live_position_quantity(
 ) -> Decimal:
     """Return current live portfolio quantity for a market/outcome."""
     if not executor or not executor.is_ready() or not await ensure_login_state():
-        logger.warning("Live portfolio check skipped because executor is not ready/logged in")
-        return Decimal("0")
+        raise RuntimeError("Live portfolio unavailable: executor is not ready/logged in")
 
     async with _portfolio_lock:
-        portfolio = await executor.fetch_portfolio_positions()
+        portfolio = await executor.fetch_portfolio_positions(force_refresh=True)
     if "error" in portfolio:
-        logger.warning(f"Live portfolio check failed: {portfolio.get('error')}")
-        return Decimal("0")
+        raise RuntimeError(f"Live portfolio check failed: {portfolio.get('error')}")
+    if portfolio.get("portfolio_complete") is not True:
+        raise RuntimeError("Live portfolio incomplete; position quantity is unknown")
 
     target_market_id = _normalize_market_id(market_id)
     target_title = _normalize_market_title(market_title)
@@ -1088,10 +1088,12 @@ async def _verify_submitted_buy(
     market_id: str,
     market_title: Optional[str],
     outcome: Optional[str],
-    before_quantity: Decimal,
+    before_quantity: Optional[Decimal],
 ):
     started_at = time.perf_counter()
     try:
+        if before_quantity is None:
+            raise RuntimeError("BUY baseline position quantity is unknown; cannot confirm a change")
         after_quantity = await _wait_for_live_position_increase(
             market_id=market_id,
             market_title=market_title,
@@ -1373,6 +1375,11 @@ async def _execute_and_record(record_id: int, request: ExecuteRequest, external_
                 )
 
             if side_upper == "BUY":
+                before_quantity = await _get_live_position_quantity(
+                    market_id=request.condition_id or request.market_slug,
+                    market_title=request.market_title,
+                    outcome=request.outcome,
+                )
                 final_risk = await _evaluate_manual_buy_risk(request, external_trade_id, "final")
                 if not final_risk.execution_allowed:
                     raise RuntimeError(f"Portfolio risk blocked manual BUY: {final_risk.outcome or final_risk.error}")
@@ -1389,13 +1396,12 @@ async def _execute_and_record(record_id: int, request: ExecuteRequest, external_
             )
 
             if side_upper == "BUY":
-                baseline = result.get("baseline") or {}
                 buy_verification = {
                     "record_id": record_id,
                     "market_id": request.condition_id or request.market_slug,
                     "market_title": request.market_title,
                     "outcome": request.outcome,
-                    "before_quantity": _decimal_from_any(baseline.get("position_quantity")),
+                    "before_quantity": before_quantity,
                 }
             elif can_verify_live_sell and before_quantity is not None:
                 sell_verification = {
@@ -2080,11 +2086,19 @@ async def handle_signal(
 
                 # Live portfolio check: if our cached/ledger quantity overestimates
                 # the actual holdings, sell what we actually have instead of skipping.
-                live_quantity = await _get_live_position_quantity(
-                    market_id=signal.condition_id or signal.market_slug or "",
-                    market_title=signal.title,
-                    outcome=signal.outcome,
-                )
+                try:
+                    live_quantity = await _get_live_position_quantity(
+                        market_id=signal.condition_id or signal.market_slug or "",
+                        market_title=signal.title,
+                        outcome=signal.outcome,
+                    )
+                except Exception as portfolio_error:
+                    await _record_failed_signal(
+                        signal=signal, cfg=cfg, side=side_upper,
+                        quantity=quantity, price=price_dec, amount=amount,
+                        reason=str(portfolio_error),
+                    )
+                    continue
                 if live_quantity <= 0:
                     logger.info(
                         f"Config {cfg.id}: SELL skipped for {signal.transaction_hash} "
@@ -2179,6 +2193,11 @@ async def handle_signal(
                             await _complete_portfolio_buy_risk(cfg, signal, "FAILED")
                         continue
                     if side_upper == "BUY":
+                        before_buy_quantity = await _get_live_position_quantity(
+                            market_id=signal.condition_id or signal.market_slug or "",
+                            market_title=signal.title,
+                            outcome=signal.outcome or "Yes",
+                        )
                         final_risk = await _evaluate_portfolio_buy_risk(
                             cfg=cfg,
                             signal=signal,
@@ -2244,15 +2263,12 @@ async def handle_signal(
                                 (submitted_at - signal._bridge_received_monotonic) * 1000,
                                 transaction_hash=signal.transaction_hash,
                             )
-                        baseline = result.get("baseline") or {}
                         buy_verification = {
                             "record_id": record_id,
                             "market_id": signal.condition_id or signal.market_slug or "",
                             "market_title": signal.title,
                             "outcome": signal.outcome,
-                            "before_quantity": _decimal_from_any(
-                                baseline.get("position_quantity")
-                            ),
+                            "before_quantity": before_buy_quantity,
                         }
                     else:
                         metrics.signals_executed += 1
