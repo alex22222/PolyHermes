@@ -81,4 +81,3 @@ async def test_partial_parse_is_not_a_complete_portfolio():
     result = await executor._fetch_portfolio_positions_on_active_page()
     assert len(result["positions"]) == 1
     assert result["portfolio_complete"] is False
-
