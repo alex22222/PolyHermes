@@ -183,8 +183,8 @@ class FutureBtc5mBridgeClient(
         if (state in setOf("PENDING", "CLAIMED")) {
             val intent = objectValue(intentValue)
             validatePreparationIntent(intent, serverTime)
-            check(intent.keySet() == PREPARATION_INTENT_FIELDS && record != null && string(record, "state") == state &&
-                PREPARATION_INTENT_FIELDS.all { intent.get(it) == record.get(it) } &&
+            check(integer(intent, "schemaVersion") == 2L && intent.keySet() == PREPARATION_V2_INTENT_FIELDS && record != null && string(record, "state") == state &&
+                PREPARATION_V2_INTENT_FIELDS.all { intent.get(it) == record.get(it) } &&
                 integer(intent, "periodStart") == integer(status, "periodStart") && string(status, "feedStatus") == "CURRENT" &&
                 serverTime < number(intent, "expiresAt") && serverTime - number(intent, "priceObservedAt") in 0.0..5.0) {
                 "Future 当前准备意图缺少新鲜的本轮信号或对应记录"
@@ -213,19 +213,24 @@ class FutureBtc5mBridgeClient(
         val start = integer(record, "periodStart")
         val signal = objectValue(field(status, "signal"))
         check(integer(status, "periodStart") == start && string(status, "feedStatus") == "CURRENT" &&
-            now >= start + 60 && now < number(record, "expiresAt") && now - number(record, "priceObservedAt") in 0.0..5.0 &&
+            integer(record, "schemaVersion") == 2L && now >= start + 60 && now < number(record, "expiresAt") &&
+            preparationSamplesFresh(record, now) &&
             integer(signal, "period_start") == start && integer(signal, "period_end") == start + 300 &&
-            now - number(signal, "price_observed_at") in 0.0..5.0 && nullableString(signal, "side") == string(record, "side") &&
+            now - number(signal, "price_observed_at") in 0.0..5.0 &&
             string(signal, "price_source") == "chainlink" && string(signal, "open_price_source") == OPEN_PRICE_SOURCE &&
             integer(signal, "twap_lookback_seconds") == 60L) { "Future 当前准备状态与新鲜的原信号不一致" }
         val preflight = objectValue(field(status, "preflight"))
         check(boolean(preflight, "browserConnected") && string(preflight, "navigation") == "CURRENT" &&
             string(preflight, "ticketStatus") == "PASS" && integer(preflight, "pagePeriodStart") == start &&
             now - number(preflight, "receivedAt") in 0.0..5.0 && kotlin.math.abs(now - number(preflight, "checkedAt")) <= 5 &&
+            string(preflight, "selectionSource") == "HIGHER_BUTTON_PRICE" &&
+            higherButtonSide(preflight) == string(record, "side") && nullableString(preflight, "preferredSide") == string(record, "side") &&
             array(preflight, "reasons").none { it.asString.startsWith("PREFLIGHT_LEDGER_") }) {
             "Future 当前准备状态缺少同轮新鲜的浏览器报告"
         }
-        if (string(record, "state") == "READY") check(number(preflight, "amountUsd") == 1.0 &&
+        if (string(record, "state") == "READY") check(string(preflight, "result") == "READ_ONLY_READY" &&
+            number(preflight, "receivedAt") >= number(record, "claimedAt") &&
+            number(preflight, "amountUsd") == 1.0 &&
             nullableString(preflight, "selectedSide") == string(record, "side") && boolean(preflight, "buyButtonEnabled")) {
             "Future 当前票据已改变，不能声明准备就绪"
         }
@@ -241,7 +246,8 @@ class FutureBtc5mBridgeClient(
     private fun validatePreparationIntent(intent: JsonObject, serverTime: Double) {
         validatePreparationScope(intent)
         val start = integer(intent, "periodStart")
-        check(integer(intent, "schemaVersion") == 1L && start >= 0 && start % 300 == 0L &&
+        val version = integer(intent, "schemaVersion")
+        check(version in 1L..2L && start >= 0 && start % 300 == 0L &&
             integer(intent, "periodEnd") == start + 300 && string(intent, "id") == "future-btc5m-prepare:$start" &&
             string(intent, "slug") == "btc-updown-5m-$start" && integer(intent, "amountUsd") == 1L) {
             "Future 准备意图的市场或固定金额无效"
@@ -254,8 +260,12 @@ class FutureBtc5mBridgeClient(
         }
         val opening = number(intent, "openPrice")
         val current = number(intent, "currentPrice")
-        check(opening > 0 && current > 0 && current != opening &&
-            string(intent, "side") == if (current > opening) "Up" else "Down") { "Future 准备方向和采样价格不一致" }
+        check(opening > 0 && current > 0) { "Future 准备参考价格无效" }
+        if (version == 1L) check(current != opening &&
+            string(intent, "side") == if (current > opening) "Up" else "Down") { "Future 历史准备方向和采样价格不一致" }
+        else check(string(intent, "selectionSource") == "HIGHER_BUTTON_PRICE" && higherButtonSide(intent) != null &&
+            string(intent, "side") == higherButtonSide(intent) && number(intent, "quoteObservedAt") >= 0 &&
+            preparationSamplesFresh(intent, created)) { "Future 准备方向或原按钮报价快照无效" }
         check(string(intent, "priceSource") == "chainlink" && string(intent, "openPriceSource") == OPEN_PRICE_SOURCE &&
             integer(intent, "twapLookbackSeconds") == 60L) { "Future 准备意图的价格来源无效" }
         val token = nullableString(intent, "claimToken")
@@ -264,7 +274,7 @@ class FutureBtc5mBridgeClient(
 
     private fun validatePreparationRecord(record: JsonObject, serverTime: Double) {
         validatePreparationIntent(record, serverTime)
-        check(record.keySet() == PREPARATION_INTENT_FIELDS + setOf("state", "updatedAt", "claimedAt", "reason", "receipt")) {
+        check(record.keySet() == (if (integer(record, "schemaVersion") == 2L) PREPARATION_V2_INTENT_FIELDS else PREPARATION_INTENT_FIELDS) + setOf("state", "updatedAt", "claimedAt", "reason", "receipt")) {
             "Future 准备报告包含未知执行字段"
         }
         val state = string(record, "state")
@@ -278,12 +288,12 @@ class FutureBtc5mBridgeClient(
         val receiptValue = field(record, "receipt")
         check(updated >= created && updated <= serverTime && (claimed == null) == (token == null) &&
             (claimed == null || claimed >= created && claimed < expires && updated >= claimed &&
-                claimed - number(record, "priceObservedAt") in 0.0..5.0)) { "Future 准备报告时间或领取凭证不一致" }
+                preparationSamplesFresh(record, claimed))) { "Future 准备报告时间或领取凭证不一致" }
         when (state) {
             "PENDING" -> check(claimed == null && receiptValue.isJsonNull && reason == null && updated == created)
             "CLAIMED" -> check(claimed != null && receiptValue.isJsonNull && reason == null && updated == claimed)
             "READY" -> check(claimed != null && !receiptValue.isJsonNull && reason == null && updated < expires &&
-                updated - number(record, "priceObservedAt") in 0.0..5.0)
+                preparationSamplesFresh(record, updated))
             "FAILED" -> check(claimed != null && !receiptValue.isJsonNull && reason in PREPARATION_FAILURE_REASONS)
             "EXPIRED" -> check(reason in setOf("INTENT_EXPIRED", "PREPARATION_RECEIPT_UNKNOWN") && updated >= expires &&
                 (claimed != null || receiptValue.isJsonNull))
@@ -319,6 +329,13 @@ class FutureBtc5mBridgeClient(
         check(amount == null || amount >= 0) { "Future 预检金额无效" }
         val side = nullableString(preflight, "selectedSide")
         val signalSide = nullableString(preflight, "signalSide")
+        val selectionSource = nullableString(preflight, "selectionSource")
+        val preferredSide = nullableString(preflight, "preferredSide")
+        val quoteSide = higherButtonSide(preflight)
+        check(selectionSource in setOf(null, "HIGHER_BUTTON_PRICE") && preferredSide == quoteSide &&
+            (selectionSource != null || field(preflight, "upQuoteCents").isJsonNull && field(preflight, "downQuoteCents").isJsonNull)) {
+            "Future 预检按钮报价来源或方向无效"
+        }
         check(side in setOf(null, "Up", "Down") && signalSide in setOf(null, "Up", "Down")) { "Future 预检方向无效" }
         val navigation = string(preflight, "navigation")
         val ticket = string(preflight, "ticketStatus")
@@ -331,14 +348,14 @@ class FutureBtc5mBridgeClient(
         }
         if (connected) check(checked != null && received != null && serverTime - received in 0.0..5.0 &&
             kotlin.math.abs(serverTime - checked) <= 5) { "Future 预检浏览器报告已过期" }
-        check(!matching || connected && fresh && side != null && side == signalSide) { "Future 预检方向匹配事实无效" }
+        check(!matching || connected && side != null && side == preferredSide) { "Future 预检方向匹配事实无效" }
         val result = string(preflight, "result")
         check(result in setOf("WAITING_BROWSER", "BLOCKED", "READ_ONLY_READY")) { "Future 预检结果无效" }
         val reasons = array(preflight, "reasons")
         reasons.forEach { check(it.isJsonPrimitive && it.asJsonPrimitive.isString && it.asString.isNotBlank()) { "Future 预检原因无效" } }
         if (result == "WAITING_BROWSER") check(!connected) { "Future 预检等待浏览器状态无效" }
         if (result == "READ_ONLY_READY") {
-            check(connected && fresh && matching && enabled && navigation == "CURRENT" && ticket == "PASS" && amount == 1.0 && reasons.isEmpty) { "Future 预检通过所需条件缺失" }
+            check(connected && fresh && matching && selectionSource == "HIGHER_BUTTON_PRICE" && preferredSide != null && enabled && navigation == "CURRENT" && ticket == "PASS" && amount == 1.0 && reasons.isEmpty) { "Future 预检通过所需条件缺失" }
             val signal = objectValue(field(status, "signal"))
             val period = integer(signal, "period_start")
             check(start == period && integer(status, "periodStart") == period && string(status, "feedStatus") == "CURRENT" &&
@@ -353,9 +370,29 @@ class FutureBtc5mBridgeClient(
             val period = integer(passed, "periodStart")
             val at = number(passed, "checkedAt")
             check(marketUrlStart(string(passed, "marketUrl")) == period && at >= period + 60 && at < period + 80 && at <= serverTime + 3 &&
-                string(passed, "signalSide") in setOf("Up", "Down") && integer(passed, "amountUsd") == 1L && boolean(passed, "noSubmission")) { "Future 历史预检记录无效" }
+                integer(passed, "amountUsd") == 1L && boolean(passed, "noSubmission")) { "Future 历史预检记录无效" }
+            val legacyFields = setOf("periodStart", "checkedAt", "marketUrl", "signalSide", "amountUsd", "noSubmission")
+            if (passed.keySet() == legacyFields) check(string(passed, "signalSide") in setOf("Up", "Down"))
+            else check(passed.keySet() == legacyFields + setOf("schemaVersion", "selectionSource", "upQuoteCents", "downQuoteCents", "preferredSide") &&
+                integer(passed, "schemaVersion") == 2L && string(passed, "selectionSource") == "HIGHER_BUTTON_PRICE" &&
+                nullableString(passed, "signalSide") in setOf(null, "Up", "Down") && higherButtonSide(passed) != null &&
+                string(passed, "preferredSide") == higherButtonSide(passed)) { "Future 历史按钮报价预检记录无效" }
         }
     }
+
+    private fun higherButtonSide(value: JsonObject): String? {
+        val quotes = listOf("upQuoteCents", "downQuoteCents").map { key ->
+            if (field(value, key).isJsonNull) null else number(value, key).also {
+                check(it in 0.0..100.0 && field(value, key).asBigDecimal.stripTrailingZeros().scale() <= 2) { "Future 按钮报价必须在0到100美分之间且最多两位小数" }
+            }
+        }
+        val (up, down) = quotes
+        return if (up == null || down == null || up == down) null else if (up > down) "Up" else "Down"
+    }
+
+    private fun preparationSamplesFresh(value: JsonObject, at: Double): Boolean =
+        at - number(value, "priceObservedAt") in 0.0..5.0 &&
+            (integer(value, "schemaVersion") == 1L || at - number(value, "quoteObservedAt") in 0.0..5.0)
 
     private fun marketUrlStart(url: String): Long? {
         val digits = Regex("https://future\\.news/(?:zh/)?event/btc-updown-5m-([0-9]{1,15})/?").matchEntire(url)?.groupValues?.get(1) ?: return null
@@ -439,15 +476,18 @@ class FutureBtc5mBridgeClient(
         private val PREPARATION_INTENT_FIELDS = setOf("schemaVersion", "id", "slug", "periodStart", "periodEnd", "side", "amountUsd",
             "createdAt", "expiresAt", "priceObservedAt", "openPrice", "currentPrice", "priceSource", "openPriceSource", "twapLookbackSeconds",
             "mode", "noSubmission", "operatorAuthorized", "authorizationSource", "claimToken")
+        private val PREPARATION_V2_INTENT_FIELDS = PREPARATION_INTENT_FIELDS + setOf("upQuoteCents", "downQuoteCents", "quoteObservedAt", "selectionSource")
         private val PREPARATION_STATES = setOf("DISABLED", "WAITING_SIGNAL", "WAITING_BROWSER", "PENDING", "CLAIMED", "READY", "FAILED",
             "EXPIRED", "REVOKED", "RECEIPT_UNKNOWN", "BLOCKED")
         private val PREPARATION_FAILURE_REASONS = setOf("PREPARATION_FAILED", "MARKET_MISMATCH", "TICKET_CHANGED", "UNSAFE_DIRECTION_CONTROL",
-            "AMOUNT_WRITE_FAILED", "DIRECTION_WRITE_FAILED", "POSTCHECK_FAILED", "PREPARATION_REVOKED")
+            "AMOUNT_WRITE_FAILED", "DIRECTION_WRITE_FAILED", "POSTCHECK_FAILED", "PREPARATION_REVOKED", "BUTTON_QUOTES_UNAVAILABLE",
+            "BUTTON_QUOTES_TIED", "BUTTON_QUOTES_NOT_FRESH", "HIGHER_BUTTON_SIDE_CHANGED")
         private val PREPARATION_REASONS = PREPARATION_FAILURE_REASONS + setOf("AUTO_PREPARATION_DISABLED", "WAITING_CURRENT_SIGNAL",
             "BROWSER_NOT_CONNECTED", "MARKET_NOT_CURRENT", "TICKET_CHECK_FAILED", "PREPARED_TICKET_CHANGED", "INTENT_EXPIRED",
             "PREPARATION_RECEIPT_UNKNOWN", "PREPARATION_REVOKED", "PROCESS_RESTARTED", "PREPARATION_LEDGER_INVALID",
             "PREPARATION_LEDGER_WRITE_FAILED", "ORDER_LEDGER_INVALID", "ORDER_LEDGER_WRITE_FAILED", "CONTROL_STATE_WRITE_FAILED",
-            "SIGNAL_SOURCE_UNAVAILABLE", "SIGNAL_SOURCE_INVALID", "STOP_FILE_PRESENT", "PREFLIGHT_LEDGER_INVALID", "PREFLIGHT_LEDGER_WRITE_FAILED")
+            "SIGNAL_SOURCE_UNAVAILABLE", "SIGNAL_SOURCE_INVALID", "STOP_FILE_PRESENT", "PREFLIGHT_LEDGER_INVALID", "PREFLIGHT_LEDGER_WRITE_FAILED", "BUTTON_QUOTES_UNAVAILABLE",
+            "BUTTON_QUOTES_TIED", "BUTTON_QUOTES_NOT_FRESH", "HIGHER_BUTTON_SIDE_CHANGED")
         val ORDER_STATUSES = setOf("PENDING", "SKIPPED", "FAILED", "SUBMITTED_UNVERIFIED", "FILLED")
     }
 }

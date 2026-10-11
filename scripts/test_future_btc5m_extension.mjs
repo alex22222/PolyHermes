@@ -7,7 +7,7 @@ const content = readFileSync(new URL('./future-btc5m-extension/content.js', impo
 const context = vm.createContext({URL, Event});
 vm.runInContext(content, context);
 const {usableDraft, matchesMarket, prepareAmount, observationView, navigationTarget, followCurrentMarket, readPreflight,
-  usablePreparation, readPreparationTicket, prepareOnlyOnce} = context.FutureBtc5m;
+  usablePreparation, readPreparationTicket, prepareOnlyOnce, parseButtonQuote} = context.FutureBtc5m;
 const start = 1791650700;
 const now = start + 65;
 const draft = {
@@ -233,6 +233,7 @@ test('stale, expired, disconnected or unverified observation samples have no usa
 
 function ticketFixture({currency = '金额 ($)', duplicate = false, marketOrder = true, sell = false, openDropdown = false,
   buySide = '涨', buyDisabled = false, buyEnabledAfterAmount = false, buyDuplicate = false,
+  upQuote = '12¢', downQuote = '88¢',
   title = 'Bitcoin Up or Down - October 10, 12:45PM-12:50PM ET', inert = false, disabledFieldset = false,
   selectedSide = buySide === '涨' ? 'Up' : 'Down', selectedAttribute = 'aria-pressed',
   classEvidence = false, selectedClass = 'text-text-hightlightbtn',
@@ -249,9 +250,9 @@ function ticketFixture({currency = '金额 ($)', duplicate = false, marketOrder 
     getClientRects() { return [1]; }
     dispatchEvent(event) { this.events.push(event.type); afterAmount(event); }
   }
-  const labels = ['买入', '卖出', marketOrder ? '市价单' : '限价单', '涨 64¢', '跌 37¢', sell ? '卖出 涨' : `买入 ${buySide}`];
+  const labels = ['买入', '卖出', marketOrder ? '市价单' : '限价单', `涨 ${upQuote}`, `跌 ${downQuote}`, sell ? '卖出 涨' : `买入 ${buySide}`];
   if (buyDuplicate) labels.push(`买入 ${buySide}`);
-  if (directionDuplicate) labels.push('跌 37¢');
+  if (directionDuplicate) labels.push(`跌 ${downQuote}`);
   if (openDropdown) labels.push(marketOrder ? '限价单' : '市价单');
   const body = {};
   const ticket = {textContent: currency, inert, parentElement: disabledFieldset ? {tagName: 'FIELDSET', disabled: true, parentElement: body} : body,
@@ -259,7 +260,8 @@ function ticketFixture({currency = '金额 ($)', duplicate = false, marketOrder 
       ...labels.map((label) => {
         const side = /^涨(?:\s|\d|--)/.test(label) ? 'Up' : /^跌(?:\s|\d|--)/.test(label) ? 'Down' : null;
         const buy = /^买入\s+(涨|跌)$/.test(label);
-        return {get textContent() { return buy ? `买入 ${buySide}` : label; },
+        return {get textContent() { return buy ? `买入 ${buySide}` : side ?
+          `${side === 'Up' ? '涨' : '跌'} ${side === 'Up' ? upQuote : downQuote}` : label; },
           tagName: 'BUTTON', type: side ? directionType : 'button', form: directionForm ? {} : null,
           get className() { return !classEvidence || !side ? '' : side === selectedSide ? selectedClass : unselectedClass; },
           get disabled() { return side ? directionDisabled : buy && buyDisabled && !(buyEnabledAfterAmount && input.amount === '1'); },
@@ -281,7 +283,8 @@ function ticketFixture({currency = '金额 ($)', duplicate = false, marketOrder 
   const input = new FakeInput();
   input.amount = '10'; input.events = []; input.parentElement = ticket; input.ownerDocument = doc;
   doc.querySelectorAll = (selector) => selector === 'button' ? ticket.querySelectorAll() : duplicate ? [input, input] : [input];
-  return {doc, input, setTitle(value) { title = value; }, clicks: () => clicks,
+  return {doc, input, setTitle(value) { title = value; },
+    setQuotes(up, down) { upQuote = up; downQuote = down; }, clicks: () => clicks,
     directionClicks: () => directionClicks, buyClicks: () => buyClicks, writes: () => writes};
 }
 
@@ -439,7 +442,7 @@ test('preflight reports only current read-only ticket values and never writes or
   const fixture = ticketFixture({buySide: '跌', buyDisabled: true});
   fixture.input.amount = '1';
   const report = readPreflight(fixture.doc, marketUrl, now);
-  assert.equal(report.schemaVersion, 1);
+  assert.equal(report.schemaVersion, 2);
   assert.equal(report.marketUrl, marketUrl);
   assert.equal(report.pagePeriodStart, start);
   assert.equal(report.checkedAt, now);
@@ -507,7 +510,7 @@ test('preflight rejects old DOM under a new URL and ambiguous tickets without tr
     assert.equal(report.amountUsd, null);
     assert.equal(report.selectedSide, null);
     assert.equal(report.buyButtonEnabled, false);
-    assert.equal(Object.keys(report).length, 9);
+    assert.equal(Object.keys(report).length, 11);
     assert.equal(fixture.writes(), 0);
     assert.equal(fixture.clicks(), 0);
   }
@@ -609,9 +612,10 @@ test('SPA preflight matches the trusted current tab URL while retaining Future B
   assert.equal(requests.length, 1);
 });
 
-const preparationIntent = {schemaVersion: 1, id: `future-btc5m-prepare:${start}`,
+const preparationIntent = {schemaVersion: 2, id: `future-btc5m-prepare:${start}`,
   slug: draft.slug, periodStart: start, periodEnd: start + 300, side: 'Down', amountUsd: 1,
-  createdAt: now, expiresAt: start + 80, priceObservedAt: now, openPrice: 82980.01, currentPrice: 82979,
+  createdAt: now, expiresAt: start + 80, priceObservedAt: now, openPrice: 82980.01, currentPrice: 82981,
+  upQuoteCents: 12, downQuoteCents: 88, quoteObservedAt: now, selectionSource: 'HIGHER_BUTTON_PRICE',
   priceSource: 'chainlink', openPriceSource: 'polymarket_crypto_price_fiveminute_twap60_openPrice',
   twapLookbackSeconds: 60, mode: 'PREPARE_ONLY', noSubmission: true, operatorAuthorized: true,
   authorizationSource: 'USER_REQUEST', claimToken: null};
@@ -648,7 +652,7 @@ test('PREPARE_ONLY uses explicit user preparation authority without changing leg
     assert.equal(usablePreparation({...preparation, ...change}, now), null);
   }
   for (const change of [{amountUsd: 2}, {side: 'Up'}, {periodStart: start - 300}, {priceObservedAt: now - 6},
-    {currentPrice: 82980.01}, {expiresAt: start + 81}, {claimToken: 'unsafe'}, {priceSource: 'other'}]) {
+    {currentPrice: 0}, {expiresAt: start + 81}, {claimToken: 'unsafe'}, {priceSource: 'other'}]) {
     assert.equal(usablePreparation({...preparation, preparation: {...preparation.preparation,
       intent: {...preparationIntent, ...change}}}, now), null);
   }
@@ -784,7 +788,10 @@ test('polling independently prepares a USER_REQUEST ticket while legacy UNKNOWN 
   assert.equal(fixture.directionClicks(), 1);
   assert.equal(fixture.buyClicks(), 0);
   assert.equal(children[3].disabled, true, 'the legacy eligibility path stays blocked');
+  assert.match(children[1].textContent, /BTC参考价差（不决定票据方向）/);
+  assert.doesNotMatch(children[1].textContent, /本轮采样方向/);
   assert.match(children[9].textContent, /已准备.*手动买入/);
+  assert.match(children[9].textContent, /按按钮较大数值选择跌 Down/);
   const acknowledgement = messages.find((item) => item.type === 'FUTURE_BTC5M_PREPARATION_ACK');
   assert.equal(acknowledgement.payload.status, 'READY');
   await children.poll();
@@ -955,4 +962,146 @@ test('a disabled, inert or aria-disabled amount ancestor blocks preparation befo
     assert.equal(fixture.clicks(), 0);
     assert.deepEqual(fixture.input.events, []);
   }
+});
+
+test('Down 88 beats Up 12 even when BTC rises and the native ticket initially defaults to Up', async () => {
+  const fixture = ticketFixture({upQuote: '12¢', downQuote: '88¢', buySide: '涨'});
+  const flow = preparationTransport();
+  const result = await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl,
+    navigationFixture().storage, flow.transport, () => now);
+  assert.equal(result?.status, 'READY');
+  assert.equal(fixture.directionClicks(), 1);
+  assert.equal(flow.reports[0].selectedSide, 'Down');
+  assert.equal(flow.reports[0].upQuoteCents, 12);
+  assert.equal(flow.reports[0].downQuoteCents, 88);
+  assert.equal(fixture.input.value, '1');
+  assert.equal(fixture.buyClicks(), 0);
+});
+
+test('button quote parsing accepts only a single cents or percentage value on its exact direction', () => {
+  for (const [text, side, amount] of [['涨 12¢', 'Up', 12], ['跌88%', 'Down', 88],
+    ['涨\u00a050.25 ¢', 'Up', 50.25], ['跌\n100.00%', 'Down', 100], ['涨0¢', 'Up', 0]]) {
+    assert.equal(parseButtonQuote(text, side), amount);
+  }
+  for (const text of ['跌12¢', '涨 --¢', '涨12', '涨$0.12', '涨-1¢', '涨101¢', '涨1e2¢',
+    '涨05¢', '涨.5¢', '涨1,000¢', '涨12¢ 88¢', '涨12.123¢', '涨12%收益', '买入 涨']) {
+    assert.equal(parseButtonQuote(text, 'Up'), null, text);
+  }
+});
+
+test('schema1, unavailable, tied or stale quote intents never restore a default Up preparation', () => {
+  for (const change of [{schemaVersion: 1}, {selectionSource: 'BTC_MOMENTUM'}, {upQuoteCents: null},
+    {downQuoteCents: 101}, {upQuoteCents: 88}, {quoteObservedAt: now - 6},
+    {quoteObservedAt: now + 1}, {side: 'Up'}, {cookie: 'secret'}]) {
+    assert.equal(usablePreparation({...preparation, preparation: {...preparation.preparation,
+      intent: {...preparationIntent, ...change}}}, now), null);
+  }
+  assert.ok(usablePreparation({...preparation, preparation: {...preparation.preparation,
+    intent: {...preparationIntent, currentPrice: preparationIntent.openPrice}}}, now),
+  'a flat BTC reference does not override the user button-price rule');
+});
+
+test('higher button selection is re-read at each phase and reversals or ties abort without a second direction click', async () => {
+  for (const phase of ['beforeClaim', 'afterDirection', 'afterAmount']) {
+    for (const quotes of [['90¢', '10¢'], ['50%', '50%'], ['--', '88¢']]) {
+      let fixture;
+      fixture = ticketFixture({afterDirection() {
+        if (phase === 'afterDirection') fixture.setQuotes(...quotes);
+      }, afterAmount() {
+        if (phase === 'afterAmount') fixture.setQuotes(...quotes);
+      }});
+      if (phase === 'beforeClaim') fixture.setQuotes(...quotes);
+      const flow = preparationTransport();
+      const result = await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl,
+        navigationFixture().storage, flow.transport, () => now);
+      assert.equal(result?.status, 'FAILED');
+      assert.equal(result.reason, quotes[0] === '90¢' ? 'HIGHER_BUTTON_SIDE_CHANGED' :
+        quotes[0] === '50%' ? 'BUTTON_QUOTES_TIED' : 'BUTTON_QUOTES_UNAVAILABLE');
+      assert.equal(fixture.directionClicks(), phase === 'beforeClaim' ? 0 : 1);
+      assert.equal(fixture.writes(), phase === 'afterAmount' ? 1 : 0);
+      assert.equal(fixture.buyClicks(), 0);
+      assert.equal(flow.claims(), phase === 'beforeClaim' ? 0 : 1);
+    }
+  }
+});
+
+test('same winning side may change quoted cents and must report current quotes without pretending the DOM sample is exchange time', async () => {
+  let fixture;
+  fixture = ticketFixture({afterDirection() { fixture.setQuotes('15%', '85%'); }});
+  const flow = preparationTransport();
+  const result = await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl,
+    navigationFixture().storage, flow.transport, () => now);
+  assert.equal(result?.status, 'READY');
+  assert.equal(flow.reports[0].upQuoteCents, 15);
+  assert.equal(flow.reports[0].downQuoteCents, 85);
+  assert.equal(flow.reports[0].checkedAt, now);
+  assert.equal(fixture.buyClicks(), 0);
+});
+
+test('original quote receipt permission expires independently of a still-fresh BTC sample', async () => {
+  let time = now;
+  const initial = {...preparation, preparation: {...preparation.preparation,
+    intent: {...preparationIntent, quoteObservedAt: now - 4}}};
+  const claimed = {...initial, preparation: {...initial.preparation, state: 'CLAIMED',
+    intent: {...initial.preparation.intent, claimToken: token}}};
+  const fixture = ticketFixture({afterDirection() { time = now + 2; }});
+  const flow = preparationTransport({claim: () => claimed, read: () => ({...claimed, serverTime: time})});
+  const result = await prepareOnlyOnce(initial, fixture.doc, () => marketUrl,
+    navigationFixture().storage, flow.transport, () => time);
+  assert.equal(result?.status, 'FAILED');
+  assert.equal(result.reason, 'BUTTON_QUOTES_NOT_FRESH');
+  assert.equal(fixture.writes(), 0);
+  assert.equal(fixture.buyClicks(), 0);
+});
+
+test('the higher Up button also overrides a falling BTC reference and an initially selected Down ticket', async () => {
+  const initial = {...preparation, preparation: {...preparation.preparation,
+    intent: {...preparationIntent, side: 'Up', upQuoteCents: 88, downQuoteCents: 12, currentPrice: 82979}}};
+  const claimed = {...initial, preparation: {...initial.preparation, state: 'CLAIMED',
+    intent: {...initial.preparation.intent, claimToken: token}}};
+  const fixture = ticketFixture({upQuote: '88%', downQuote: '12¢', buySide: '跌'});
+  const flow = preparationTransport({claim: () => claimed, read: () => claimed});
+  const result = await prepareOnlyOnce(initial, fixture.doc, () => marketUrl,
+    navigationFixture().storage, flow.transport, () => now);
+  assert.equal(result?.status, 'READY');
+  assert.equal(flow.reports[0].selectedSide, 'Up');
+  assert.equal(fixture.directionClicks(), 1);
+  assert.equal(fixture.buyClicks(), 0);
+});
+
+test('the worker accepts exact schema2 quote snapshots, keeps schema1 read-only compatibility and rejects extra quote data', async () => {
+  let handler;
+  const requests = [];
+  class Clock extends Date { static now() { return now * 1000; } }
+  vm.runInNewContext(readFileSync(new URL('./future-btc5m-extension/background.js', import.meta.url), 'utf8'), {
+    URL, AbortSignal, Date: Clock, chrome: {runtime: {onMessage: {addListener(fn) { handler = fn; }}}},
+    fetch: async (url, options) => { requests.push({url, options}); return {ok: true, json: async () => ({})}; },
+  });
+  const sender = {url: marketUrl, frameId: 0, tab: {id: 1, url: marketUrl}};
+  const payload = {schemaVersion: 2, marketUrl, pagePeriodStart: start, checkedAt: now, navigation: 'CURRENT',
+    ticketStatus: 'PASS', amountUsd: 1, selectedSide: 'Down', buyButtonEnabled: true, upQuoteCents: 12, downQuoteCents: 88};
+  const {upQuoteCents, downQuoteCents, ...legacy} = payload;
+  for (const report of [payload, {...legacy, schemaVersion: 1}, {...payload, upQuoteCents: null, downQuoteCents: null}]) {
+    await new Promise((resolve) => {
+      assert.equal(handler({type: 'FUTURE_BTC5M_PREFLIGHT', payload: report}, sender,
+        (reply) => { assert.equal(reply.ok, true); resolve(); }), true);
+    });
+  }
+  for (const change of [{schemaVersion: 3}, {upQuoteCents: '12'}, {upQuoteCents: -1}, {downQuoteCents: 100.01},
+    {upQuoteCents: 12.123}, {downQuoteCents: Infinity}, {upQuoteCents: undefined},
+    {quoteObservedAt: now}, {dom: 'private-page-data'}]) {
+    assert.equal(handler({type: 'FUTURE_BTC5M_PREFLIGHT', payload: {...payload, ...change}}, sender, () => {}), undefined);
+  }
+  assert.equal(requests.length, 3);
+  assert.deepEqual(JSON.parse(requests[0].options.body), payload);
+  assert.equal(requests[0].options.credentials, 'omit');
+  for (const reason of ['BUTTON_QUOTES_UNAVAILABLE', 'BUTTON_QUOTES_TIED', 'BUTTON_QUOTES_NOT_FRESH', 'HIGHER_BUTTON_SIDE_CHANGED']) {
+    await new Promise((resolve) => {
+      assert.equal(handler({type: 'FUTURE_BTC5M_PREPARATION_ACK', payload: {
+        schemaVersion: 1, id: preparationIntent.id, claimToken: token, checkedAt: now, status: 'FAILED',
+        marketUrl, amountUsd: 1, selectedSide: 'Down', reason, noSubmission: true,
+      }}, sender, (reply) => { assert.equal(reply.ok, true); resolve(); }), true);
+    });
+  }
+  assert.equal(requests.length, 7);
 });

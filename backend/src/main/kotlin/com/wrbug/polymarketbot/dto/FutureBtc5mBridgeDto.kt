@@ -38,12 +38,15 @@ data class FutureBtc5mPreflight(
     val checkedAt: Double?, val receivedAt: Double?, val marketUrl: String?, val pagePeriodStart: Long?,
     val navigation: String, val ticketStatus: String, val amountUsd: Double?, val selectedSide: String?,
     val buyButtonEnabled: Boolean, val signalFresh: Boolean, val signalSide: String?, val sideMatches: Boolean,
-    val result: String, val reasons: List<String>, val lastPassed: FutureBtc5mPreflightPass?
+    val result: String, val reasons: List<String>, val lastPassed: FutureBtc5mPreflightPass?,
+    val upQuoteCents: Double?, val downQuoteCents: Double?, val preferredSide: String?, val selectionSource: String?
 )
 
 data class FutureBtc5mPreflightPass(
     val periodStart: Long, val checkedAt: Double, val marketUrl: String,
-    val signalSide: String, val amountUsd: Int, val noSubmission: Boolean
+    val signalSide: String?, val amountUsd: Int, val noSubmission: Boolean,
+    val schemaVersion: Int? = null, val selectionSource: String? = null,
+    val upQuoteCents: Double? = null, val downQuoteCents: Double? = null, val preferredSide: String? = null
 )
 
 data class FutureBtc5mPreparation(
@@ -59,7 +62,9 @@ data class FutureBtc5mPreparationIntent(
     val priceObservedAt: Double, val openPrice: Double, val currentPrice: Double,
     val priceSource: String, val openPriceSource: String, val twapLookbackSeconds: Int,
     val mode: String, val noSubmission: Boolean, val operatorAuthorized: Boolean,
-    val authorizationSource: String, val claimToken: String?
+    val authorizationSource: String, val claimToken: String?,
+    val upQuoteCents: Double? = null, val downQuoteCents: Double? = null,
+    val quoteObservedAt: Double? = null, val selectionSource: String? = null
 )
 
 data class FutureBtc5mPreparationRecord(
@@ -70,7 +75,9 @@ data class FutureBtc5mPreparationRecord(
     val mode: String, val noSubmission: Boolean, val operatorAuthorized: Boolean,
     val authorizationSource: String, val claimToken: String?,
     val state: String, val updatedAt: Double, val claimedAt: Double?, val reason: String?,
-    val receipt: FutureBtc5mPreparationReceipt?
+    val receipt: FutureBtc5mPreparationReceipt?,
+    val upQuoteCents: Double? = null, val downQuoteCents: Double? = null,
+    val quoteObservedAt: Double? = null, val selectionSource: String? = null
 )
 
 data class FutureBtc5mPreparationReceipt(

@@ -16,6 +16,7 @@ function validPreflight(message, sender) {
   const payload = message.payload;
   const keys = ['schemaVersion', 'marketUrl', 'pagePeriodStart', 'checkedAt', 'navigation', 'ticketStatus',
     'amountUsd', 'selectedSide', 'buyButtonEnabled'];
+  if (payload?.schemaVersion === 2) keys.push('upQuoteCents', 'downQuoteCents');
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
       Object.keys(payload).length !== keys.length || !keys.every((key) => Object.hasOwn(payload, key))) return false;
   const documentPage = marketPage(sender.url);
@@ -26,7 +27,7 @@ function validPreflight(message, sender) {
   const now = Date.now() / 1000;
   const start = Math.floor(now / 300) * 300;
   return Boolean(documentPage && page && match && payload.marketUrl === page.origin + page.pathname &&
-    payload.schemaVersion === 1 && Number.isSafeInteger(payload.pagePeriodStart) && payload.pagePeriodStart >= 0 &&
+    [1, 2].includes(payload.schemaVersion) && Number.isSafeInteger(payload.pagePeriodStart) && payload.pagePeriodStart >= 0 &&
     payload.pagePeriodStart % 300 === 0 && payload.pagePeriodStart === Number(match[1]) &&
     Number.isFinite(payload.checkedAt) && Math.abs(now - payload.checkedAt) <= 3 &&
     ['CURRENT', 'ENDED', 'MISMATCH'].includes(payload.navigation) &&
@@ -34,7 +35,9 @@ function validPreflight(message, sender) {
     (payload.navigation !== 'ENDED' || payload.pagePeriodStart < start) &&
     ['PASS', 'FAIL'].includes(payload.ticketStatus) &&
     (payload.amountUsd === null || Number.isFinite(payload.amountUsd) && payload.amountUsd >= 0) &&
-    ['Up', 'Down', null].includes(payload.selectedSide) && typeof payload.buyButtonEnabled === 'boolean');
+    ['Up', 'Down', null].includes(payload.selectedSide) && typeof payload.buyButtonEnabled === 'boolean' &&
+    (payload.schemaVersion === 1 || ['upQuoteCents', 'downQuoteCents'].every((key) => payload[key] === null ||
+      Number.isFinite(payload[key]) && payload[key] >= 0 && payload[key] <= 100 && Number(payload[key].toFixed(2)) === payload[key])));
 }
 
 function preparationMessage(message, sender) {
@@ -54,7 +57,8 @@ function preparationMessage(message, sender) {
   const keys = ['schemaVersion', 'id', 'claimToken', 'checkedAt', 'status', 'marketUrl',
     'amountUsd', 'selectedSide', 'reason', 'noSubmission'];
   const reasons = ['PREPARATION_FAILED', 'MARKET_MISMATCH', 'TICKET_CHANGED', 'UNSAFE_DIRECTION_CONTROL',
-    'AMOUNT_WRITE_FAILED', 'DIRECTION_WRITE_FAILED', 'POSTCHECK_FAILED', 'PREPARATION_REVOKED'];
+    'AMOUNT_WRITE_FAILED', 'DIRECTION_WRITE_FAILED', 'POSTCHECK_FAILED', 'PREPARATION_REVOKED',
+    'BUTTON_QUOTES_UNAVAILABLE', 'BUTTON_QUOTES_TIED', 'BUTTON_QUOTES_NOT_FRESH', 'HIGHER_BUTTON_SIDE_CHANGED'];
   if (type !== 'FUTURE_BTC5M_PREPARATION_ACK' || Object.keys(payload).length !== keys.length ||
       !keys.every((key) => Object.hasOwn(payload, key)) || payload.noSubmission !== true ||
       typeof payload.claimToken !== 'string' || !/^[a-f0-9]{32}$/.test(payload.claimToken) ||

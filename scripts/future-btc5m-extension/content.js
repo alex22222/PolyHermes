@@ -189,6 +189,32 @@
     return true;
   }
 
+  function parseButtonQuote(text, side) {
+    if (typeof text !== 'string' || !['Up', 'Down'].includes(side)) return null;
+    const match = text.trim().match(/^(涨|跌)\s*((?:0|[1-9]\d{0,2})(?:\.\d{1,2})?)\s*(¢|%)$/);
+    if (!match || match[1] !== (side === 'Up' ? '涨' : '跌')) return null;
+    const quote = Number(match[2]);
+    return quote >= 0 && quote <= 100 ? quote : null;
+  }
+
+  function validButtonQuote(value) {
+    return Number.isFinite(value) && value >= 0 && value <= 100 && Number(value.toFixed(2)) === value;
+  }
+
+  function readButtonQuotes(ticket) {
+    const buttons = [...ticket.querySelectorAll('button')].filter((button) => button.getClientRects().length);
+    const quote = (side, pattern) => {
+      const matches = buttons.filter((button) => pattern.test(button.textContent.trim()));
+      return matches.length === 1 && buttonIsEnabled(matches[0]) && matches[0].tagName === 'BUTTON' &&
+        matches[0].type === 'button' ? parseButtonQuote(matches[0].textContent, side) : null;
+    };
+    const upQuoteCents = quote('Up', /^涨(?:\s|\d|--)/);
+    const downQuoteCents = quote('Down', /^跌(?:\s|\d|--)/);
+    const preferredSide = upQuoteCents === null || downQuoteCents === null || upQuoteCents === downQuoteCents ? null :
+      upQuoteCents > downQuoteCents ? 'Up' : 'Down';
+    return {upQuoteCents, downQuoteCents, preferredSide};
+  }
+
   function readPreflight(doc, url, now = Date.now() / 1000) {
     let parsed;
     try {
@@ -204,8 +230,9 @@
     const start = Math.floor(now / 300) * 300;
     const navigation = pagePeriodStart < start ? 'ENDED' : pagePeriodStart !== start || endedMarketButtons(doc).length ? 'MISMATCH' : 'CURRENT';
     // Only origin/path leave the tab. Query parameters, DOM text and errors do not.
-    const report = {schemaVersion: 1, marketUrl: parsed.origin + parsed.pathname, pagePeriodStart,
-      checkedAt: now, navigation, ticketStatus: 'FAIL', amountUsd: null, selectedSide: null, buyButtonEnabled: false};
+    const report = {schemaVersion: 2, marketUrl: parsed.origin + parsed.pathname, pagePeriodStart,
+      checkedAt: now, navigation, ticketStatus: 'FAIL', amountUsd: null, selectedSide: null, buyButtonEnabled: false,
+      upQuoteCents: null, downQuoteCents: null};
     if (navigation !== 'CURRENT') return report;
     try {
       const input = findAmountInput(doc);
@@ -222,6 +249,9 @@
       report.amountUsd = Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
       report.selectedSide = /涨$/.test(buttons[0].textContent.trim()) ? 'Up' : 'Down';
       report.buyButtonEnabled = buttonIsEnabled(buttons[0]);
+      const quotes = readButtonQuotes(ticket);
+      report.upQuoteCents = quotes.upQuoteCents;
+      report.downQuoteCents = quotes.downQuoteCents;
       report.ticketStatus = 'PASS';
     } catch {
       // Inspection failures report fixed stages, never raw page data.
@@ -254,8 +284,17 @@
         preparation?.mode !== 'PREPARE_ONLY' || preparation.noSubmission !== true ||
         preparation.operatorAuthorized !== true || preparation.authorizationSource !== 'USER_REQUEST' ||
         preparation.enabled !== true || !['PENDING', 'CLAIMED'].includes(preparation.state) || !intent ||
-        intent.schemaVersion !== 1 || intent.mode !== 'PREPARE_ONLY' || intent.noSubmission !== true ||
+        intent.schemaVersion !== 2 || intent.mode !== 'PREPARE_ONLY' || intent.noSubmission !== true ||
         intent.operatorAuthorized !== true || intent.authorizationSource !== 'USER_REQUEST') return null;
+    const keys = ['schemaVersion', 'id', 'slug', 'periodStart', 'periodEnd', 'side', 'amountUsd', 'createdAt',
+      'expiresAt', 'priceObservedAt', 'openPrice', 'currentPrice', 'priceSource', 'openPriceSource',
+      'twapLookbackSeconds', 'mode', 'noSubmission', 'operatorAuthorized', 'authorizationSource', 'claimToken',
+      'upQuoteCents', 'downQuoteCents', 'quoteObservedAt', 'selectionSource'];
+    if (Object.keys(intent).length !== keys.length || !keys.every((key) => Object.hasOwn(intent, key)) ||
+        intent.selectionSource !== 'HIGHER_BUTTON_PRICE' || !validButtonQuote(intent.upQuoteCents) ||
+        !validButtonQuote(intent.downQuoteCents) || intent.upQuoteCents === intent.downQuoteCents ||
+        intent.side !== (intent.upQuoteCents > intent.downQuoteCents ? 'Up' : 'Down') ||
+        !Number.isFinite(intent.quoteObservedAt) || intent.quoteObservedAt > now || now - intent.quoteObservedAt > 5) return null;
     const start = Math.floor(now / 300) * 300;
     if (!Number.isSafeInteger(intent.periodStart) || intent.periodStart !== start ||
         intent.id !== `future-btc5m-prepare:${start}` || intent.slug !== `btc-updown-5m-${start}` ||
@@ -263,8 +302,7 @@
         intent.priceSource !== 'chainlink' ||
         intent.openPriceSource !== 'polymarket_crypto_price_fiveminute_twap60_openPrice' ||
         intent.twapLookbackSeconds !== 60 || !Number.isFinite(intent.openPrice) || intent.openPrice <= 0 ||
-        !Number.isFinite(intent.currentPrice) || intent.currentPrice <= 0 || intent.currentPrice === intent.openPrice ||
-        intent.side !== (intent.currentPrice > intent.openPrice ? 'Up' : 'Down') ||
+        !Number.isFinite(intent.currentPrice) || intent.currentPrice <= 0 ||
         !Number.isFinite(intent.createdAt) || intent.createdAt < start + 60 || intent.createdAt >= start + 80 ||
         intent.expiresAt !== start + 80 || now < intent.createdAt || now >= intent.expiresAt ||
         !Number.isFinite(intent.priceObservedAt) || intent.priceObservedAt > intent.createdAt ||
@@ -317,7 +355,10 @@
     if (states.Up === states.Down) throw preparationError('UNSAFE_DIRECTION_CONTROL');
     const selectedSide = states.Up ? 'Up' : 'Down';
     if (selectedSide !== report.selectedSide) throw preparationError('UNSAFE_DIRECTION_CONTROL');
-    return {input, directions, selectedSide};
+    const quotes = readButtonQuotes(ticket);
+    if (quotes.upQuoteCents === null || quotes.downQuoteCents === null) throw preparationError('BUTTON_QUOTES_UNAVAILABLE');
+    if (!quotes.preferredSide) throw preparationError('BUTTON_QUOTES_TIED');
+    return {input, directions, selectedSide, ...quotes};
   }
 
   async function prepareOnlyOnce(wrapper, doc, readUrl, storage, transport, nowFn = () => Date.now() / 1000) {
@@ -330,16 +371,21 @@
       const current = await transport.readPreparation();
       const now = nowFn();
       if (now >= intent.expiresAt) throw preparationError('INTENT_EXPIRED');
+      if (now - intent.priceObservedAt > 5) throw preparationError('PREPARATION_REVOKED');
+      if (now - intent.quoteObservedAt > 5) throw preparationError('BUTTON_QUOTES_NOT_FRESH');
       const value = usablePreparation(current, now);
       if (!value || current.preparation.state !== 'CLAIMED' || value.id !== intent.id ||
           value.claimToken !== claimed.claimToken || now - intent.priceObservedAt > 5 ||
           !Object.keys(intent).every((field) => field === 'claimToken' || value[field] === intent[field])) {
         throw preparationError('PREPARATION_REVOKED');
       }
-      return readPreparationTicket(doc, readUrl(), intent.periodStart);
+      const ticket = readPreparationTicket(doc, readUrl(), intent.periodStart);
+      if (ticket.preferredSide !== intent.side) throw preparationError('HIGHER_BUTTON_SIDE_CHANGED');
+      return ticket;
     };
     try {
-      readPreparationTicket(doc, readUrl(), intent.periodStart);
+      const initial = readPreparationTicket(doc, readUrl(), intent.periodStart);
+      if (initial.preferredSide !== intent.side) throw preparationError('HIGHER_BUTTON_SIDE_CHANGED');
       const previous = JSON.parse(storage.getItem(key) || 'null');
       if (previous !== null && (!Number.isSafeInteger(previous.periodStart) ||
           previous.id !== `future-btc5m-prepare:${previous.periodStart}`)) throw preparationError('PREPARATION_FAILED');
@@ -382,7 +428,8 @@
       result = {status: 'READY', reason: null};
     } catch (error) {
       const codes = ['PREPARATION_FAILED', 'MARKET_MISMATCH', 'TICKET_CHANGED', 'UNSAFE_DIRECTION_CONTROL',
-        'AMOUNT_WRITE_FAILED', 'DIRECTION_WRITE_FAILED', 'POSTCHECK_FAILED', 'INTENT_EXPIRED', 'PREPARATION_REVOKED'];
+        'AMOUNT_WRITE_FAILED', 'DIRECTION_WRITE_FAILED', 'POSTCHECK_FAILED', 'INTENT_EXPIRED', 'PREPARATION_REVOKED',
+        'BUTTON_QUOTES_UNAVAILABLE', 'BUTTON_QUOTES_TIED', 'BUTTON_QUOTES_NOT_FRESH', 'HIGHER_BUTTON_SIDE_CHANGED'];
       const reason = codes.includes(error.code) ? error.code : 'PREPARATION_FAILED';
       result = {status: reason === 'INTENT_EXPIRED' ? 'EXPIRED' : 'FAILED', reason};
     }
@@ -403,7 +450,7 @@
 
   // Export pure guards for the local fixture tests; this is an isolated extension world.
   globalThis.FutureBtc5m = {usableDraft, matchesMarket, observationView, findAmountInput, prepareAmount,
-    navigationTarget, followCurrentMarket, readPreflight, usablePreparation, readPreparationTicket, prepareOnlyOnce};
+    navigationTarget, followCurrentMarket, readPreflight, usablePreparation, readPreparationTicket, prepareOnlyOnce, parseButtonQuote};
   if (typeof document === 'undefined') return;
 
   const panel = document.createElement('aside');
@@ -426,7 +473,7 @@
   const preflightReport = document.createElement('p');
   const preparationReport = document.createElement('p');
   const note = document.createElement('p');
-  note.textContent = '自动票据仅准备策略方向和 $1；由你核对并点击 Future 买入。$1 为订单本金，费用以平台为准。';
+  note.textContent = '自动票据选择按钮数字较大的一方并填入 $1；由你核对并点击 Future 买入。$1 为订单本金，费用以平台为准。';
   panel.append(title, text, link, prepare, inspect, inspection, navigation, note, preflightReport, preparationReport);
   document.body.append(panel);
   let latest = null;
@@ -472,7 +519,7 @@
     try {
       const wrapper = await preparationRequest('FUTURE_BTC5M_PREPARATION');
       const labels = {DISABLED: '已关闭', WAITING_SIGNAL: '等待本轮信号', WAITING_BROWSER: '等待浏览器报告', PENDING: '等待准备',
-        CLAIMED: '本轮已认领，不重复准备', READY: '已准备 $1 与策略方向，请核对后手动买入',
+        CLAIMED: '本轮已认领，不重复准备', READY: '已准备 $1 与按钮数字较大的一方，请核对后手动买入',
         FAILED: '本轮准备失败，不重试', EXPIRED: '本轮准备窗口已过期', REVOKED: '本轮准备已停止',
         RECEIPT_UNKNOWN: '票据回执未知，请检查页面', BLOCKED: '准备受阻'};
       const value = wrapper?.preparation;
@@ -481,6 +528,7 @@
           value.noSubmission !== true || value.operatorAuthorized !== true ||
           value.authorizationSource !== 'USER_REQUEST' || typeof value.enabled !== 'boolean' ||
           !Object.hasOwn(labels, value.state)) throw preparationError('PREPARATION_FAILED');
+      text.textContent = text.textContent.replace('本轮采样方向：', 'BTC参考价差（不决定票据方向）：');
       const state = value.state;
       preparationReport.textContent = `自动票据：${labels[state] || '本地准备服务未就绪'}（未提交订单）`;
       if (reportPromise) await reportPromise.catch(() => {});
@@ -494,7 +542,7 @@
         },
       });
       if (result) preparationReport.textContent = result.status === 'READY' ?
-        '自动票据：已准备 $1 与策略方向，请核对后手动买入（未提交订单）' :
+        `自动票据：已准备 $1，并按按钮较大数值选择${value.intent.side === 'Up' ? '涨 Up' : '跌 Down'}，请核对后手动买入（未提交订单）` :
         `自动票据：${result.status} · ${result.reason}（未提交订单，不重试）`;
     } catch {
       preparationReport.textContent = '自动票据：本地准备服务未连接（未提交订单）';

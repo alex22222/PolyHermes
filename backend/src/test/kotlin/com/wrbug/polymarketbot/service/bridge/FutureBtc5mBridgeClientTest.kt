@@ -238,7 +238,8 @@ class FutureBtc5mBridgeClientTest {
         assertFalse(mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preflight").path("browserConnected").asBoolean())
         val restarted = expired + mapOf("checkedAt" to null, "receivedAt" to null, "marketUrl" to null,
             "pagePeriodStart" to null, "navigation" to "UNKNOWN", "ticketStatus" to "UNKNOWN", "amountUsd" to null,
-            "selectedSide" to null, "buyButtonEnabled" to false, "signalFresh" to false, "signalSide" to null)
+            "selectedSide" to null, "buyButtonEnabled" to false, "signalFresh" to false, "signalSide" to null,
+            "upQuoteCents" to null, "downQuoteCents" to null, "preferredSide" to null, "selectionSource" to null)
         responseBody = mapper.writeValueAsString(status() + ("preflight" to restarted))
         val result = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preflight")
         assertTrue(result.path("checkedAt").isNull)
@@ -280,7 +281,7 @@ class FutureBtc5mBridgeClientTest {
     @Test
     fun `preparation rejects wrong market size source price direction and acquisition window`() {
         val valid = preparationIntent()
-        listOf(valid + ("schemaVersion" to 2), valid + ("id" to "future-btc5m:1791706200"),
+        listOf(valid + ("schemaVersion" to 3), valid + ("id" to "future-btc5m:1791706200"),
             valid + ("slug" to "btc-updown-5m-1791706500"), valid + ("amountUsd" to 2),
             valid + ("amountUsd" to "1"), valid + ("priceSource" to "binance"),
             valid + ("openPriceSource" to "legacy"), valid + ("twapLookbackSeconds" to 30),
@@ -371,7 +372,7 @@ class FutureBtc5mBridgeClientTest {
             val view = preparation(true, state, if (state == "READY") null else record.filterKeys { it in preparationIntent().keys }, record)
             listOf(activeStatus() + mapOf("serverTime" to 1791706271.0, "signal" to (freshSignal() + ("price_observed_at" to 1791706271.0))),
                 activeStatus() + ("signal" to null), activeStatus() + ("feedStatus" to "UNAVAILABLE"),
-                activeStatus() + ("signal" to (freshSignal() + mapOf("side" to "Down", "current_price" to 82998.0)))).forEach { payload ->
+                activeStatus() + ("signal" to (freshSignal() + ("side" to "Down")))).forEach { payload ->
                 responseBody = mapper.writeValueAsString(payload + ("preparation" to view))
                 assertThrows(IllegalStateException::class.java) { client.status() }
             }
@@ -435,14 +436,140 @@ class FutureBtc5mBridgeClientTest {
         }
     }
 
+    @Test
+    fun `schema two prepares the higher Future button side independently of Chainlink momentum or flat reference`() {
+        listOf(false, true).forEach { flat ->
+            val intent = preparationIntent() + mapOf("schemaVersion" to 2, "side" to "Down",
+                "upQuoteCents" to 12.5, "downQuoteCents" to 88.25, "quoteObservedAt" to 1791706265.0,
+                "selectionSource" to "HIGHER_BUTTON_PRICE", "currentPrice" to if (flat) 82999.0 else 83000.0)
+            val signal = freshSignal() + if (flat) mapOf("side" to null, "current_price" to 82999.0) else emptyMap()
+            val browser = preflight() + mapOf("selectedSide" to "Down", "signalSide" to if (flat) null else "Up",
+                "upQuoteCents" to 12.5, "downQuoteCents" to 88.25, "preferredSide" to "Down", "selectionSource" to "HIGHER_BUTTON_PRICE",
+                "lastPassed" to ((preflight()["lastPassed"] as Map<*, *>) + mapOf("schemaVersion" to 2,
+                    "signalSide" to if (flat) null else "Up", "selectionSource" to "HIGHER_BUTTON_PRICE",
+                    "upQuoteCents" to 12.5, "downQuoteCents" to 88.25, "preferredSide" to "Down")))
+            listOf("PENDING", "CLAIMED", "READY").forEach { state ->
+                val record = preparationRecord(state) + intent + mapOf("claimToken" to if (state == "PENDING") null else "a".repeat(32),
+                    "receipt" to if (state == "READY") mapOf("checkedAt" to 1791706265.0,
+                        "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200", "amountUsd" to 1, "selectedSide" to "Down") else null)
+                responseBody = mapper.writeValueAsString(activeStatus() + mapOf("signal" to signal, "preflight" to browser,
+                    "preparation" to preparation(true, state, if (state == "READY") null else record.filterKeys { it in intent.keys }, record)))
+                val result = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status())
+                assertEquals(state, result.path("preparation").path("state").asText())
+                assertEquals("Down", result.path("preparation").path("lastAttempt").path("side").asText())
+                assertEquals(88.25, result.path("preparation").path("lastAttempt").path("downQuoteCents").asDouble())
+                assertFalse(result.path("effectiveEnabled").asBoolean())
+            }
+        }
+    }
+
+    @Test
+    fun `legacy preparation is readable history but cannot expose a current intent or READY permission`() {
+        val legacy = legacyPreparationRecord("READY")
+        responseBody = mapper.writeValueAsString(status() + ("preparation" to preparation(false, "DISABLED", null, legacy)))
+        assertEquals(1, mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preparation").path("lastAttempt").path("schemaVersion").asInt())
+        listOf("PENDING", "CLAIMED", "READY").forEach { state ->
+            val record = legacyPreparationRecord(state)
+            responseBody = mapper.writeValueAsString(activeStatus() + ("preparation" to preparation(true, state,
+                if (state == "READY") null else record.filterKeys { it in legacyPreparationRecord("PENDING").keys - setOf("state", "updatedAt", "claimedAt", "reason", "receipt") }, record)))
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+    }
+
+    @Test
+    fun `button quote evidence rejects ties bounds coercion wrong source side changes and frozen samples`() {
+        val intent = preparationIntent()
+        listOf(intent - "upQuoteCents", intent + ("upQuoteCents" to null), intent + ("upQuoteCents" to "54"),
+            intent + ("upQuoteCents" to -0.1), intent + ("downQuoteCents" to 100.1),
+            intent + ("downQuoteCents" to 54), intent + ("selectionSource" to "CHAINLINK"),
+            intent + ("quoteObservedAt" to 1791706259.0), intent + ("quoteObservedAt" to 1791706266.0)).forEach { value ->
+            responseBody = mapper.writeValueAsString(activeStatus() + ("preparation" to preparation(true, "PENDING", value,
+                preparationRecord("PENDING") + value)))
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+        listOf("PENDING", "CLAIMED", "READY").forEach { state ->
+            val record = preparationRecord(state)
+            val view = preparation(true, state, if (state == "READY") null else record.filterKeys { it in intent.keys }, record)
+            listOf(mapOf("upQuoteCents" to 12, "downQuoteCents" to 88, "preferredSide" to "Down"),
+                mapOf("upQuoteCents" to null, "preferredSide" to null),
+                mapOf("upQuoteCents" to 46, "preferredSide" to null)).forEach { change ->
+                responseBody = mapper.writeValueAsString(activeStatus() + mapOf("preparation" to view,
+                    "preflight" to (preflight() + change + mapOf("sideMatches" to false, "result" to "BLOCKED", "reasons" to listOf("SIDE_MISMATCH")))))
+                assertThrows(IllegalStateException::class.java) { client.status() }
+            }
+        }
+        val ready = preparationRecord("READY")
+        listOf(preparationRecord("CLAIMED") + mapOf("claimedAt" to 1791706271.0, "updatedAt" to 1791706271.0),
+            ready + mapOf("updatedAt" to 1791706271.0, "receipt" to ((ready["receipt"] as Map<*, *>) + ("checkedAt" to 1791706271.0)))).forEach { value ->
+            val frozenQuotes = value + mapOf("priceObservedAt" to 1791706266.0, "createdAt" to 1791706266.0)
+            responseBody = mapper.writeValueAsString(status() + mapOf("serverTime" to 1791706271.0,
+                "preparation" to preparation(false, "DISABLED", null, frozenQuotes)))
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+    }
+
+    @Test
+    fun `current quote match remains a browser fact without a fresh Chainlink reference`() {
+        val browser = preflight() + mapOf("signalFresh" to false, "signalSide" to null,
+            "result" to "BLOCKED", "reasons" to listOf("SIGNAL_NOT_FRESH"))
+        responseBody = mapper.writeValueAsString(status() + ("preflight" to browser))
+        val result = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preflight")
+        assertTrue(result.path("sideMatches").asBoolean())
+        assertFalse(result.path("signalFresh").asBoolean())
+        assertEquals("Up", result.path("preferredSide").asText())
+        listOf("BUTTON_QUOTES_UNAVAILABLE", "BUTTON_QUOTES_TIED", "BUTTON_QUOTES_NOT_FRESH", "HIGHER_BUTTON_SIDE_CHANGED").forEach { reason ->
+            responseBody = mapper.writeValueAsString(status(true) + ("preparation" to
+                (preparation(true, "WAITING_BROWSER") + ("reasons" to listOf(reason)))))
+            assertEquals(reason, client.status().preparation.reasons.single())
+            val failed = preparationRecord("FAILED") + mapOf("reason" to reason, "receipt" to mapOf(
+                "checkedAt" to 1791706265.0, "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200",
+                "amountUsd" to 1, "selectedSide" to "Up"))
+            responseBody = mapper.writeValueAsString(status() + ("preparation" to preparation(false, "DISABLED", null, failed)))
+            assertEquals(reason, client.status().preparation.lastAttempt!!.reason)
+        }
+    }
+
+    @Test
+    fun `new preflight history requires exact quote facts while legacy history receives no invented quotes`() {
+        responseBody = mapper.writeValueAsString(status() + mapOf("signal" to freshSignal(), "preflight" to preflight()))
+        val legacy = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preflight").path("lastPassed")
+        assertTrue(legacy.path("upQuoteCents").isNull)
+        val history = (preflight()["lastPassed"] as Map<*, *>) + mapOf("schemaVersion" to 2,
+            "selectionSource" to "HIGHER_BUTTON_PRICE", "upQuoteCents" to 54.5, "downQuoteCents" to 43.5, "preferredSide" to "Up")
+        listOf(history - "preferredSide", history + ("preferredSide" to "Down"), history + ("downQuoteCents" to 54.5),
+            history + ("signalSide" to "Flat"), history + ("selectionSource" to "CHAINLINK"),
+            history + ("schemaVersion" to 1), history + ("platformOrderId" to "fake")).forEach { value ->
+            responseBody = mapper.writeValueAsString(status() + mapOf("signal" to freshSignal(), "preflight" to (preflight() + ("lastPassed" to value))))
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+    }
+
+    @Test
+    fun `button quotes reject excess cent precision`() {
+        val intent = preparationIntent() + ("upQuoteCents" to 54.345)
+        responseBody = mapper.writeValueAsString(activeStatus() + ("preparation" to preparation(true, "PENDING", intent,
+            preparationRecord("PENDING") + intent)))
+        assertThrows(IllegalStateException::class.java) { client.status() }
+    }
+
+    @Test
+    fun `READY requires passed current preflight`() {
+        responseBody = mapper.writeValueAsString(activeStatus() + mapOf(
+            "preflight" to (preflight() + mapOf("result" to "BLOCKED", "reasons" to listOf("BROWSER_CHECK_OUTSIDE_ENTRY"))),
+            "preparation" to preparation(true, "READY", null, preparationRecord("READY"))))
+        assertThrows(IllegalStateException::class.java) { client.status() }
+    }
+
     private fun preparationIntent() = mapOf(
-        "schemaVersion" to 1, "id" to "future-btc5m-prepare:1791706200", "slug" to "btc-updown-5m-1791706200",
+        "schemaVersion" to 2, "id" to "future-btc5m-prepare:1791706200", "slug" to "btc-updown-5m-1791706200",
         "periodStart" to 1791706200, "periodEnd" to 1791706500, "side" to "Up", "amountUsd" to 1,
         "createdAt" to 1791706265.0, "expiresAt" to 1791706280.0, "priceObservedAt" to 1791706265.0,
         "openPrice" to 82999.0, "currentPrice" to 83000.0, "priceSource" to "chainlink",
         "openPriceSource" to "polymarket_crypto_price_fiveminute_twap60_openPrice", "twapLookbackSeconds" to 60,
         "mode" to "PREPARE_ONLY", "noSubmission" to true, "operatorAuthorized" to true,
-        "authorizationSource" to "USER_REQUEST", "claimToken" to null
+        "authorizationSource" to "USER_REQUEST", "claimToken" to null,
+        "upQuoteCents" to 54.0, "downQuoteCents" to 46.0, "quoteObservedAt" to 1791706265.0,
+        "selectionSource" to "HIGHER_BUTTON_PRICE"
     )
 
     private fun preparationRecord(state: String) = preparationIntent() + mapOf(
@@ -452,6 +579,10 @@ class FutureBtc5mBridgeClientTest {
         "receipt" to if (state == "READY") mapOf("checkedAt" to 1791706265.0,
             "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200", "amountUsd" to 1, "selectedSide" to "Up") else null
     )
+
+    private fun legacyPreparationRecord(state: String) = preparationRecord(state).filterKeys {
+        it !in setOf("upQuoteCents", "downQuoteCents", "quoteObservedAt", "selectionSource")
+    } + ("schemaVersion" to 1)
 
     private fun preparation(enabled: Boolean = false, state: String = if (enabled) "WAITING_SIGNAL" else "DISABLED",
                             intent: Map<String, Any?>? = null, record: Map<String, Any?>? = null) = mapOf(
@@ -471,6 +602,7 @@ class FutureBtc5mBridgeClientTest {
         "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200", "pagePeriodStart" to 1791706200,
         "navigation" to "CURRENT", "ticketStatus" to "PASS", "amountUsd" to 1, "selectedSide" to "Up",
         "buyButtonEnabled" to true, "signalFresh" to true, "signalSide" to "Up", "sideMatches" to true,
+        "upQuoteCents" to 54.0, "downQuoteCents" to 46.0, "preferredSide" to "Up", "selectionSource" to "HIGHER_BUTTON_PRICE",
         "result" to "READ_ONLY_READY", "reasons" to emptyList<String>(),
         "lastPassed" to mapOf("periodStart" to 1791706200, "checkedAt" to 1791706265.0,
             "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200", "signalSide" to "Up",

@@ -3021,15 +3021,24 @@ export interface FutureBtc5mPreflight {
   signalFresh: boolean
   signalSide: 'Up' | 'Down' | null
   sideMatches: boolean
+  upQuoteCents: number | null
+  downQuoteCents: number | null
+  preferredSide: 'Up' | 'Down' | null
+  selectionSource: 'HIGHER_BUTTON_PRICE' | null
   result: 'WAITING_BROWSER' | 'BLOCKED' | 'READ_ONLY_READY'
   reasons: string[]
   lastPassed: {
     periodStart: number
     checkedAt: number
     marketUrl: string
-    signalSide: 'Up' | 'Down'
+    signalSide: 'Up' | 'Down' | null
     amountUsd: 1
     noSubmission: true
+    schemaVersion?: 2 | null
+    selectionSource?: 'HIGHER_BUTTON_PRICE' | null
+    upQuoteCents?: number | null
+    downQuoteCents?: number | null
+    preferredSide?: 'Up' | 'Down' | null
   } | null
 }
 
@@ -3074,8 +3083,7 @@ export interface FutureBtc5mBridgeStatus {
 export type FutureBtc5mPreparationState = 'DISABLED' | 'WAITING_SIGNAL' | 'WAITING_BROWSER' | 'PENDING' | 'CLAIMED' |
   'READY' | 'FAILED' | 'EXPIRED' | 'REVOKED' | 'RECEIPT_UNKNOWN' | 'BLOCKED'
 
-export interface FutureBtc5mPreparationIntent {
-  schemaVersion: 1
+interface FutureBtc5mPreparationBase {
   id: string
   slug: string
   periodStart: number
@@ -3097,7 +3105,12 @@ export interface FutureBtc5mPreparationIntent {
   claimToken: string | null
 }
 
-export interface FutureBtc5mPreparationRecord extends FutureBtc5mPreparationIntent {
+export type FutureBtc5mPreparationIntent = FutureBtc5mPreparationBase & (
+  { schemaVersion: 1; upQuoteCents?: null; downQuoteCents?: null; quoteObservedAt?: null; selectionSource?: null } |
+  { schemaVersion: 2; upQuoteCents: number; downQuoteCents: number; quoteObservedAt: number; selectionSource: 'HIGHER_BUTTON_PRICE' }
+)
+
+export type FutureBtc5mPreparationRecord = FutureBtc5mPreparationIntent & {
   state: 'PENDING' | 'CLAIMED' | 'READY' | 'FAILED' | 'EXPIRED' | 'REVOKED'
   updatedAt: number
   claimedAt: number | null

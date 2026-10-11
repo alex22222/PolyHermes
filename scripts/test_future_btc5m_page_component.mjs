@@ -30,7 +30,8 @@ const healthyStatus = (at = receipt) => {
     preflight: {mode: 'READ_ONLY', noSubmission: true, browserConnected: true,
       checkedAt: second, receivedAt: second, pagePeriodStart: start, navigation: 'CURRENT',
       ticketStatus: 'PASS', amountUsd: 1, selectedSide: 'Up', buyButtonEnabled: true,
-      signalFresh: true, signalSide: 'Up', sideMatches: true, result: 'READ_ONLY_READY', reasons: []},
+      signalFresh: true, signalSide: 'Up', sideMatches: true, upQuoteCents: 54, downQuoteCents: 46,
+      preferredSide: 'Up', selectionSource: 'HIGHER_BUTTON_PRICE', result: 'READ_ONLY_READY', reasons: []},
   };
 };
 
@@ -200,13 +201,14 @@ test('a wall-clock rollback after receipt remains invalid', async () => {
   assert.equal(page.field('Chrome 预检报告'), '未连接或已过期');
 });
 
-const preparationIntent = () => ({schemaVersion: 1, id: `future-btc5m-prepare:${start}`,
+const preparationIntent = () => ({schemaVersion: 2, id: `future-btc5m-prepare:${start}`,
   slug: `btc-updown-5m-${start}`, periodStart: start, periodEnd: start + 300, side: 'Up', amountUsd: 1,
   createdAt: start + 65, expiresAt: start + 80, priceObservedAt: start + 65,
   openPrice: 82000, currentPrice: 82001, priceSource: 'chainlink',
   openPriceSource: 'polymarket_crypto_price_fiveminute_twap60_openPrice', twapLookbackSeconds: 60,
   mode: 'PREPARE_ONLY', noSubmission: true, operatorAuthorized: true,
-  authorizationSource: 'USER_REQUEST', claimToken: null});
+  authorizationSource: 'USER_REQUEST', claimToken: null, upQuoteCents: 54, downQuoteCents: 46,
+  quoteObservedAt: start + 65, selectionSource: 'HIGHER_BUTTON_PRICE'});
 
 test('the switch controls ticket preparation and keeps final buy manual with no running executor', async () => {
   const page = mountPage(receipt);
@@ -271,11 +273,85 @@ test('a ready operation report stays separate from real orders and never claims 
 test('disabled preparation retains its historical report without current permission', async () => {
   const page = mountPage(receipt);
   const value = healthyStatus();
-  value.preparation.lastAttempt = {...preparationIntent(), state: 'REVOKED',
+  value.preparation.lastAttempt = {...preparationIntent(), schemaVersion: 1, upQuoteCents: null, downQuoteCents: null,
+    quoteObservedAt: null, selectionSource: null, state: 'REVOKED',
     updatedAt: start + 65, claimedAt: null, reason: 'PREPARATION_REVOKED', receipt: null};
   await page.reply('status', value);
   assert.equal(page.field('准备阶段'), '已关闭');
   assert.equal(page.field('最近准备结果'), '已撤销');
   assert.equal(page.field('待准备方向 / 金额'), '—');
   assert.equal(page.field('实际下单'), '未运行');
+});
+
+
+const higherButtonStatus = (flat = false) => {
+  const value = healthyStatus();
+  const intent = {...preparationIntent(), schemaVersion: 2, side: 'Down', upQuoteCents: 12,
+    downQuoteCents: 88, quoteObservedAt: start + 65, selectionSource: 'HIGHER_BUTTON_PRICE',
+    currentPrice: flat ? 82000 : 82001};
+  if (flat) value.signal = {...value.signal, side: null, current_price: 82000};
+  value.preflight = {...value.preflight, selectedSide: 'Down', signalSide: flat ? null : 'Up',
+    upQuoteCents: 12, downQuoteCents: 88, preferredSide: 'Down', selectionSource: 'HIGHER_BUTTON_PRICE'};
+  value.requestedEnabled = true;
+  value.mode = 'BLOCKED';
+  value.preparation = {...value.preparation, enabled: true, state: 'READY', reasons: [],
+    lastAttempt: {...intent, state: 'READY', claimToken: 'a'.repeat(32),
+      updatedAt: start + 65, claimedAt: start + 65, reason: null,
+      receipt: {checkedAt: start + 65, marketUrl: `https://future.news/zh/event/btc-updown-5m-${start}`,
+        amountUsd: 1, selectedSide: 'Down'}}};
+  return value;
+};
+
+test('higher Down button quote remains READY when Chainlink points Up or is flat', async () => {
+  for (const flat of [false, true]) {
+    const page = mountPage(receipt);
+    await page.reply('status', higherButtonStatus(flat));
+    assert.equal(page.field('准备阶段'), '票据已准备，未自动买入');
+    assert.equal(page.field('按钮报价方向'), 'Down');
+    assert.equal(page.field('观察方向'), flat ? '平价' : 'Up');
+    assert.equal(page.field('Up / Down 按钮报价'), '12¢ / 88¢');
+    assert.equal(page.field('准备报告金额 / 方向'), '$1 / Down');
+    assert.equal(page.field('实际下单'), '未运行');
+  }
+});
+
+test('frozen original quotes and changed current button winner revoke current READY between polls', async () => {
+  for (const change of [{quoteObservedAt: start + 59}, {schemaVersion: 1}]) {
+    const page = mountPage(receipt);
+    const value = higherButtonStatus();
+    value.preparation.lastAttempt = {...value.preparation.lastAttempt, ...change};
+    await page.reply('status', value);
+    assert.equal(page.field('准备阶段'), '等待有效信号');
+    assert.equal(page.field('最近准备结果'), '票据已准备，未自动买入');
+  }
+  const page = mountPage(receipt);
+  const value = higherButtonStatus();
+  value.preflight = {...value.preflight, upQuoteCents: 90, downQuoteCents: 10, preferredSide: 'Up',
+    sideMatches: false, result: 'BLOCKED', reasons: ['SIDE_MISMATCH']};
+  await page.reply('status', value);
+  assert.equal(page.field('准备阶段'), '等待有效信号');
+});
+
+
+test('a button quote tie or missing quote cannot display an active preparation or ready result', async () => {
+  for (const change of [{upQuoteCents: 88, preferredSide: null}, {downQuoteCents: null, preferredSide: null}]) {
+    const page = mountPage(receipt);
+    const value = higherButtonStatus();
+    value.preflight = {...value.preflight, ...change, result: 'BLOCKED', sideMatches: false, reasons: ['BUTTON_QUOTES_TIED']};
+    await page.reply('status', value);
+    assert.equal(page.field('准备阶段'), '等待有效信号');
+    assert.equal(page.field('按钮报价方向'), '等待不同且有效的按钮报价');
+    assert.equal(page.field('待准备方向 / 金额'), '—');
+    assert.equal(page.field('实际下单'), '未运行');
+  }
+});
+
+
+test('READY requires the current read-only preflight result to have passed', async () => {
+  const page = mountPage(receipt);
+  const value = higherButtonStatus();
+  value.preflight = {...value.preflight, result: 'BLOCKED', reasons: ['BROWSER_CHECK_OUTSIDE_ENTRY']};
+  await page.reply('status', value);
+  assert.equal(page.field('准备阶段'), '等待有效信号');
+  assert.equal(page.field('最近准备结果'), '票据已准备，未自动买入');
 });

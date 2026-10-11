@@ -4,7 +4,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined } from '@ant-design/icons'
 import { useMediaQuery } from 'react-responsive'
 import { apiService } from '../services/api'
-import { preflightIsFresh, preflightReasonText, signalIsFresh } from '../utils/futureBtc5mPreflight'
+import { higherButtonSide, preflightIsFresh, preflightReasonText, referenceIsFresh } from '../utils/futureBtc5mPreflight'
 import type { FutureBtc5mBridgeStatus, FutureBtc5mOrder, FutureBtc5mOrderStatus, FutureBtc5mPreparationState } from '../types'
 
 const preparationStateText: Record<FutureBtc5mPreparationState, string> = {
@@ -260,21 +260,32 @@ const FutureBtc5mBridge: React.FC = () => {
     !Number.isFinite(runtime.serverTime) || Math.abs(runtime.serverTime - statusReceivedAt / 1000) > 3))
   const ledgerError = runtime?.blockReasons.some((reason) => reason.startsWith('ORDER_LEDGER_')) ?? false
   const orderCounts = runtime && !ledgerError ? runtime.orderCounts : null
-  const signalFresh = signalIsFresh(runtime, statusReceivedAt, clock)
+  const referenceFresh = referenceIsFresh(runtime, statusReceivedAt, clock)
   const preflight = runtime?.preflight
   const browserFresh = preflightIsFresh(runtime, statusReceivedAt, clock)
-  const preflightReady = Boolean(browserFresh && signalFresh && preflight?.result === 'READ_ONLY_READY' &&
+  const buttonSide = browserFresh && preflight?.selectionSource === 'HIGHER_BUTTON_PRICE'
+    ? higherButtonSide(preflight.upQuoteCents, preflight.downQuoteCents) : null
+  const quotesFresh = Boolean(buttonSide && buttonSide === preflight?.preferredSide)
+  const preflightReady = Boolean(browserFresh && referenceFresh && quotesFresh && preflight?.result === 'READ_ONLY_READY' &&
     preflight.pagePeriodStart === runtime?.periodStart && preflight.navigation === 'CURRENT' &&
     preflight.ticketStatus === 'PASS' && preflight.amountUsd === 1 && preflight.sideMatches &&
-    preflight.selectedSide === runtime?.signal?.side && preflight.buyButtonEnabled)
+    preflight.selectedSide === buttonSide && preflight.buyButtonEnabled)
   const preparation = runtime?.preparation
   const serverNow = runtime ? Math.max(runtime.serverTime + (clock - statusReceivedAt) / 1000, clock / 1000) : 0
   const activeRecord = preparation?.intent || (preparation?.enabled && preparation.state === 'READY' ? preparation.lastAttempt : null)
   const intentExpired = Boolean(activeRecord && serverNow >= activeRecord.expiresAt)
-  const intentFresh = Boolean(runtime && !statusStale && preparation?.enabled && preparation.intent &&
-    serverNow >= preparation.intent.priceObservedAt && serverNow - preparation.intent.priceObservedAt <= 5 && !intentExpired)
-  const readyFresh = Boolean(activeRecord && serverNow >= activeRecord.priceObservedAt &&
-    serverNow - activeRecord.priceObservedAt <= 5 && signalFresh && runtime?.signal?.side === activeRecord.side)
+  const originalSamplesFresh = Boolean(activeRecord?.schemaVersion === 2 &&
+    activeRecord.selectionSource === 'HIGHER_BUTTON_PRICE' &&
+    higherButtonSide(activeRecord.upQuoteCents, activeRecord.downQuoteCents) === activeRecord.side &&
+    serverNow >= activeRecord.priceObservedAt && serverNow - activeRecord.priceObservedAt <= 5 &&
+    serverNow >= activeRecord.quoteObservedAt && serverNow - activeRecord.quoteObservedAt <= 5)
+  const currentPreparationFresh = originalSamplesFresh && referenceFresh && quotesFresh && buttonSide === activeRecord?.side &&
+    preflight?.pagePeriodStart === activeRecord?.periodStart && preflight?.navigation === 'CURRENT' && preflight?.ticketStatus === 'PASS'
+  const intentFresh = Boolean(runtime && !statusStale && preparation?.enabled && preparation.intent && currentPreparationFresh && !intentExpired)
+  const readyRecord = preparation?.lastAttempt
+  const readyFresh = Boolean(currentPreparationFresh && preflight?.result === 'READ_ONLY_READY' &&
+    preflight.amountUsd === 1 && preflight.selectedSide === readyRecord?.side && preflight.buyButtonEnabled &&
+    readyRecord?.claimedAt != null && preflight.receivedAt != null && preflight.receivedAt >= readyRecord.claimedAt)
   const preparationState = runtime && !statusStale && preparation
     ? intentExpired ? 'EXPIRED'
       : preparation.intent && !intentFresh || preparation.state === 'READY' && !readyFresh ? 'WAITING_SIGNAL'
@@ -289,7 +300,7 @@ const FutureBtc5mBridge: React.FC = () => {
   return <Space direction="vertical" size="middle" style={{ width: '100%' }}>
     <div>
       <Typography.Title level={3} style={{ marginBottom: 4 }}>Future BTC 5 分钟 Bridge</Typography.Title>
-      <Typography.Text type="secondary">自动准备 BTC 5 分钟 $1 票据，最终买入由你完成。每 5 秒更新准备状态与真实订单记录。</Typography.Text>
+      <Typography.Text type="secondary">按 Future 按钮报价较高的一侧自动准备 BTC 5 分钟 $1 票据，最终买入由你完成。每 5 秒更新准备状态与真实订单记录。</Typography.Text>
     </div>
 
     <Card title="自动准备票据控制" extra={<Button icon={<ReloadOutlined />} loading={statusLoading} onClick={() => { fetchStatus(); fetchOrders() }}>刷新</Button>}>
@@ -305,7 +316,7 @@ const FutureBtc5mBridge: React.FC = () => {
         {statusError && <Alert type="error" showIcon message="Bridge 状态未知" description={statusError} />}
         {statusStale && <Alert type="error" showIcon message="运行状态已过期，请刷新核对" description="当前状态时间已失效，开关与准备情况未知；仍可点击关闭自动准备票据。" />}
         {runtime && !runtime.executorReady && <Alert type="info" showIcon message="当前尚未接入 Future 交易执行器"
-          description="开启后会在有效信号出现时前往当前市场、选择方向并填写 $1，核对结果后由你检查并点击 Future 买入。准备流程不会点击买入或提交订单。" />}
+          description="开启后会前往当前市场，按 Up / Down 按钮数字较高的一侧选择方向并填写 $1；报价缺失或相同则等待。Chainlink 价格仅作参考。核对结果后由你检查并点击 Future 买入。准备流程不会点击买入或提交订单。" />}
         <Descriptions size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="Bridge 连接">{runtime ? runtime.online ? '在线' : '离线' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="执行器">{runtime ? '未接入' : '未知'}</Descriptions.Item>
@@ -316,9 +327,9 @@ const FutureBtc5mBridge: React.FC = () => {
           <Descriptions.Item label="服务器更新时间">{formatTime(runtime?.serverTime)}</Descriptions.Item>
           <Descriptions.Item label="下单阻断原因" span={isMobile ? 1 : 3}>{runtime?.blockReasons.join('；') || '—'}</Descriptions.Item>
         </Descriptions>
-        {runtime?.signal && <Descriptions title="信号采样记录" size="small" column={isMobile ? 1 : 3}>
+        {runtime?.signal && <Descriptions title="Chainlink 参考采样（不用于选择准备方向）" size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="市场" span={isMobile ? 1 : 3}>{marketLink(runtime.signal.slug)}</Descriptions.Item>
-          <Descriptions.Item label="观察方向">{signalFresh ? runtime.signal.side || '—' : '采样已过期'}</Descriptions.Item>
+          <Descriptions.Item label="观察方向">{referenceFresh ? runtime.signal.side || '平价' : '采样已过期'}</Descriptions.Item>
           <Descriptions.Item label="开盘参考价">{formatValue(runtime.signal.open_price, '$')}</Descriptions.Item>
           <Descriptions.Item label="采样价格">{formatValue(runtime.signal.current_price, '$')}</Descriptions.Item>
           <Descriptions.Item label="价格采样时间">{formatTime(runtime.signal.price_observed_at)}</Descriptions.Item>
@@ -332,15 +343,20 @@ const FutureBtc5mBridge: React.FC = () => {
           description="准备报告只记录页面金额、方向及检查结果。历史报告不能用于当前轮次入场，最终买入前请核对实时市场与票据。" />
         <Descriptions size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="准备阶段">{preparationState ? preparationStateText[preparationState] : '状态未知'}</Descriptions.Item>
+          <Descriptions.Item label="准备方向规则">Future Up / Down 按钮报价较高的一侧</Descriptions.Item>
           <Descriptions.Item label="准备模式">{preparation ? '仅准备票据，未提交订单' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="待准备方向 / 金额">{intent ? `${intent.side} / $1` : '—'}</Descriptions.Item>
           <Descriptions.Item label="待准备市场" span={isMobile ? 1 : 3}>{intent ? marketLink(intent.slug) : '—'}</Descriptions.Item>
+          <Descriptions.Item label="原按钮快照接收时间">{formatTime(intent?.quoteObservedAt)}</Descriptions.Item>
           <Descriptions.Item label="准备截止时间">{formatTime(intent?.expiresAt)}</Descriptions.Item>
           <Descriptions.Item label="准备原因" span={isMobile ? 1 : 2}>{preparation?.reasons.join('；') || '—'}</Descriptions.Item>
         </Descriptions>
         {lastAttempt && <Descriptions title="最近操作报告（历史事实）" size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="最近准备结果">{preparationStateText[lastAttempt.state]}</Descriptions.Item>
           <Descriptions.Item label="准备报告方向 / 本金">{lastAttempt.side} / $1</Descriptions.Item>
+          <Descriptions.Item label="报告选边规则">{lastAttempt.schemaVersion === 2 ? 'Future 按钮报价较高的一侧' : '历史规则：Chainlink 动量'}</Descriptions.Item>
+          <Descriptions.Item label="报告 Up / Down 报价">{lastAttempt.schemaVersion === 2 ? `${formatValue(lastAttempt.upQuoteCents)}¢ / ${formatValue(lastAttempt.downQuoteCents)}¢` : '历史记录未保存按钮报价'}</Descriptions.Item>
+          <Descriptions.Item label="报告按钮快照接收时间">{formatTime(lastAttempt.quoteObservedAt)}</Descriptions.Item>
           <Descriptions.Item label="操作报告更新时间">{formatTime(lastAttempt.updatedAt)}</Descriptions.Item>
           <Descriptions.Item label="准备报告市场" span={isMobile ? 1 : 3}>{marketLink(lastAttempt.slug)}</Descriptions.Item>
           <Descriptions.Item label="准备报告金额 / 方向">{lastAttempt.receipt ? `${formatValue(lastAttempt.receipt.amountUsd, '$')} / ${lastAttempt.receipt.selectedSide || '—'}` : '—'}</Descriptions.Item>
@@ -361,22 +377,23 @@ const FutureBtc5mBridge: React.FC = () => {
           <Descriptions.Item label="项目接口">{runtime && !statusStale && runtime.online ? '已连接' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="Chrome 预检报告">{browserFresh ? '新鲜' : '未连接或已过期'}</Descriptions.Item>
           <Descriptions.Item label="当前 BTC 5 分钟市场">{browserFresh && preflight?.navigation === 'CURRENT' && preflight.pagePeriodStart === runtime?.periodStart ? '已匹配' : '待匹配'}</Descriptions.Item>
-          <Descriptions.Item label="Chainlink / TWAP 60 秒">{signalFresh ? '已核对，采样新鲜' : '等待有效入场采样'}</Descriptions.Item>
+          <Descriptions.Item label="Chainlink / TWAP 60 秒">{referenceFresh ? '参考已核对，采样新鲜' : '等待有效入场采样'}</Descriptions.Item>
           <Descriptions.Item label="美元市价买入栏">{browserFresh && preflight?.ticketStatus === 'PASS' ? '只读检查通过' : '待检查'}</Descriptions.Item>
           <Descriptions.Item label="页面现有金额">{browserFresh ? formatValue(preflight?.amountUsd, '$') : '—'}</Descriptions.Item>
           <Descriptions.Item label="当前选中方向">{browserFresh ? preflight?.selectedSide || '—' : '—'}</Descriptions.Item>
-          <Descriptions.Item label="新鲜信号方向">{signalFresh ? runtime?.signal?.side || '—' : '—'}</Descriptions.Item>
-          <Descriptions.Item label="方向匹配">{browserFresh && signalFresh ? preflight?.sideMatches ? '匹配' : '待匹配' : '待核对'}</Descriptions.Item>
+          <Descriptions.Item label="Up / Down 按钮报价">{browserFresh && preflight?.selectionSource === 'HIGHER_BUTTON_PRICE' ? `${formatValue(preflight.upQuoteCents)}¢ / ${formatValue(preflight.downQuoteCents)}¢` : '—'}</Descriptions.Item>
+          <Descriptions.Item label="按钮报价方向">{quotesFresh ? buttonSide : '等待不同且有效的按钮报价'}</Descriptions.Item>
+          <Descriptions.Item label="方向匹配">{browserFresh && quotesFresh ? preflight?.sideMatches ? '匹配' : '待匹配' : '待核对'}</Descriptions.Item>
           <Descriptions.Item label="页面买入按钮">{browserFresh ? preflight?.buyButtonEnabled ? '可用，未点击' : '不可用' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="浏览器检查时间">{formatTime(preflight?.checkedAt)}</Descriptions.Item>
           <Descriptions.Item label="服务接收时间">{formatTime(preflight?.receivedAt)}</Descriptions.Item>
           <Descriptions.Item label="浏览器市场" span={isMobile ? 1 : 3}>{preflight?.marketUrl ? <Typography.Link href={preflight.marketUrl} target="_blank" rel="noopener noreferrer">{preflight.marketUrl}</Typography.Link> : '—'}</Descriptions.Item>
-          <Descriptions.Item label="预检原因" span={isMobile ? 1 : 3}>{preflightReasonText(preflightReady, browserFresh, signalFresh, preflight?.reasons || [])}</Descriptions.Item>
+          <Descriptions.Item label="预检原因" span={isMobile ? 1 : 3}>{preflightReasonText(preflightReady, browserFresh, referenceFresh, preflight?.reasons || [])}</Descriptions.Item>
         </Descriptions>
         {preflight?.lastPassed && <Descriptions title="最后通过的只读预检（历史记录）" size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="轮次">{formatTime(preflight.lastPassed.periodStart)}</Descriptions.Item>
           <Descriptions.Item label="检查时间">{formatTime(preflight.lastPassed.checkedAt)}</Descriptions.Item>
-          <Descriptions.Item label="方向 / 现有金额">{preflight.lastPassed.signalSide} / $1</Descriptions.Item>
+          <Descriptions.Item label="方向 / 现有金额">{preflight.lastPassed.schemaVersion === 2 ? preflight.lastPassed.preferredSide : preflight.lastPassed.signalSide} / $1</Descriptions.Item>
           <Descriptions.Item label="提交状态" span={isMobile ? 1 : 3}>未提交订单；历史通过记录不能用于当前轮次入场。</Descriptions.Item>
         </Descriptions>}
       </Space>

@@ -8,7 +8,7 @@ const source = readFileSync(new URL('../frontend/src/utils/futureBtc5mPreflight.
 const {outputText} = ts.transpileModule(source, {compilerOptions: {module: ts.ModuleKind.CommonJS}});
 const sandbox = {exports: {}};
 vm.runInNewContext(outputText, sandbox);
-const {signalIsFresh, preflightIsFresh, preflightReasonText} = sandbox.exports;
+const {signalIsFresh, referenceIsFresh, higherButtonSide, preflightIsFresh, preflightReasonText} = sandbox.exports;
 const start = 1791706200;
 const second = start + 65;
 const receipt = second * 1000;
@@ -85,4 +85,27 @@ test('empty reasons cannot claim success once the signal or entry window expires
   assert.equal(preflightReasonText(false, true, false, []), '信号或入场窗口已过期，等待刷新核对');
   assert.equal(preflightReasonText(false, true, true, []), '等待满足当前只读预检条件');
   assert.equal(preflightReasonText(false, false, true, []), '等待当前真实页面的新鲜只读报告');
+});
+
+
+test('higher button numbers determine preparation side without a sum-of-100 or integer constraint', () => {
+  assert.equal(higherButtonSide(12.5, 88.25), 'Down');
+  assert.equal(higherButtonSide(70, 40), 'Up');
+  for (const [up, down] of [[50, 50], [null, 50], ['12', 88], [-1, 88], [10, 101], [NaN, 88]]) {
+    assert.equal(higherButtonSide(up, down), null);
+  }
+});
+
+test('flat Chainlink prices remain a fresh reference for button-price preparation', () => {
+  const flat = {...runtime, signal: {...runtime.signal, side: null, current_price: runtime.signal.open_price}};
+  assert.equal(referenceIsFresh(flat, receipt, receipt), true);
+  assert.equal(signalIsFresh(flat, receipt, receipt), false);
+  assert.equal(referenceIsFresh({...flat, signal: {...flat.signal, side: 'Up'}}, receipt, receipt), false);
+  assert.equal(referenceIsFresh(flat, receipt, receipt + 1001), false);
+});
+
+
+test('button quotes support two decimal cents and reject greater precision', () => {
+  assert.equal(higherButtonSide(12.34, 88.01), 'Down');
+  assert.equal(higherButtonSide(12.345, 88), null);
 });

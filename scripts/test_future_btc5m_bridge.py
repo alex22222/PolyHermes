@@ -32,11 +32,19 @@ def source(at=START + 60):
 
 def browser_report(at=START + 60, **changes):
     return {
-        "schemaVersion": 1, "marketUrl": f"https://future.news/zh/event/btc-updown-5m-{START}",
+        "schemaVersion": 2, "marketUrl": f"https://future.news/zh/event/btc-updown-5m-{START}",
         "pagePeriodStart": START, "checkedAt": at, "navigation": "CURRENT",
         "ticketStatus": "PASS", "amountUsd": 1, "selectedSide": "Up", "buyButtonEnabled": True,
+        "upQuoteCents": 53, "downQuoteCents": 48,
         **changes,
     }
+
+
+def legacy_browser_report(at=START + 60, **changes):
+    report = browser_report(at, **changes)
+    report["schemaVersion"] = 1
+    del report["upQuoteCents"], report["downQuoteCents"]
+    return report
 
 
 def legacy_order(start=START, at=None):
@@ -69,11 +77,11 @@ class FutureBridgeTest(unittest.TestCase):
         self.source["server_time"] = at
         return self.bridge.observe()
 
-    def enable_and_prepare(self, at=START + 60):
+    def enable_and_prepare(self, at=START + 60, **changes):
         self.bridge.control(True)
         self.clock = at
         self.source["server_time"] = at
-        self.bridge.report_preflight(browser_report(at))
+        self.bridge.report_preflight(browser_report(at, **changes))
         return self.bridge.observe()
 
     def test_default_off_and_reads_do_not_create_orders(self):
@@ -214,7 +222,7 @@ class FutureBridgeTest(unittest.TestCase):
 
     def test_only_valid_down_signal_can_prepare_down(self):
         self.source["signal"].update(side="Down", current_price=82999)
-        status = self.enable_and_prepare()
+        status = self.enable_and_prepare(upQuoteCents=12, downQuoteCents=88)
         self.assertEqual("Down", status["preparation"]["intent"]["side"])
         self.assertEqual(0, self.bridge.orders()["total"])
 
@@ -346,7 +354,9 @@ class FutureBridgeTest(unittest.TestCase):
         record = json.loads((self.path / "preflight.jsonl").read_text())
         self.assertEqual({"periodStart": START, "checkedAt": START + 60,
                           "marketUrl": browser_report()["marketUrl"], "signalSide": "Up",
-                          "amountUsd": 1, "noSubmission": True}, record)
+                          "amountUsd": 1, "noSubmission": True, "schemaVersion": 2,
+                          "selectionSource": "HIGHER_BUTTON_PRICE", "upQuoteCents": 53,
+                          "downQuoteCents": 48, "preferredSide": "Up"}, record)
 
     def test_preflight_records_only_once_per_round_and_returns_copies(self):
         self.clock = START + 60
@@ -378,7 +388,7 @@ class FutureBridgeTest(unittest.TestCase):
     def test_preflight_whitelist_urls_types_and_report_time_are_strict(self):
         self.clock = START + 60
         scenarios = [
-            {"schemaVersion": True}, {"schemaVersion": 2}, {"extra": "field"},
+            {"schemaVersion": True}, {"schemaVersion": 3}, {"extra": "field"},
             {"marketUrl": f"https://future.news.evil/zh/event/btc-updown-5m-{START}"},
             {"marketUrl": f"http://future.news/zh/event/btc-updown-5m-{START}"},
             {"marketUrl": f"https://user:pass@future.news/zh/event/btc-updown-5m-{START}"},
@@ -442,6 +452,37 @@ class FutureBridgeTest(unittest.TestCase):
         self.assertEqual(passed, preflight["lastPassed"])
         restored.report_preflight(browser_report())
         self.assertEqual(1, len((self.path / "preflight.jsonl").read_text().splitlines()))
+
+    def test_legacy_preflight_pass_history_keeps_its_original_signal_meaning_and_bytes(self):
+        self.clock = START + 60
+        legacy = {"periodStart": START, "checkedAt": self.clock, "marketUrl": browser_report()["marketUrl"],
+                  "signalSide": "Up", "amountUsd": 1, "noSubmission": True}
+        ledger = self.path / "preflight.jsonl"
+        ledger.write_text(json.dumps(legacy) + "\n")
+        original = ledger.read_bytes()
+        restored = FutureBridge(self.path, lambda: self.source, lambda: self.clock)
+        status = restored.report_preflight(browser_report(upQuoteCents=12, downQuoteCents=88, selectedSide="Down"))
+        self.assertEqual("READ_ONLY_READY", status["preflight"]["result"])
+        self.assertEqual("Down", status["preflight"]["preferredSide"])
+        self.assertEqual(legacy, status["preflight"]["lastPassed"])
+        self.assertEqual(original, ledger.read_bytes())
+
+    def test_new_preflight_pass_quote_proof_is_strict_and_flat_reference_can_be_retained(self):
+        self.clock = START + 60
+        self.source["signal"].update(side=None, current_price=83000)
+        record = self.bridge.report_preflight(browser_report(upQuoteCents=12, downQuoteCents=88,
+                                                            selectedSide="Down"))["preflight"]["lastPassed"]
+        self.assertIsNone(record["signalSide"])
+        restored = FutureBridge(self.path, lambda: self.source, lambda: self.clock)
+        self.assertIsNone(restored.preflight_error)
+        self.assertEqual(record, restored.status()["preflight"]["lastPassed"])
+        ledger = self.path / "preflight.jsonl"
+        for changes in ({"preferredSide": "Up"}, {"upQuoteCents": True}, {"downQuoteCents": 101},
+                        {"selectionSource": "CHAINLINK"}, {"schemaVersion": True}, {"schemaVersion": 1}):
+            with self.subTest(changes=changes):
+                ledger.write_text(json.dumps({**record, **changes}) + "\n")
+                restored = FutureBridge(self.path, lambda: self.source, lambda: self.clock)
+                self.assertEqual("PREFLIGHT_LEDGER_INVALID", restored.preflight_error)
 
     def test_preflight_corrupt_ledger_blocks_only_preflight_and_keeps_original_bytes(self):
         self.load_legacy_and_observe()

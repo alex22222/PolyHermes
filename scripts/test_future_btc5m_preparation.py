@@ -9,7 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent))
 
 from future_btc5m_bridge import FutureBridge, PreparationConflict
-from test_future_btc5m_bridge import START, browser_report, source
+from test_future_btc5m_bridge import START, browser_report, legacy_browser_report, source
 
 
 class FuturePreparationTest(unittest.TestCase):
@@ -39,6 +39,197 @@ class FuturePreparationTest(unittest.TestCase):
         return {"schemaVersion": 1, "id": intent["id"], "claimToken": intent["claimToken"],
                 "checkedAt": self.clock, "status": "READY", "marketUrl": browser_report()["marketUrl"],
                 "amountUsd": 1, "selectedSide": "Up", "reason": None, "noSubmission": True, **changes}
+
+    def offer_quotes(self, up=12, down=88, **changes):
+        self.bridge.control(True)
+        self.clock = START + 60
+        self.source["server_time"] = self.clock
+        self.bridge.report_preflight(browser_report(schemaVersion=2, upQuoteCents=up, downQuoteCents=down, **changes))
+        return self.bridge.observe()["preparation"]
+
+    def test_higher_down_button_price_wins_even_when_chainlink_direction_is_up(self):
+        value = self.offer_quotes()
+        intent = value["intent"]
+        self.assertEqual("PENDING", value["state"])
+        self.assertEqual(2, intent["schemaVersion"])
+        self.assertEqual("Down", intent["side"])
+        self.assertEqual((12, 88, START + 60, "HIGHER_BUTTON_PRICE"), tuple(intent[field] for field in (
+            "upQuoteCents", "downQuoteCents", "quoteObservedAt", "selectionSource")))
+        intent = self.bridge.claim_preparation({"schemaVersion": 1, "id": intent["id"]})["preparation"]["intent"]
+        status = self.bridge.report_preflight(browser_report(schemaVersion=2, upQuoteCents=12, downQuoteCents=88,
+                                                           selectedSide="Down"))
+        self.assertEqual("Up", status["preflight"]["signalSide"])
+        self.assertEqual("Down", status["preflight"]["preferredSide"])
+        self.assertTrue(status["preflight"]["sideMatches"])
+        self.assertEqual("READ_ONLY_READY", status["preflight"]["result"])
+        value = self.bridge.report_preparation(self.acknowledgement(intent, selectedSide="Down"))["preparation"]
+        self.assertEqual("READY", value["state"])
+        self.assertEqual(0, self.bridge.orders()["total"])
+
+    def test_higher_up_button_price_wins_even_when_chainlink_direction_is_down(self):
+        self.source["signal"].update(side="Down", current_price=82999)
+        self.assertEqual("Up", self.offer_quotes(up=88.5, down=13)["intent"]["side"])
+
+    def test_flat_chainlink_is_health_reference_and_does_not_choose_the_button_side(self):
+        self.source["signal"].update(side=None, current_price=83000)
+        value = self.offer_quotes(selectedSide="Down")
+        self.assertEqual("Down", value["intent"]["side"])
+        self.assertEqual("READ_ONLY_READY", self.bridge.status()["preflight"]["result"])
+        self.assertIsNone(self.bridge.status()["preflight"]["signalSide"])
+
+    def test_missing_chainlink_direction_is_not_an_explicit_flat_reference(self):
+        self.source["signal"]["current_price"] = self.source["signal"]["open_price"]
+        del self.source["signal"]["side"]
+        value = self.offer_quotes(selectedSide="Down")
+        self.assertIsNone(value["intent"])
+        self.assertEqual(["WAITING_CURRENT_SIGNAL"], value["reasons"])
+
+    def test_legacy_preflight_without_button_quotes_cannot_fallback_to_chainlink(self):
+        self.bridge.control(True)
+        self.clock = START + 60
+        self.bridge.report_preflight(legacy_browser_report())
+        value = self.bridge.observe()["preparation"]
+        self.assertIsNone(value["intent"])
+        self.assertEqual(["BUTTON_QUOTES_UNAVAILABLE"], value["reasons"])
+        self.assertIsNone(self.bridge.status()["preflight"]["preferredSide"])
+
+    def test_tied_or_missing_button_quotes_never_offer_a_permission(self):
+        for index, (up, down, reason) in enumerate([
+            (50, 50, "BUTTON_QUOTES_TIED"), (None, 88, "BUTTON_QUOTES_UNAVAILABLE"),
+            (12, None, "BUTTON_QUOTES_UNAVAILABLE"), (None, None, "BUTTON_QUOTES_UNAVAILABLE"),
+        ]):
+            with self.subTest(up=up, down=down):
+                self.bridge = FutureBridge(self.path / str(index), lambda: self.source, lambda: self.clock)
+                value = self.offer_quotes(up, down)
+                self.assertIsNone(value["intent"])
+                self.assertEqual([reason], value["reasons"])
+
+    def test_higher_side_reversal_blocks_claim_and_ready_without_replacing_the_intent(self):
+        intent = self.offer_quotes()["intent"]
+        self.bridge.report_preflight(browser_report(schemaVersion=2, upQuoteCents=89, downQuoteCents=11))
+        with self.assertRaises(ValueError):
+            self.bridge.claim_preparation({"schemaVersion": 1, "id": intent["id"]})
+        self.assertEqual(["HIGHER_BUTTON_SIDE_CHANGED"], self.bridge.preparation()["preparation"]["reasons"])
+        self.bridge.report_preflight(browser_report(schemaVersion=2, upQuoteCents=12, downQuoteCents=88))
+        intent = self.bridge.claim_preparation({"schemaVersion": 1, "id": intent["id"]})["preparation"]["intent"]
+        self.bridge.report_preflight(browser_report(schemaVersion=2, upQuoteCents=89, downQuoteCents=11, selectedSide="Down"))
+        with self.assertRaises(ValueError):
+            self.bridge.report_preparation(self.acknowledgement(intent, selectedSide="Down"))
+        self.assertEqual("Down", self.bridge.preparation()["preparation"]["lastAttempt"]["side"])
+        self.assertIsNone(self.bridge.observe()["preparation"]["intent"])
+
+    def test_fresh_reports_cannot_extend_original_quote_freshness(self):
+        intent = self.offer_quotes()["intent"]
+        self.clock = START + 65.001
+        self.source["server_time"] = self.clock
+        self.source["signal"]["price_observed_at"] = self.clock
+        self.bridge.report_preflight(browser_report(self.clock, schemaVersion=2, upQuoteCents=12, downQuoteCents=88))
+        with self.assertRaises(ValueError):
+            self.bridge.claim_preparation({"schemaVersion": 1, "id": intent["id"]})
+        value = self.bridge.preparation()["preparation"]
+        self.assertIsNone(value["intent"])
+        self.assertEqual(["BUTTON_QUOTES_NOT_FRESH"], value["reasons"])
+
+    def test_button_quote_types_bounds_and_required_schema_fields_are_strict(self):
+        self.clock = START + 60
+        for field in ("upQuoteCents", "downQuoteCents"):
+            for value in (True, "88", -0.1, 100.1, float("nan"), float("inf"), [], {}):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.bridge.report_preflight(browser_report(**{field: value}))
+        for changes in ({"selectionSource": "HIGHER_BUTTON_PRICE"}, {"schemaVersion": 1}, {"schemaVersion": 3}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.bridge.report_preflight(browser_report(**changes))
+        report = browser_report()
+        del report["upQuoteCents"]
+        with self.assertRaises(ValueError):
+            self.bridge.report_preflight(report)
+        value = self.offer_quotes(up=0, down=100)
+        self.assertEqual("Down", value["intent"]["side"])
+
+    def test_button_quotes_allow_at_most_two_decimal_places_without_rounding_inputs(self):
+        self.clock = START + 60
+        for quote in (0.001, 12.345, 88.251, 99.999):
+            with self.subTest(quote=quote), self.assertRaises(ValueError):
+                self.bridge.report_preflight(browser_report(upQuoteCents=quote))
+        for quote in (0.1, 12.5, 88.25):
+            with self.subTest(quote=quote):
+                value = self.bridge.report_preflight(browser_report(upQuoteCents=quote))["preflight"]
+                self.assertEqual(quote, value["upQuoteCents"])
+
+    def test_button_failure_ack_codes_are_terminal_and_remain_valid_after_restart(self):
+        for reason in ("BUTTON_QUOTES_UNAVAILABLE", "BUTTON_QUOTES_TIED", "BUTTON_QUOTES_NOT_FRESH", "HIGHER_BUTTON_SIDE_CHANGED"):
+            with self.subTest(reason=reason):
+                self.bridge = FutureBridge(self.path / reason, lambda: self.source, lambda: self.clock)
+                intent = self.claim()
+                value = self.bridge.report_preparation(self.acknowledgement(
+                    intent, status="FAILED", amountUsd=None, selectedSide=None, reason=reason))["preparation"]
+                self.assertEqual("FAILED", value["state"])
+                self.assertEqual(reason, value["lastAttempt"]["reason"])
+                self.assertIsNone(value["intent"])
+                self.assertIsNone(self.bridge.observe()["preparation"]["intent"])
+                restored = FutureBridge(self.path / reason, lambda: self.source, lambda: self.clock)
+                self.assertIsNone(restored.preparation_error)
+                self.assertEqual(reason, restored.preparation()["preparation"]["lastAttempt"]["reason"])
+                self.assertEqual(0, restored.orders()["total"])
+
+    def test_quote_observation_time_uses_server_receipt_and_accepts_legal_browser_clock_skew(self):
+        value = self.offer_quotes(checkedAt=START + 63)
+        self.assertEqual(START + 60, value["intent"]["quoteObservedAt"])
+        self.assertEqual(START + 63, self.bridge.status()["preflight"]["checkedAt"])
+        intent = self.bridge.claim_preparation({"schemaVersion": 1, "id": value["intent"]["id"]})["preparation"]["intent"]
+        self.bridge.report_preflight(browser_report(START + 63, upQuoteCents=12, downQuoteCents=88, selectedSide="Down"))
+        value = self.bridge.report_preparation(self.acknowledgement(intent, checkedAt=START + 63, selectedSide="Down"))["preparation"]
+        self.assertEqual("READY", value["state"])
+
+    def test_ready_ack_requires_the_postclaim_read_only_check_to_have_passed(self):
+        value = self.offer_quotes(checkedAt=START + 59, selectedSide="Down")
+        intent = self.bridge.claim_preparation({"schemaVersion": 1, "id": value["intent"]["id"]})["preparation"]["intent"]
+        status = self.bridge.report_preflight(browser_report(START + 59, upQuoteCents=12, downQuoteCents=88,
+                                                           selectedSide="Down"))
+        self.assertEqual("BLOCKED", status["preflight"]["result"])
+        self.assertIn("BROWSER_CHECK_OUTSIDE_ENTRY", status["preflight"]["reasons"])
+        with self.assertRaises(ValueError):
+            self.bridge.report_preparation(self.acknowledgement(intent, selectedSide="Down"))
+
+    def test_schema1_preparation_history_is_valid_but_never_an_active_quote_permission(self):
+        self.offer()
+        pending = json.loads((self.path / "preparations.jsonl").read_text())
+        pending["schemaVersion"] = 1
+        for field in ("upQuoteCents", "downQuoteCents", "quoteObservedAt", "selectionSource"):
+            del pending[field]
+        claimed = {**pending, "state": "CLAIMED", "claimToken": "0" * 32, "claimedAt": START + 60}
+        ready = {**claimed, "state": "READY", "receipt": {"checkedAt": START + 60,
+                 "marketUrl": browser_report()["marketUrl"], "amountUsd": 1, "selectedSide": "Up"}}
+        for state, rows in (("PENDING", [pending]), ("CLAIMED", [pending, claimed]), ("READY", [pending, claimed, ready])):
+            with self.subTest(state=state):
+                directory = self.path / state
+                directory.mkdir()
+                ledger = directory / "preparations.jsonl"
+                ledger.write_text("".join(json.dumps(row) + "\n" for row in rows))
+                restored = FutureBridge(directory, lambda: self.source, lambda: self.clock)
+                restored.control(True)
+                restored.report_preflight(browser_report())
+                value = restored.observe()["preparation"]
+                self.assertNotEqual("READY", value["state"])
+                self.assertIsNone(value["intent"])
+                self.assertEqual(1, value["lastAttempt"]["schemaVersion"])
+                self.assertIsNone(restored.preparation_error)
+                with self.assertRaises(PreparationConflict):
+                    restored.claim_preparation({"schemaVersion": 1, "id": pending["id"]})
+                with self.assertRaises(PreparationConflict):
+                    restored.report_preparation(self.acknowledgement(claimed))
+                self.assertEqual(0, restored.orders()["total"])
+
+    def test_schema2_history_rejects_mismatched_or_mutated_quote_evidence(self):
+        self.offer_quotes()
+        ledger = self.path / "preparations.jsonl"
+        pending = json.loads(ledger.read_text())
+        for changes in ({"side": "Up"}, {"selectionSource": "CHAINLINK"}, {"upQuoteCents": True}, {"upQuoteCents": 12.345},
+                        {"downQuoteCents": 101}, {"quoteObservedAt": START + 54}, {"quoteObservedAt": START + 61}):
+            with self.subTest(changes=changes):
+                ledger.write_text(json.dumps({**pending, **changes}) + "\n")
+                restored = FutureBridge(self.path, lambda: self.source, lambda: self.clock)
+                self.assertEqual("PREPARATION_LEDGER_INVALID", restored.preparation_error)
 
     def test_default_off_and_reads_never_offer_or_create_order_facts(self):
         result = self.bridge.preparation()
@@ -237,8 +428,9 @@ class FuturePreparationTest(unittest.TestCase):
         self.assertEqual("READY", value["lastAttempt"]["state"])
 
     def test_fresh_new_sample_cannot_extend_the_original_intent_or_ready_receipt(self):
+        self.source["signal"]["price_observed_at"] = START + 58.5
         intent = self.claim()
-        self.clock = START + 65.001
+        self.clock = START + 64
         self.source["server_time"] = self.clock
         self.source["signal"]["price_observed_at"] = self.clock
         self.bridge.report_preflight(browser_report(self.clock))
@@ -247,13 +439,14 @@ class FuturePreparationTest(unittest.TestCase):
         value = self.bridge.preparation()["preparation"]
         self.assertEqual("WAITING_SIGNAL", value["state"])
         self.assertIsNone(value["intent"])
-        self.assertEqual(START + 60, value["lastAttempt"]["priceObservedAt"])
+        self.assertEqual(START + 58.5, value["lastAttempt"]["priceObservedAt"])
 
     def test_ready_history_remains_but_current_ready_expires_with_original_sample(self):
+        self.source["signal"]["price_observed_at"] = START + 58.5
         intent = self.claim()
         self.bridge.report_preflight(browser_report())
         self.bridge.report_preparation(self.acknowledgement(intent))
-        self.clock = START + 65.001
+        self.clock = START + 64
         self.source["server_time"] = self.clock
         self.source["signal"]["price_observed_at"] = self.clock
         self.bridge.report_preflight(browser_report(self.clock))
@@ -261,14 +454,13 @@ class FuturePreparationTest(unittest.TestCase):
         self.assertEqual("WAITING_SIGNAL", value["state"])
         self.assertEqual("READY", value["lastAttempt"]["state"])
 
-    def test_direction_change_revokes_current_permission_and_ready_confirmation(self):
+    def test_chainlink_direction_change_does_not_override_higher_button_side(self):
         intent = self.claim()
         self.source["signal"].update(side="Down", current_price=82999)
         self.bridge.report_preflight(browser_report())
-        with self.assertRaises(ValueError):
-            self.bridge.report_preparation(self.acknowledgement(intent))
-        value = self.bridge.preparation()["preparation"]
-        self.assertEqual("WAITING_SIGNAL", value["state"])
+        value = self.bridge.report_preparation(self.acknowledgement(intent))["preparation"]
+        self.assertEqual("READY", value["state"])
+        self.assertEqual("Up", value["lastAttempt"]["side"])
         self.assertIsNone(value["intent"])
 
     def test_ready_requires_a_new_preflight_received_after_the_claim(self):

@@ -1,6 +1,6 @@
 import type { FutureBtc5mBridgeStatus } from '../types'
 
-export const signalIsFresh = (runtime: FutureBtc5mBridgeStatus | null, receivedAt: number, now: number): boolean => {
+export const referenceIsFresh = (runtime: FutureBtc5mBridgeStatus | null, receivedAt: number, now: number): boolean => {
   const signal = runtime?.signal
   const elapsed = (now - receivedAt) / 1000
   if (!runtime || !Number.isFinite(elapsed) || elapsed < 0 || elapsed > 15 ||
@@ -14,9 +14,19 @@ export const signalIsFresh = (runtime: FutureBtc5mBridgeStatus | null, receivedA
     signal.slug === `btc-updown-5m-${start}` && signal.price_source === 'chainlink' &&
     signal.open_price_source === 'polymarket_crypto_price_fiveminute_twap60_openPrice' && signal.twap_lookback_seconds === 60 &&
     Number.isFinite(signal.open_price) && signal.open_price > 0 && Number.isFinite(signal.current_price) && signal.current_price > 0 &&
-    expected !== null && signal.side === expected && serverNow >= start + 60 && serverNow < start + 80 &&
+    signal.side === expected && serverNow >= start + 60 && serverNow < start + 80 &&
     Number.isFinite(signal.price_observed_at) && signal.price_observed_at <= runtime.serverTime &&
     serverNow >= signal.price_observed_at && serverNow - signal.price_observed_at <= 5
+}
+
+export const signalIsFresh = (runtime: FutureBtc5mBridgeStatus | null, receivedAt: number, now: number): boolean =>
+  runtime?.signal?.side != null && referenceIsFresh(runtime, receivedAt, now)
+
+export const higherButtonSide = (up: number | null | undefined, down: number | null | undefined): 'Up' | 'Down' | null => {
+  if (typeof up !== 'number' || typeof down !== 'number' || !Number.isFinite(up) || !Number.isFinite(down) ||
+      up < 0 || up > 100 || down < 0 || down > 100 || Math.round(up * 100) / 100 !== up ||
+      Math.round(down * 100) / 100 !== down || up === down) return null
+  return up > down ? 'Up' : 'Down'
 }
 
 export const preflightIsFresh = (runtime: FutureBtc5mBridgeStatus | null, receivedAt: number, now: number): boolean => {

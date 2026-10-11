@@ -236,6 +236,50 @@ class FutureBridgeHttpTest(unittest.TestCase):
         self.assertEqual(400, self.request(path, b'{"id":"x","id":"y"}', headers)[0])
         self.assertEqual(400, self.request(path, b"x" * 1501, headers)[0])
 
+    def test_schema2_higher_button_side_crosses_http_claim_and_ready_with_manual_submit_only(self):
+        current = source()
+        clock = [START + 10]
+        self.bridge.status_fn = lambda: current
+        self.bridge.now_fn = lambda: clock[0]
+        self.assertEqual(200, self.control({"enabled": True})[0])
+        clock[0] = START + 60
+        report = browser_report(upQuoteCents=12, downQuoteCents=88)
+        self.assertEqual(200, self.preflight(report)[0])
+        intent = self.bridge.observe()["preparation"]["intent"]
+        self.assertEqual((2, "Down", 1), (intent["schemaVersion"], intent["side"], intent["amountUsd"]))
+        claim = self.preparation("/bridge/preparation/claim", {"schemaVersion": 1, "id": intent["id"]})
+        self.assertEqual(200, claim[0])
+        report["selectedSide"] = "Down"
+        status = self.preflight(report)
+        self.assertEqual(200, status[0])
+        self.assertEqual("Up", status[1]["preflight"]["signalSide"])
+        self.assertEqual("Down", status[1]["preflight"]["preferredSide"])
+        ack = {"schemaVersion": 1, "id": intent["id"], "claimToken": claim[1]["preparation"]["intent"]["claimToken"],
+               "checkedAt": clock[0], "status": "READY", "marketUrl": report["marketUrl"], "amountUsd": 1,
+               "selectedSide": "Down", "reason": None, "noSubmission": True}
+        ready = self.preparation("/bridge/preparation/ack", ack)
+        self.assertEqual(200, ready[0])
+        self.assertEqual("READY", ready[1]["preparation"]["state"])
+        self.assertTrue(ready[1]["preparation"]["noSubmission"])
+        self.assertEqual(0, self.request("/bridge/orders")[1]["total"])
+
+    def test_schema2_preflight_quote_whitelist_types_and_legacy_read_compatibility(self):
+        current = source()
+        self.bridge.status_fn = lambda: current
+        self.bridge.now_fn = lambda: START + 60
+        report = browser_report()
+        for changes in ({"upQuoteCents": True}, {"downQuoteCents": "88"}, {"upQuoteCents": -1},
+                        {"downQuoteCents": 101}, {"selectionSource": "HIGHER_BUTTON_PRICE"}, {"schemaVersion": 1}):
+            with self.subTest(changes=changes):
+                self.assertEqual(400, self.preflight({**report, **changes})[0])
+        legacy = {field: value for field, value in report.items() if field not in ("upQuoteCents", "downQuoteCents")}
+        legacy["schemaVersion"] = 1
+        code, status, _ = self.preflight(legacy)
+        self.assertEqual(200, code)
+        self.assertIsNone(status["preflight"]["preferredSide"])
+        self.assertIsNone(status["preflight"]["selectionSource"])
+        self.assertIn("BUTTON_QUOTES_UNAVAILABLE", status["preflight"]["reasons"])
+
 
 if __name__ == "__main__":
     unittest.main()
