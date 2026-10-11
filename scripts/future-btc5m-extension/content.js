@@ -449,7 +449,7 @@
   }
 
   // Export pure guards for the local fixture tests; this is an isolated extension world.
-  globalThis.FutureBtc5m = {usableDraft, matchesMarket, observationView, findAmountInput, prepareAmount,
+  globalThis.FutureBtc5m = {usableDraft, matchesMarket, observationView, findAmountInput, findAmountTicket, buttonIsEnabled, prepareAmount,
     navigationTarget, followCurrentMarket, readPreflight, usablePreparation, readPreparationTicket, prepareOnlyOnce, parseButtonQuote};
   if (typeof document === 'undefined') return;
 
