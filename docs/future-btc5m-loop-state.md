@@ -74,3 +74,9 @@
 原 Bridge、MySQL、配置和未提交工作未变；真实自动开关/实际执行保持关闭，订单数 0。Mac 助手和前台隧道须持续运行，未安装常驻或定时任务。本次完成只读链路，不证明金额写入、执行器、实际提交或成交完成，总目标未宣告完成。
 
 Chrome 缓存排查期间误取消了 Google Pay 的 ServiceWorker 注册，访问官方页面后仍未确认恢复；未操作凭据、Cookie 或付款。该未恢复事项及全部验收证据记录在 `reports/future-btc5m-assistant/production-preorder-verification-20261011.json`。
+
+## 2026-10-11 状态闪烁与隧道恢复
+
+用户报告运行状态过期提示闪烁。`e3763db` 同步成功状态/控制响应的接收时间和页面时钟，先失败复现 3 项组件行为，再通过 51 项 Node 测试、干净前端构建和 ESLint；真正的时效与时钟回拨守卫保留。前端已上线并保存为 `polyhermes-app:future-e3763db`，没有暂停或重启 app。
+
+另确认专用 SSH 超时退出、固定 socket 无监听造成真实 503。`b3df53b` 增加前台安全重连，隧道与 relay 共 36 项 Python 测试通过；实际断线演练后自动恢复，6 次状态读取全部成功。正式 Chrome 修复后和重连后共 236 次采样没有运行状态误报，开关关闭、订单 0，原 Bridge、MySQL 和保护哈希未变。证据为 `reports/future-btc5m-assistant/ui-clock-fix-verification-20261011.json`。Mac 前台进程仍是依赖，真实过期和网络失败继续阻断；本次修复没有接入交易执行器或提交订单，总目标未宣告完成。
