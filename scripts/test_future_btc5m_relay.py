@@ -3,6 +3,7 @@ import json
 import socketserver
 import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -36,6 +37,7 @@ class FutureRelayTest(unittest.TestCase):
                 body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 test.requests.append({"method": self.command, "path": self.path,
                                       "headers": dict(self.headers), "body": body})
+                time.sleep(test.response_delay)
                 if test.response_kind == "disconnect":
                     self.connection.close()
                     return
@@ -48,7 +50,10 @@ class FutureRelayTest(unittest.TestCase):
                     self.send_header("X-Fixture-Truncated", "1")
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Set-Cookie", "fixture=value")
-                self.end_headers()
+                try:
+                    self.end_headers()
+                except (BrokenPipeError, ConnectionResetError):
+                    return
                 try:
                     self.wfile.write(payload[:5] if test.response_kind == "truncated" else payload)
                 except (BrokenPipeError, ConnectionResetError):
@@ -58,6 +63,7 @@ class FutureRelayTest(unittest.TestCase):
                 pass
 
         self.response_kind = "normal"
+        self.response_delay = 0
         self.upstream = UnixHttpServer(self.socket_path, Upstream)
         threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
         self.addCleanup(self.upstream.server_close)
@@ -69,7 +75,7 @@ class FutureRelayTest(unittest.TestCase):
         self.host = f"127.0.0.1:{self.relay.server_port}"
 
     def request(self, method, path, body=None, headers=None):
-        connection = http.client.HTTPConnection("127.0.0.1", self.relay.server_port, timeout=3)
+        connection = http.client.HTTPConnection("127.0.0.1", self.relay.server_port, timeout=4)
         self.addCleanup(connection.close)
         connection.request(method, path, body, headers or {})
         response = connection.getresponse()
@@ -164,7 +170,7 @@ class FutureRelayTest(unittest.TestCase):
 
     def test_chunked_and_duplicate_critical_headers_rejected(self):
         self.assertEqual(400, self.post("/bridge/control", headers={"Transfer-Encoding": "chunked"})[0])
-        connection = http.client.HTTPConnection("127.0.0.1", self.relay.server_port, timeout=3)
+        connection = http.client.HTTPConnection("127.0.0.1", self.relay.server_port, timeout=4)
         self.addCleanup(connection.close)
         connection.putrequest("POST", "/bridge/control", skip_host=True)
         connection.putheader("Host", self.host)
@@ -198,6 +204,26 @@ class FutureRelayTest(unittest.TestCase):
     def test_upstream_http_failure_is_preserved(self):
         self.response_kind = "unavailable"
         self.assertEqual(503, self.request("GET", "/status")[0])
+
+    def test_upstream_response_after_two_seconds_is_preserved(self):
+        self.response_delay = 2.2
+        started = time.monotonic()
+        code, body, _ = self.request("GET", "/bridge/status")
+        elapsed = time.monotonic() - started
+        self.assertEqual(200, code)
+        self.assertFalse(json.loads(body)["effectiveEnabled"])
+        self.assertGreaterEqual(elapsed, 2.1)
+        self.assertLess(elapsed, 3.3)
+
+    def test_stalled_upstream_times_out_before_late_response(self):
+        self.response_delay = 3.3
+        started = time.monotonic()
+        code, body, _ = self.request("GET", "/bridge/orders")
+        elapsed = time.monotonic() - started
+        self.assertEqual(503, code)
+        self.assertEqual("FUTURE_TUNNEL_UNAVAILABLE", json.loads(body)["error"])
+        self.assertGreaterEqual(elapsed, 2.8)
+        self.assertLess(elapsed, 3.3)
 
     def test_public_bind_is_rejected(self):
         with self.assertRaises(ValueError):

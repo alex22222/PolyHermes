@@ -60,7 +60,7 @@ relay 只监听 `127.0.0.1:8766`，入站 Host 必须准确匹配，转发到 Ma
 - POST `/bridge/control`，要求 `X-PolyHermes-Future-Control: 1`、JSON 对象和不超过 256 字节的请求体。
 - POST `/bridge/preflight`，要求 `X-PolyHermes-Future-Preflight: 1`、JSON 对象和不超过 1500 字节的请求体，与本机只读报告接口一致。
 
-拒绝所有 Origin、重复关键头、Transfer-Encoding、任意目标与 `/submit`。不转发 Cookie、Authorization、Set-Cookie 或 CORS。请求和上游操作超时为 2 秒，响应最大 1 MiB。
+拒绝所有 Origin、重复关键头、Transfer-Encoding、任意目标与 `/submit`。不转发 Cookie、Authorization、Set-Cookie 或 CORS。入站请求超时为 2 秒，上游 socket 超时为 3 秒，仍小于 Kotlin 客户端的 4 秒总预算；响应最大 1 MiB。生产实测曾出现 2 秒上游截止造成的间歇 503，因此仅增加上游等待时间；报告 3 秒时差、样本 5 秒新鲜度及入场窗口守卫不变。
 
 隧道缺失、断开、超时或上游响应不完整时，返回 HTTP 503 和 `FUTURE_TUNNEL_UNAVAILABLE`，不会制造在线、已关闭、准备成功或成交数据。上游有效的非 200 状态保留。预检查及开关的业务限制仍由本机助手和已鉴权 Kotlin API 执行。
 

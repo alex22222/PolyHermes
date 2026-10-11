@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 LOCAL_ADDRESS = ("127.0.0.1", 8766)
 UPSTREAM_HOST = "127.0.0.1:8766"
 TIMEOUT_SECONDS = 2
+UPSTREAM_TIMEOUT_SECONDS = 3
 MAX_REQUEST_BYTES = 256
 MAX_PREFLIGHT_BYTES = 1500
 MAX_RESPONSE_BYTES = 1024 * 1024
@@ -19,7 +20,7 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 
 class UnixHTTPConnection(http.client.HTTPConnection):
     def __init__(self, socket_path):
-        super().__init__("127.0.0.1", timeout=TIMEOUT_SECONDS)
+        super().__init__("127.0.0.1", timeout=UPSTREAM_TIMEOUT_SECONDS)
         self.socket_path = socket_path
 
     def connect(self):
