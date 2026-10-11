@@ -90,8 +90,10 @@ const FutureBtc5mBridge: React.FC = () => {
       if (response.data.code !== 0 || !response.data.data) {
         throw new Error(response.data.msg || '获取 Future Bridge 状态失败')
       }
+      const receivedAt = Date.now()
       setRuntime(response.data.data)
-      setStatusReceivedAt(Date.now())
+      setStatusReceivedAt(receivedAt)
+      setClock(receivedAt)
       setStatusError(null)
     } catch (error: unknown) {
       if (!mounted.current || requestSeq !== statusRequestSeq.current) return
@@ -193,8 +195,10 @@ const FutureBtc5mBridge: React.FC = () => {
       if (response.data.code !== 0 || !response.data.data) {
         throw new Error(response.data.msg || '更新自动下单开关失败')
       }
+      const receivedAt = Date.now()
       setRuntime(response.data.data)
-      setStatusReceivedAt(Date.now())
+      setStatusReceivedAt(receivedAt)
+      setClock(receivedAt)
       setStatusError(null)
       message.success(enabled ? '自动下单请求已保存，请查看实际执行状态' : '自动下单已关闭')
       fetchOrders()
