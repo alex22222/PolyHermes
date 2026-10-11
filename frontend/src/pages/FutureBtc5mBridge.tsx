@@ -5,7 +5,21 @@ import { ReloadOutlined } from '@ant-design/icons'
 import { useMediaQuery } from 'react-responsive'
 import { apiService } from '../services/api'
 import { preflightIsFresh, preflightReasonText, signalIsFresh } from '../utils/futureBtc5mPreflight'
-import type { FutureBtc5mBridgeStatus, FutureBtc5mOrder, FutureBtc5mOrderStatus } from '../types'
+import type { FutureBtc5mBridgeStatus, FutureBtc5mOrder, FutureBtc5mOrderStatus, FutureBtc5mPreparationState } from '../types'
+
+const preparationStateText: Record<FutureBtc5mPreparationState, string> = {
+  DISABLED: '已关闭',
+  WAITING_SIGNAL: '等待有效信号',
+  WAITING_BROWSER: '等待 Chrome 报告',
+  PENDING: '等待 Chrome 准备',
+  CLAIMED: 'Chrome 正在准备',
+  READY: '票据已准备，未自动买入',
+  FAILED: '准备失败',
+  EXPIRED: '已过期',
+  REVOKED: '已撤销',
+  RECEIPT_UNKNOWN: '准备结果未知',
+  BLOCKED: '准备受阻'
+}
 
 const orderStatusText: Record<FutureBtc5mOrderStatus, string> = {
   PENDING: '待处理',
@@ -193,20 +207,20 @@ const FutureBtc5mBridge: React.FC = () => {
       const response = await apiService.futureBtc5mBridge.control({ enabled })
       if (!mounted.current) return
       if (response.data.code !== 0 || !response.data.data) {
-        throw new Error(response.data.msg || '更新自动下单开关失败')
+        throw new Error(response.data.msg || '更新自动准备票据开关失败')
       }
       const receivedAt = Date.now()
       setRuntime(response.data.data)
       setStatusReceivedAt(receivedAt)
       setClock(receivedAt)
       setStatusError(null)
-      message.success(enabled ? '自动下单请求已保存，请查看实际执行状态' : '自动下单已关闭')
+      message.success(enabled ? '自动准备票据已开启，最终买入由你完成' : '自动准备票据已关闭')
       fetchOrders()
     } catch (error: unknown) {
       if (!mounted.current) return
       setRuntime(null)
-      setStatusError(`开关状态未知：${errorText(error, '更新失败')}。请刷新核对，或再次点击关闭自动下单。`)
-      message.error('更新失败，自动下单开关状态未知')
+      setStatusError(`开关状态未知：${errorText(error, '更新失败')}。请刷新核对，或再次点击关闭自动准备票据。`)
+      message.error('更新失败，自动准备票据开关状态未知')
     } finally {
       controlPending.current = false
       if (mounted.current) setControlLoading(false)
@@ -246,8 +260,6 @@ const FutureBtc5mBridge: React.FC = () => {
     !Number.isFinite(runtime.serverTime) || Math.abs(runtime.serverTime - statusReceivedAt / 1000) > 3))
   const ledgerError = runtime?.blockReasons.some((reason) => reason.startsWith('ORDER_LEDGER_')) ?? false
   const orderCounts = runtime && !ledgerError ? runtime.orderCounts : null
-  const running = Boolean(runtime && !statusStale && runtime.online && runtime.executorReady &&
-    runtime.requestedEnabled && runtime.effectiveEnabled && runtime.mode === 'LIVE')
   const signalFresh = signalIsFresh(runtime, statusReceivedAt, clock)
   const preflight = runtime?.preflight
   const browserFresh = preflightIsFresh(runtime, statusReceivedAt, clock)
@@ -255,40 +267,54 @@ const FutureBtc5mBridge: React.FC = () => {
     preflight.pagePeriodStart === runtime?.periodStart && preflight.navigation === 'CURRENT' &&
     preflight.ticketStatus === 'PASS' && preflight.amountUsd === 1 && preflight.sideMatches &&
     preflight.selectedSide === runtime?.signal?.side && preflight.buyButtonEnabled)
+  const preparation = runtime?.preparation
+  const serverNow = runtime ? Math.max(runtime.serverTime + (clock - statusReceivedAt) / 1000, clock / 1000) : 0
+  const activeRecord = preparation?.intent || (preparation?.enabled && preparation.state === 'READY' ? preparation.lastAttempt : null)
+  const intentExpired = Boolean(activeRecord && serverNow >= activeRecord.expiresAt)
+  const intentFresh = Boolean(runtime && !statusStale && preparation?.enabled && preparation.intent &&
+    serverNow >= preparation.intent.priceObservedAt && serverNow - preparation.intent.priceObservedAt <= 5 && !intentExpired)
+  const readyFresh = Boolean(activeRecord && serverNow >= activeRecord.priceObservedAt &&
+    serverNow - activeRecord.priceObservedAt <= 5 && signalFresh && runtime?.signal?.side === activeRecord.side)
+  const preparationState = runtime && !statusStale && preparation
+    ? intentExpired ? 'EXPIRED'
+      : preparation.intent && !intentFresh || preparation.state === 'READY' && !readyFresh ? 'WAITING_SIGNAL'
+        : preparation.state === 'READY' && !browserFresh ? 'WAITING_BROWSER' : preparation.state
+    : null
+  const intent = intentFresh ? preparation?.intent : null
+  const lastAttempt = preparation?.lastAttempt
   const actualState = runtime && !statusStale
-    ? running ? '运行中' : runtime.mode === 'BLOCKED' ? '受阻，不会下单' : '已停止'
+    ? preparation?.enabled ? '自动准备已开启，买入由你完成' : '自动准备已关闭'
     : '状态未知'
 
   return <Space direction="vertical" size="middle" style={{ width: '100%' }}>
     <div>
       <Typography.Title level={3} style={{ marginBottom: 4 }}>Future BTC 5 分钟 Bridge</Typography.Title>
-      <Typography.Text type="secondary">每笔订单本金固定为 $1，每 5 秒更新运行状态与订单记录。</Typography.Text>
+      <Typography.Text type="secondary">自动准备 BTC 5 分钟 $1 票据，最终买入由你完成。每 5 秒更新准备状态与真实订单记录。</Typography.Text>
     </div>
 
-    <Card title="自动下单控制" extra={<Button icon={<ReloadOutlined />} loading={statusLoading} onClick={() => { fetchStatus(); fetchOrders() }}>刷新</Button>}>
+    <Card title="自动准备票据控制" extra={<Button icon={<ReloadOutlined />} loading={statusLoading} onClick={() => { fetchStatus(); fetchOrders() }}>刷新</Button>}>
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Space wrap>
-          <Typography.Text strong>自动下单开关</Typography.Text>
+          <Typography.Text strong>自动准备票据开关</Typography.Text>
           <Switch checked={runtime?.requestedEnabled ?? false} loading={controlLoading} disabled={!runtime || statusStale}
             checkedChildren="开启" unCheckedChildren="关闭" onChange={handleControl} />
-          <Button danger loading={controlLoading} onClick={() => handleControl(false)}>关闭自动下单</Button>
-          <Tag color={!runtime || statusStale ? 'default' : running ? 'success' : runtime.mode === 'BLOCKED' ? 'warning' : 'default'}>{actualState}</Tag>
+          <Button danger loading={controlLoading} onClick={() => handleControl(false)}>关闭自动准备票据</Button>
+          <Tag color={!runtime || statusStale ? 'default' : preparation?.enabled ? 'processing' : 'default'}>{actualState}</Tag>
           <Typography.Text type="secondary">保存开关：{runtime ? runtime.requestedEnabled ? '开启' : '关闭' : '未知'}</Typography.Text>
         </Space>
         {statusError && <Alert type="error" showIcon message="Bridge 状态未知" description={statusError} />}
-        {statusStale && <Alert type="error" showIcon message="运行状态已过期，请刷新核对" description="15 秒未取得新的状态，当前开关与实际运行情况未知；仍可点击关闭自动下单。" />}
+        {statusStale && <Alert type="error" showIcon message="运行状态已过期，请刷新核对" description="当前状态时间已失效，开关与准备情况未知；仍可点击关闭自动准备票据。" />}
         {runtime && !runtime.executorReady && <Alert type="info" showIcon message="当前尚未接入 Future 交易执行器"
-          description="开关可以保存启用请求，当前不会提交买入。有效新信号只记为跳过；接入执行器后才可实际自动下单。" />}
-        {runtime?.mode === 'BLOCKED' && <Alert type="warning" showIcon message="自动下单请求已保存，执行受阻，不会下单"
-          description={runtime.blockReasons.length ? runtime.blockReasons.join('；') : runtime.reason || '执行条件尚未满足'} />}
+          description="开启后会在有效信号出现时前往当前市场、选择方向并填写 $1，核对结果后由你检查并点击 Future 买入。准备流程不会点击买入或提交订单。" />}
         <Descriptions size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="Bridge 连接">{runtime ? runtime.online ? '在线' : '离线' : '未知'}</Descriptions.Item>
-          <Descriptions.Item label="执行器">{runtime ? runtime.executorReady ? '就绪' : '未就绪' : '未知'}</Descriptions.Item>
-          <Descriptions.Item label="实际下单">{runtime && !statusStale ? running ? '运行中' : '未运行' : '未知'}</Descriptions.Item>
+          <Descriptions.Item label="执行器">{runtime ? '未接入' : '未知'}</Descriptions.Item>
+          <Descriptions.Item label="实际下单">{runtime && !statusStale ? '未运行' : '未知'}</Descriptions.Item>
+          <Descriptions.Item label="最终买入">由你在 Future 页面完成</Descriptions.Item>
           <Descriptions.Item label="行情状态">{runtime?.feedStatus || '—'}</Descriptions.Item>
           <Descriptions.Item label="当前轮次">{formatTime(runtime?.periodStart)}</Descriptions.Item>
           <Descriptions.Item label="服务器更新时间">{formatTime(runtime?.serverTime)}</Descriptions.Item>
-          <Descriptions.Item label="当前原因" span={isMobile ? 1 : 3}>{runtime?.reason || '—'}</Descriptions.Item>
+          <Descriptions.Item label="下单阻断原因" span={isMobile ? 1 : 3}>{runtime?.blockReasons.join('；') || '—'}</Descriptions.Item>
         </Descriptions>
         {runtime?.signal && <Descriptions title="信号采样记录" size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="市场" span={isMobile ? 1 : 3}>{marketLink(runtime.signal.slug)}</Descriptions.Item>
@@ -300,12 +326,37 @@ const FutureBtc5mBridge: React.FC = () => {
       </Space>
     </Card>
 
+    <Card title="票据准备状态">
+      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+        <Alert type="info" showIcon message="准备结果不代表买入或成交"
+          description="准备报告只记录页面金额、方向及检查结果。历史报告不能用于当前轮次入场，最终买入前请核对实时市场与票据。" />
+        <Descriptions size="small" column={isMobile ? 1 : 3}>
+          <Descriptions.Item label="准备阶段">{preparationState ? preparationStateText[preparationState] : '状态未知'}</Descriptions.Item>
+          <Descriptions.Item label="准备模式">{preparation ? '仅准备票据，未提交订单' : '未知'}</Descriptions.Item>
+          <Descriptions.Item label="待准备方向 / 金额">{intent ? `${intent.side} / $1` : '—'}</Descriptions.Item>
+          <Descriptions.Item label="待准备市场" span={isMobile ? 1 : 3}>{intent ? marketLink(intent.slug) : '—'}</Descriptions.Item>
+          <Descriptions.Item label="准备截止时间">{formatTime(intent?.expiresAt)}</Descriptions.Item>
+          <Descriptions.Item label="准备原因" span={isMobile ? 1 : 2}>{preparation?.reasons.join('；') || '—'}</Descriptions.Item>
+        </Descriptions>
+        {lastAttempt && <Descriptions title="最近操作报告（历史事实）" size="small" column={isMobile ? 1 : 3}>
+          <Descriptions.Item label="最近准备结果">{preparationStateText[lastAttempt.state]}</Descriptions.Item>
+          <Descriptions.Item label="准备报告方向 / 本金">{lastAttempt.side} / $1</Descriptions.Item>
+          <Descriptions.Item label="操作报告更新时间">{formatTime(lastAttempt.updatedAt)}</Descriptions.Item>
+          <Descriptions.Item label="准备报告市场" span={isMobile ? 1 : 3}>{marketLink(lastAttempt.slug)}</Descriptions.Item>
+          <Descriptions.Item label="准备报告金额 / 方向">{lastAttempt.receipt ? `${formatValue(lastAttempt.receipt.amountUsd, '$')} / ${lastAttempt.receipt.selectedSide || '—'}` : '—'}</Descriptions.Item>
+          <Descriptions.Item label="操作检查时间">{formatTime(lastAttempt.receipt?.checkedAt)}</Descriptions.Item>
+          <Descriptions.Item label="操作报告原因">{lastAttempt.reason || '—'}</Descriptions.Item>
+          <Descriptions.Item label="准备提交状态" span={isMobile ? 1 : 3}>未提交订单；买入与成交均未由此报告确认。</Descriptions.Item>
+        </Descriptions>}
+      </Space>
+    </Card>
+
     <Card title="下单前只读预检" extra={<Tag color={preflightReady ? 'success' : browserFresh ? 'warning' : 'default'}>
       {preflightReady ? '只读预检通过' : browserFresh ? '待满足预检条件' : '等待浏览器报告'}
     </Tag>}>
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Alert type="info" showIcon message="只读预检，不提交订单"
-          description="核对已登录 Chrome 当前市场、票据现有金额和选中方向；不修改金额、不选择涨跌、不点击买入。与自动下单开关独立。" />
+          description="此预检核对已登录 Chrome 当前市场、票据现有金额和选中方向。自动准备票据另由上方开关控制，最终买入由你完成。" />
         <Descriptions size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="项目接口">{runtime && !statusStale && runtime.online ? '已连接' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="Chrome 预检报告">{browserFresh ? '新鲜' : '未连接或已过期'}</Descriptions.Item>
@@ -331,7 +382,7 @@ const FutureBtc5mBridge: React.FC = () => {
       </Space>
     </Card>
 
-    <Card title="自动下单订单详情">
+    <Card title="真实订单与历史跳过记录">
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         {ledgerError && <Alert type="error" showIcon message="订单账本不可用，记录数量未知" description="记录损坏或写入未获确认，暂停显示统计。请检查服务记录后再核对历史。" />}
         <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>

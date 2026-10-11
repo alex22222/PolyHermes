@@ -22,7 +22,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import websockets
-from future_btc5m_bridge import FutureBridge, strict_json_object
+from future_btc5m_bridge import FutureBridge, PreparationConflict, strict_json_object
 
 
 STATE_DIR = Path(__file__).resolve().parents[1] / "reports/future-btc5m-assistant"
@@ -382,6 +382,9 @@ class Assistant:
 
 
 def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
+    if address[0] != "127.0.0.1":
+        raise ValueError("ASSISTANT_REQUIRES_LOOPBACK")
+
     class Handler(BaseHTTPRequestHandler):
         def valid_host(self):
             if self.headers.get("Host") != f"{address[0]}:{self.server.server_port}":
@@ -398,6 +401,19 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
             self.end_headers()
             self.wfile.write(body)
 
+        def preparation_access(self):
+            critical = ("Host", "Origin", "Content-Length", "Content-Type", "X-PolyHermes-Future-Preparation")
+            if (any(len(self.headers.get_all(name, [])) > 1 for name in critical)
+                    or self.headers.get("Transfer-Encoding") is not None):
+                self.send_error(400)
+                return False
+            origin = self.headers.get("Origin")
+            if (self.headers.get("X-PolyHermes-Future-Preparation") != "1"
+                    or origin is not None and re.fullmatch(r"chrome-extension://[a-p]{32}", origin) is None):
+                self.send_error(403)
+                return False
+            return True
+
         def do_GET(self):
             if not self.valid_host():
                 return
@@ -411,6 +427,12 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
             try:
                 if url.path == "/bridge/status" and not url.query:
                     self.reply(bridge.status())
+                elif self.path == "/bridge/preparation":
+                    if not self.preparation_access():
+                        return
+                    if self.headers.get("Content-Length", "0") != "0":
+                        raise ValueError("GET_BODY_NOT_ALLOWED")
+                    self.reply(bridge.preparation())
                 elif url.path == "/bridge/orders":
                     params = urllib.parse.parse_qs(url.query, keep_blank_values=True)
                     if set(params) - {"page", "size", "status"} or any(len(values) != 1 for values in params.values()):
@@ -438,15 +460,19 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
                 return
             if not self.valid_host():
                 return
-            if self.path not in ("/bridge/control", "/bridge/preflight"):
+            preparation = self.path in ("/bridge/preparation/claim", "/bridge/preparation/ack")
+            if self.path not in ("/bridge/control", "/bridge/preflight") and not preparation:
                 self.send_error(404)
+                return
+            if preparation and not self.preparation_access():
                 return
             preflight = self.path == "/bridge/preflight"
             origin = self.headers.get("Origin")
-            header = "X-PolyHermes-Future-Preflight" if preflight else "X-PolyHermes-Future-Control"
+            header = "X-PolyHermes-Future-Preparation" if preparation else (
+                "X-PolyHermes-Future-Preflight" if preflight else "X-PolyHermes-Future-Control")
             # A service worker may report only read-only browser facts. Ordinary
             # website origins remain rejected; controls still accept no Origin.
-            allowed_origin = origin is None or preflight and re.fullmatch(r"chrome-extension://[a-p]{32}", origin) is not None
+            allowed_origin = origin is None or (preflight or preparation) and re.fullmatch(r"chrome-extension://[a-p]{32}", origin) is not None
             if self.headers.get(header) != "1" or not allowed_origin:
                 self.send_error(403)
                 return
@@ -454,17 +480,30 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
                 self.send_error(415)
                 return
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= (1500 if preflight else 256) or self.headers.get("Transfer-Encoding") is not None:
+                raw_length = self.headers.get("Content-Length", "0")
+                if preparation and (not raw_length.isascii() or not raw_length.isdigit()):
+                    raise ValueError("INVALID_BODY_SIZE")
+                length = int(raw_length)
+                limit = 1500 if preflight or self.path == "/bridge/preparation/ack" else 256
+                if not 0 < length <= limit or self.headers.get("Transfer-Encoding") is not None:
                     raise ValueError("INVALID_BODY_SIZE")
                 self.connection.settimeout(2)
-                payload = json.loads(self.rfile.read(length), object_pairs_hook=strict_json_object if preflight else None)
-                if preflight:
+                body = self.rfile.read(length)
+                if preparation and len(body) != length:
+                    raise ValueError("INCOMPLETE_BODY")
+                payload = json.loads(body, object_pairs_hook=strict_json_object if preflight or preparation else None)
+                if self.path == "/bridge/preparation/claim":
+                    self.reply(bridge.claim_preparation(payload))
+                elif self.path == "/bridge/preparation/ack":
+                    self.reply(bridge.report_preparation(payload))
+                elif preflight:
                     self.reply(bridge.report_preflight(payload))
                 else:
                     if type(payload) is not dict or set(payload) != {"enabled"} or type(payload["enabled"]) is not bool:
                         raise ValueError("ENABLED_MUST_BE_BOOLEAN")
                     self.reply(bridge.control(payload["enabled"]))
+            except PreparationConflict:
+                self.send_error(409)
             except (ValueError, UnicodeError):
                 self.send_error(400)
             except OSError:

@@ -79,6 +79,9 @@ class FutureBtc5mBridgeControllerTest {
         assertFalse(enabled.path("data").path("executorReady").asBoolean())
         assertEquals("BLOCKED", enabled.path("data").path("mode").asText())
         assertEquals(1, enabled.path("data").path("amountUsd").asInt())
+        assertTrue(enabled.path("data").path("preparation").path("enabled").asBoolean())
+        assertEquals("PREPARE_ONLY", enabled.path("data").path("preparation").path("mode").asText())
+        assertTrue(enabled.path("data").path("preparation").path("noSubmission").asBoolean())
 
         val disabled = api("/control", """{"enabled":false}""")
         assertEquals(0, disabled.path("code").asInt())
@@ -166,6 +169,10 @@ class FutureBtc5mBridgeControllerTest {
         "periodStart" to 1791706200, "feedStatus" to "CURRENT",
         "reason" to if (requestedEnabled) "EXECUTOR_NOT_CONNECTED" else "AUTO_DISABLED",
         "blockReasons" to listOf("EXECUTOR_NOT_CONNECTED"), "executorReady" to false, "signal" to null,
+        "preparation" to mapOf("mode" to "PREPARE_ONLY", "noSubmission" to true, "operatorAuthorized" to true,
+            "authorizationSource" to "USER_REQUEST", "enabled" to requestedEnabled,
+            "state" to if (requestedEnabled) "WAITING_SIGNAL" else "DISABLED", "intent" to null, "lastAttempt" to null,
+            "reasons" to listOf(if (requestedEnabled) "WAITING_CURRENT_SIGNAL" else "AUTO_PREPARATION_DISABLED")),
         "orderCounts" to mapOf("total" to 0, "pending" to 0, "submitted" to 0, "filled" to 0, "failed" to 0, "skipped" to 0)
     )
 

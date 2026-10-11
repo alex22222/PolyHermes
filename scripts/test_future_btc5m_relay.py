@@ -137,6 +137,13 @@ class FutureRelayTest(unittest.TestCase):
                 self.assertIn(self.post(path, headers={"Host": self.host})[0], (400, 404))
         self.assertEqual([], self.requests)
 
+    def test_browser_preparation_claims_remain_local_to_mac(self):
+        for path in ("/bridge/preparation", "/bridge/preparation/claim", "/bridge/preparation/ack"):
+            with self.subTest(path=path):
+                self.assertEqual(404, self.request("GET", path)[0])
+                self.assertEqual(404, self.post(path)[0])
+        self.assertEqual([], self.requests)
+
     def test_other_methods_are_rejected(self):
         for method in ("PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"):
             with self.subTest(method=method):

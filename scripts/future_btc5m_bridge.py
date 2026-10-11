@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,18 @@ OPEN_PRICE_SOURCE = "polymarket_crypto_price_fiveminute_twap60_openPrice"
 FILL_FIELDS = ("submittedAt", "filledAt", "platformOrderId", "filledQuantity", "avgFilledPrice", "feeUsd")
 PREFLIGHT_FIELDS = {"schemaVersion", "marketUrl", "pagePeriodStart", "checkedAt", "navigation",
                     "ticketStatus", "amountUsd", "selectedSide", "buyButtonEnabled"}
+PREPARATION_INTENT_FIELDS = {"schemaVersion", "id", "slug", "periodStart", "periodEnd", "side", "amountUsd",
+    "createdAt", "expiresAt", "priceObservedAt", "openPrice", "currentPrice", "priceSource", "openPriceSource",
+    "twapLookbackSeconds", "mode", "noSubmission", "operatorAuthorized", "authorizationSource", "claimToken"}
+PREPARATION_RECORD_FIELDS = PREPARATION_INTENT_FIELDS | {"state", "updatedAt", "claimedAt", "reason", "receipt"}
+PREPARATION_REPORT_FIELDS = {"schemaVersion", "id", "claimToken", "checkedAt", "status", "marketUrl",
+                             "amountUsd", "selectedSide", "reason", "noSubmission"}
+PREPARATION_FAILURES = {"PREPARATION_FAILED", "MARKET_MISMATCH", "TICKET_CHANGED", "UNSAFE_DIRECTION_CONTROL",
+                        "AMOUNT_WRITE_FAILED", "DIRECTION_WRITE_FAILED", "POSTCHECK_FAILED", "PREPARATION_REVOKED"}
+
+
+class PreparationConflict(ValueError):
+    pass
 
 
 def finite_number(value):
@@ -49,6 +62,9 @@ class FutureBridge:
         self.preflight_error = None
         self.preflight_seen = set()
         self.last_preflight_pass = None
+        self.preparations = {}
+        self.last_preparation = None
+        self.preparation_error = None
         self.state_dir.mkdir(parents=True, exist_ok=True)
         ledger = self.state_dir / "orders.jsonl"
         if ledger.exists():
@@ -77,11 +93,273 @@ class FutureBridge:
             except (OSError, ValueError, TypeError):
                 self.preflight_error = "PREFLIGHT_LEDGER_INVALID"
                 self.last_preflight_pass = None
+        preparation_ledger = self.state_dir / "preparations.jsonl"
+        if preparation_ledger.exists():
+            try:
+                with preparation_ledger.open(encoding="utf-8") as stream:
+                    for line in stream:
+                        record = json.loads(line, object_pairs_hook=strict_json_object)
+                        previous = self.preparations.get(record.get("id")) if isinstance(record, dict) else None
+                        if not line.endswith("\n") or not self._valid_preparation_record(record, previous):
+                            raise ValueError("Invalid preparation ledger")
+                        self.preparations[record["id"]] = record
+                        if self.last_preparation is None or record["periodStart"] >= self.last_preparation["periodStart"]:
+                            self.last_preparation = record
+            except (OSError, ValueError, TypeError):
+                self.preparation_error = "PREPARATION_LEDGER_INVALID"
+                self.last_preparation = None
         # A process restart never resumes a persisted request to trade.
         try:
             self._save_control(self.now_fn())
         except OSError:
             self.storage_error = self.storage_error or "CONTROL_STATE_WRITE_FAILED"
+        self._revoke_preparation(self.now_fn(), "PROCESS_RESTARTED")
+
+    @classmethod
+    def _valid_preparation_record(cls, record, previous=None):
+        if type(record) is not dict or set(record) != PREPARATION_RECORD_FIELDS:
+            return False
+        start, created, updated = record["periodStart"], record["createdAt"], record["updatedAt"]
+        if (type(start) is not int or start < 0 or start % 300 or record["id"] != f"future-btc5m-prepare:{start}"
+                or record["slug"] != f"btc-updown-5m-{start}" or record["periodEnd"] != start + 300
+                or type(record["schemaVersion"]) is not int or record["schemaVersion"] != 1
+                or record["mode"] != "PREPARE_ONLY" or record["noSubmission"] is not True
+                or record["operatorAuthorized"] is not True or record["authorizationSource"] != "USER_REQUEST"
+                or not finite_number(record["amountUsd"]) or record["amountUsd"] != 1
+                or not finite_number(created) or not start + 60 <= created < start + 80
+                or record["expiresAt"] != start + 80 or not finite_number(updated) or updated < created
+                or record["priceSource"] != "chainlink" or record["openPriceSource"] != OPEN_PRICE_SOURCE
+                or record["twapLookbackSeconds"] != 60 or not finite_number(record["priceObservedAt"])
+                or not 0 <= created - record["priceObservedAt"] <= 5
+                or not finite_number(record["openPrice"]) or record["openPrice"] <= 0
+                or not finite_number(record["currentPrice"]) or record["currentPrice"] <= 0
+                or record["side"] not in ("Up", "Down")
+                or record["side"] != ("Up" if record["currentPrice"] > record["openPrice"] else
+                                      "Down" if record["currentPrice"] < record["openPrice"] else None)):
+            return False
+        token, claimed, receipt = record["claimToken"], record["claimedAt"], record["receipt"]
+        if token is None:
+            if claimed is not None:
+                return False
+        elif (not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{32}", token) is None
+              or not finite_number(claimed) or not created <= claimed < record["expiresAt"] or updated < claimed):
+            return False
+        if receipt is not None:
+            if (type(receipt) is not dict or set(receipt) != {"checkedAt", "marketUrl", "amountUsd", "selectedSide"}
+                    or token is None or cls._market_url_start(receipt["marketUrl"]) != start
+                    or not finite_number(receipt["checkedAt"]) or abs(updated - receipt["checkedAt"]) > 3
+                    or receipt["checkedAt"] < claimed - 3
+                    or receipt["amountUsd"] is not None and (not finite_number(receipt["amountUsd"]) or receipt["amountUsd"] < 0)
+                    or receipt["selectedSide"] not in (None, "Up", "Down")):
+                return False
+        state, reason = record["state"], record["reason"]
+        if state == "PENDING":
+            valid = token is None and receipt is None and reason is None and updated == created
+        elif state == "CLAIMED":
+            valid = (token is not None and receipt is None and reason is None and updated == claimed
+                     and 0 <= claimed - record["priceObservedAt"] <= 5)
+        elif state == "READY":
+            valid = (token is not None and reason is None and receipt is not None
+                     and receipt["amountUsd"] == 1 and receipt["selectedSide"] == record["side"]
+                     and start + 60 <= receipt["checkedAt"] < record["expiresAt"] and updated < record["expiresAt"]
+                     and 0 <= updated - record["priceObservedAt"] <= 5)
+        elif state == "FAILED":
+            valid = token is not None and receipt is not None and reason in PREPARATION_FAILURES
+        elif state == "EXPIRED":
+            valid = (updated >= record["expiresAt"] and (reason == "INTENT_EXPIRED"
+                     or reason == "PREPARATION_RECEIPT_UNKNOWN" and token is not None and receipt is None))
+        elif state == "REVOKED":
+            valid = reason in ("PREPARATION_REVOKED", "PROCESS_RESTARTED") and receipt is None
+        else:
+            return False
+        if not valid:
+            return False
+        if previous is None:
+            return state == "PENDING"
+        transitions = {"PENDING": {"CLAIMED", "EXPIRED", "REVOKED"}, "CLAIMED": {"READY", "FAILED", "EXPIRED", "REVOKED"}}
+        return (state in transitions.get(previous["state"], set()) and updated >= previous["updatedAt"]
+                and all(record[field] == previous[field] for field in PREPARATION_INTENT_FIELDS - {"claimToken"})
+                and (previous["state"] == "PENDING" and state == "CLAIMED"
+                     or token == previous["claimToken"] and claimed == previous["claimedAt"]))
+
+    def _save_preparation(self, record):
+        if self.preparation_error:
+            raise OSError(self.preparation_error)
+        previous = self.preparations.get(record["id"])
+        if not self._valid_preparation_record(record, previous):
+            raise ValueError("INVALID_PREPARATION_EVENT")
+        try:
+            ledger_path = self.state_dir / "preparations.jsonl"
+            first_write = not ledger_path.exists()
+            with ledger_path.open("a", encoding="utf-8") as ledger:
+                ledger.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+                ledger.flush()
+                os.fsync(ledger.fileno())
+            if first_write:
+                descriptor = os.open(self.state_dir, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+        except OSError:
+            self.preparation_error = "PREPARATION_LEDGER_WRITE_FAILED"
+            raise
+        self.preparations[record["id"]] = record
+        self.last_preparation = record
+
+    def _revoke_preparation(self, now, reason="PREPARATION_REVOKED"):
+        record = self.last_preparation
+        if not self.preparation_error and record and record["state"] in ("PENDING", "CLAIMED"):
+            try:
+                self._save_preparation({**record, "state": "REVOKED", "updatedAt": max(now, record["updatedAt"]), "reason": reason})
+            except OSError:
+                pass
+
+    def _expire_preparation(self, now):
+        record = self.last_preparation
+        if not self.preparation_error and record and record["state"] in ("PENDING", "CLAIMED") and now >= record["expiresAt"]:
+            reason = "INTENT_EXPIRED" if record["state"] == "PENDING" else "PREPARATION_RECEIPT_UNKNOWN"
+            self._save_preparation({**record, "state": "EXPIRED", "updatedAt": now, "reason": reason})
+
+    def _preparation_reasons(self, source, error, now):
+        if self.preparation_error:
+            return [self.preparation_error]
+        if self.storage_error:
+            return [self.storage_error]
+        if self.preflight_error:
+            return [self.preflight_error]
+        if self._stopped(source):
+            return ["STOP_FILE_PRESENT"]
+        if error:
+            return [error]
+        if not self.requested_enabled:
+            return ["AUTO_PREPARATION_DISABLED"]
+        if not self._current_signal(source, now):
+            return ["WAITING_CURRENT_SIGNAL"]
+        report = self.browser_report
+        if (not report or self.browser_received_at is None or not 0 <= now - self.browser_received_at <= 5
+                or abs(now - report["checkedAt"]) > 5):
+            return ["BROWSER_NOT_CONNECTED"]
+        if report["navigation"] != "CURRENT" or report["pagePeriodStart"] != int(now // 300) * 300:
+            return ["MARKET_NOT_CURRENT"]
+        if report["ticketStatus"] != "PASS":
+            return ["TICKET_CHECK_FAILED"]
+        return []
+
+    def _preparation_view(self, source, error, now):
+        reasons = self._preparation_reasons(source, error, now)
+        record = self.last_preparation
+        if (not reasons and record and record["periodStart"] == int(now // 300) * 300
+                and record["state"] in ("PENDING", "CLAIMED", "READY")
+                and (not 0 <= now - record["priceObservedAt"] <= 5
+                     or self._current_signal(source, now)["side"] != record["side"])):
+            reasons = ["WAITING_CURRENT_SIGNAL"]
+        intent = None
+        if self.preparation_error or self.storage_error or self.preflight_error or error or self._stopped(source):
+            state = "BLOCKED"
+        elif not self.requested_enabled:
+            state = "DISABLED"
+        elif record and record["periodStart"] == int(now // 300) * 300:
+            state = record["state"]
+            if state in ("PENDING", "CLAIMED") and now >= record["expiresAt"]:
+                state = "EXPIRED" if state == "PENDING" else "RECEIPT_UNKNOWN"
+                reasons = ["INTENT_EXPIRED" if state == "EXPIRED" else "PREPARATION_RECEIPT_UNKNOWN"]
+            elif state == "EXPIRED" and record["reason"] == "PREPARATION_RECEIPT_UNKNOWN":
+                state, reasons = "RECEIPT_UNKNOWN", [record["reason"]]
+            elif state in ("FAILED", "EXPIRED", "REVOKED"):
+                reasons = [record["reason"]]
+            elif state == "READY":
+                if now >= record["expiresAt"]:
+                    state, reasons = "EXPIRED", ["INTENT_EXPIRED"]
+                elif reasons:
+                    state = "WAITING_SIGNAL" if reasons == ["WAITING_CURRENT_SIGNAL"] else "WAITING_BROWSER"
+                elif (self.browser_report["amountUsd"] != 1 or self.browser_report["selectedSide"] != record["side"]
+                      or not self.browser_report["buyButtonEnabled"]):
+                    state, reasons = "BLOCKED", ["PREPARED_TICKET_CHANGED"]
+            elif reasons:
+                state = "WAITING_SIGNAL" if reasons == ["WAITING_CURRENT_SIGNAL"] else "WAITING_BROWSER"
+            elif not 0 <= now - record["priceObservedAt"] <= 5:
+                state, reasons = "WAITING_SIGNAL", ["WAITING_CURRENT_SIGNAL"]
+            else:
+                intent = {field: copy.deepcopy(record[field]) for field in PREPARATION_INTENT_FIELDS}
+        else:
+            state = "WAITING_SIGNAL" if reasons == ["WAITING_CURRENT_SIGNAL"] or not reasons else "WAITING_BROWSER"
+        return {"mode": "PREPARE_ONLY", "noSubmission": True, "operatorAuthorized": True,
+                "authorizationSource": "USER_REQUEST", "enabled": self.requested_enabled, "state": state,
+                "intent": intent, "lastAttempt": copy.deepcopy(record), "reasons": reasons}
+
+    def preparation(self):
+        with self.lock:
+            source, error = self._read_source()
+            now = self.now_fn()
+            self._disable_for_stop(source, now)
+            return {"bridgeId": BRIDGE_ID, "serverTime": now, "preparation": self._preparation_view(source, error, now)}
+
+    def claim_preparation(self, payload):
+        if (type(payload) is not dict or set(payload) != {"schemaVersion", "id"}
+                or type(payload["schemaVersion"]) is not int or payload["schemaVersion"] != 1
+                or not isinstance(payload["id"], str)):
+            raise ValueError("INVALID_PREPARATION_CLAIM")
+        with self.lock:
+            source, error = self._read_source()
+            now = self.now_fn()
+            self._disable_for_stop(source, now)
+            self._expire_preparation(now)
+            record = self.last_preparation
+            signal = self._current_signal(source, now)
+            if (self._preparation_reasons(source, error, now) or not record or record["id"] != payload["id"]
+                    or record["state"] != "PENDING" or record["periodStart"] != int(now // 300) * 300
+                    or not 0 <= now - record["priceObservedAt"] <= 5 or signal["side"] != record["side"]):
+                raise PreparationConflict("PREPARATION_NOT_CLAIMABLE")
+            self._save_preparation({**record, "state": "CLAIMED", "updatedAt": now,
+                                    "claimedAt": now, "claimToken": secrets.token_hex(16)})
+            return self.preparation()
+
+    def report_preparation(self, payload):
+        if (type(payload) is not dict or set(payload) != PREPARATION_REPORT_FIELDS
+                or type(payload["schemaVersion"]) is not int or payload["schemaVersion"] != 1
+                or not isinstance(payload["id"], str) or not isinstance(payload["claimToken"], str)
+                or re.fullmatch(r"[0-9a-f]{32}", payload["claimToken"]) is None
+                or payload["noSubmission"] is not True or not finite_number(payload["checkedAt"])
+                or self._market_url_start(payload["marketUrl"]) is None
+                or payload["amountUsd"] is not None and (not finite_number(payload["amountUsd"]) or payload["amountUsd"] < 0)
+                or payload["selectedSide"] not in (None, "Up", "Down")
+                or payload["status"] not in ("READY", "FAILED", "EXPIRED")
+                or payload["reason"] is not None and not isinstance(payload["reason"], str)
+                or payload["status"] == "READY" and payload["reason"] is not None
+                or payload["status"] == "FAILED" and payload["reason"] not in PREPARATION_FAILURES
+                or payload["status"] == "EXPIRED" and payload["reason"] != "INTENT_EXPIRED"):
+            raise ValueError("INVALID_PREPARATION_REPORT")
+        with self.lock:
+            now = self.now_fn()
+            source, error = self._read_source()
+            self._disable_for_stop(source, now)
+            self._expire_preparation(now)
+            record = self.last_preparation
+            if (not self.requested_enabled or self.preparation_error or self._stopped(source) or not record
+                    or record["state"] != "CLAIMED" or record["id"] != payload["id"]
+                    or record["claimToken"] != payload["claimToken"]):
+                raise PreparationConflict("PREPARATION_REPORT_NOT_CURRENT")
+            if (abs(now - payload["checkedAt"]) > 3 or payload["checkedAt"] < record["claimedAt"] - 3
+                    or self._market_url_start(payload["marketUrl"]) != record["periodStart"]):
+                raise ValueError("INVALID_PREPARATION_REPORT_TIME_OR_MARKET")
+            if payload["status"] == "EXPIRED" and now < record["expiresAt"]:
+                raise ValueError("PREPARATION_NOT_EXPIRED")
+            if payload["status"] == "READY":
+                report = self.browser_report
+                if (self._preparation_reasons(source, error, now) or payload["amountUsd"] != 1
+                        or not 0 <= now - record["priceObservedAt"] <= 5
+                        or self._current_signal(source, now)["side"] != record["side"]
+                        or self.browser_received_at < record["claimedAt"]
+                        or payload["selectedSide"] != record["side"]
+                        or not record["periodStart"] + 60 <= payload["checkedAt"] < record["expiresAt"]
+                        or report["amountUsd"] != 1 or report["selectedSide"] != record["side"]
+                        or not report["buyButtonEnabled"]):
+                    raise ValueError("PREPARATION_READY_NOT_CONFIRMED")
+            receipt = {field: copy.deepcopy(payload[field]) for field in ("checkedAt", "marketUrl", "amountUsd", "selectedSide")}
+            self._save_preparation({**record, "state": payload["status"], "updatedAt": now,
+                                    "reason": payload["reason"], "receipt": receipt})
+            return self.preparation()
 
     @staticmethod
     def _valid_record(record):
@@ -255,6 +533,8 @@ class FutureBridge:
                 self._save_control(now)
             except OSError:
                 self.storage_error = self.storage_error or "CONTROL_STATE_WRITE_FAILED"
+        if self._stopped(source):
+            self._revoke_preparation(now)
 
     def _status(self, source, source_error, now, persist_preflight=False):
         self._disable_for_stop(source, now)
@@ -280,6 +560,7 @@ class FutureBridge:
             "orderCounts": {"total": len(self.records), "pending": 0, "submitted": 0,
                             "filled": 0, "failed": 0, "skipped": len(self.records)},
             "preflight": self._preflight(source, source_error, now, persist_preflight),
+            "preparation": self._preparation_view(source, source_error, now),
         }
 
     def status(self):
@@ -310,6 +591,8 @@ class FutureBridge:
                 self.enabled_at = None
                 self.storage_error = self.storage_error or "CONTROL_STATE_WRITE_FAILED"
                 raise
+            if not enabled:
+                self._revoke_preparation(now)
             return self._status(source, error, now)
 
     def orders(self, page=1, size=20, status=None):
@@ -364,36 +647,27 @@ class FutureBridge:
             now = self.now_fn()
             source, error = self._read_source()
             self._disable_for_stop(source, now)
-            signal = self._current_signal(source, now) if self.requested_enabled and not self.storage_error and not error else None
-            if signal and not self._stopped(source):
+            try:
+                self._expire_preparation(now)
+            except OSError:
+                pass
+            signal = self._current_signal(source, now) if not self._preparation_reasons(source, error, now) else None
+            if signal:
                 start = signal["period_start"]
-                id = f"{BRIDGE_ID}:{start}"
-                if id not in self.seen:
+                id = f"future-btc5m-prepare:{start}"
+                if id not in self.preparations and f"{BRIDGE_ID}:{start}" not in self.seen:
                     record = {
-                        "id": id, "bridgeId": BRIDGE_ID, "slug": signal["slug"],
+                        "schemaVersion": 1, "id": id, "slug": signal["slug"],
                         "periodStart": start, "periodEnd": start + 300, "side": signal["side"],
-                        "amountUsd": 1, "status": "SKIPPED", "reason": "EXECUTOR_NOT_CONNECTED",
-                        "createdAt": now, "updatedAt": now, **{field: None for field in FILL_FIELDS},
-                        "events": [{"stage": "SIGNAL_ACCEPTED", "at": now, "reason": None},
-                                   {"stage": "EXECUTION_BLOCKED", "at": now, "reason": "EXECUTOR_NOT_CONNECTED"}],
+                        "amountUsd": 1, "createdAt": now, "expiresAt": start + 80,
+                        "priceObservedAt": signal["price_observed_at"], "openPrice": signal["open_price"],
+                        "currentPrice": signal["current_price"], "priceSource": "chainlink", "openPriceSource": OPEN_PRICE_SOURCE,
+                        "twapLookbackSeconds": 60, "mode": "PREPARE_ONLY", "noSubmission": True,
+                        "operatorAuthorized": True, "authorizationSource": "USER_REQUEST", "claimToken": None,
+                        "state": "PENDING", "updatedAt": now, "claimedAt": None, "reason": None, "receipt": None,
                     }
                     try:
-                        ledger_path = self.state_dir / "orders.jsonl"
-                        first_write = not ledger_path.exists()
-                        with ledger_path.open("a", encoding="utf-8") as ledger:
-                            ledger.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
-                            ledger.flush()
-                            os.fsync(ledger.fileno())
-                        if first_write:
-                            descriptor = os.open(self.state_dir, os.O_RDONLY)
-                            try:
-                                os.fsync(descriptor)
-                            finally:
-                                os.close(descriptor)
-                        self.records.append(record)
-                        self.seen.add(id)
+                        self._save_preparation(record)
                     except OSError:
-                        self.storage_error = "ORDER_LEDGER_WRITE_FAILED"
-                        self.requested_enabled = False
-                        self.enabled_at = None
+                        pass
             return self._status(source, error, now, persist_preflight=True)

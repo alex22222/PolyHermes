@@ -37,8 +37,41 @@ function validPreflight(message, sender) {
     ['Up', 'Down', null].includes(payload.selectedSide) && typeof payload.buyButtonEnabled === 'boolean');
 }
 
+function preparationMessage(message, sender) {
+  const page = marketPage(sender.tab.url ?? sender.url);
+  if (!marketPage(sender.url) || !page) return null;
+  const type = message.type;
+  if (type === 'FUTURE_BTC5M_PREPARATION') return Object.keys(message).length === 1 ? '' : null;
+  if (Object.keys(message).length !== 2 || !Object.hasOwn(message, 'payload')) return null;
+  const payload = message.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const start = Number(page.pathname.match(/btc-updown-5m-(\d+)/)[1]);
+  const id = `future-btc5m-prepare:${start}`;
+  if (payload.schemaVersion !== 1 || payload.id !== id) return null;
+  if (type === 'FUTURE_BTC5M_PREPARATION_CLAIM') {
+    return Object.keys(payload).length === 2 && start === Math.floor(Date.now() / 300000) * 300 ? '/claim' : null;
+  }
+  const keys = ['schemaVersion', 'id', 'claimToken', 'checkedAt', 'status', 'marketUrl',
+    'amountUsd', 'selectedSide', 'reason', 'noSubmission'];
+  const reasons = ['PREPARATION_FAILED', 'MARKET_MISMATCH', 'TICKET_CHANGED', 'UNSAFE_DIRECTION_CONTROL',
+    'AMOUNT_WRITE_FAILED', 'DIRECTION_WRITE_FAILED', 'POSTCHECK_FAILED', 'PREPARATION_REVOKED'];
+  if (type !== 'FUTURE_BTC5M_PREPARATION_ACK' || Object.keys(payload).length !== keys.length ||
+      !keys.every((key) => Object.hasOwn(payload, key)) || payload.noSubmission !== true ||
+      typeof payload.claimToken !== 'string' || !/^[a-f0-9]{32}$/.test(payload.claimToken) ||
+      !Number.isFinite(payload.checkedAt) || Math.abs(Date.now() / 1000 - payload.checkedAt) > 3 ||
+      payload.marketUrl !== page.origin + page.pathname ||
+      !(payload.amountUsd === null || Number.isFinite(payload.amountUsd) && payload.amountUsd >= 0) ||
+      !['Up', 'Down', null].includes(payload.selectedSide) ||
+      !(payload.status === 'READY' && payload.reason === null && payload.amountUsd === 1 && payload.selectedSide !== null ||
+        payload.status === 'FAILED' && reasons.includes(payload.reason) ||
+        payload.status === 'EXPIRED' && payload.reason === 'INTENT_EXPIRED')) return null;
+  return '/ack';
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!['FUTURE_BTC5M_STATUS', 'FUTURE_BTC5M_PREFLIGHT'].includes(message?.type) || !sender.tab || sender.frameId !== 0) return;
+  const preparationTypes = ['FUTURE_BTC5M_PREPARATION', 'FUTURE_BTC5M_PREPARATION_CLAIM', 'FUTURE_BTC5M_PREPARATION_ACK'];
+  if (!['FUTURE_BTC5M_STATUS', 'FUTURE_BTC5M_PREFLIGHT', ...preparationTypes].includes(message?.type) ||
+      !sender.tab || sender.frameId !== 0) return;
   let origin;
   try {
     origin = new URL(sender.url).origin;
@@ -46,6 +79,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
   if (origin !== 'https://future.news') return;
+  if (preparationTypes.includes(message.type)) {
+    const suffix = preparationMessage(message, sender);
+    if (suffix === null) return;
+    const options = {method: suffix ? 'POST' : 'GET', credentials: 'omit', cache: 'no-store',
+      redirect: 'error', headers: {'X-PolyHermes-Future-Preparation': '1'}, signal: AbortSignal.timeout(2000)};
+    if (suffix) {
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(message.payload);
+    }
+    fetch(`http://127.0.0.1:8766/bridge/preparation${suffix}`, options).then((response) => {
+      if (!response.ok) throw new Error('本地准备服务未确认');
+      return response.json();
+    }).then((status) => sendResponse({ok: true, status}))
+      .catch(() => sendResponse({ok: false, error: '本地准备服务未确认'}));
+    return true;
+  }
   if (message.type === 'FUTURE_BTC5M_PREFLIGHT') {
     if (!validPreflight(message, sender)) return;
     fetch('http://127.0.0.1:8766/bridge/preflight', {

@@ -6,7 +6,8 @@ import vm from 'node:vm';
 const content = readFileSync(new URL('./future-btc5m-extension/content.js', import.meta.url), 'utf8');
 const context = vm.createContext({URL, Event});
 vm.runInContext(content, context);
-const {usableDraft, matchesMarket, prepareAmount, observationView, navigationTarget, followCurrentMarket, readPreflight} = context.FutureBtc5m;
+const {usableDraft, matchesMarket, prepareAmount, observationView, navigationTarget, followCurrentMarket, readPreflight,
+  usablePreparation, readPreparationTicket, prepareOnlyOnce} = context.FutureBtc5m;
 const start = 1791650700;
 const now = start + 65;
 const draft = {
@@ -231,24 +232,48 @@ test('stale, expired, disconnected or unverified observation samples have no usa
 });
 
 function ticketFixture({currency = '金额 ($)', duplicate = false, marketOrder = true, sell = false, openDropdown = false,
-  buySide = '涨', buyDisabled = false, buyDuplicate = false,
-  title = 'Bitcoin Up or Down - October 10, 12:45PM-12:50PM ET', inert = false, disabledFieldset = false} = {}) {
+  buySide = '涨', buyDisabled = false, buyEnabledAfterAmount = false, buyDuplicate = false,
+  title = 'Bitcoin Up or Down - October 10, 12:45PM-12:50PM ET', inert = false, disabledFieldset = false,
+  selectedSide = buySide === '涨' ? 'Up' : 'Down', selectedAttribute = 'aria-pressed',
+  classEvidence = false, selectedClass = 'text-text-hightlightbtn',
+  unselectedClass = 'bg-panel-100 text-text-400 hover:bg-hover-200 border border-solid border-line-100',
+  directionType = 'button', directionForm = false, directionDisabled = false,
+  directionDuplicate = false, directionApplies = true, afterDirection = () => {}, afterAmount = () => {}} = {}) {
   let clicks = 0;
+  let directionClicks = 0;
+  let buyClicks = 0;
   let writes = 0;
   class FakeInput {
     get value() { return this.amount; }
     set value(value) { writes++; this.amount = value; }
     getClientRects() { return [1]; }
-    dispatchEvent(event) { this.events.push(event.type); }
+    dispatchEvent(event) { this.events.push(event.type); afterAmount(event); }
   }
   const labels = ['买入', '卖出', marketOrder ? '市价单' : '限价单', '涨 64¢', '跌 37¢', sell ? '卖出 涨' : `买入 ${buySide}`];
   if (buyDuplicate) labels.push(`买入 ${buySide}`);
+  if (directionDuplicate) labels.push('跌 37¢');
   if (openDropdown) labels.push(marketOrder ? '限价单' : '市价单');
   const body = {};
   const ticket = {textContent: currency, inert, parentElement: disabledFieldset ? {tagName: 'FIELDSET', disabled: true, parentElement: body} : body,
     querySelectorAll: (selector) => selector === 'button' ? [
-      ...labels.map((textContent) => ({textContent, disabled: /^买入\s+(涨|跌)$/.test(textContent) && buyDisabled,
-        parentElement: ticket, getClientRects: () => [1], click() { clicks++; }})),
+      ...labels.map((label) => {
+        const side = /^涨(?:\s|\d|--)/.test(label) ? 'Up' : /^跌(?:\s|\d|--)/.test(label) ? 'Down' : null;
+        const buy = /^买入\s+(涨|跌)$/.test(label);
+        return {get textContent() { return buy ? `买入 ${buySide}` : label; },
+          tagName: 'BUTTON', type: side ? directionType : 'button', form: directionForm ? {} : null,
+          get className() { return !classEvidence || !side ? '' : side === selectedSide ? selectedClass : unselectedClass; },
+          get disabled() { return side ? directionDisabled : buy && buyDisabled && !(buyEnabledAfterAmount && input.amount === '1'); },
+          getAttribute(name) { return side && name === selectedAttribute ? String(side === selectedSide) : null; },
+          parentElement: ticket, getClientRects: () => [1], click() {
+            clicks++;
+            if (side) {
+              directionClicks++;
+              if (directionApplies) { selectedSide = side; buySide = side === 'Up' ? '涨' : '跌'; }
+              afterDirection();
+            }
+            if (buy) buyClicks++;
+          }};
+      }),
       // Closed dropdown options stay in some DOM implementations.
       {textContent: '市价单', getClientRects: () => [], click() { clicks++; }},
     ] : title ? [{textContent: title, getClientRects: () => [1]}] : []};
@@ -256,7 +281,8 @@ function ticketFixture({currency = '金额 ($)', duplicate = false, marketOrder 
   const input = new FakeInput();
   input.amount = '10'; input.events = []; input.parentElement = ticket; input.ownerDocument = doc;
   doc.querySelectorAll = (selector) => selector === 'button' ? ticket.querySelectorAll() : duplicate ? [input, input] : [input];
-  return {doc, input, setTitle(value) { title = value; }, clicks: () => clicks, writes: () => writes};
+  return {doc, input, setTitle(value) { title = value; }, clicks: () => clicks,
+    directionClicks: () => directionClicks, buyClicks: () => buyClicks, writes: () => writes};
 }
 
 test('the polling flow navigates an ended round once, clears old inspection and checks the new ticket', async () => {
@@ -581,4 +607,352 @@ test('SPA preflight matches the trusted current tab URL while retaining Future B
     {...sender, tab: {id: 1}},
   ]) assert.equal(handler(message, invalid, () => {}), undefined);
   assert.equal(requests.length, 1);
+});
+
+const preparationIntent = {schemaVersion: 1, id: `future-btc5m-prepare:${start}`,
+  slug: draft.slug, periodStart: start, periodEnd: start + 300, side: 'Down', amountUsd: 1,
+  createdAt: now, expiresAt: start + 80, priceObservedAt: now, openPrice: 82980.01, currentPrice: 82979,
+  priceSource: 'chainlink', openPriceSource: 'polymarket_crypto_price_fiveminute_twap60_openPrice',
+  twapLookbackSeconds: 60, mode: 'PREPARE_ONLY', noSubmission: true, operatorAuthorized: true,
+  authorizationSource: 'USER_REQUEST', claimToken: null};
+const preparation = {bridgeId: 'future-btc5m', serverTime: now,
+  preparation: {mode: 'PREPARE_ONLY', noSubmission: true, operatorAuthorized: true,
+    authorizationSource: 'USER_REQUEST', enabled: true, state: 'PENDING',
+    intent: preparationIntent, lastAttempt: null, reasons: []}};
+const token = 'a'.repeat(32);
+
+function preparationTransport({read = null, claim = null, preflightOk = true} = {}) {
+  const acknowledgements = [];
+  const reports = [];
+  let claims = 0;
+  const claimed = {...preparation, preparation: {...preparation.preparation, state: 'CLAIMED',
+    intent: {...preparationIntent, claimToken: token}}};
+  const transport = {
+    async readPreparation() { return read ? read() : claimed; },
+    async claimPreparation(payload) { claims++; assert.deepEqual(JSON.parse(JSON.stringify(payload)),
+      {schemaVersion: 1, id: preparationIntent.id}); return claim ? claim() : claimed; },
+    async reportPreflight(payload) { reports.push(payload); return {ok: preflightOk}; },
+    async acknowledge(payload) { acknowledgements.push(payload); return {ok: true}; },
+  };
+  return {transport, acknowledgements, reports, claims: () => claims, claimed};
+}
+
+test('PREPARE_ONLY uses explicit user preparation authority without changing legacy eligibility guards', () => {
+  assert.equal(usableDraft(observing, now), null);
+  assert.equal(usablePreparation(preparation, now), preparationIntent);
+  for (const change of [{mode: 'LIVE'}, {noSubmission: false}, {operatorAuthorized: false},
+    {authorizationSource: 'OFFICIAL_VERIFIED'}, {enabled: false}, {state: 'READY'}]) {
+    assert.equal(usablePreparation({...preparation, preparation: {...preparation.preparation, ...change}}, now), null);
+  }
+  for (const change of [{bridgeId: 'other'}, {serverTime: now - 4}]) {
+    assert.equal(usablePreparation({...preparation, ...change}, now), null);
+  }
+  for (const change of [{amountUsd: 2}, {side: 'Up'}, {periodStart: start - 300}, {priceObservedAt: now - 6},
+    {currentPrice: 82980.01}, {expiresAt: start + 81}, {claimToken: 'unsafe'}, {priceSource: 'other'}]) {
+    assert.equal(usablePreparation({...preparation, preparation: {...preparation.preparation,
+      intent: {...preparationIntent, ...change}}}, now), null);
+  }
+  assert.equal(usablePreparation(preparation, start + 59), null);
+  assert.equal(usablePreparation({...preparation, serverTime: start + 80}, start + 80), null);
+});
+
+test('direction controls require actual selected evidence and cannot be inferred solely from Buy text', () => {
+  assert.equal(readPreparationTicket(ticketFixture().doc, marketUrl, start).selectedSide, 'Up');
+  for (const options of [{selectedAttribute: null}, {selectedSide: null}, {selectedSide: 'Down'},
+    {directionDuplicate: true}, {directionDisabled: true}, {directionType: 'submit', directionForm: true},
+    {inert: true}, {currency: '金额 (¥)'}, {sell: true}, {marketOrder: false}]) {
+    const fixture = ticketFixture(options);
+    assert.throws(() => readPreparationTicket(fixture.doc, marketUrl, start));
+    assert.equal(fixture.clicks(), 0);
+    assert.equal(fixture.writes(), 0);
+  }
+  assert.equal(readPreparationTicket(ticketFixture({buyDisabled: true}).doc, marketUrl, start).selectedSide, 'Up');
+});
+
+test('observed Future selected class is unique and cross-checked with Buy text without guessing a color class', () => {
+  const options = {selectedAttribute: null, classEvidence: true};
+  assert.equal(readPreparationTicket(ticketFixture(options).doc, marketUrl, start).selectedSide, 'Up');
+  assert.equal(readPreparationTicket(ticketFixture({...options, buySide: '跌'}).doc, marketUrl, start).selectedSide, 'Down');
+  for (const change of [{selectedClass: 'bg-increase-100'}, {selectedClass: 'text-text-hightlightbtn text-text-400'},
+    {unselectedClass: 'bg-panel-100'}, {unselectedClass: 'bg-panel-100 text-text-400 text-text-hightlightbtn'},
+    {selectedSide: 'Down'}]) {
+    const fixture = ticketFixture({...options, ...change});
+    assert.throws(() => readPreparationTicket(fixture.doc, marketUrl, start));
+    assert.equal(fixture.clicks(), 0);
+    assert.equal(fixture.writes(), 0);
+  }
+});
+
+test('first atomic claim prepares strategy direction and dollar 1 once without any Buy click', async () => {
+  const fixture = ticketFixture();
+  const storage = navigationFixture().storage;
+  const flow = preparationTransport();
+  const result = await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl, storage, flow.transport, () => now);
+  assert.equal(result.status, 'READY');
+  assert.equal(fixture.input.value, '1');
+  assert.equal(fixture.directionClicks(), 1);
+  assert.equal(fixture.buyClicks(), 0);
+  assert.deepEqual(fixture.input.events, ['input', 'change']);
+  assert.equal(flow.claims(), 1);
+  assert.equal(flow.reports.length, 1);
+  assert.equal(flow.reports[0].selectedSide, 'Down');
+  assert.equal(flow.reports[0].amountUsd, 1);
+  assert.equal(flow.acknowledgements.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(flow.acknowledgements[0])), {schemaVersion: 1,
+    id: preparationIntent.id, claimToken: token, checkedAt: now, status: 'READY', marketUrl,
+    amountUsd: 1, selectedSide: 'Down', reason: null, noSubmission: true});
+  await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl, storage, flow.transport, () => now);
+  assert.equal(flow.claims(), 1, 'the same tab may not repeat even after a content script reload');
+  assert.equal(fixture.directionClicks(), 1);
+  assert.equal(fixture.writes(), 1);
+});
+
+test('a GET CLAIMED or disabled intent cannot restore a lost preparation claim', async () => {
+  for (const wrapper of [
+    {...preparation, preparation: {...preparation.preparation, enabled: false}},
+    {...preparation, preparation: {...preparation.preparation, state: 'CLAIMED',
+      intent: {...preparationIntent, claimToken: token}}},
+  ]) {
+    const fixture = ticketFixture();
+    const flow = preparationTransport();
+    await prepareOnlyOnce(wrapper, fixture.doc, () => marketUrl, navigationFixture().storage, flow.transport, () => now);
+    assert.equal(flow.claims(), 0);
+    assert.equal(fixture.clicks(), 0);
+    assert.equal(fixture.writes(), 0);
+    assert.equal(flow.acknowledgements.length, 0);
+  }
+});
+
+test('STOP, expiry or ticket changes between direction and amount fail closed without writing amount', async () => {
+  for (const reason of ['PREPARATION_REVOKED', 'INTENT_EXPIRED', 'MARKET_MISMATCH']) {
+    let time = now;
+    let revoked = false;
+    const fixture = ticketFixture({afterDirection() {
+      if (reason === 'INTENT_EXPIRED') time = start + 80;
+      if (reason === 'PREPARATION_REVOKED') revoked = true;
+      if (reason === 'MARKET_MISMATCH') fixture.setTitle('Bitcoin Up or Down - October 10, 12:40PM-12:45PM ET');
+    }});
+    const flow = preparationTransport({read: () => ({...flow.claimed, serverTime: time,
+      preparation: {...flow.claimed.preparation, enabled: !revoked}})});
+    const result = await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl,
+      navigationFixture().storage, flow.transport, () => time);
+    assert.equal(result.reason, reason);
+    assert.equal(result.status, reason === 'INTENT_EXPIRED' ? 'EXPIRED' : 'FAILED');
+    assert.equal(fixture.writes(), 0);
+    assert.equal(fixture.buyClicks(), 0);
+    assert.equal(flow.acknowledgements.length, 1);
+    assert.equal(flow.acknowledgements[0].reason, reason);
+  }
+});
+
+test('readback and confirmed preflight are required before READY and failures never retry', async () => {
+  for (const options of [{directionApplies: false}, {preflightOk: false}, {amountApplies: false}]) {
+    let fixture;
+    fixture = ticketFixture({directionApplies: options.directionApplies,
+      afterAmount() { if (options.amountApplies === false) fixture.input.amount = '2'; }});
+    const flow = preparationTransport({preflightOk: options.preflightOk});
+    const storage = navigationFixture().storage;
+    const result = await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl, storage, flow.transport, () => now);
+    assert.equal(result.status, 'FAILED');
+    assert.equal(result.reason, options.directionApplies === false ? 'DIRECTION_WRITE_FAILED' :
+      options.amountApplies === false ? 'AMOUNT_WRITE_FAILED' : 'POSTCHECK_FAILED');
+    assert.equal(flow.acknowledgements.length, 1);
+    assert.equal(fixture.buyClicks(), 0);
+    await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl, storage, flow.transport, () => now);
+    assert.equal(flow.claims(), 1);
+  }
+});
+
+test('polling independently prepares a USER_REQUEST ticket while legacy UNKNOWN remains blocked', async () => {
+  const fixture = ticketFixture();
+  const flow = preparationTransport();
+  const messages = [];
+  let claimed = false;
+  const children = await renderedPanel(observing, marketUrl, now, fixture.doc, {messages,
+    reply(message) {
+      if (message.type === 'FUTURE_BTC5M_PREPARATION') return {ok: true, status: claimed ? flow.claimed : preparation};
+      if (message.type === 'FUTURE_BTC5M_PREPARATION_CLAIM') {
+        claimed = true;
+        return {ok: true, status: flow.claimed};
+      }
+      if (message.type === 'FUTURE_BTC5M_PREPARATION_ACK') return {ok: true,
+        status: {...flow.claimed, preparation: {...flow.claimed.preparation, state: message.payload.status}}};
+      if (message.type === 'FUTURE_BTC5M_PREFLIGHT') return {ok: true};
+      return {ok: true, status: observing};
+    }});
+  assert.equal(fixture.input.value, '1');
+  assert.equal(fixture.directionClicks(), 1);
+  assert.equal(fixture.buyClicks(), 0);
+  assert.equal(children[3].disabled, true, 'the legacy eligibility path stays blocked');
+  assert.match(children[9].textContent, /已准备.*手动买入/);
+  const acknowledgement = messages.find((item) => item.type === 'FUTURE_BTC5M_PREPARATION_ACK');
+  assert.equal(acknowledgement.payload.status, 'READY');
+  await children.poll();
+  assert.equal(messages.filter((item) => item.type === 'FUTURE_BTC5M_PREPARATION_CLAIM').length, 1);
+  assert.equal(fixture.writes(), 1);
+});
+
+test('the worker exposes only fixed prepare/claim/ack endpoints and refuses financial or unscoped messages', async () => {
+  let handler;
+  const requests = [];
+  class Clock extends Date { static now() { return now * 1000; } }
+  vm.runInNewContext(readFileSync(new URL('./future-btc5m-extension/background.js', import.meta.url), 'utf8'), {
+    URL, AbortSignal, Date: Clock, chrome: {runtime: {onMessage: {addListener(fn) { handler = fn; }}}},
+    fetch: async (url, options) => { requests.push({url, options}); return {ok: true, json: async () => preparation}; },
+  });
+  const sender = {url: marketUrl, frameId: 0, tab: {id: 1, url: marketUrl}};
+  const claim = {schemaVersion: 1, id: preparationIntent.id};
+  const ack = {schemaVersion: 1, id: preparationIntent.id, claimToken: token, checkedAt: now,
+    status: 'READY', marketUrl, amountUsd: 1, selectedSide: 'Down', reason: null, noSubmission: true};
+  for (const [type, payload, suffix, method] of [
+    ['FUTURE_BTC5M_PREPARATION', undefined, '', 'GET'],
+    ['FUTURE_BTC5M_PREPARATION_CLAIM', claim, '/claim', 'POST'],
+    ['FUTURE_BTC5M_PREPARATION_ACK', ack, '/ack', 'POST'],
+  ]) {
+    await new Promise((resolve) => {
+      assert.equal(handler(payload ? {type, payload} : {type}, sender, (reply) => {
+        assert.equal(reply.ok, true); resolve();
+      }), true);
+    });
+    const request = requests.at(-1);
+    assert.equal(request.url, `http://127.0.0.1:8766/bridge/preparation${suffix}`);
+    assert.equal(request.options.method, method);
+    assert.equal(request.options.credentials, 'omit');
+    assert.equal(request.options.redirect, 'error');
+    assert.equal(request.options.cache, 'no-store');
+    assert.equal(request.options.headers['X-PolyHermes-Future-Preparation'], '1');
+    if (payload) {
+      assert.deepEqual(JSON.parse(request.options.body), payload);
+    }
+  }
+  for (const message of [
+    {type: 'FUTURE_BTC5M_PREPARATION', url: 'https://evil.test'},
+    {type: 'FUTURE_BTC5M_PREPARATION_CLAIM', payload: {...claim, amountUsd: 2}},
+    {type: 'FUTURE_BTC5M_PREPARATION_CLAIM', payload: {...claim, id: `future-btc5m-prepare:${start - 300}`}},
+    ...[{noSubmission: false}, {claimToken: 'secret'}, {status: 'FILLED'}, {checkedAt: now - 4},
+      {reason: 'raw-page-secret'}, {amountUsd: 2}, {marketUrl: `${marketUrl}?token=secret`},
+      {status: 'FAILED', reason: 'INTENT_EXPIRED'}, {cookie: 'secret'}].map((change) =>
+      ({type: 'FUTURE_BTC5M_PREPARATION_ACK', payload: {...ack, ...change}})),
+    {type: 'BUY'}, {type: 'FUTURE_BTC5M_SUBMIT'},
+  ]) assert.equal(handler(message, sender, () => assert.fail()), undefined);
+  for (const change of [{frameId: 1}, {url: 'https://evil.test/'}, {tab: {id: 1, url: 'https://evil.test/'}},
+    {url: 'https://future.news/zh/updown'}]) {
+    assert.equal(handler({type: 'FUTURE_BTC5M_PREPARATION_CLAIM', payload: claim},
+      {...sender, ...change}, () => assert.fail()), undefined);
+  }
+  assert.equal(requests.length, 3);
+});
+
+test('blocked storage, rejected claims and lost acknowledgements never permit retries or Buy clicks', async () => {
+  for (const failure of ['storage', 'claim', 'ack']) {
+    const fixture = ticketFixture();
+    const storage = navigationFixture({storageError: failure === 'storage'}).storage;
+    const flow = preparationTransport({claim: failure === 'claim' ? () => { throw new Error('HTTP409'); } : null});
+    if (failure === 'ack') flow.transport.acknowledge = async () => { throw new Error('lost response'); };
+    const result = await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl, storage, flow.transport, () => now);
+    assert.equal(result.status, 'FAILED');
+    assert.equal(fixture.buyClicks(), 0);
+    if (failure !== 'ack') {
+      assert.equal(fixture.writes(), 0);
+      assert.equal(fixture.directionClicks(), 0);
+      assert.equal(flow.acknowledgements.length, 0);
+    }
+    await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl, storage, flow.transport, () => now);
+    assert.equal(flow.claims(), failure === 'storage' ? 0 : 1);
+  }
+});
+
+test('concurrent calls share a persistent once-per-round attempt and claim mismatches never touch the ticket', async () => {
+  const fixture = ticketFixture();
+  const storage = navigationFixture().storage;
+  const flow = preparationTransport();
+  await Promise.all([1, 2].map(() => prepareOnlyOnce(preparation, fixture.doc, () => marketUrl,
+    storage, flow.transport, () => now)));
+  assert.equal(flow.claims(), 1);
+  assert.equal(fixture.writes(), 1);
+  assert.equal(fixture.buyClicks(), 0);
+  for (const change of [{id: 'other'}, {side: 'Up'}, {claimToken: null}, {claimToken: 'invalid'}]) {
+    const invalid = ticketFixture();
+    const rejected = preparationTransport({claim: () => ({...flow.claimed,
+      preparation: {...flow.claimed.preparation, intent: {...flow.claimed.preparation.intent, ...change}}})});
+    await prepareOnlyOnce(preparation, invalid.doc, () => marketUrl, navigationFixture().storage,
+      rejected.transport, () => now);
+    assert.equal(invalid.clicks(), 0);
+    assert.equal(invalid.writes(), 0);
+    assert.equal(rejected.acknowledgements.length, 0);
+  }
+});
+
+test('a claimed price sample cannot be replaced to extend its five-second write permission', async () => {
+  let time = now;
+  const fixture = ticketFixture({afterDirection() { time = now + 6; }});
+  const flow = preparationTransport({read: () => ({...flow.claimed, serverTime: time,
+    preparation: {...flow.claimed.preparation, intent: {...flow.claimed.preparation.intent,
+      createdAt: time, priceObservedAt: time}}})});
+  const result = await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl,
+    navigationFixture().storage, flow.transport, () => time);
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.reason, 'PREPARATION_REVOKED');
+  assert.equal(fixture.writes(), 0);
+  assert.equal(fixture.buyClicks(), 0);
+});
+
+test('the panel does not claim a prepared ticket from stale or malformed preparation state', async () => {
+  for (const change of [{bridgeId: 'other'}, {serverTime: now - 4},
+    {preparation: {...preparation.preparation, mode: 'LIVE', state: 'READY'}},
+    {preparation: {...preparation.preparation, noSubmission: false, state: 'READY'}}]) {
+    const fixture = ticketFixture();
+    const children = await renderedPanel(observing, marketUrl, now, fixture.doc, {
+      reply(message) {
+        if (message.type === 'FUTURE_BTC5M_PREPARATION') return {ok: true,
+          status: {...preparation, preparation: {...preparation.preparation, state: 'READY'}, ...change}};
+        return message.type === 'FUTURE_BTC5M_PREFLIGHT' ? {ok: true} : {ok: true, status: observing};
+      }});
+    assert.doesNotMatch(children[9].textContent, /已准备/);
+    assert.equal(fixture.writes(), 0);
+    assert.equal(fixture.clicks(), 0);
+  }
+});
+
+test('an empty amount and initially disabled Buy may be prepared but only enabled final readback can become READY', async () => {
+  for (const enabledAfter of [true, false]) {
+    const fixture = ticketFixture({buyDisabled: true, buyEnabledAfterAmount: enabledAfter});
+    fixture.input.amount = '';
+    const flow = preparationTransport();
+    const result = await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl,
+      navigationFixture().storage, flow.transport, () => now);
+    assert.equal(flow.claims(), 1);
+    assert.equal(fixture.input.value, '1');
+    assert.equal(fixture.directionClicks(), 1);
+    assert.equal(fixture.buyClicks(), 0);
+    assert.equal(result.status, enabledAfter ? 'READY' : 'FAILED');
+    assert.equal(result.reason, enabledAfter ? null : 'POSTCHECK_FAILED');
+    assert.equal(flow.reports.length, enabledAfter ? 1 : 0);
+    assert.equal(flow.acknowledgements.length, 1);
+  }
+});
+
+test('a disabled, inert or aria-disabled amount ancestor blocks preparation before claim while read-only inspection stays observable', async () => {
+  for (const ancestor of [
+    {tagName: 'FIELDSET', disabled: true},
+    {tagName: 'DIV', inert: true},
+    {tagName: 'DIV', getAttribute: (name) => name === 'aria-disabled' ? 'true' : null},
+  ]) {
+    const fixture = ticketFixture();
+    fixture.input.parentElement = {...ancestor, textContent: '', querySelectorAll: () => [],
+      parentElement: fixture.input.parentElement};
+    const before = readPreflight(fixture.doc, marketUrl, now);
+    assert.equal(before.ticketStatus, 'PASS');
+    assert.equal(before.buyButtonEnabled, true);
+    const flow = preparationTransport();
+    const result = await prepareOnlyOnce(preparation, fixture.doc, () => marketUrl,
+      navigationFixture().storage, flow.transport, () => now);
+    assert.equal(result.status, 'FAILED');
+    assert.equal(result.reason, 'TICKET_CHANGED');
+    assert.equal(flow.claims(), 0);
+    assert.equal(flow.acknowledgements.length, 0);
+    assert.equal(fixture.writes(), 0);
+    assert.equal(fixture.clicks(), 0);
+    assert.deepEqual(fixture.input.events, []);
+  }
 });

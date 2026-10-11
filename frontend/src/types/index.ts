@@ -3037,17 +3037,18 @@ export interface FutureBtc5mBridgeStatus {
   bridgeId: 'future-btc5m'
   online: boolean
   requestedEnabled: boolean
-  effectiveEnabled: boolean
+  effectiveEnabled: false
   amountUsd: 1
   series: '5m'
-  mode: 'DISABLED' | 'BLOCKED' | 'LIVE'
+  mode: 'DISABLED' | 'BLOCKED'
   serverTime: number
   periodStart: number | null
   feedStatus: string
   reason: string | null
   blockReasons: string[]
-  executorReady: boolean
+  executorReady: false
   preflight?: FutureBtc5mPreflight | null
+  preparation: FutureBtc5mPreparation
   signal: {
     slug: string
     side: 'Up' | 'Down' | null
@@ -3068,6 +3069,57 @@ export interface FutureBtc5mBridgeStatus {
     failed: number
     skipped: number
   }
+}
+
+export type FutureBtc5mPreparationState = 'DISABLED' | 'WAITING_SIGNAL' | 'WAITING_BROWSER' | 'PENDING' | 'CLAIMED' |
+  'READY' | 'FAILED' | 'EXPIRED' | 'REVOKED' | 'RECEIPT_UNKNOWN' | 'BLOCKED'
+
+export interface FutureBtc5mPreparationIntent {
+  schemaVersion: 1
+  id: string
+  slug: string
+  periodStart: number
+  periodEnd: number
+  side: 'Up' | 'Down'
+  amountUsd: 1
+  createdAt: number
+  expiresAt: number
+  priceObservedAt: number
+  openPrice: number
+  currentPrice: number
+  priceSource: 'chainlink'
+  openPriceSource: 'polymarket_crypto_price_fiveminute_twap60_openPrice'
+  twapLookbackSeconds: 60
+  mode: 'PREPARE_ONLY'
+  noSubmission: true
+  operatorAuthorized: true
+  authorizationSource: 'USER_REQUEST'
+  claimToken: string | null
+}
+
+export interface FutureBtc5mPreparationRecord extends FutureBtc5mPreparationIntent {
+  state: 'PENDING' | 'CLAIMED' | 'READY' | 'FAILED' | 'EXPIRED' | 'REVOKED'
+  updatedAt: number
+  claimedAt: number | null
+  reason: string | null
+  receipt: {
+    checkedAt: number
+    marketUrl: string
+    amountUsd: number | null
+    selectedSide: 'Up' | 'Down' | null
+  } | null
+}
+
+export interface FutureBtc5mPreparation {
+  mode: 'PREPARE_ONLY'
+  noSubmission: true
+  operatorAuthorized: true
+  authorizationSource: 'USER_REQUEST'
+  enabled: boolean
+  state: FutureBtc5mPreparationState
+  intent: FutureBtc5mPreparationIntent | null
+  lastAttempt: FutureBtc5mPreparationRecord | null
+  reasons: string[]
 }
 
 export interface FutureBtc5mOrder {

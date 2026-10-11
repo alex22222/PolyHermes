@@ -245,6 +245,222 @@ class FutureBtc5mBridgeClientTest {
         assertEquals(1791706200, result.path("lastPassed").path("periodStart").asLong())
     }
 
+    @Test
+    fun `preparation preserves pending claimed and ready evidence without enabling execution`() {
+        listOf("PENDING", "CLAIMED", "READY").forEach { state ->
+            val record = preparationRecord(state)
+            responseBody = mapper.writeValueAsString(activeStatus() + ("preparation" to preparation(true, state,
+                if (state == "READY") null else record.filterKeys { it in preparationIntent().keys }, record)))
+            val value = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status())
+            assertEquals(state, value.path("preparation").path("state").asText())
+            assertEquals("PREPARE_ONLY", value.path("preparation").path("mode").asText())
+            assertTrue(value.path("preparation").path("noSubmission").asBoolean())
+            assertFalse(value.path("executorReady").asBoolean())
+            assertFalse(value.path("effectiveEnabled").asBoolean())
+            assertEquals(0, value.path("orderCounts").path("filled").asInt())
+        }
+    }
+
+    @Test
+    fun `preparation requires explicit scope exact authorization and confirmed switch`() {
+        val valid = preparation()
+        val invalid = listOf(valid - "noSubmission", valid + ("noSubmission" to false),
+            valid + ("mode" to "LIVE"), valid + ("operatorAuthorized" to false),
+            valid + ("operatorAuthorized" to "true"), valid + ("authorizationSource" to "BROWSER"),
+            valid + ("enabled" to true), valid + ("state" to "FILLED"),
+            valid + ("reasons" to listOf("UNREVIEWED_CODE")), valid - "intent", valid - "lastAttempt")
+        invalid.forEach { value ->
+            responseBody = mapper.writeValueAsString(status() + ("preparation" to value))
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+        responseBody = mapper.writeValueAsString(status() - "preparation")
+        assertThrows(IllegalStateException::class.java) { client.status() }
+    }
+
+    @Test
+    fun `preparation rejects wrong market size source price direction and acquisition window`() {
+        val valid = preparationIntent()
+        listOf(valid + ("schemaVersion" to 2), valid + ("id" to "future-btc5m:1791706200"),
+            valid + ("slug" to "btc-updown-5m-1791706500"), valid + ("amountUsd" to 2),
+            valid + ("amountUsd" to "1"), valid + ("priceSource" to "binance"),
+            valid + ("openPriceSource" to "legacy"), valid + ("twapLookbackSeconds" to 30),
+            valid + ("periodEnd" to 1791706501), valid + ("side" to "Down"),
+            valid + ("createdAt" to 1791706260.0 - 0.001), valid + ("createdAt" to 1791706280.0),
+            valid + ("expiresAt" to 1791706281.0), valid + ("priceObservedAt" to 1791706259.0),
+            valid + ("priceObservedAt" to 1791706266.0), valid + ("claimToken" to "a".repeat(32))).forEach { intent ->
+            responseBody = mapper.writeValueAsString(activeStatus() + ("preparation" to preparation(true, "PENDING", intent,
+                preparationRecord("PENDING") + intent)))
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+    }
+
+    @Test
+    fun `preparation rejects forged ready receipts token coercion and contradictory lifecycle facts`() {
+        val ready = preparationRecord("READY")
+        val receipt = ready["receipt"] as Map<*, *>
+        listOf(ready + ("claimToken" to null), ready + ("claimToken" to "A".repeat(32)),
+            ready + ("claimedAt" to 1791706280.0), ready + ("updatedAt" to 1791706264.0),
+            ready + ("receipt" to null), ready + ("receipt" to (receipt + ("amountUsd" to 2))),
+            ready + ("receipt" to (receipt + ("selectedSide" to "Down"))),
+            ready + ("receipt" to (receipt + ("marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706500"))),
+            ready + ("receipt" to (receipt + ("checkedAt" to 1791706269.0))),
+            ready + ("reason" to "PREPARATION_FAILED"),
+            ready + ("platformOrderId" to "invented-fill")).forEach { record ->
+            responseBody = mapper.writeValueAsString(activeStatus() + ("preparation" to preparation(true, "READY", null, record)))
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+        val pending = preparationRecord("PENDING") + ("claimedAt" to 1791706265.0)
+        responseBody = mapper.writeValueAsString(activeStatus() + ("preparation" to preparation(true, "PENDING", preparationIntent(), pending)))
+        assertThrows(IllegalStateException::class.java) { client.status() }
+        responseBody = mapper.writeValueAsString(status() + ("preparation" to preparation(false, "DISABLED", preparationIntent(), null)))
+        assertThrows(IllegalStateException::class.java) { client.status() }
+    }
+
+    @Test
+    fun `preparation history survives disabled switch expiry restart and receipt uncertainty`() {
+        val ready = preparationRecord("READY")
+        val histories = listOf(ready,
+            preparationRecord("FAILED") + mapOf("reason" to "POSTCHECK_FAILED", "receipt" to mapOf(
+                "checkedAt" to 1791706265.0, "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200",
+                "amountUsd" to null, "selectedSide" to null)),
+            preparationRecord("PENDING") + mapOf("state" to "EXPIRED", "updatedAt" to 1791706280.0, "reason" to "INTENT_EXPIRED"),
+            preparationRecord("CLAIMED") + mapOf("state" to "EXPIRED", "updatedAt" to 1791706280.0, "reason" to "PREPARATION_RECEIPT_UNKNOWN"),
+            preparationRecord("PENDING") + mapOf("state" to "REVOKED", "reason" to "PROCESS_RESTARTED"))
+        histories.forEach { record ->
+            responseBody = mapper.writeValueAsString(status() + mapOf("serverTime" to 1791706565.0, "periodStart" to 1791706500,
+                "preparation" to preparation(false, "DISABLED", null, record)))
+            val value = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preparation")
+            assertEquals(record["state"], value.path("lastAttempt").path("state").asText())
+            assertTrue(value.path("intent").isNull)
+            assertFalse(value.path("enabled").asBoolean())
+        }
+        listOf(-3.0, 3.0).forEach { skew ->
+            responseBody = mapper.writeValueAsString(activeStatus() + ("preparation" to preparation(true, "READY", null,
+                ready + ("receipt" to ((ready["receipt"] as Map<*, *>) + ("checkedAt" to 1791706265.0 + skew))))))
+            assertEquals("READY", mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preparation").path("state").asText())
+        }
+    }
+
+    @Test
+    fun `preparation accepts blocked disabled and virtual expired views without rewriting historical facts`() {
+        listOf("SIGNAL_SOURCE_UNAVAILABLE", "PREFLIGHT_LEDGER_INVALID", "PREFLIGHT_LEDGER_WRITE_FAILED").forEach { reason ->
+            responseBody = mapper.writeValueAsString(status() + ("preparation" to preparation(false, "BLOCKED") +
+                ("reasons" to listOf(reason))))
+            assertEquals("BLOCKED", mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preparation").path("state").asText())
+        }
+        listOf("PENDING", "READY", "CLAIMED").forEach { recordState ->
+            val viewState = if (recordState == "CLAIMED") "RECEIPT_UNKNOWN" else "EXPIRED"
+            val reason = if (recordState == "CLAIMED") "PREPARATION_RECEIPT_UNKNOWN" else "INTENT_EXPIRED"
+            responseBody = mapper.writeValueAsString(status(true) + mapOf("serverTime" to 1791706281.0,
+                "preparation" to (preparation(true, viewState, null, preparationRecord(recordState)) + ("reasons" to listOf(reason)))))
+            val value = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preparation")
+            assertEquals(viewState, value.path("state").asText())
+            assertEquals(recordState, value.path("lastAttempt").path("state").asText())
+        }
+        val failed = preparationRecord("FAILED") + mapOf("reason" to "PREPARATION_REVOKED",
+            "receipt" to mapOf("checkedAt" to 1791706265.0,
+                "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200", "amountUsd" to null, "selectedSide" to null))
+        responseBody = mapper.writeValueAsString(status(true) + ("preparation" to preparation(true, "FAILED", null, failed)))
+        assertEquals("FAILED", mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preparation").path("state").asText())
+    }
+
+    @Test
+    fun `current ready and exposed intents require original sample freshness and matching current signal`() {
+        listOf("PENDING", "CLAIMED", "READY").forEach { state ->
+            val record = preparationRecord(state)
+            val view = preparation(true, state, if (state == "READY") null else record.filterKeys { it in preparationIntent().keys }, record)
+            listOf(activeStatus() + mapOf("serverTime" to 1791706271.0, "signal" to (freshSignal() + ("price_observed_at" to 1791706271.0))),
+                activeStatus() + ("signal" to null), activeStatus() + ("feedStatus" to "UNAVAILABLE"),
+                activeStatus() + ("signal" to (freshSignal() + mapOf("side" to "Down", "current_price" to 82998.0)))).forEach { payload ->
+                responseBody = mapper.writeValueAsString(payload + ("preparation" to view))
+                assertThrows(IllegalStateException::class.java) { client.status() }
+            }
+        }
+    }
+
+    @Test
+    fun `active preparation requires a current browser report and ready requires an unchanged prepared ticket`() {
+        val browser = preflight() + mapOf("result" to "BLOCKED", "reasons" to listOf("TICKET_CHECK_FAILED"), "sideMatches" to false)
+        listOf("PENDING", "CLAIMED", "READY").forEach { state ->
+            val record = preparationRecord(state)
+            val view = preparation(true, state, if (state == "READY") null else record.filterKeys { it in preparationIntent().keys }, record)
+            listOf(browser + mapOf("browserConnected" to false, "result" to "WAITING_BROWSER"),
+                browser + ("navigation" to "ENDED"), browser + ("ticketStatus" to "FAIL"),
+                browser + mapOf("pagePeriodStart" to 1791705900, "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791705900"),
+                browser + ("receivedAt" to 1791706250.0)).forEach { value ->
+                responseBody = mapper.writeValueAsString(activeStatus() + mapOf("preflight" to value, "preparation" to view))
+                assertThrows(IllegalStateException::class.java) { client.status() }
+            }
+            if (state == "READY") {
+                listOf(browser + ("amountUsd" to 2), browser + ("selectedSide" to "Down"), browser + ("buyButtonEnabled" to false)).forEach { value ->
+                    responseBody = mapper.writeValueAsString(activeStatus() + mapOf("preflight" to value, "preparation" to view))
+                    assertThrows(IllegalStateException::class.java) { client.status() }
+                }
+            }
+            listOf("PREFLIGHT_LEDGER_INVALID", "PREFLIGHT_LEDGER_WRITE_FAILED").forEach { reason ->
+                responseBody = mapper.writeValueAsString(activeStatus() + mapOf(
+                    "preflight" to (browser + ("reasons" to listOf(reason))), "preparation" to view))
+                assertThrows(IllegalStateException::class.java) { client.status() }
+                responseBody = mapper.writeValueAsString(activeStatus() + ("preparation" to (view + ("reasons" to listOf(reason)))))
+                assertThrows(IllegalStateException::class.java) { client.status() }
+            }
+        }
+    }
+
+    @Test
+    fun `pending and claimed preparation can prepare an empty ticket with disabled buy button`() {
+        val browser = preflight() + mapOf("result" to "BLOCKED", "reasons" to listOf("AMOUNT_NOT_ONE_USD"),
+            "amountUsd" to 0, "selectedSide" to null, "buyButtonEnabled" to false, "sideMatches" to false)
+        listOf("PENDING", "CLAIMED").forEach { state ->
+            val record = preparationRecord(state)
+            responseBody = mapper.writeValueAsString(activeStatus() + mapOf("preflight" to browser,
+                "preparation" to preparation(true, state, record.filterKeys { it in preparationIntent().keys }, record)))
+            assertEquals(state, mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preparation").path("state").asText())
+        }
+    }
+
+    private fun activeStatus() = status(true) + mapOf("signal" to freshSignal(), "preflight" to preflight())
+
+    @Test
+    fun `historical acquisition and successful preparation cannot be fabricated after the original sample expires`() {
+        val ready = preparationRecord("READY")
+        val invalid = listOf(
+            preparationRecord("CLAIMED") + mapOf("claimedAt" to 1791706271.0, "updatedAt" to 1791706271.0),
+            ready + mapOf("updatedAt" to 1791706271.0, "receipt" to ((ready["receipt"] as Map<*, *>) + ("checkedAt" to 1791706271.0))),
+            preparationRecord("CLAIMED") + mapOf("state" to "EXPIRED", "updatedAt" to 1791706271.0, "reason" to "INTENT_EXPIRED"))
+        invalid.forEach { record ->
+            responseBody = mapper.writeValueAsString(status() + mapOf("serverTime" to 1791706271.0,
+                "preparation" to preparation(false, "DISABLED", null, record)))
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+    }
+
+    private fun preparationIntent() = mapOf(
+        "schemaVersion" to 1, "id" to "future-btc5m-prepare:1791706200", "slug" to "btc-updown-5m-1791706200",
+        "periodStart" to 1791706200, "periodEnd" to 1791706500, "side" to "Up", "amountUsd" to 1,
+        "createdAt" to 1791706265.0, "expiresAt" to 1791706280.0, "priceObservedAt" to 1791706265.0,
+        "openPrice" to 82999.0, "currentPrice" to 83000.0, "priceSource" to "chainlink",
+        "openPriceSource" to "polymarket_crypto_price_fiveminute_twap60_openPrice", "twapLookbackSeconds" to 60,
+        "mode" to "PREPARE_ONLY", "noSubmission" to true, "operatorAuthorized" to true,
+        "authorizationSource" to "USER_REQUEST", "claimToken" to null
+    )
+
+    private fun preparationRecord(state: String) = preparationIntent() + mapOf(
+        "state" to state, "updatedAt" to 1791706265.0,
+        "claimedAt" to if (state == "PENDING") null else 1791706265.0,
+        "claimToken" to if (state == "PENDING") null else "a".repeat(32), "reason" to null,
+        "receipt" to if (state == "READY") mapOf("checkedAt" to 1791706265.0,
+            "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200", "amountUsd" to 1, "selectedSide" to "Up") else null
+    )
+
+    private fun preparation(enabled: Boolean = false, state: String = if (enabled) "WAITING_SIGNAL" else "DISABLED",
+                            intent: Map<String, Any?>? = null, record: Map<String, Any?>? = null) = mapOf(
+        "mode" to "PREPARE_ONLY", "noSubmission" to true, "operatorAuthorized" to true,
+        "authorizationSource" to "USER_REQUEST", "enabled" to enabled, "state" to state,
+        "intent" to intent, "lastAttempt" to record,
+        "reasons" to if (state == "DISABLED") listOf("AUTO_PREPARATION_DISABLED") else if (state == "WAITING_SIGNAL") listOf("WAITING_CURRENT_SIGNAL") else emptyList()
+    )
+
     private fun freshSignal() = mapOf("slug" to "btc-updown-5m-1791706200", "side" to "Up", "period_start" to 1791706200,
         "period_end" to 1791706500, "price_observed_at" to 1791706265.0, "open_price" to 82999.0, "current_price" to 83000.0,
         "price_source" to "chainlink", "open_price_source" to "polymarket_crypto_price_fiveminute_twap60_openPrice", "twap_lookback_seconds" to 60)
@@ -268,6 +484,7 @@ class FutureBtc5mBridgeClientTest {
         "periodStart" to 1791706200, "feedStatus" to "CURRENT",
         "reason" to if (enabled) "EXECUTOR_NOT_CONNECTED" else "AUTO_DISABLED",
         "blockReasons" to listOf("EXECUTOR_NOT_CONNECTED"), "executorReady" to false, "signal" to null,
+        "preparation" to preparation(enabled),
         "orderCounts" to mapOf("total" to 0, "pending" to 0, "submitted" to 0, "filled" to 0, "failed" to 0, "skipped" to 0)
     )
 

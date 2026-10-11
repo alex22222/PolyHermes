@@ -20,6 +20,9 @@ const healthyStatus = (at = receipt) => {
     amountUsd: 1, series: '5m', mode: 'DISABLED', serverTime: second,
     periodStart: start, feedStatus: 'CURRENT', executorReady: false, blockReasons: [],
     orderCounts: {total: 0, pending: 0, submitted: 0, filled: 0, failed: 0, skipped: 0},
+    preparation: {mode: 'PREPARE_ONLY', noSubmission: true, operatorAuthorized: true,
+      authorizationSource: 'USER_REQUEST', enabled: false, state: 'DISABLED', intent: null,
+      lastAttempt: null, reasons: ['AUTO_PREPARATION_DISABLED']},
     signal: {slug: `btc-updown-5m-${start}`, side: 'Up', period_start: start, period_end: start + 300,
       price_observed_at: second - 1, open_price: 82000, current_price: 82001,
       price_source: 'chainlink', open_price_source: 'polymarket_crypto_price_fiveminute_twap60_openPrice',
@@ -195,4 +198,84 @@ test('a wall-clock rollback after receipt remains invalid', async () => {
   page.tick(receipt - 1);
   assert.equal(page.expiredAlert().length, 1);
   assert.equal(page.field('Chrome 预检报告'), '未连接或已过期');
+});
+
+const preparationIntent = () => ({schemaVersion: 1, id: `future-btc5m-prepare:${start}`,
+  slug: `btc-updown-5m-${start}`, periodStart: start, periodEnd: start + 300, side: 'Up', amountUsd: 1,
+  createdAt: start + 65, expiresAt: start + 80, priceObservedAt: start + 65,
+  openPrice: 82000, currentPrice: 82001, priceSource: 'chainlink',
+  openPriceSource: 'polymarket_crypto_price_fiveminute_twap60_openPrice', twapLookbackSeconds: 60,
+  mode: 'PREPARE_ONLY', noSubmission: true, operatorAuthorized: true,
+  authorizationSource: 'USER_REQUEST', claimToken: null});
+
+test('the switch controls ticket preparation and keeps final buy manual with no running executor', async () => {
+  const page = mountPage(receipt);
+  await page.reply('status', healthyStatus());
+  assert.equal(page.elements((node) => node.type === 'Card' && node.props.title === '自动准备票据控制').length, 1);
+  assert.equal(page.field('最终买入'), '由你在 Future 页面完成');
+  assert.equal(page.field('实际下单'), '未运行');
+  assert.equal(page.field('准备阶段'), '已关闭');
+  assert.equal(page.elements((node) => node.type === 'Card' && node.props.title === '真实订单与历史跳过记录').length, 1);
+  page.elements((node) => node.type === 'Switch')[0].props.onChange(true);
+  const enabled = healthyStatus();
+  enabled.requestedEnabled = true;
+  enabled.mode = 'BLOCKED';
+  enabled.preparation = {...enabled.preparation, enabled: true, state: 'WAITING_SIGNAL', reasons: ['WAITING_CURRENT_SIGNAL']};
+  await page.reply('control', enabled);
+  assert.equal(page.elements((node) => node.type === 'Switch')[0].props.checked, true);
+  assert.equal(page.field('准备阶段'), '等待有效信号');
+  assert.equal(page.field('实际下单'), '未运行');
+});
+
+test('pending ticket evidence expires at the entry boundary between polls', async () => {
+  const page = mountPage(receipt);
+  const value = healthyStatus();
+  value.requestedEnabled = true;
+  value.mode = 'BLOCKED';
+  value.preparation = {...value.preparation, enabled: true, state: 'PENDING', intent: preparationIntent(), reasons: []};
+  await page.reply('status', value);
+  assert.equal(page.field('准备阶段'), '等待 Chrome 准备');
+  assert.equal(page.field('待准备方向 / 金额'), 'Up / $1');
+  page.tick(receipt + 5001);
+  assert.equal(page.field('准备阶段'), '等待有效信号');
+  assert.equal(page.field('待准备方向 / 金额'), '—');
+  page.tick((start + 80) * 1000);
+  assert.equal(page.field('准备阶段'), '已过期');
+  assert.equal(page.field('待准备方向 / 金额'), '—');
+});
+
+test('a ready operation report stays separate from real orders and never claims a fill', async () => {
+  const page = mountPage(receipt);
+  const value = healthyStatus();
+  value.requestedEnabled = true;
+  value.mode = 'BLOCKED';
+  value.preparation = {...value.preparation, enabled: true, state: 'READY', reasons: [],
+    lastAttempt: {...preparationIntent(), state: 'READY', claimToken: 'a'.repeat(32),
+      updatedAt: start + 65, claimedAt: start + 65, reason: null,
+      receipt: {checkedAt: start + 65, marketUrl: `https://future.news/zh/event/btc-updown-5m-${start}`,
+        amountUsd: 1, selectedSide: 'Up'}}};
+  await page.reply('status', value);
+  assert.equal(page.field('准备阶段'), '票据已准备，未自动买入');
+  assert.equal(page.field('准备报告金额 / 方向'), '$1 / Up');
+  assert.equal(page.field('实际下单'), '未运行');
+  assert.equal(page.field('待准备方向 / 金额'), '—');
+  assert.equal(page.elements((node) => node.type === 'Table')[0].props.dataSource.length, 0);
+  page.tick(receipt + 5001);
+  assert.equal(page.field('准备阶段'), '等待有效信号');
+  assert.equal(page.field('最近准备结果'), '票据已准备，未自动买入');
+  page.tick((start + 80) * 1000);
+  assert.equal(page.field('准备阶段'), '已过期');
+  assert.equal(page.field('最近准备结果'), '票据已准备，未自动买入');
+});
+
+test('disabled preparation retains its historical report without current permission', async () => {
+  const page = mountPage(receipt);
+  const value = healthyStatus();
+  value.preparation.lastAttempt = {...preparationIntent(), state: 'REVOKED',
+    updatedAt: start + 65, claimedAt: null, reason: 'PREPARATION_REVOKED', receipt: null};
+  await page.reply('status', value);
+  assert.equal(page.field('准备阶段'), '已关闭');
+  assert.equal(page.field('最近准备结果'), '已撤销');
+  assert.equal(page.field('待准备方向 / 金额'), '—');
+  assert.equal(page.field('实际下单'), '未运行');
 });

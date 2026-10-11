@@ -16,7 +16,8 @@ data class FutureBtc5mBridgeStatus(
     val executorReady: Boolean,
     val signal: FutureBtc5mSignal?,
     val orderCounts: FutureBtc5mOrderCounts,
-    val preflight: FutureBtc5mPreflight? = null
+    val preflight: FutureBtc5mPreflight? = null,
+    val preparation: FutureBtc5mPreparation
 )
 
 data class FutureBtc5mSignal(
@@ -43,6 +44,37 @@ data class FutureBtc5mPreflight(
 data class FutureBtc5mPreflightPass(
     val periodStart: Long, val checkedAt: Double, val marketUrl: String,
     val signalSide: String, val amountUsd: Int, val noSubmission: Boolean
+)
+
+data class FutureBtc5mPreparation(
+    val mode: String, val noSubmission: Boolean, val operatorAuthorized: Boolean,
+    val authorizationSource: String, val enabled: Boolean, val state: String,
+    val intent: FutureBtc5mPreparationIntent?, val lastAttempt: FutureBtc5mPreparationRecord?,
+    val reasons: List<String>
+)
+
+data class FutureBtc5mPreparationIntent(
+    val schemaVersion: Int, val id: String, val slug: String, val periodStart: Long, val periodEnd: Long,
+    val side: String, val amountUsd: Int, val createdAt: Double, val expiresAt: Double,
+    val priceObservedAt: Double, val openPrice: Double, val currentPrice: Double,
+    val priceSource: String, val openPriceSource: String, val twapLookbackSeconds: Int,
+    val mode: String, val noSubmission: Boolean, val operatorAuthorized: Boolean,
+    val authorizationSource: String, val claimToken: String?
+)
+
+data class FutureBtc5mPreparationRecord(
+    val schemaVersion: Int, val id: String, val slug: String, val periodStart: Long, val periodEnd: Long,
+    val side: String, val amountUsd: Int, val createdAt: Double, val expiresAt: Double,
+    val priceObservedAt: Double, val openPrice: Double, val currentPrice: Double,
+    val priceSource: String, val openPriceSource: String, val twapLookbackSeconds: Int,
+    val mode: String, val noSubmission: Boolean, val operatorAuthorized: Boolean,
+    val authorizationSource: String, val claimToken: String?,
+    val state: String, val updatedAt: Double, val claimedAt: Double?, val reason: String?,
+    val receipt: FutureBtc5mPreparationReceipt?
+)
+
+data class FutureBtc5mPreparationReceipt(
+    val checkedAt: Double, val marketUrl: String, val amountUsd: Double?, val selectedSide: String?
 )
 
 data class FutureBtc5mOrderCounts(

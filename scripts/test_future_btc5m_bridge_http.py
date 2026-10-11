@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from future_btc5m_assistant import make_server
 from future_btc5m_bridge import FutureBridge
+from test_future_btc5m_bridge import START, browser_report, source
 
 
 class Source:
@@ -57,6 +58,10 @@ class FutureBridgeHttpTest(unittest.TestCase):
         }
         return self.request("/bridge/preflight", json.dumps(payload).encode(), {
             "Content-Type": "application/json", "X-PolyHermes-Future-Preflight": "1", **headers})
+
+    def preparation(self, path="/bridge/preparation", payload=None, **headers):
+        return self.request(path, None if payload is None else json.dumps(payload).encode(), {
+            "Content-Type": "application/json", "X-PolyHermes-Future-Preparation": "1", **headers})
 
     def test_status_and_orders_are_real_disabled_empty_state(self):
         code, status, headers = self.request("/bridge/status")
@@ -153,6 +158,83 @@ class FutureBridgeHttpTest(unittest.TestCase):
         self.assertEqual(400, self.request("/bridge/preflight", body, {
             "Content-Type": "application/json", "X-PolyHermes-Future-Preflight": "1"})[0])
         self.assertFalse(self.bridge.status()["preflight"]["browserConnected"])
+
+    def test_preparation_read_and_atomic_claim_ack_never_add_order_facts(self):
+        result = self.preparation()
+        self.assertEqual(200, result[0])
+        self.assertEqual("DISABLED", result[1]["preparation"]["state"])
+        self.assertTrue(result[1]["preparation"]["noSubmission"])
+        self.assertNotIn("Access-Control-Allow-Origin", result[2])
+        current = source()
+        clock = [START + 10]
+        self.bridge.status_fn = lambda: current
+        self.bridge.now_fn = lambda: clock[0]
+        self.assertEqual(200, self.control({"enabled": True})[0])
+        clock[0] = START + 60
+        self.preflight(browser_report())
+        intent = self.bridge.observe()["preparation"]["intent"]
+        payload = {"schemaVersion": 1, "id": intent["id"]}
+        claimed = self.preparation("/bridge/preparation/claim", payload)
+        self.assertEqual(200, claimed[0])
+        self.assertEqual(409, self.preparation("/bridge/preparation/claim", payload)[0])
+        token = claimed[1]["preparation"]["intent"]["claimToken"]
+        ack = {"schemaVersion": 1, "id": intent["id"], "claimToken": token, "checkedAt": clock[0],
+               "status": "READY", "marketUrl": browser_report()["marketUrl"], "amountUsd": 1,
+               "selectedSide": "Up", "reason": None, "noSubmission": True}
+        self.assertEqual(400, self.preparation("/bridge/preparation/ack", {
+            **ack, "status": "EXPIRED", "reason": "INTENT_EXPIRED"})[0])
+        self.assertEqual("CLAIMED", self.preparation()[1]["preparation"]["state"])
+        self.preflight(browser_report())
+        ready = self.preparation("/bridge/preparation/ack", ack)
+        self.assertEqual(200, ready[0])
+        self.assertEqual("READY", ready[1]["preparation"]["state"])
+        self.assertEqual(0, self.bridge.orders()["total"])
+        self.assertFalse((self.bridge.state_dir / "orders.jsonl").exists())
+
+    def test_preparation_requires_fixed_header_origin_host_and_exact_paths(self):
+        self.assertEqual(403, self.request("/bridge/preparation")[0])
+        for path in ("/bridge/preparation", "/bridge/preparation/claim", "/bridge/preparation/ack"):
+            payload = None if path == "/bridge/preparation" else {"schemaVersion": 1, "id": "unknown"}
+            for origin in ("https://future.news", "null", "chrome-extension://" + "z" * 32):
+                with self.subTest(path=path, origin=origin):
+                    self.assertEqual(403, self.preparation(path, payload, Origin=origin)[0])
+            self.assertEqual(403, self.preparation(path, payload, Host="attacker.invalid")[0])
+            self.assertEqual(404, self.preparation(path + "?url=attacker", payload)[0])
+        self.assertEqual(200, self.preparation(Origin="chrome-extension://" + "a" * 32)[0])
+
+    def test_preparation_rejects_duplicate_json_headers_and_coerced_claim_fields(self):
+        headers = {"Content-Type": "application/json", "X-PolyHermes-Future-Preparation": "1"}
+        path = "/bridge/preparation/claim"
+        for body in (b'{"schemaVersion":1,"id":"x","id":"y"}', b'{"schemaVersion":true,"id":"x"}',
+                     b'{"schemaVersion":1,"id":"x","submit":true}', b"x" * 257):
+            with self.subTest(body=body[:40]):
+                self.assertEqual(400, self.request(path, body, headers)[0])
+        self.assertEqual(400, self.request(path, b"{}", {**headers, "Transfer-Encoding": "chunked"})[0])
+        import http.client
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        self.addCleanup(connection.close)
+        connection.putrequest("GET", "/bridge/preparation", skip_host=True)
+        connection.putheader("Host", f"127.0.0.1:{self.server.server_port}")
+        connection.putheader("X-PolyHermes-Future-Preparation", "1")
+        connection.putheader("X-PolyHermes-Future-Preparation", "1")
+        connection.endheaders()
+        self.assertEqual(400, connection.getresponse().status)
+
+    def test_preparation_get_refuses_body_and_server_never_binds_public_address(self):
+        self.assertEqual(400, self.preparation(**{"Content-Length": "1"})[0])
+        for address in (("0.0.0.0", 0), ("localhost", 0), ("::1", 0)):
+            with self.subTest(address=address), self.assertRaisesRegex(ValueError, "ASSISTANT_REQUIRES_LOOPBACK"):
+                make_server(Source(), address, self.bridge)
+
+    def test_preparation_ack_rejects_non_string_reason_duplicate_fields_and_oversize_body(self):
+        headers = {"Content-Type": "application/json", "X-PolyHermes-Future-Preparation": "1"}
+        ack = {"schemaVersion": 1, "id": f"future-btc5m-prepare:{START}", "claimToken": "0" * 32,
+               "checkedAt": START + 60, "status": "FAILED", "marketUrl": browser_report()["marketUrl"],
+               "amountUsd": None, "selectedSide": None, "reason": [], "noSubmission": True}
+        path = "/bridge/preparation/ack"
+        self.assertEqual(400, self.preparation(path, ack)[0])
+        self.assertEqual(400, self.request(path, b'{"id":"x","id":"y"}', headers)[0])
+        self.assertEqual(400, self.request(path, b"x" * 1501, headers)[0])
 
 
 if __name__ == "__main__":

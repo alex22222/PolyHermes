@@ -159,6 +159,149 @@ class FutureBtc5mBridgeClient(
             if (signal.has("twap_lookback_seconds")) check(integer(signal, "twap_lookback_seconds") == 60L) { "Future Bridge TWAP时长无效" }
         }
         if (status.has("preflight") && !status.get("preflight").isJsonNull) validatePreflight(objectValue(status.get("preflight")), status)
+        validatePreparation(objectValue(field(status, "preparation")), status)
+    }
+
+    private fun validatePreparation(preparation: JsonObject, status: JsonObject) {
+        validatePreparationScope(preparation)
+        val enabled = boolean(preparation, "enabled")
+        check(enabled == boolean(status, "requestedEnabled")) { "Future 票据准备开关未获确认" }
+        val state = string(preparation, "state")
+        check(state in PREPARATION_STATES && (enabled || state in setOf("DISABLED", "BLOCKED")) && (state != "DISABLED" || !enabled)) {
+            "Future 票据准备状态和开关不一致"
+        }
+        array(preparation, "reasons").forEach {
+            check(it.isJsonPrimitive && it.asJsonPrimitive.isString && it.asString in PREPARATION_REASONS) { "Future 票据准备原因无效" }
+        }
+        if (state in setOf("PENDING", "CLAIMED", "READY")) check(array(preparation, "reasons").isEmpty) {
+            "Future 活动准备状态仍存在阻断原因"
+        }
+        val serverTime = number(status, "serverTime")
+        val intentValue = field(preparation, "intent")
+        val historyValue = field(preparation, "lastAttempt")
+        val record = if (historyValue.isJsonNull) null else objectValue(historyValue).also { validatePreparationRecord(it, serverTime) }
+        if (state in setOf("PENDING", "CLAIMED")) {
+            val intent = objectValue(intentValue)
+            validatePreparationIntent(intent, serverTime)
+            check(intent.keySet() == PREPARATION_INTENT_FIELDS && record != null && string(record, "state") == state &&
+                PREPARATION_INTENT_FIELDS.all { intent.get(it) == record.get(it) } &&
+                integer(intent, "periodStart") == integer(status, "periodStart") && string(status, "feedStatus") == "CURRENT" &&
+                serverTime < number(intent, "expiresAt") && serverTime - number(intent, "priceObservedAt") in 0.0..5.0) {
+                "Future 当前准备意图缺少新鲜的本轮信号或对应记录"
+            }
+            validateCurrentPreparation(record, status)
+        } else check(intentValue.isJsonNull) { "Future 当前状态不允许暴露可写票据意图" }
+        when (state) {
+            "READY" -> {
+                check(record != null && string(record, "state") == "READY") { "Future 准备成功缺少对应操作报告" }
+                validateCurrentPreparation(record, status)
+            }
+            "FAILED", "REVOKED" -> check(record != null && string(record, "state") == state) { "Future 准备结果缺少对应操作报告" }
+            "EXPIRED" -> check(record != null && serverTime >= number(record, "expiresAt") &&
+                string(record, "state") in setOf("PENDING", "READY", "EXPIRED") &&
+                (string(record, "state") != "EXPIRED" || nullableString(record, "reason") == "INTENT_EXPIRED")) {
+                "Future 过期视图缺少已到期的准备记录"
+            }
+            "RECEIPT_UNKNOWN" -> check(record != null && serverTime >= number(record, "expiresAt") &&
+                (string(record, "state") == "CLAIMED" || string(record, "state") == "EXPIRED" &&
+                    nullableString(record, "reason") == "PREPARATION_RECEIPT_UNKNOWN")) { "Future 未知结果缺少已到期的领取事实" }
+        }
+    }
+
+    private fun validateCurrentPreparation(record: JsonObject, status: JsonObject) {
+        val now = number(status, "serverTime")
+        val start = integer(record, "periodStart")
+        val signal = objectValue(field(status, "signal"))
+        check(integer(status, "periodStart") == start && string(status, "feedStatus") == "CURRENT" &&
+            now >= start + 60 && now < number(record, "expiresAt") && now - number(record, "priceObservedAt") in 0.0..5.0 &&
+            integer(signal, "period_start") == start && integer(signal, "period_end") == start + 300 &&
+            now - number(signal, "price_observed_at") in 0.0..5.0 && nullableString(signal, "side") == string(record, "side") &&
+            string(signal, "price_source") == "chainlink" && string(signal, "open_price_source") == OPEN_PRICE_SOURCE &&
+            integer(signal, "twap_lookback_seconds") == 60L) { "Future 当前准备状态与新鲜的原信号不一致" }
+        val preflight = objectValue(field(status, "preflight"))
+        check(boolean(preflight, "browserConnected") && string(preflight, "navigation") == "CURRENT" &&
+            string(preflight, "ticketStatus") == "PASS" && integer(preflight, "pagePeriodStart") == start &&
+            now - number(preflight, "receivedAt") in 0.0..5.0 && kotlin.math.abs(now - number(preflight, "checkedAt")) <= 5 &&
+            array(preflight, "reasons").none { it.asString.startsWith("PREFLIGHT_LEDGER_") }) {
+            "Future 当前准备状态缺少同轮新鲜的浏览器报告"
+        }
+        if (string(record, "state") == "READY") check(number(preflight, "amountUsd") == 1.0 &&
+            nullableString(preflight, "selectedSide") == string(record, "side") && boolean(preflight, "buyButtonEnabled")) {
+            "Future 当前票据已改变，不能声明准备就绪"
+        }
+    }
+
+    private fun validatePreparationScope(value: JsonObject) {
+        check(string(value, "mode") == "PREPARE_ONLY" && boolean(value, "noSubmission") &&
+            boolean(value, "operatorAuthorized") && string(value, "authorizationSource") == "USER_REQUEST") {
+            "Future 票据准备只能采用用户授权的准备模式，不能提交买入"
+        }
+    }
+
+    private fun validatePreparationIntent(intent: JsonObject, serverTime: Double) {
+        validatePreparationScope(intent)
+        val start = integer(intent, "periodStart")
+        check(integer(intent, "schemaVersion") == 1L && start >= 0 && start % 300 == 0L &&
+            integer(intent, "periodEnd") == start + 300 && string(intent, "id") == "future-btc5m-prepare:$start" &&
+            string(intent, "slug") == "btc-updown-5m-$start" && integer(intent, "amountUsd") == 1L) {
+            "Future 准备意图的市场或固定金额无效"
+        }
+        val created = number(intent, "createdAt")
+        val observed = number(intent, "priceObservedAt")
+        check(created >= start + 60 && created < start + 80 && created <= serverTime &&
+            number(intent, "expiresAt") == (start + 80).toDouble() && observed >= 0 && created - observed in 0.0..5.0) {
+            "Future 准备意图的信号采样或入场窗口无效"
+        }
+        val opening = number(intent, "openPrice")
+        val current = number(intent, "currentPrice")
+        check(opening > 0 && current > 0 && current != opening &&
+            string(intent, "side") == if (current > opening) "Up" else "Down") { "Future 准备方向和采样价格不一致" }
+        check(string(intent, "priceSource") == "chainlink" && string(intent, "openPriceSource") == OPEN_PRICE_SOURCE &&
+            integer(intent, "twapLookbackSeconds") == 60L) { "Future 准备意图的价格来源无效" }
+        val token = nullableString(intent, "claimToken")
+        check(token == null || Regex("[0-9a-f]{32}").matches(token)) { "Future 准备意图的领取凭证无效" }
+    }
+
+    private fun validatePreparationRecord(record: JsonObject, serverTime: Double) {
+        validatePreparationIntent(record, serverTime)
+        check(record.keySet() == PREPARATION_INTENT_FIELDS + setOf("state", "updatedAt", "claimedAt", "reason", "receipt")) {
+            "Future 准备报告包含未知执行字段"
+        }
+        val state = string(record, "state")
+        check(state in setOf("PENDING", "CLAIMED", "READY", "FAILED", "EXPIRED", "REVOKED")) { "Future 准备操作报告状态无效" }
+        val created = number(record, "createdAt")
+        val expires = number(record, "expiresAt")
+        val updated = number(record, "updatedAt")
+        val claimed = if (field(record, "claimedAt").isJsonNull) null else number(record, "claimedAt")
+        val token = nullableString(record, "claimToken")
+        val reason = nullableString(record, "reason")
+        val receiptValue = field(record, "receipt")
+        check(updated >= created && updated <= serverTime && (claimed == null) == (token == null) &&
+            (claimed == null || claimed >= created && claimed < expires && updated >= claimed &&
+                claimed - number(record, "priceObservedAt") in 0.0..5.0)) { "Future 准备报告时间或领取凭证不一致" }
+        when (state) {
+            "PENDING" -> check(claimed == null && receiptValue.isJsonNull && reason == null && updated == created)
+            "CLAIMED" -> check(claimed != null && receiptValue.isJsonNull && reason == null && updated == claimed)
+            "READY" -> check(claimed != null && !receiptValue.isJsonNull && reason == null && updated < expires &&
+                updated - number(record, "priceObservedAt") in 0.0..5.0)
+            "FAILED" -> check(claimed != null && !receiptValue.isJsonNull && reason in PREPARATION_FAILURE_REASONS)
+            "EXPIRED" -> check(reason in setOf("INTENT_EXPIRED", "PREPARATION_RECEIPT_UNKNOWN") && updated >= expires &&
+                (claimed != null || receiptValue.isJsonNull))
+            "REVOKED" -> check(receiptValue.isJsonNull && reason in setOf("PREPARATION_REVOKED", "PROCESS_RESTARTED"))
+        }
+        if (!receiptValue.isJsonNull) {
+            check(claimed != null) { "Future 准备报告缺少领取事实" }
+            val receipt = objectValue(receiptValue)
+            check(receipt.keySet() == setOf("checkedAt", "marketUrl", "amountUsd", "selectedSide")) { "Future 准备回执字段无效" }
+            val checked = number(receipt, "checkedAt")
+            check(checked >= 0 && kotlin.math.abs(checked - updated) <= 3 && checked >= claimed - 3 &&
+                marketUrlStart(string(receipt, "marketUrl")) == integer(record, "periodStart")) { "Future 准备回执的市场或浏览器时间无效" }
+            val amount = if (field(receipt, "amountUsd").isJsonNull) null else number(receipt, "amountUsd")
+            val side = nullableString(receipt, "selectedSide")
+            check((amount == null || amount >= 0) && side in setOf(null, "Up", "Down")) { "Future 准备回执金额或方向无效" }
+            if (state == "READY") check(amount == 1.0 && side == string(record, "side") &&
+                checked >= integer(record, "periodStart") + 60 && checked < expires) { "Future 票据准备成功缺少实际金额和方向核对" }
+        }
     }
 
     private fun validatePreflight(preflight: JsonObject, status: JsonObject) {
@@ -293,6 +436,18 @@ class FutureBtc5mBridgeClient(
 
     companion object {
         private const val OPEN_PRICE_SOURCE = "polymarket_crypto_price_fiveminute_twap60_openPrice"
+        private val PREPARATION_INTENT_FIELDS = setOf("schemaVersion", "id", "slug", "periodStart", "periodEnd", "side", "amountUsd",
+            "createdAt", "expiresAt", "priceObservedAt", "openPrice", "currentPrice", "priceSource", "openPriceSource", "twapLookbackSeconds",
+            "mode", "noSubmission", "operatorAuthorized", "authorizationSource", "claimToken")
+        private val PREPARATION_STATES = setOf("DISABLED", "WAITING_SIGNAL", "WAITING_BROWSER", "PENDING", "CLAIMED", "READY", "FAILED",
+            "EXPIRED", "REVOKED", "RECEIPT_UNKNOWN", "BLOCKED")
+        private val PREPARATION_FAILURE_REASONS = setOf("PREPARATION_FAILED", "MARKET_MISMATCH", "TICKET_CHANGED", "UNSAFE_DIRECTION_CONTROL",
+            "AMOUNT_WRITE_FAILED", "DIRECTION_WRITE_FAILED", "POSTCHECK_FAILED", "PREPARATION_REVOKED")
+        private val PREPARATION_REASONS = PREPARATION_FAILURE_REASONS + setOf("AUTO_PREPARATION_DISABLED", "WAITING_CURRENT_SIGNAL",
+            "BROWSER_NOT_CONNECTED", "MARKET_NOT_CURRENT", "TICKET_CHECK_FAILED", "PREPARED_TICKET_CHANGED", "INTENT_EXPIRED",
+            "PREPARATION_RECEIPT_UNKNOWN", "PREPARATION_REVOKED", "PROCESS_RESTARTED", "PREPARATION_LEDGER_INVALID",
+            "PREPARATION_LEDGER_WRITE_FAILED", "ORDER_LEDGER_INVALID", "ORDER_LEDGER_WRITE_FAILED", "CONTROL_STATE_WRITE_FAILED",
+            "SIGNAL_SOURCE_UNAVAILABLE", "SIGNAL_SOURCE_INVALID", "STOP_FILE_PRESENT", "PREFLIGHT_LEDGER_INVALID", "PREFLIGHT_LEDGER_WRITE_FAILED")
         val ORDER_STATUSES = setOf("PENDING", "SKIPPED", "FAILED", "SUBMITTED_UNVERIFIED", "FILLED")
     }
 }

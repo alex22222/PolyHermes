@@ -39,6 +39,19 @@ def browser_report(at=START + 60, **changes):
     }
 
 
+def legacy_order(start=START, at=None):
+    at = start + 60 if at is None else at
+    return {
+        "id": f"future-btc5m:{start}", "bridgeId": "future-btc5m", "slug": f"btc-updown-5m-{start}",
+        "periodStart": start, "periodEnd": start + 300, "side": "Up", "amountUsd": 1,
+        "status": "SKIPPED", "reason": "EXECUTOR_NOT_CONNECTED", "createdAt": at, "updatedAt": at,
+        "submittedAt": None, "filledAt": None, "platformOrderId": None, "filledQuantity": None,
+        "avgFilledPrice": None, "feeUsd": None,
+        "events": [{"stage": "SIGNAL_ACCEPTED", "at": at, "reason": None},
+                   {"stage": "EXECUTION_BLOCKED", "at": at, "reason": "EXECUTOR_NOT_CONNECTED"}],
+    }
+
+
 class FutureBridgeTest(unittest.TestCase):
     def setUp(self):
         self.directory = TemporaryDirectory()
@@ -48,10 +61,19 @@ class FutureBridgeTest(unittest.TestCase):
         self.source = source()
         self.bridge = FutureBridge(self.path, lambda: self.source, lambda: self.clock)
 
-    def enable_and_observe(self, at=START + 60):
+    def load_legacy_and_observe(self, at=START + 60):
+        (self.path / "orders.jsonl").write_text(json.dumps(legacy_order(at=at)) + "\n")
+        self.bridge = FutureBridge(self.path, lambda: self.source, lambda: self.clock)
         self.bridge.control(True)
         self.clock = at
         self.source["server_time"] = at
+        return self.bridge.observe()
+
+    def enable_and_prepare(self, at=START + 60):
+        self.bridge.control(True)
+        self.clock = at
+        self.source["server_time"] = at
+        self.bridge.report_preflight(browser_report(at))
         return self.bridge.observe()
 
     def test_default_off_and_reads_do_not_create_orders(self):
@@ -78,7 +100,7 @@ class FutureBridgeTest(unittest.TestCase):
         self.assertEqual("UNKNOWN", self.source["future_eligibility"]["status"])
 
     def test_restart_forces_off_and_retains_order_source_of_truth(self):
-        self.enable_and_observe()
+        self.load_legacy_and_observe()
         restored = FutureBridge(self.path, lambda: self.source, lambda: self.clock)
         self.assertFalse(restored.status()["requestedEnabled"])
         self.assertFalse(json.loads((self.path / "control.json").read_text())["requestedEnabled"])
@@ -87,8 +109,8 @@ class FutureBridgeTest(unittest.TestCase):
         restored.observe()
         self.assertEqual(1, restored.orders()["total"])
 
-    def test_new_signal_records_skipped_and_has_no_fill_fields(self):
-        status = self.enable_and_observe()
+    def test_legacy_skipped_history_has_no_fill_fields_and_observe_creates_no_order(self):
+        status = self.load_legacy_and_observe()
         record = self.bridge.orders()["list"][0]
         self.assertEqual(f"future-btc5m:{START}", record["id"])
         self.assertEqual("SKIPPED", record["status"])
@@ -100,8 +122,10 @@ class FutureBridgeTest(unittest.TestCase):
         self.assertEqual({"total": 1, "pending": 0, "submitted": 0, "filled": 0, "failed": 0, "skipped": 1}, status["orderCounts"])
         self.assertEqual(record, json.loads((self.path / "orders.jsonl").read_text()))
 
-    def test_observation_and_concurrent_calls_are_deduplicated_per_round(self):
-        self.enable_and_observe()
+    def test_observation_and_concurrent_calls_preserve_legacy_history_without_upgrade(self):
+        self.load_legacy_and_observe()
+        original = (self.path / "orders.jsonl").read_bytes()
+        self.bridge.report_preflight(browser_report())
         threads = [threading.Thread(target=self.bridge.observe) for _ in range(12)]
         for thread in threads:
             thread.start()
@@ -109,6 +133,8 @@ class FutureBridgeTest(unittest.TestCase):
             thread.join()
         self.assertEqual(1, self.bridge.orders()["total"])
         self.assertEqual(1, len((self.path / "orders.jsonl").read_text().splitlines()))
+        self.assertEqual(original, (self.path / "orders.jsonl").read_bytes())
+        self.assertIsNone(self.bridge.status()["preparation"]["intent"])
 
     def test_control_false_and_stop_do_not_create_order(self):
         self.bridge.control(True)
@@ -182,17 +208,20 @@ class FutureBridgeTest(unittest.TestCase):
 
     def test_recent_chainlink_sample_before_entry_is_accepted_like_helper(self):
         self.source["signal"]["price_observed_at"] = START + 58.5
-        self.enable_and_observe()
-        self.assertEqual(1, self.bridge.orders()["total"])
+        status = self.enable_and_prepare()
+        self.assertEqual("PENDING", status["preparation"]["state"])
+        self.assertEqual(0, self.bridge.orders()["total"])
 
-    def test_only_valid_down_signal_can_record_down(self):
+    def test_only_valid_down_signal_can_prepare_down(self):
         self.source["signal"].update(side="Down", current_price=82999)
-        self.enable_and_observe()
-        self.assertEqual("Down", self.bridge.orders()["list"][0]["side"])
+        status = self.enable_and_prepare()
+        self.assertEqual("Down", status["preparation"]["intent"]["side"])
+        self.assertEqual(0, self.bridge.orders()["total"])
 
     def test_pagination_filter_detail_and_returned_values_are_copied(self):
-        self.enable_and_observe()
         second = START + 300
+        (self.path / "orders.jsonl").write_text("".join(json.dumps(legacy_order(start)) + "\n" for start in (START, second)))
+        self.bridge = FutureBridge(self.path, lambda: self.source, lambda: self.clock)
         self.clock = second + 60
         self.source = source(self.clock)
         self.source["period_start"] = second
@@ -218,13 +247,15 @@ class FutureBridgeTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.bridge.orders(**kwargs)
 
-    def test_ledger_is_fsynced_before_record_is_visible(self):
+    def test_preparation_ledger_is_fsynced_before_intent_is_visible(self):
         self.bridge.control(True)
         self.clock = START + 60
+        self.bridge.report_preflight(browser_report())
         with patch("future_btc5m_bridge.os.fsync") as fsync:
-            self.bridge.observe()
+            status = self.bridge.observe()
             self.assertGreaterEqual(fsync.call_count, 1)
-        self.assertEqual(1, self.bridge.orders()["total"])
+        self.assertEqual("PENDING", status["preparation"]["state"])
+        self.assertEqual(0, self.bridge.orders()["total"])
 
     def test_invalid_ledger_reads_are_unavailable_not_empty_history(self):
         (self.path / "orders.jsonl").write_text('{"broken":')
@@ -236,7 +267,7 @@ class FutureBridgeTest(unittest.TestCase):
                 read()
 
     def test_corrupt_ledger_fails_closed_without_repair_or_overwrite(self):
-        self.enable_and_observe()
+        self.load_legacy_and_observe()
         ledger = self.path / "orders.jsonl"
         ledger.write_text(ledger.read_text() + '{"broken":')
         original = ledger.read_bytes()
@@ -252,7 +283,7 @@ class FutureBridgeTest(unittest.TestCase):
         self.assertEqual(original, ledger.read_bytes())
 
     def test_forged_filled_or_duplicate_ledger_records_are_rejected(self):
-        self.enable_and_observe()
+        self.load_legacy_and_observe()
         record = self.bridge.orders()["list"][0]
         ledger = self.path / "orders.jsonl"
         for rows in ([{**record, "status": "FILLED"}], [record, record], [{**record, "filledQuantity": 3}]):
@@ -261,20 +292,26 @@ class FutureBridgeTest(unittest.TestCase):
                 restored = FutureBridge(self.path, lambda: self.source, lambda: self.clock)
                 self.assertEqual("ORDER_LEDGER_INVALID", restored.status()["reason"])
 
-    def test_failed_ledger_write_blocks_further_observation(self):
-        self.bridge.control(True)
-        self.clock = START + 60
+    def test_failed_preparation_write_blocks_preparation_and_preserves_legacy_orders(self):
+        self.load_legacy_and_observe()
+        original = (self.path / "orders.jsonl").read_bytes()
+        second = START + 300
+        self.clock = second + 60
+        self.source = source(self.clock)
+        self.source["period_start"] = second
+        self.source["signal"].update(id=f"5m:{second}", slug=f"btc-updown-5m-{second}",
+                                     period_start=second, period_end=second + 300)
+        self.bridge.report_preflight(browser_report(self.clock, marketUrl=f"https://future.news/event/btc-updown-5m-{second}",
+                                                   pagePeriodStart=second))
         with patch("future_btc5m_bridge.os.fsync", side_effect=OSError("disk failure")):
             status = self.bridge.observe()
-        self.assertEqual("ORDER_LEDGER_WRITE_FAILED", status["reason"])
-        self.assertFalse(status["requestedEnabled"])
-        original = (self.path / "orders.jsonl").read_bytes()
-        for read in (self.bridge.orders, lambda: self.bridge.detail(f"future-btc5m:{START}")):
-            with self.assertRaisesRegex(OSError, "ORDER_LEDGER_WRITE_FAILED"):
-                read()
+        self.assertEqual("BLOCKED", status["preparation"]["state"])
+        self.assertEqual(["PREPARATION_LEDGER_WRITE_FAILED"], status["preparation"]["reasons"])
+        self.assertIsNone(self.bridge.storage_error)
+        self.assertEqual(1, self.bridge.orders()["total"])
         self.bridge.observe()
         self.assertEqual(original, (self.path / "orders.jsonl").read_bytes())
-        self.assertEqual("ORDER_LEDGER_WRITE_FAILED", self.bridge.status()["reason"])
+        self.assertIsNone(self.bridge.status()["preparation"]["intent"])
 
     def test_source_exception_keeps_control_service_readable(self):
         self.bridge.status_fn = lambda: (_ for _ in ()).throw(OSError("not connected"))
@@ -407,7 +444,7 @@ class FutureBridgeTest(unittest.TestCase):
         self.assertEqual(1, len((self.path / "preflight.jsonl").read_text().splitlines()))
 
     def test_preflight_corrupt_ledger_blocks_only_preflight_and_keeps_original_bytes(self):
-        self.enable_and_observe()
+        self.load_legacy_and_observe()
         ledger = self.path / "preflight.jsonl"
         ledger.write_text('{"broken":')
         original = ledger.read_bytes()

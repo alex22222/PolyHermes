@@ -244,9 +244,166 @@
     return draft.side;
   }
 
+  // User-authorized ticket preparation has no order-submission capability and does not
+  // change the legacy official-eligibility guard above.
+  function usablePreparation(wrapper, now = Date.now() / 1000) {
+    const preparation = wrapper?.preparation;
+    const intent = preparation?.intent;
+    if (wrapper?.bridgeId !== 'future-btc5m' || !Number.isFinite(wrapper.serverTime) ||
+        !Number.isFinite(now) || Math.abs(now - wrapper.serverTime) > 3 ||
+        preparation?.mode !== 'PREPARE_ONLY' || preparation.noSubmission !== true ||
+        preparation.operatorAuthorized !== true || preparation.authorizationSource !== 'USER_REQUEST' ||
+        preparation.enabled !== true || !['PENDING', 'CLAIMED'].includes(preparation.state) || !intent ||
+        intent.schemaVersion !== 1 || intent.mode !== 'PREPARE_ONLY' || intent.noSubmission !== true ||
+        intent.operatorAuthorized !== true || intent.authorizationSource !== 'USER_REQUEST') return null;
+    const start = Math.floor(now / 300) * 300;
+    if (!Number.isSafeInteger(intent.periodStart) || intent.periodStart !== start ||
+        intent.id !== `future-btc5m-prepare:${start}` || intent.slug !== `btc-updown-5m-${start}` ||
+        intent.periodEnd !== start + 300 || intent.amountUsd !== 1 || !['Up', 'Down'].includes(intent.side) ||
+        intent.priceSource !== 'chainlink' ||
+        intent.openPriceSource !== 'polymarket_crypto_price_fiveminute_twap60_openPrice' ||
+        intent.twapLookbackSeconds !== 60 || !Number.isFinite(intent.openPrice) || intent.openPrice <= 0 ||
+        !Number.isFinite(intent.currentPrice) || intent.currentPrice <= 0 || intent.currentPrice === intent.openPrice ||
+        intent.side !== (intent.currentPrice > intent.openPrice ? 'Up' : 'Down') ||
+        !Number.isFinite(intent.createdAt) || intent.createdAt < start + 60 || intent.createdAt >= start + 80 ||
+        intent.expiresAt !== start + 80 || now < intent.createdAt || now >= intent.expiresAt ||
+        !Number.isFinite(intent.priceObservedAt) || intent.priceObservedAt > intent.createdAt ||
+        now - intent.priceObservedAt > 5 || now < start + 60 ||
+        !(intent.claimToken === null || typeof intent.claimToken === 'string' && /^[a-f0-9]{32}$/.test(intent.claimToken))) return null;
+    return intent;
+  }
+
+  function preparationError(code) {
+    const error = new Error(code);
+    error.code = code;
+    return error;
+  }
+
+  function readPreparationTicket(doc, url, start) {
+    // Freshness is checked against the bridge before every stage; this read binds the
+    // DOM title and URL to that already checked round.
+    const report = readPreflight(doc, url, start + 60);
+    if (report?.navigation !== 'CURRENT' || report.pagePeriodStart !== start) throw preparationError('MARKET_MISMATCH');
+    if (report.ticketStatus !== 'PASS') throw preparationError('TICKET_CHANGED');
+    const input = findAmountInput(doc);
+    if (!buttonIsEnabled(input)) throw preparationError('TICKET_CHANGED');
+    const ticket = findAmountTicket(doc, input);
+    const buttons = [...ticket.querySelectorAll('button')].filter((button) => button.getClientRects().length);
+    const directions = {};
+    const states = {};
+    for (const [side, pattern] of [['Up', /^涨(?:\s|\d|--)/], ['Down', /^跌(?:\s|\d|--)/]]) {
+      const matches = buttons.filter((button) => pattern.test(button.textContent.trim()));
+      if (matches.length !== 1 || !buttonIsEnabled(matches[0]) || matches[0].tagName !== 'BUTTON' ||
+          matches[0].type !== 'button') throw preparationError('UNSAFE_DIRECTION_CONTROL');
+      const button = matches[0];
+      const evidence = ['aria-pressed', 'aria-selected'].map((name) => button.getAttribute?.(name))
+        .filter((value) => value !== null && value !== undefined);
+      directions[side] = button;
+      if (evidence.length) {
+        if (evidence.some((value) => !['true', 'false'].includes(value)) ||
+            evidence.some((value) => value !== evidence[0])) throw preparationError('UNSAFE_DIRECTION_CONTROL');
+        states[side] = evidence[0] === 'true';
+      } else {
+        // Observed in the real Future ticket: this exact misspelled token marks the
+        // selected button. The other button has both panel/text tokens. No color is guessed.
+        const classes = new Set((typeof button.className === 'string' ? button.className : '').split(/\s+/));
+        if (classes.has('text-text-hightlightbtn') && !classes.has('bg-panel-100') && !classes.has('text-text-400')) {
+          states[side] = true;
+        } else if (!classes.has('text-text-hightlightbtn') && classes.has('bg-panel-100') && classes.has('text-text-400')) {
+          states[side] = false;
+        } else throw preparationError('UNSAFE_DIRECTION_CONTROL');
+      }
+    }
+    if (states.Up === states.Down) throw preparationError('UNSAFE_DIRECTION_CONTROL');
+    const selectedSide = states.Up ? 'Up' : 'Down';
+    if (selectedSide !== report.selectedSide) throw preparationError('UNSAFE_DIRECTION_CONTROL');
+    return {input, directions, selectedSide};
+  }
+
+  async function prepareOnlyOnce(wrapper, doc, readUrl, storage, transport, nowFn = () => Date.now() / 1000) {
+    const intent = usablePreparation(wrapper, nowFn());
+    if (!intent || wrapper.preparation.state !== 'PENDING' || intent.claimToken !== null) return null;
+    let claimed = null;
+    let result = null;
+    const key = 'polyhermes.future-btc5m.preparation';
+    const check = async () => {
+      const current = await transport.readPreparation();
+      const now = nowFn();
+      if (now >= intent.expiresAt) throw preparationError('INTENT_EXPIRED');
+      const value = usablePreparation(current, now);
+      if (!value || current.preparation.state !== 'CLAIMED' || value.id !== intent.id ||
+          value.claimToken !== claimed.claimToken || now - intent.priceObservedAt > 5 ||
+          !Object.keys(intent).every((field) => field === 'claimToken' || value[field] === intent[field])) {
+        throw preparationError('PREPARATION_REVOKED');
+      }
+      return readPreparationTicket(doc, readUrl(), intent.periodStart);
+    };
+    try {
+      readPreparationTicket(doc, readUrl(), intent.periodStart);
+      const previous = JSON.parse(storage.getItem(key) || 'null');
+      if (previous !== null && (!Number.isSafeInteger(previous.periodStart) ||
+          previous.id !== `future-btc5m-prepare:${previous.periodStart}`)) throw preparationError('PREPARATION_FAILED');
+      if (previous?.periodStart >= intent.periodStart) return null;
+      // Persist before claiming. An uncertain claim response, reload or failure never retries this round.
+      storage.setItem(key, JSON.stringify({periodStart: intent.periodStart, id: intent.id}));
+      const response = await transport.claimPreparation({schemaVersion: 1, id: intent.id});
+      claimed = usablePreparation(response, nowFn());
+      if (!claimed || response.preparation.state !== 'CLAIMED' || claimed.id !== intent.id ||
+          typeof claimed.claimToken !== 'string' ||
+          !Object.keys(intent).every((field) => field === 'claimToken' || claimed[field] === intent[field])) {
+        claimed = null;
+        throw preparationError('PREPARATION_FAILED');
+      }
+      let ticket = await check();
+      if (ticket.selectedSide !== intent.side) {
+        // This is the outcome toggle, never the final Buy control or a form submission.
+        ticket.directions[intent.side].click();
+        ticket = await check();
+        if (ticket.selectedSide !== intent.side) throw preparationError('DIRECTION_WRITE_FAILED');
+      }
+      ticket = await check();
+      try {
+        const setter = Object.getOwnPropertyDescriptor(ticket.input.ownerDocument.defaultView.HTMLInputElement.prototype, 'value').set;
+        setter.call(ticket.input, '1');
+        ticket.input.dispatchEvent(new Event('input', {bubbles: true}));
+        ticket.input.dispatchEvent(new Event('change', {bubbles: true}));
+      } catch {
+        throw preparationError('AMOUNT_WRITE_FAILED');
+      }
+      ticket = await check();
+      if (ticket.input.value !== '1') throw preparationError('AMOUNT_WRITE_FAILED');
+      if (ticket.selectedSide !== intent.side) throw preparationError('DIRECTION_WRITE_FAILED');
+      const report = readPreflight(doc, readUrl(), nowFn());
+      if (report?.navigation !== 'CURRENT' || report.ticketStatus !== 'PASS' || report.amountUsd !== 1 ||
+          report.selectedSide !== intent.side || !report.buyButtonEnabled ||
+          !(await transport.reportPreflight(report))?.ok) throw preparationError('POSTCHECK_FAILED');
+      ticket = await check();
+      if (ticket.input.value !== '1' || ticket.selectedSide !== intent.side) throw preparationError('POSTCHECK_FAILED');
+      result = {status: 'READY', reason: null};
+    } catch (error) {
+      const codes = ['PREPARATION_FAILED', 'MARKET_MISMATCH', 'TICKET_CHANGED', 'UNSAFE_DIRECTION_CONTROL',
+        'AMOUNT_WRITE_FAILED', 'DIRECTION_WRITE_FAILED', 'POSTCHECK_FAILED', 'INTENT_EXPIRED', 'PREPARATION_REVOKED'];
+      const reason = codes.includes(error.code) ? error.code : 'PREPARATION_FAILED';
+      result = {status: reason === 'INTENT_EXPIRED' ? 'EXPIRED' : 'FAILED', reason};
+    }
+    if (claimed) {
+      const report = readPreflight(doc, readUrl(), nowFn());
+      const payload = {schemaVersion: 1, id: intent.id, claimToken: claimed.claimToken, checkedAt: nowFn(),
+        status: result.status, marketUrl: report?.marketUrl || `https://future.news/zh/event/${intent.slug}`,
+        amountUsd: report?.amountUsd ?? null, selectedSide: report?.selectedSide ?? null,
+        reason: result.reason, noSubmission: true};
+      try {
+        if (!(await transport.acknowledge(payload))?.ok) return {status: 'FAILED', reason: 'POSTCHECK_FAILED'};
+      } catch {
+        return {status: 'FAILED', reason: 'POSTCHECK_FAILED'};
+      }
+    }
+    return result;
+  }
+
   // Export pure guards for the local fixture tests; this is an isolated extension world.
   globalThis.FutureBtc5m = {usableDraft, matchesMarket, observationView, findAmountInput, prepareAmount,
-    navigationTarget, followCurrentMarket, readPreflight};
+    navigationTarget, followCurrentMarket, readPreflight, usablePreparation, readPreparationTicket, prepareOnlyOnce};
   if (typeof document === 'undefined') return;
 
   const panel = document.createElement('aside');
@@ -267,15 +424,17 @@
   const inspection = document.createElement('p');
   const navigation = document.createElement('p');
   const preflightReport = document.createElement('p');
+  const preparationReport = document.createElement('p');
   const note = document.createElement('p');
-  note.textContent = '选择提示方向后，由你检查并点击 Future 买入。$1 为订单本金，费用以平台为准。';
-  panel.append(title, text, link, prepare, inspect, inspection, navigation, note, preflightReport);
+  note.textContent = '自动票据仅准备策略方向和 $1；由你核对并点击 Future 买入。$1 为订单本金，费用以平台为准。';
+  panel.append(title, text, link, prepare, inspect, inspection, navigation, note, preflightReport, preparationReport);
   document.body.append(panel);
   let latest = null;
   let polling = false;
   let inspectedUrl = null;
   let autoCheckedUrl = null;
   let reporting = false;
+  let reportPromise = null;
 
   async function reportPage() {
     if (reporting) return;
@@ -286,12 +445,14 @@
     }
     reporting = true;
     try {
-      const reply = await chrome.runtime.sendMessage({type: 'FUTURE_BTC5M_PREFLIGHT', payload});
+      reportPromise = chrome.runtime.sendMessage({type: 'FUTURE_BTC5M_PREFLIGHT', payload});
+      const reply = await reportPromise;
       preflightReport.textContent = reply?.ok ? '只读预检：已上报现有票据，未提交订单' : '只读预检：本地服务未确认';
     } catch {
       preflightReport.textContent = '只读预检：本地服务未连接';
     } finally {
       reporting = false;
+      reportPromise = null;
     }
   }
 
@@ -299,6 +460,45 @@
     const reply = await chrome.runtime.sendMessage({type: 'FUTURE_BTC5M_STATUS'});
     if (!reply?.ok) throw new Error(reply?.error || '本地助手未连接');
     return reply.status;
+  }
+
+  async function preparationRequest(type, payload) {
+    const reply = await chrome.runtime.sendMessage(payload ? {type, payload} : {type});
+    if (!reply?.ok) throw preparationError('PREPARATION_FAILED');
+    return reply.status;
+  }
+
+  async function pollPreparation() {
+    try {
+      const wrapper = await preparationRequest('FUTURE_BTC5M_PREPARATION');
+      const labels = {DISABLED: '已关闭', WAITING_SIGNAL: '等待本轮信号', WAITING_BROWSER: '等待浏览器报告', PENDING: '等待准备',
+        CLAIMED: '本轮已认领，不重复准备', READY: '已准备 $1 与策略方向，请核对后手动买入',
+        FAILED: '本轮准备失败，不重试', EXPIRED: '本轮准备窗口已过期', REVOKED: '本轮准备已停止',
+        RECEIPT_UNKNOWN: '票据回执未知，请检查页面', BLOCKED: '准备受阻'};
+      const value = wrapper?.preparation;
+      if (wrapper?.bridgeId !== 'future-btc5m' || !Number.isFinite(wrapper.serverTime) ||
+          Math.abs(Date.now() / 1000 - wrapper.serverTime) > 3 || value?.mode !== 'PREPARE_ONLY' ||
+          value.noSubmission !== true || value.operatorAuthorized !== true ||
+          value.authorizationSource !== 'USER_REQUEST' || typeof value.enabled !== 'boolean' ||
+          !Object.hasOwn(labels, value.state)) throw preparationError('PREPARATION_FAILED');
+      const state = value.state;
+      preparationReport.textContent = `自动票据：${labels[state] || '本地准备服务未就绪'}（未提交订单）`;
+      if (reportPromise) await reportPromise.catch(() => {});
+      const result = await prepareOnlyOnce(wrapper, document, () => location.href, globalThis.sessionStorage, {
+        readPreparation: () => preparationRequest('FUTURE_BTC5M_PREPARATION'),
+        claimPreparation: (payload) => preparationRequest('FUTURE_BTC5M_PREPARATION_CLAIM', payload),
+        reportPreflight: (payload) => chrome.runtime.sendMessage({type: 'FUTURE_BTC5M_PREFLIGHT', payload}),
+        acknowledge: async (payload) => {
+          const status = await preparationRequest('FUTURE_BTC5M_PREPARATION_ACK', payload);
+          return {ok: status?.bridgeId === 'future-btc5m' && status.preparation?.state === payload.status};
+        },
+      });
+      if (result) preparationReport.textContent = result.status === 'READY' ?
+        '自动票据：已准备 $1 与策略方向，请核对后手动买入（未提交订单）' :
+        `自动票据：${result.status} · ${result.reason}（未提交订单，不重试）`;
+    } catch {
+      preparationReport.textContent = '自动票据：本地准备服务未连接（未提交订单）';
+    }
   }
 
   async function poll() {
@@ -336,12 +536,14 @@
         text.textContent += `\n入场草稿剩余 ${Math.max(0, Math.floor(draft.expires_at - now))} 秒`;
         prepare.disabled = false;
       }
+      await pollPreparation();
     } catch (error) {
       latest = null;
       text.textContent = error.message;
       inspection.textContent = '';
       autoCheckedUrl = null;
       navigation.textContent = '自动换轮：暂停（本地助手未连接）';
+      preparationReport.textContent = '自动票据：暂停（本地助手未连接，未提交订单）';
     } finally {
       polling = false;
     }
