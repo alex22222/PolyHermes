@@ -2,6 +2,8 @@
 
 日期：2026-10-11（北京时间）。行情和时窗基于 [周末 BTC 顺势策略](weekend-btc-updown-momentum-strategy.md)；当前票据方向按用户明确的新规则，选择 Future 涨/跌按钮上数字较大的一方。
 
+`2030a89` 已修复并部署按钮选边流程，扩展 0.3.1，284 项相关回归通过。真实轮次 `1791727200` 在 Up 30¢ / Down 71¢ 时，从初始 Up、空金额自动改为 Down / $1，账本记录 READY；未点击最终买入，测试后开关关闭。详见 [修复验收](future-btc5m-bridge.md#按钮较大方向修复验收2030a89) 及 [现场证据](../reports/future-btc5m-assistant/quote-direction-verification-20261011.json)。
+
 ## 实现范围
 
 用户已确认“每次 1 元”指 Future 的美元金额 1。助手固定订单本金为 **$1**，没有金额放大、人民币换算、倍投或自动补单。官方订单说明将 BUY 金额定义为美元本金，费用可能额外收取；最终扣款与最低订单要求以 Future 页面为准。[Polymarket 订单说明](https://docs.polymarket.com/trading/place-orders)
