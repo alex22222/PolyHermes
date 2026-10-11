@@ -84,3 +84,11 @@ bash -n scripts/start-future-btc5m-tunnel.sh
 ```
 
 测试只使用临时 Unix socket 和随机 loopback 端口，不建立生产 SSH、不读取账户凭据、不发订单。
+
+## 2026-10-11 生产验收
+
+后端和前端发布 `d5464c0`，ServiceWorker 导航缓存修复 `83c2e12`，宿主与专用 relay 内的上游超时修复 `d4c6862` SHA256 均为 `9f58a7f4c97ef9bc8791b2a80db6455e40e62bededece1f44d2832de326a6819`。app 状态已固化为镜像 `polyhermes-app:future-83c2e12`；重新创建 app 时须明确选用该镜像，并按上文重建 relay。没有修改现有 compose 或环境配置。
+
+原 JAR 和前端备份分别位于 `/opt/polyhermes/backups/app-before-future-d5464c0-20261011.jar`、`/opt/polyhermes/backups/frontend-before-future-d5464c0-20261011.tar.gz`；relay 旧文件保留在独立目录的 `relay-before-d4c6862.py`。89 项现有迁移清单一致，没有新增迁移或数据库操作。固化 app 镜像时曾因容器短暂暂停导致健康检查失败，随后自行恢复 healthy，未再次重启 app。
+
+断开专用隧道时 relay 返回 503，正式页面显示状态未知；恢复后正式鉴权页面显示接口已连接、新鲜浏览器报告、当前 $1 票据和空订单列表。超时修复后的 40 次实际状态/订单读取全部 HTTP 200，最慢 1.902 秒；开关与实际执行均关闭、0 订单。证据见 [生产只读验收记录](../reports/future-btc5m-assistant/production-preorder-verification-20261011.json)。这只是本次有界采样，不能证明全天网络稳定；Mac 助手和前台隧道仍是运行依赖。

@@ -81,7 +81,7 @@ scripts/future-btc5m-runtime/.venv/bin/python scripts/future_btc5m_assistant.py 
 1. 打开 `chrome://extensions`，启用开发者模式。
 2. 点击“加载已解压的扩展程序”，选择 `/Users/henry/projects/polyhermes/scripts/future-btc5m-extension`。
 3. 扩展仅在 `https://future.news/*` 注入助手；网络权限为 `127.0.0.1`，后台端点固定为 `http://127.0.0.1:8766/status` 和只读预检报告接口。没有 cookies、storage、tabs 或全网站权限。
-4. 刷新 Future 页面，左下角显示助手状态。已安装版本更新后，在扩展页对本助手点击“重新加载”，再刷新 Future；本机已核对加载版本为 0.2.3，权限没有新增。
+4. 刷新 Future 页面，左下角显示助手状态。已安装版本更新后，在扩展页对本助手点击“重新加载”，再刷新 Future；当前版本为 0.2.4，权限没有新增。
 5. 已结束的 BTC5m 页面会自动点击“前往实时市场”，核对当前轮次后自动只读检查金额栏。“检查页面”可手动重复此检查，均不修改表单。面板显示采样轮次、采样时刻与价格来源；错轮、陈旧和过期信号不会显示可用于入场的方向。“前往本轮市场”保留为失败时的手动导航入口。
 6. 当前资格依据显示“未核实”，填入按钮保持禁用。完成官方资格源接入和平台 $1 最低要求核对后，才能继续真实金额准备验收：READY 且数据仍新鲜时，点击“填入 $1 草稿”。你手动选择提示的涨/跌方向，核对轮次、金额、费用、平台最低要求和期限后自行买入。不要把助手的 READY 当成成交确认。
 
@@ -101,22 +101,23 @@ touch /Users/henry/projects/polyhermes/reports/future-btc5m-assistant/STOP
 
 ## 当前验证与限制
 
-- 68 项测试通过：33 项 Python 行为测试、21 项 Chrome 扩展测试、14 项已有策略/监控基线。覆盖周末/DST、数据与市场校验、固定金额、失联、停止、去重、重启、只读 HTTP、系统 CA 回退、紧凑订阅、TWAP 参数和市场配置、旧轮次/陈旧显示、只读页面预检及独立 Future 资格守卫，以及自动换轮去重、错误按钮拒绝、旧检查清空、SPA URL 先切换而旧 DOM 尚未更新。错误价格口径、旧方向显示、Polymarket 允许结果误当 Future 资格和 SPA 旧票据误报均由失败回归复现，修复后通过。肯定资格的金额流程仅在隔离测试中使用 mock，不能当作生产资格证据。
+- 当前 172 项测试通过：100 Python、52 Node、20 Kotlin；前端构建、定向 ESLint 和 TypeScript 检查通过。68 项是历史行情/导航阶段的测试汇总：33 项 Python 行为测试、21 项 Chrome 扩展测试、14 项已有策略/监控基线。覆盖周末/DST、数据与市场校验、固定金额、失联、停止、去重、重启、只读 HTTP、系统 CA 回退、紧凑订阅、TWAP 参数和市场配置、旧轮次/陈旧显示、只读页面预检及独立 Future 资格守卫，以及自动换轮去重、错误按钮拒绝、旧检查清空、SPA URL 先切换而旧 DOM 尚未更新。错误价格口径、旧方向显示、Polymarket 允许结果误当 Future 资格和 SPA 旧票据误报均由失败回归复现，修复后通过。肯定资格的金额流程仅在隔离测试中使用 mock，不能当作生产资格证据。
+- 当前扩展 0.2.4 在真实自然轮次 `1791709800`、`1791709861.343` 时只读预检返回 `READ_ONLY_READY`：方向 Up、页面现有金额 $1、`noSubmission=true`。轮次 `1791711900` 在开盘后 61.391 秒再次通过，记录已显示在生产页面。持续 SPA 页面报告问题已由 `b6e9b90` 修复。导航和现有票据检查已通过；没有写入金额、选择方向或提交订单，交易执行器仍未连接。
 - 0.2.3 已在已登录 Chrome 实测自动导航：刷新已结束的 1791706200 后，由扩展自动进入 1791706500（北京时间 16:15–16:20）；随后无需浏览器输入，自然换轮时自动进入 1791706800（16:20–16:25）。两轮均核对 URL 与标题，自动只读金额栏检查通过、检查时金额 $1。没有人工代点实时市场、金额写入、方向或买入。记录见 [navigation-verification-20261011.json](../reports/future-btc5m-assistant/navigation-verification-20261011.json)。
 - 本地 Chrome 只读检查确认 Future 已登录，订单栏显示“金额 ($)”、输入 1；没有点击买入或检查真实成交。
 - CLI 与用户 Chrome 对同一公开地域接口均返回 `blocked=true`；Chrome 请求出口被识别为 US/CA。该接口检查请求 IP，[适用语境为 Polymarket 订单](https://docs.polymarket.com/api-reference/geoblock)，不能据此推断 Future 账户状态。已找到 [Future 官方隐私政策](https://future.news/static/privacypolicy.html)，但它没有明确订单路由、受限地区或资格接口；官网“Odds via Polymarket”也仅证明赔率来源。Future 的具体交易路由与账户资格仍缺少官方依据，保留拦截。
 - 已修复实时连接：默认 CA 数量 0，补载系统证书后为 128；保留 `CERT_REQUIRED`、主机名校验与原代理。修复后的 `--once` 返回 `feed_status=CURRENT`、`feed_reason=null`；因探测时超过入场窗口，正确返回 `ENTRY_WINDOW_MISSED`，没有生成信号或草稿。
-- 直接运行修复后的接收代码，约 7.7 秒收到 6 个不同源时间的 `crypto_prices_chainlink` / `btc/usd` 报价，源时间年龄为 1.3–2.2 秒。安全诊断记录见 [diagnostics-20261011.json](../reports/future-btc5m-assistant/diagnostics-20261011.json)。这证明当前实时行情连接与新鲜度校验恢复，尚未证明完整的入场及真实页面操作流程。
+- 直接运行修复后的接收代码，约 7.7 秒收到 6 个不同源时间的 `crypto_prices_chainlink` / `btc/usd` 报价，源时间年龄为 1.3–2.2 秒。安全诊断记录见 [diagnostics-20261011.json](../reports/future-btc5m-assistant/diagnostics-20261011.json)。这是历史行情连接与新鲜度校验恢复证据；后续自然轮次已完成上述只读预检，金额写入和交易提交仍未验收。
 - 用户已将扩展加载到 Chrome，首次现场预检使用 0.2.1；真实页面收到 `OBSERVING / GEOBLOCK_BLOCKED`，金额按钮保持禁用，`draft=null`。点击只读“检查页面”，未结束市场实测通过，识别唯一中文美元市价买入栏和金额 1；已结束市场因最终按钮显示“价格不可用”而正确拒绝。**尚未实测金额写入操作**，没有点击方向或买入。
 - 同轮 `btc-updown-5m-1791652500` 的旧请求开盘价为 82981.98681761073，遗漏 TWAP 参数导致与网页目标 82980.01 不一致，并把该采样方向反转。官方页面查询参数及同出口 API 对照已确认原因；明确启用 60 秒 TWAP 后返回 82980.01481629249，与网页一致。证据见 [reference-price-review.json](../reports/future-btc5m-assistant/reference-price-review.json)。
 - 新服务自然处理后续两轮：1791653100 的开盘价 82964.52189404255，对应 Future 目标 82964.52；1791653400 的开盘价 82976.2971943462，对应 Future 图表目标 82976.30。新版面板实测在错页、采样陈旧及入场窗口过期时明确拒用方向。只读端到端记录见 [browser-verification-20261011.json](../reports/future-btc5m-assistant/browser-verification-20261011.json)。
 - 0.2.2 与新服务在自然轮次 1791654000 实测一致：`feed_status=CURRENT`、Polymarket `blocked=true`、Future 金额准备资格 `UNKNOWN`、`draft=null`。真实面板显示“Future 金额准备依据：未核实”，金额准备按钮禁用，独立只读金额栏检查仍通过。修复及额外验收记录见 [eligibility-guard-review.json](../reports/future-btc5m-assistant/eligibility-guard-review.json)。
 - 公开 Gamma 与两侧 CLOB 订单簿均核对该 BTC5m 市场最低订单量为 5 股；官方市场单说明也要求遵守订单簿的最低量。[官方订单说明](https://docs.polymarket.com/trading/place-orders) 若直接适用此 CLOB 规则，$1 在均价高于 $0.20 时不足 5 股；这是数量推算，不能证明 Future 自己的 $1 执行规则。是否可按 $1 成交仍需其正式规则或平台记录，不能自动加额解决。
-- 本地辅助服务已启动，监听 `127.0.0.1:8766`，状态接口确认实时行情为 `CURRENT`、连接错误为空。没有提交代码或部署服务器。现有 Bridge、数据库、配置与未提交工作保持原状。
+- 本地辅助服务已启动，监听 `127.0.0.1:8766`。后端与前端 `d5464c0`、ServiceWorker 导航缓存修复 `83c2e12`、专用 relay 超时修复 `d4c6862` 已上线；app 健康，原 Bridge、MySQL 与配置未改。正式 Chrome 页面的鉴权、关闭控制、断线未知提示、恢复后新鲜报告与现有 $1 票据、历史通过记录和空订单列表已验收；relay 连续 40 次查询全部成功。详见 [生产只读验收记录](../reports/future-btc5m-assistant/production-preorder-verification-20261011.json)。Mac 助手与前台 SSH 隧道须保持运行；标签页休眠或报告过期仍会拒绝当前就绪。本次没有验证金额写入或交易提交。
 
 旧 RTDS 价格流已被官方标为迁移对象，新 PolyBolt 参考价订阅需要账户凭据。本实现沿用原文的公开旧流，失效则显示不可用，不自动获取凭据或换用 Binance 价格。[官方迁移说明](https://docs.polymarket.com/migrate/rtds-to-polybolt)
 
-验证命令：
+历史行情/导航基线验证命令（当前完整测试汇总见上文）：
 
 ```bash
 scripts/future-btc5m-runtime/.venv/bin/python -m unittest scripts/test_future_btc5m_assistant.py scripts/test_jev_shadow_monitor.py -q
