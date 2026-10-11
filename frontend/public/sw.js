@@ -1,4 +1,4 @@
-const CACHE_NAME = 'polyhermes-cache-v1'
+const CACHE_NAME = 'polyhermes-cache-v2'
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -19,7 +19,7 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames
-          .filter((name) => name !== CACHE_NAME)
+          .filter((name) => name.startsWith('polyhermes-cache-') && name !== CACHE_NAME)
           .map((name) => caches.delete(name))
       )
     })
@@ -33,6 +33,25 @@ self.addEventListener('fetch', (event) => {
 
   // API / WebSocket 不缓存
   if (url.pathname.startsWith('/api') || url.pathname.startsWith('/ws')) {
+    return
+  }
+
+  // 页面导航优先网络，避免旧 HTML 固定引用上一版本的路由和资源
+  if (request.method === 'GET' && request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request).then(async (response) => {
+        if (response && response.status === 200 && response.type === 'basic') {
+          await caches.open(CACHE_NAME).then((cache) => {
+            return cache.put(request, response.clone())
+          }).catch(() => {})
+        }
+        return response
+      }).catch(() => {
+        return caches.open(CACHE_NAME).then(async (cache) => {
+          return await cache.match(request) || cache.match('/index.html')
+        })
+      })
+    )
     return
   }
 
