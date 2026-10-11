@@ -39,6 +39,14 @@ bash scripts/start-future-btc5m-tunnel.sh --remove-stale-socket
 
 脚本在前台监督 SSH，不设置 daemon、cron 或 LaunchAgent。首次本机助手不可用时立即退出；默认首次启动发现已有 socket 也会拒绝，只有上述显式选项允许首次清理。启动后 SSH 以 255 断线时，按 5、10、20、30 秒退避重连，之后等待上限保持 30 秒。每次重连前沿用相同固定路径、socket 类型、`ECONNREFUSED` 和 inode 校验，只清理确认失效的 socket；活动 socket 或远端校验的其他错误会立即停止。校验 SSH 自身连接失败也退避重试，不放宽首次清理规则。Ctrl-C 或 TERM 会结束当前子 SSH/等待进程并停止重连；SSH 正常退出或其他非 255 退出也会结束脚本。关闭这个前台进程仍会使生产接口返回 503。
 
+直连 22 端口不稳定时（2026-10-12 实测：直连握手卡在密钥交换后超时，而经本机代理 3 次均约 3 秒连上），让两条 SSH 都经本机 SOCKS5 代理：
+
+```bash
+bash scripts/start-future-btc5m-tunnel.sh --remove-stale-socket --socks-proxy 127.0.0.1:7890
+```
+
+参数只接受 `127.0.0.1:端口`，用 `nc -X 5` 作为 `ProxyCommand`，其余 SSH 选项与转发路径不变。隧道断线后，VPS 上旧的 sshd 会话可能仍占用 socket；此时项目页请求会卡住，脚本也会报 `tunnel socket is active`。只关闭 `ss -xlp` 显示持有该 socket 的那个 sshd 进程，再按上面的命令恢复。
+
 在 VPS 上启动独立 relay。目录和 Python 文件应先通过审阅的部署流程准备：
 
 ```bash

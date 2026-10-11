@@ -30,6 +30,14 @@ PREPARATION_REPORT_FIELDS = {"schemaVersion", "id", "claimToken", "checkedAt", "
 PREPARATION_FAILURES = {"PREPARATION_FAILED", "MARKET_MISMATCH", "TICKET_CHANGED", "UNSAFE_DIRECTION_CONTROL",
                         "AMOUNT_WRITE_FAILED", "DIRECTION_WRITE_FAILED", "POSTCHECK_FAILED", "PREPARATION_REVOKED",
                         "BUTTON_QUOTES_UNAVAILABLE", "BUTTON_QUOTES_TIED", "BUTTON_QUOTES_NOT_FRESH", "HIGHER_BUTTON_SIDE_CHANGED"}
+# One extension Buy attempt (or refusal) bound to a READY preparation. A click attempt is
+# not an order or fill fact; platform fills are reconciled separately.
+BUY_AUDIT_FIELDS = {"schemaVersion", "auditId", "id", "claimToken", "periodStart", "side", "amountUsd", "state",
+                    "reason", "armedAt", "attemptedAt", "marketUrl", "upQuoteCents", "downQuoteCents",
+                    "selectedSide", "ticketAmountUsd", "extensionVersion"}
+BUY_AUDIT_REASONS = {"CLICK_ATTEMPTED": {"PLATFORM_RESULT_UNKNOWN", "CLICK_THROWN_RESULT_UNKNOWN"},
+                     "BLOCKED": {"TICKET_CHANGED", "BUY_BUTTON_UNSAFE", "READY_CHANGED", "STORAGE_FAILED",
+                                 "FINAL_CHECK_FAILED", "ALREADY_CONSUMED"}}
 
 
 class PreparationConflict(ValueError):
@@ -81,6 +89,8 @@ class FutureBridge:
         self.preparations = {}
         self.last_preparation = None
         self.preparation_error = None
+        self.buy_audits = {}
+        self.buy_audit_error = None
         self.state_dir.mkdir(parents=True, exist_ok=True)
         ledger = self.state_dir / "orders.jsonl"
         if ledger.exists():
@@ -124,6 +134,19 @@ class FutureBridge:
             except (OSError, ValueError, TypeError):
                 self.preparation_error = "PREPARATION_LEDGER_INVALID"
                 self.last_preparation = None
+        buy_audit_ledger = self.state_dir / "buy_attempts.jsonl"
+        if buy_audit_ledger.exists():
+            try:
+                with buy_audit_ledger.open(encoding="utf-8") as stream:
+                    for line in stream:
+                        record = json.loads(line, object_pairs_hook=strict_json_object)
+                        if (not line.endswith("\n") or type(record) is not dict or set(record) != BUY_AUDIT_FIELDS | {"receivedAt"}
+                                or not self._valid_buy_audit(record) or not finite_number(record["receivedAt"])
+                                or record["auditId"] in self.buy_audits):
+                            raise ValueError("Invalid buy audit ledger")
+                        self.buy_audits[record["auditId"]] = record
+            except (OSError, ValueError, TypeError):
+                self.buy_audit_error = "BUY_AUDIT_LEDGER_INVALID"
         # A process restart never resumes a persisted request to trade.
         try:
             self._save_control(self.now_fn())
@@ -399,6 +422,65 @@ class FutureBridge:
             self._save_preparation({**record, "state": payload["status"], "updatedAt": now,
                                     "reason": payload["reason"], "receipt": receipt})
             return self.preparation()
+
+    @classmethod
+    def _valid_buy_audit(cls, value):
+        start = value.get("periodStart")
+        quote_ok = lambda quote: quote is None or valid_button_quote(quote)
+        return (type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+                and type(start) is int and start >= 0 and start % 300 == 0
+                and value["id"] == f"future-btc5m-prepare:{start}"
+                and isinstance(value["claimToken"], str) and re.fullmatch(r"[0-9a-f]{32}", value["claimToken"]) is not None
+                and value["side"] in ("Up", "Down") and finite_number(value["amountUsd"]) and value["amountUsd"] == 1
+                and value["state"] in BUY_AUDIT_REASONS and value["reason"] in BUY_AUDIT_REASONS[value["state"]]
+                and finite_number(value["armedAt"]) and finite_number(value["attemptedAt"])
+                and value["armedAt"] <= value["attemptedAt"]
+                and value["auditId"] == f"{value['id']}:{math.floor(value['attemptedAt'] * 1000)}"
+                and cls._market_url_start(value["marketUrl"]) == start
+                and quote_ok(value["upQuoteCents"]) and quote_ok(value["downQuoteCents"])
+                and value["selectedSide"] in (None, "Up", "Down")
+                and (value["ticketAmountUsd"] is None or finite_number(value["ticketAmountUsd"]) and value["ticketAmountUsd"] >= 0)
+                and isinstance(value["extensionVersion"], str)
+                and re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", value["extensionVersion"]) is not None)
+
+    def report_buy_attempt(self, payload):
+        if type(payload) is not dict or set(payload) != BUY_AUDIT_FIELDS or not self._valid_buy_audit(payload):
+            raise ValueError("INVALID_BUY_AUDIT")
+        with self.lock:
+            if self.buy_audit_error:
+                raise OSError(self.buy_audit_error)
+            previous = self.buy_audits.get(payload["auditId"])
+            if previous is not None:
+                # The extension outbox resends until acknowledged; an identical resend is a no-op.
+                if {field: previous[field] for field in BUY_AUDIT_FIELDS} != payload:
+                    raise PreparationConflict("BUY_AUDIT_ID_REUSED")
+                return {"bridgeId": BRIDGE_ID, "auditId": payload["auditId"], "stored": True, "duplicate": True}
+            record = self.preparations.get(payload["id"])
+            # Audits stay accepted after the switch is turned off or the round ends; they
+            # only have to describe a READY preparation the bridge actually issued.
+            if (not record or record["state"] != "READY" or record["claimToken"] != payload["claimToken"]
+                    or record["periodStart"] != payload["periodStart"] or record["side"] != payload["side"]
+                    or not record["createdAt"] - 3 <= payload["attemptedAt"] <= record["expiresAt"] + 5):
+                raise PreparationConflict("BUY_AUDIT_NOT_BOUND_TO_READY")
+            stored = {**copy.deepcopy(payload), "receivedAt": self.now_fn()}
+            try:
+                ledger_path = self.state_dir / "buy_attempts.jsonl"
+                first_write = not ledger_path.exists()
+                with ledger_path.open("a", encoding="utf-8") as ledger:
+                    ledger.write(json.dumps(stored, ensure_ascii=False, allow_nan=False) + "\n")
+                    ledger.flush()
+                    os.fsync(ledger.fileno())
+                if first_write:
+                    descriptor = os.open(self.state_dir, os.O_RDONLY)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+            except OSError:
+                self.buy_audit_error = "BUY_AUDIT_LEDGER_WRITE_FAILED"
+                raise
+            self.buy_audits[payload["auditId"]] = stored
+            return {"bridgeId": BRIDGE_ID, "auditId": payload["auditId"], "stored": True, "duplicate": False}
 
     @staticmethod
     def _valid_record(record):

@@ -14,6 +14,7 @@ const start = 1791650700;
 const now = start + 65;
 const marketUrl = `https://future.news/zh/event/btc-updown-5m-${start}`;
 const storageKey = 'polyhermes.future-btc5m.buy-once';
+const auditKey = 'polyhermes.future-btc5m.buy-audit';
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
 const ready = (at = now, side = 'Down', round = start) => {
@@ -96,6 +97,12 @@ const memoryStorage = (values = new Map(), {failRead = false, failWrite = false,
     values.set(key, value);
     afterWrite(key, value);
   }});
+// The audit outbox may only use its own key; it is a separate handle so the consumption
+// assertions above keep describing the consumption marker alone.
+const auditMemory = (values = new Map(), {failWrite = false} = {}) => ({values,
+  getItem(key) { assert.equal(key, auditKey); return values.get(key) ?? null; },
+  setItem(key, value) { assert.equal(key, auditKey); if (failWrite) throw new Error('audit storage full'); values.set(key, value); },
+  entries() { return JSON.parse(values.get(auditKey) ?? '[]'); }});
 const mutex = () => {
   let previous = Promise.resolve();
   return (callback) => {
@@ -110,17 +117,18 @@ const deferred = () => {
   return {promise, resolve};
 };
 const setup = ({ticket = ticketFixture(), storage = memoryStorage(), read = () => ready(),
-  time = now, withLock = mutex(), url = marketUrl} = {}) => {
+  time = now, withLock = mutex(), url = marketUrl, auditStorage = auditMemory()} = {}) => {
   let currentTime = time;
   let currentUrl = url;
   const intervals = new Map();
   const reads = [];
   const watcher = createWatcher({core, document: ticket.doc, readUrl: () => currentUrl,
-    storage, readPreparation: async () => {reads.push(currentTime); return read(reads.length);},
+    storage, auditStorage, extensionVersion: '0.4.1',
+    readPreparation: async () => {reads.push(currentTime); return read(reads.length);},
     nowFn: () => currentTime, withLock,
     setIntervalFn(callback) {const id = intervals.size + 1; intervals.set(id, callback); return id;},
     clearIntervalFn(id) {intervals.delete(id);}});
-  return {watcher, ticket, storage, intervals, reads,
+  return {watcher, ticket, storage, auditStorage, intervals, reads,
     setTime(value) {currentTime = value;}, setUrl(value) {currentUrl = value;}};
 };
 const assertUnchangedTicket = (fixture, buys = 0) => {
@@ -584,7 +592,8 @@ const waiting = (at) => {
 };
 // The switch-following controller owns its watchers; ticks run their scheduled polls.
 const setupAuto = ({ticket = ticketFixture(), storage = memoryStorage(), withLock = mutex(),
-  read = () => waiting(start + 30)} = {}) => {
+  read = () => waiting(start + 30), auditStorage = auditMemory(), reportAudit = async (entry) =>
+    ({bridgeId: 'future-btc5m', auditId: entry.auditId, stored: true, duplicate: false})} = {}) => {
   let currentTime = start + 30;
   let currentUrl = marketUrl;
   let currentRead = read;
@@ -592,11 +601,12 @@ const setupAuto = ({ticket = ticketFixture(), storage = memoryStorage(), withLoc
   const intervals = new Map();
   const reads = [];
   const buyer = createAutoBuyer({core, document: ticket.doc, readUrl: () => currentUrl, storage,
+    auditStorage, extensionVersion: '0.4.1', reportAudit,
     readPreparation: async () => {reads.push(currentTime); return currentRead(reads.length);},
     nowFn: () => currentTime, withLock,
     setIntervalFn(callback) {intervals.set(++nextId, callback); return nextId;},
     clearIntervalFn(id) {intervals.delete(id);}});
-  return {buyer, ticket, storage, intervals, reads,
+  return {buyer, ticket, storage, auditStorage, intervals, reads,
     setTime(value) {currentTime = value;}, setUrl(value) {currentUrl = value;}, setRead(value) {currentRead = value;},
     async tick() {
       for (const callback of [...intervals.values()]) callback();
@@ -688,4 +698,102 @@ test('start failures and transient read failures re-arm without clicking or hidi
   await env.tick();
   assert.equal(env.buyer.sync(true).last.state, 'CLICK_ATTEMPTED');
   assertUnchangedTicket(env.ticket, 1);
+});
+
+test('a live click queues one audit after the click with the final ticket facts bound to READY', async () => {
+  let env;
+  const auditStorage = auditMemory();
+  const ticket = ticketFixture({beforeBuy() {
+    assert.deepEqual(auditStorage.entries(), [], 'the audit write never delays the click');
+  }});
+  env = setup({ticket, auditStorage});
+  env.watcher.start({live: true});
+  await env.watcher.poll();
+  assertUnchangedTicket(ticket, 1);
+  assert.equal(env.watcher.status().audit, 'QUEUED');
+  const record = ready().preparation.lastAttempt;
+  assert.deepEqual(auditStorage.entries(), [{schemaVersion: 1,
+    auditId: `${record.id}:${Math.floor(now * 1000)}`, id: record.id, claimToken: record.claimToken,
+    periodStart: start, side: 'Down', amountUsd: 1, state: 'CLICK_ATTEMPTED', reason: 'PLATFORM_RESULT_UNKNOWN',
+    armedAt: now, attemptedAt: now, marketUrl, upQuoteCents: 12, downQuoteCents: 88,
+    selectedSide: 'Down', ticketAmountUsd: 1, extensionVersion: '0.4.1'}]);
+});
+
+test('READY refusals are audited while read failures, dry runs and stale READY leave no audit', async () => {
+  for (const [options, reason] of [
+    [{ticket: ticketFixture({buyDisabled: true})}, 'TICKET_CHANGED'],
+    [{storage: memoryStorage(new Map([[storageKey, JSON.stringify({schemaVersion: 1, periodStart: start,
+      id: `future-btc5m-prepare:${start}`, side: 'Down', amountUsd: 1, state: 'CLICK_ATTEMPTED'})]]))}, 'ALREADY_CONSUMED'],
+  ]) {
+    const env = setup(options);
+    env.watcher.start({live: true});
+    await env.watcher.poll();
+    assert.equal(env.watcher.status().reason, reason);
+    assert.deepEqual(env.auditStorage.entries().map((entry) => [entry.state, entry.reason, entry.periodStart]),
+      [['BLOCKED', reason, start]]);
+    assertUnchangedTicket(env.ticket);
+  }
+  let env;
+  const storage = memoryStorage(new Map(), {afterWrite() {env.ticket.buyButtons[0].isConnected = false;}});
+  env = setup({storage});
+  env.watcher.start({live: true});
+  await env.watcher.poll();
+  assert.deepEqual(env.auditStorage.entries().map((entry) => entry.reason), ['FINAL_CHECK_FAILED']);
+
+  for (const options of [{read: () => {throw new Error('bridge timeout');}}, {read: () => ready(now - 0.1)}]) {
+    const quiet = setup(options);
+    quiet.watcher.start({live: true});
+    await quiet.watcher.poll();
+    assert.deepEqual(quiet.auditStorage.entries(), []);
+  }
+  const dryRun = setup();
+  dryRun.watcher.start();
+  await dryRun.watcher.poll();
+  assert.equal(dryRun.watcher.status().state, 'DRY_RUN_READY');
+  assert.deepEqual(dryRun.auditStorage.entries(), []);
+});
+
+test('an audit storage failure never blocks the click and is reported as an audit failure', async () => {
+  const env = setup({auditStorage: auditMemory(new Map(), {failWrite: true})});
+  env.watcher.start({live: true});
+  await env.watcher.poll();
+  assert.equal(env.watcher.status().state, 'CLICK_ATTEMPTED');
+  assert.equal(env.watcher.status().audit, 'FAILED');
+  assertUnchangedTicket(env.ticket, 1);
+});
+
+test('the auto buyer flushes audits, removes only acknowledged entries and keeps the rest pending', async () => {
+  const sent = [];
+  let accept = () => true;
+  const env = setupAuto({reportAudit: async (entry) => {
+    sent.push(entry.auditId);
+    if (!accept(entry)) throw new Error('bridge offline');
+    return {bridgeId: 'future-btc5m', auditId: entry.auditId, stored: true, duplicate: false};
+  }});
+  env.buyer.sync(true);
+  env.setTime(now);
+  env.setRead(() => ready());
+  accept = () => false;
+  await env.tick();
+  env.setTime(now + 1);
+  const view = env.buyer.sync(true);
+  await env.tick();
+  assert.equal(env.auditStorage.entries().length, 1, 'kept locally while the bridge is unavailable');
+  assert.equal(env.buyer.status().pendingAudits, 1);
+  assert.equal(env.buyer.status().auditError, 'AUDIT_REPORT_PENDING');
+  assert.equal(view.last.audit, 'QUEUED');
+  accept = () => true;
+  await env.buyer.flushAudits();
+  assert.deepEqual(env.auditStorage.entries(), []);
+  assert.equal(env.buyer.status().pendingAudits, 0);
+  assert.equal(env.buyer.status().auditError, null);
+  assert.equal(new Set(sent).size, 1, 'every retry resends the same audit id');
+
+  // A wrong acknowledgement is not proof of storage.
+  env.auditStorage.values.set(auditKey, JSON.stringify([{auditId: 'a'}, {auditId: 'b'}]));
+  const partial = setupAuto({auditStorage: env.auditStorage, reportAudit: async (entry) =>
+    ({bridgeId: 'future-btc5m', auditId: entry.auditId === 'a' ? 'other' : entry.auditId, stored: true})});
+  await partial.buyer.flushAudits();
+  assert.deepEqual(env.auditStorage.entries(), [{auditId: 'a'}]);
+  assert.equal(partial.buyer.status().pendingAudits, 1);
 });

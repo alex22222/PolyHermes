@@ -838,15 +838,23 @@ test('the panel arms automatic Buy from the project switch before preparing and 
   events.length = 0;
   assert.equal((await buyerEnv.readPreparation()).bridgeId, 'future-btc5m');
   assert.deepEqual(events, ['FUTURE_BTC5M_PREPARATION']);
+  events.length = 0;
+  await buyerEnv.reportAudit({auditId: 'x'});
+  assert.deepEqual(events, ['FUTURE_BTC5M_BUY_AUDIT'], 'audits go through the fixed local preparation worker route');
+  assert.match(children[10].textContent, /审计：全部已写入本机账本/);
 
   view = {state: 'PAUSED', reason: null, last: {state: 'CLICK_ATTEMPTED', reason: 'PLATFORM_RESULT_UNKNOWN',
     periodStart: start, side: 'Down', amountUsd: 1}};
   await children.poll();
   assert.match(children[10].textContent, new RegExp(`最近：已点击“买入 跌” \\$1（btc-updown-5m-${start}），成交以 Future 订单为准`));
   view = {state: 'WATCHING', reason: null, last: {state: 'BLOCKED', reason: 'TICKET_CHANGED',
-    periodStart: null, side: null, amountUsd: null}};
+    periodStart: null, side: null, amountUsd: null}, pendingAudits: 2, auditError: 'AUDIT_REPORT_PENDING'};
   await children.poll();
   assert.match(children[10].textContent, /最近：未点击（票据已改变）/);
+  assert.match(children[10].textContent, /审计：2 条已保存在本页，等待写入本机账本/);
+  view = {...view, last: {...view.last, audit: 'FAILED'}};
+  await children.poll();
+  assert.match(children[10].textContent, /审计：本地记录写入失败/);
 
   offline = true;
   events.length = 0;
@@ -931,6 +939,43 @@ test('waiting automatic tickets explain freshness and the entry window without c
     assert.equal(fixture.writes(), 0);
     assert.equal(fixture.buyClicks(), 0);
   }
+});
+
+test('the worker forwards strict Buy attempt audits from any BTC5m page and rejects unscoped audit data', async () => {
+  let handler;
+  const requests = [];
+  class Clock extends Date { static now() { return now * 1000; } }
+  vm.runInNewContext(readFileSync(new URL('./future-btc5m-extension/background.js', import.meta.url), 'utf8'), {
+    URL, AbortSignal, Date: Clock, chrome: {runtime: {onMessage: {addListener(fn) { handler = fn; }}}},
+    fetch: async (url, options) => { requests.push({url, options}); return {ok: true, json: async () => ({stored: true})}; },
+  });
+  // Flushed later from the next round's page: the audit keeps its own READY round.
+  const laterUrl = `https://future.news/zh/event/btc-updown-5m-${start + 300}`;
+  const sender = {url: laterUrl, frameId: 0, tab: {id: 1, url: laterUrl}};
+  const audit = {schemaVersion: 1, auditId: `${preparationIntent.id}:${Math.floor(now * 1000)}`, id: preparationIntent.id,
+    claimToken: token, periodStart: start, side: 'Down', amountUsd: 1, state: 'CLICK_ATTEMPTED',
+    reason: 'PLATFORM_RESULT_UNKNOWN', armedAt: now - 30, attemptedAt: now, marketUrl, upQuoteCents: 12,
+    downQuoteCents: 88, selectedSide: 'Down', ticketAmountUsd: 1, extensionVersion: '0.4.1'};
+  await new Promise((resolve) => {
+    assert.equal(handler({type: 'FUTURE_BTC5M_BUY_AUDIT', payload: audit}, sender, (reply) => {
+      assert.equal(reply.ok, true); resolve();
+    }), true);
+  });
+  assert.equal(requests[0].url, 'http://127.0.0.1:8766/bridge/preparation/buy-audit');
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[0].options.credentials, 'omit');
+  assert.equal(requests[0].options.headers['X-PolyHermes-Future-Preparation'], '1');
+  assert.deepEqual(JSON.parse(requests[0].options.body), audit);
+  for (const change of [{extra: 1}, {state: 'FILLED'}, {reason: 'raw DOM text'}, {amountUsd: 2},
+    {auditId: `${audit.auditId}0`}, {marketUrl: `${marketUrl}?token=secret`}, {marketUrl: laterUrl},
+    {claimToken: 'secret'}, {upQuoteCents: 101}, {extensionVersion: 'dev'}, {armedAt: now + 1},
+    {state: 'BLOCKED', reason: 'PLATFORM_RESULT_UNKNOWN'}]) {
+    assert.equal(handler({type: 'FUTURE_BTC5M_BUY_AUDIT', payload: {...audit, ...change}}, sender, () => assert.fail()),
+      undefined, JSON.stringify(change));
+  }
+  assert.equal(handler({type: 'FUTURE_BTC5M_BUY_AUDIT', payload: audit},
+    {...sender, url: 'https://future.news/zh/updown', tab: {id: 1, url: 'https://future.news/zh/updown'}}, () => assert.fail()), undefined);
+  assert.equal(requests.length, 1);
 });
 
 test('the worker exposes only fixed prepare/claim/ack endpoints and refuses financial or unscoped messages', async () => {

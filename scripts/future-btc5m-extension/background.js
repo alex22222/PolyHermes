@@ -40,11 +40,42 @@ function validPreflight(message, sender) {
       Number.isFinite(payload[key]) && payload[key] >= 0 && payload[key] <= 100 && Number(payload[key].toFixed(2)) === payload[key])));
 }
 
+// An attempt audit may be flushed after the tab moved to a later round, so it is bound
+// to its READY record by the bridge rather than to the current page.
+function validBuyAudit(message) {
+  if (Object.keys(message).length !== 2 || !Object.hasOwn(message, 'payload')) return false;
+  const value = message.payload;
+  const keys = ['schemaVersion', 'auditId', 'id', 'claimToken', 'periodStart', 'side', 'amountUsd', 'state', 'reason',
+    'armedAt', 'attemptedAt', 'marketUrl', 'upQuoteCents', 'downQuoteCents', 'selectedSide', 'ticketAmountUsd',
+    'extensionVersion'];
+  const reasons = {CLICK_ATTEMPTED: ['PLATFORM_RESULT_UNKNOWN', 'CLICK_THROWN_RESULT_UNKNOWN'],
+    BLOCKED: ['TICKET_CHANGED', 'BUY_BUTTON_UNSAFE', 'READY_CHANGED', 'STORAGE_FAILED', 'FINAL_CHECK_FAILED',
+      'ALREADY_CONSUMED']};
+  const quote = (cents) => cents === null ||
+    Number.isFinite(cents) && cents >= 0 && cents <= 100 && Number(cents.toFixed(2)) === cents;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length ||
+      !keys.every((key) => Object.hasOwn(value, key))) return false;
+  const page = marketPage(value.marketUrl);
+  return value.schemaVersion === 1 && Number.isSafeInteger(value.periodStart) && value.periodStart >= 0 &&
+    value.periodStart % 300 === 0 && value.id === `future-btc5m-prepare:${value.periodStart}` &&
+    Number.isFinite(value.armedAt) && Number.isFinite(value.attemptedAt) && value.armedAt <= value.attemptedAt &&
+    value.auditId === `${value.id}:${Math.floor(value.attemptedAt * 1000)}` &&
+    typeof value.claimToken === 'string' && /^[a-f0-9]{32}$/.test(value.claimToken) &&
+    ['Up', 'Down'].includes(value.side) && value.amountUsd === 1 &&
+    Object.hasOwn(reasons, value.state) && reasons[value.state].includes(value.reason) &&
+    Boolean(page) && value.marketUrl === page.origin + page.pathname &&
+    Number(page.pathname.match(/btc-updown-5m-(\d+)/)[1]) === value.periodStart &&
+    quote(value.upQuoteCents) && quote(value.downQuoteCents) && ['Up', 'Down', null].includes(value.selectedSide) &&
+    (value.ticketAmountUsd === null || Number.isFinite(value.ticketAmountUsd) && value.ticketAmountUsd >= 0) &&
+    typeof value.extensionVersion === 'string' && /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(value.extensionVersion);
+}
+
 function preparationMessage(message, sender) {
   const page = marketPage(sender.tab.url ?? sender.url);
   if (!marketPage(sender.url) || !page) return null;
   const type = message.type;
   if (type === 'FUTURE_BTC5M_PREPARATION') return Object.keys(message).length === 1 ? '' : null;
+  if (type === 'FUTURE_BTC5M_BUY_AUDIT') return validBuyAudit(message) ? '/buy-audit' : null;
   if (Object.keys(message).length !== 2 || !Object.hasOwn(message, 'payload')) return null;
   const payload = message.payload;
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
@@ -73,7 +104,8 @@ function preparationMessage(message, sender) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  const preparationTypes = ['FUTURE_BTC5M_PREPARATION', 'FUTURE_BTC5M_PREPARATION_CLAIM', 'FUTURE_BTC5M_PREPARATION_ACK'];
+  const preparationTypes = ['FUTURE_BTC5M_PREPARATION', 'FUTURE_BTC5M_PREPARATION_CLAIM', 'FUTURE_BTC5M_PREPARATION_ACK',
+    'FUTURE_BTC5M_BUY_AUDIT'];
   if (!['FUTURE_BTC5M_STATUS', 'FUTURE_BTC5M_PREFLIGHT', ...preparationTypes].includes(message?.type) ||
       !sender.tab || sender.frameId !== 0) return;
   let origin;

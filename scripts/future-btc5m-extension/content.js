@@ -527,7 +527,8 @@
     let view;
     try {
       autoBuyer ??= globalThis.FutureBtc5mBuyOnce.createAutoBuyer({
-        readPreparation: () => preparationRequest('FUTURE_BTC5M_PREPARATION')});
+        readPreparation: () => preparationRequest('FUTURE_BTC5M_PREPARATION'),
+        reportAudit: (payload) => preparationRequest('FUTURE_BTC5M_BUY_AUDIT', payload)});
       view = enabled === undefined ? autoBuyer.status() : autoBuyer.sync(enabled);
     } catch {
       autoBuyReport.textContent = '自动买入：脚本未加载，不会点击';
@@ -545,6 +546,8 @@
     if (view.last?.state === 'CLICK_ATTEMPTED') {
       report += `\n最近：已点击“买入 ${view.last.side === 'Up' ? '涨' : '跌'}” $1（btc-updown-5m-${view.last.periodStart}），成交以 Future 订单为准`;
     } else if (view.last) report += `\n最近：未点击（${reasons[view.last.reason] || view.last.reason}）`;
+    report += view.auditError === 'AUDIT_STORAGE_FAILED' || view.last?.audit === 'FAILED' ? '\n审计：本地记录写入失败，请检查' :
+      view.pendingAudits ? `\n审计：${view.pendingAudits} 条已保存在本页，等待写入本机账本` : '\n审计：全部已写入本机账本';
     autoBuyReport.textContent = report;
   }
 

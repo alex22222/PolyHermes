@@ -13,7 +13,7 @@ const preparationStateText: Record<FutureBtc5mPreparationState, string> = {
   WAITING_BROWSER: '等待 Chrome 报告',
   PENDING: '等待 Chrome 准备',
   CLAIMED: 'Chrome 正在准备',
-  READY: '票据已准备，未自动买入',
+  READY: '票据已准备，交由扩展自动买入',
   FAILED: '准备失败',
   EXPIRED: '已过期',
   REVOKED: '已撤销',

@@ -161,6 +161,27 @@ class FutureTunnelTest(unittest.TestCase):
             for option in ("ControlMaster=no", "ControlPath=none", "ServerAliveInterval=15", "ServerAliveCountMax=3"):
                 self.assertIn(option, row["args"])
 
+    def test_socks_proxy_routes_both_ssh_connections_through_loopback_only(self):
+        code, _, stderr = self.run_tunnel("--socks-proxy", "127.0.0.1:7890")
+        self.assertEqual(0, code, stderr)
+        proxy = "ProxyCommand=nc -X 5 -x 127.0.0.1:7890 %h %p"
+        for kind in ("check", "forward"):
+            for row in self.trace(kind):
+                self.assertEqual(proxy, row["args"][row["args"].index(proxy)])
+                self.assertIn("root@66.135.16.16", row["args"])
+        for value in ("10.0.0.1:7890", "127.0.0.1:0", "127.0.0.1:70000", "127.0.0.1", "localhost:7890",
+                      "127.0.0.1:7890;id", ""):
+            with self.subTest(value=value):
+                code, _, _ = self.run_tunnel("--socks-proxy", value)
+                self.assertEqual(2, code)
+        self.assertEqual(1, len(self.trace("forward")), "invalid proxies never start SSH")
+
+    def test_default_ssh_has_no_proxy_command(self):
+        code, _, stderr = self.run_tunnel()
+        self.assertEqual(0, code, stderr)
+        for row in self.trace("check") + self.trace("forward"):
+            self.assertFalse(any(arg.startswith("ProxyCommand=") for arg in row["args"]))
+
     def test_default_first_start_preserves_existing_stale_socket(self):
         self.stale_socket()
         inode = self.socket_path.lstat().st_ino

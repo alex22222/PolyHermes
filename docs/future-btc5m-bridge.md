@@ -48,7 +48,7 @@ cd /Users/henry/projects/polyhermes
 scripts/future-btc5m-runtime/.venv/bin/python scripts/future_btc5m_assistant.py --watch
 ```
 
-辅助服务监听 `127.0.0.1:8766`。控制状态为 `reports/future-btc5m-assistant/bridge/control.json`，实际订单历史为同目录 `orders.jsonl`，准备事件为独立 `preparations.jsonl`。重启强制关闭开关，撤销未完成准备并保留历史；STOP 自动取消启用请求。准备账本损坏或写盘失败阻断新准备，不改变旧订单事实。
+辅助服务监听 `127.0.0.1:8766`。控制状态为 `reports/future-btc5m-assistant/bridge/control.json`，实际订单历史为同目录 `orders.jsonl`，准备事件为独立 `preparations.jsonl`，扩展点击审计为 `buy_attempts.jsonl`（见 [自动买入](future-btc5m-buy-once.md#审计与回测)）。重启强制关闭开关，撤销未完成准备并保留历史；STOP 自动取消启用请求。准备账本损坏或写盘失败阻断新准备，不改变旧订单事实。
 
 仅开启请求后，新的有效信号及新鲜本轮浏览器票据可生成准备任务：BTC5m 正确轮次、+60 至 +80 秒、新鲜 Chainlink 样本及 60 秒 TWAP 基准。启用前样本不补录，每轮去重一次。旧 `SKIPPED / EXECUTOR_NOT_CONNECTED` 订单历史保留；准备流程不会新增跳过订单或制造提交、成交、平台订单号及费用。
 

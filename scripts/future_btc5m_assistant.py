@@ -460,7 +460,7 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
                 return
             if not self.valid_host():
                 return
-            preparation = self.path in ("/bridge/preparation/claim", "/bridge/preparation/ack")
+            preparation = self.path in ("/bridge/preparation/claim", "/bridge/preparation/ack", "/bridge/preparation/buy-audit")
             if self.path not in ("/bridge/control", "/bridge/preflight") and not preparation:
                 self.send_error(404)
                 return
@@ -484,7 +484,7 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
                 if preparation and (not raw_length.isascii() or not raw_length.isdigit()):
                     raise ValueError("INVALID_BODY_SIZE")
                 length = int(raw_length)
-                limit = 1500 if preflight or self.path == "/bridge/preparation/ack" else 256
+                limit = 1500 if preflight or self.path in ("/bridge/preparation/ack", "/bridge/preparation/buy-audit") else 256
                 if not 0 < length <= limit or self.headers.get("Transfer-Encoding") is not None:
                     raise ValueError("INVALID_BODY_SIZE")
                 self.connection.settimeout(2)
@@ -496,6 +496,8 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
                     self.reply(bridge.claim_preparation(payload))
                 elif self.path == "/bridge/preparation/ack":
                     self.reply(bridge.report_preparation(payload))
+                elif self.path == "/bridge/preparation/buy-audit":
+                    self.reply(bridge.report_buy_attempt(payload))
                 elif preflight:
                     self.reply(bridge.report_preflight(payload))
                 else:

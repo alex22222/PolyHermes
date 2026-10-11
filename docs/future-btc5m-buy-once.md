@@ -13,7 +13,7 @@
 
 ## 使用步骤
 
-1. 在 `chrome://extensions` 对 **PolyHermes Future BTC 5m 助手**点击“重新加载”，确认版本为 0.4.0，再刷新 Future 页面。权限没有新增。
+1. 在 `chrome://extensions` 对 **PolyHermes Future BTC 5m 助手**点击“重新加载”，确认版本为 0.4.1，再刷新 Future 页面。权限没有新增。
 2. 保持 Mac 助手、私有隧道和已登录的 Future BTC 5 分钟页面运行。
 3. 在项目页开启“自动准备票据”。面板最后一行“自动买入”的含义：
    - `已开启，新票据准备好后点击一次买入（每轮最多一次）`：正在监控。
@@ -23,6 +23,26 @@
 4. 停止自动买入：在项目页关闭“自动准备票据”。面板读到关闭状态后停止监控；监控本身也只接受 `enabled=true` 的 READY。
 
 已经发生的点击尝试不会被撤销。跨页面重载的同轮占用不会自动清除；不要删除占用记录来重试结果不确定的订单。
+
+## 审计与回测
+
+0.4.1 起，每次实盘点击，以及对 READY 票据的每次拒绝（票据改变、按钮不安全、READY 改变、最终核对失败、本轮已点击），都会留下一条审计记录：
+
+1. 点击之后（不推迟点击）写入本页待发队列 `polyhermes.future-btc5m.buy-audit`。
+2. 扩展每秒把队列发到本机 `POST /bridge/preparation/buy-audit`。助手校验它对应一张真实 READY（轮次、方向、`claimToken` 一致），然后追加写入 `reports/future-btc5m-assistant/bridge/buy_attempts.jsonl` 并 fsync，按 `auditId` 去重。
+3. 只有助手确认写入后才从队列删除；断线、重载或助手未运行时保留并重发。面板“审计”一行显示待写入条数或写入失败。
+
+每条记录包含：轮次、READY 方向与 `claimToken`、状态与原因、监控开始和点击时间、点击时页面的涨/跌报价、选中方向、金额和扩展版本，以及助手的接收时间。读取失败和模拟模式不产生审计。
+
+**审计只证明点过“买入”，不是成交。** 平台订单号、成交股数、均价和费用需另行对账，按轮次写入同目录的 `fills.jsonl`（`periodStart`、`platformOrderId`、`filledShares`、`avgFillPrice`、`feeUsd`、`source`）。
+
+回测导出：
+
+```bash
+python3 scripts/future_btc5m_backtest_export.py
+```
+
+每轮一行，写入同目录的 `backtest_rounds.csv` 与 `.jsonl`：合并准备记录、点击审计、Polymarket 公开结算结果和 `fills.jsonl`。结算结果缓存在 `resolutions.json`，未结算的轮次下次重查。`buyState=NO_AUDIT` 表示 READY 但没有审计，例如 0.4.1 之前的轮次，是否成交只能以平台记录为准。`estPnlUsdAtQuote` 按准备时按钮报价估算 $1 的盈亏，不含费用、滑点和最低下单量，不是成交；只有 `realizedPnlUsd` 来自 `fills.jsonl`。
 
 ## 核对与去重
 

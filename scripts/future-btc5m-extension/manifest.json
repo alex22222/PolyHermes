@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PolyHermes Future BTC 5m 助手",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "自动进入当前 BTC 五分钟市场；开启自动票据时选择按钮数字较大的一方并填入 $1，准备好后自动点击一次买入。",
   "host_permissions": ["http://127.0.0.1/*"],
   "background": {"service_worker": "background.js"},

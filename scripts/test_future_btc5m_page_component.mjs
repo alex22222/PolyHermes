@@ -257,17 +257,17 @@ test('a ready operation report stays separate from real orders and never claims 
       receipt: {checkedAt: start + 65, marketUrl: `https://future.news/zh/event/btc-updown-5m-${start}`,
         amountUsd: 1, selectedSide: 'Up'}}};
   await page.reply('status', value);
-  assert.equal(page.field('准备阶段'), '票据已准备，未自动买入');
+  assert.equal(page.field('准备阶段'), '票据已准备，交由扩展自动买入');
   assert.equal(page.field('准备报告金额 / 方向'), '$1 / Up');
   assert.equal(page.field('实际下单'), '未运行');
   assert.equal(page.field('待准备方向 / 金额'), '—');
   assert.equal(page.elements((node) => node.type === 'Table')[0].props.dataSource.length, 0);
   page.tick(receipt + 5001);
   assert.equal(page.field('准备阶段'), '等待有效信号');
-  assert.equal(page.field('最近准备结果'), '票据已准备，未自动买入');
+  assert.equal(page.field('最近准备结果'), '票据已准备，交由扩展自动买入');
   page.tick((start + 80) * 1000);
   assert.equal(page.field('准备阶段'), '已过期');
-  assert.equal(page.field('最近准备结果'), '票据已准备，未自动买入');
+  assert.equal(page.field('最近准备结果'), '票据已准备，交由扩展自动买入');
 });
 
 test('disabled preparation retains its historical report without current permission', async () => {
@@ -306,7 +306,7 @@ test('higher Down button quote remains READY when Chainlink points Up or is flat
   for (const flat of [false, true]) {
     const page = mountPage(receipt);
     await page.reply('status', higherButtonStatus(flat));
-    assert.equal(page.field('准备阶段'), '票据已准备，未自动买入');
+    assert.equal(page.field('准备阶段'), '票据已准备，交由扩展自动买入');
     assert.equal(page.field('按钮报价方向'), 'Down');
     assert.equal(page.field('观察方向'), flat ? '平价' : 'Up');
     assert.equal(page.field('Up / Down 按钮报价'), '12¢ / 88¢');
@@ -322,7 +322,7 @@ test('frozen original quotes and changed current button winner revoke current RE
     value.preparation.lastAttempt = {...value.preparation.lastAttempt, ...change};
     await page.reply('status', value);
     assert.equal(page.field('准备阶段'), '等待有效信号');
-    assert.equal(page.field('最近准备结果'), '票据已准备，未自动买入');
+    assert.equal(page.field('最近准备结果'), '票据已准备，交由扩展自动买入');
   }
   const page = mountPage(receipt);
   const value = higherButtonStatus();
@@ -353,5 +353,5 @@ test('READY requires the current read-only preflight result to have passed', asy
   value.preflight = {...value.preflight, result: 'BLOCKED', reasons: ['BROWSER_CHECK_OUTSIDE_ENTRY']};
   await page.reply('status', value);
   assert.equal(page.field('准备阶段'), '等待有效信号');
-  assert.equal(page.field('最近准备结果'), '票据已准备，未自动买入');
+  assert.equal(page.field('最近准备结果'), '票据已准备，交由扩展自动买入');
 });
