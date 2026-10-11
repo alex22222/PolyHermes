@@ -551,3 +551,34 @@ test('the worker posts a strictly scoped top-frame preflight without credentials
   handler({type: 'FUTURE_BTC5M_PREFLIGHT', payload}, {...sender, url: 'https://evil.test'}, () => assert.fail());
   assert.equal(requests.length, 1);
 });
+
+test('SPA preflight matches the trusted current tab URL while retaining Future BTC5m sender guards', async () => {
+  let handler;
+  const requests = [];
+  class Clock extends Date { static now() { return now * 1000; } }
+  vm.runInNewContext(readFileSync(new URL('./future-btc5m-extension/background.js', import.meta.url), 'utf8'), {
+    URL, AbortSignal, Date: Clock, chrome: {runtime: {onMessage: {addListener(fn) { handler = fn; }}}},
+    fetch: async (url, options) => { requests.push({url, options}); return {ok: true}; },
+  });
+  const payload = {schemaVersion: 1, marketUrl, pagePeriodStart: start, checkedAt: now, navigation: 'CURRENT',
+    ticketStatus: 'PASS', amountUsd: 1, selectedSide: 'Up', buyButtonEnabled: true};
+  const message = {type: 'FUTURE_BTC5M_PREFLIGHT', payload};
+  const oldDocument = `https://future.news/zh/event/btc-updown-5m-${start - 300}`;
+  const sender = {url: oldDocument, frameId: 0, tab: {id: 1, url: `${marketUrl}?m=current-market-id`}};
+  await new Promise((resolve) => {
+    assert.equal(handler(message, sender, (reply) => { assert.equal(reply.ok, true); resolve(); }), true);
+  });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'http://127.0.0.1:8766/bridge/preflight');
+  assert.deepEqual(JSON.parse(requests[0].options.body), payload);
+  for (const invalid of [
+    {...sender, frameId: 1},
+    {...sender, url: 'https://evil.test/zh/event/btc-updown-5m-1'},
+    {...sender, url: 'https://future.news/zh/updown'},
+    {...sender, tab: {id: 1, url: 'https://evil.test/'}},
+    {...sender, tab: {id: 1, url: 'https://future.news/zh/updown'}},
+    {...sender, tab: {id: 1, url: oldDocument}},
+    {...sender, tab: {id: 1}},
+  ]) assert.equal(handler(message, invalid, () => {}), undefined);
+  assert.equal(requests.length, 1);
+});

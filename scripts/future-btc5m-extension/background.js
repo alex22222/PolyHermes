@@ -1,4 +1,16 @@
 // Fixed local endpoints only. Preflight carries a whitelist of read-only ticket facts.
+function marketPage(value) {
+  try {
+    const parsed = new URL(value);
+    const match = parsed.pathname.match(/^\/(?:zh\/)?event\/btc-updown-5m-(0|[1-9]\d*)\/?$/);
+    const start = match && Number(match[1]);
+    return parsed.origin === 'https://future.news' && !parsed.username && !parsed.password && match &&
+      Number.isSafeInteger(start) && start >= 0 && start % 300 === 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function validPreflight(message, sender) {
   if (!message || Object.keys(message).length !== 2 || !Object.hasOwn(message, 'payload')) return false;
   const payload = message.payload;
@@ -6,16 +18,14 @@ function validPreflight(message, sender) {
     'amountUsd', 'selectedSide', 'buyButtonEnabled'];
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
       Object.keys(payload).length !== keys.length || !keys.every((key) => Object.hasOwn(payload, key))) return false;
-  let page;
-  try {
-    page = new URL(sender.url);
-  } catch {
-    return false;
-  }
+  const documentPage = marketPage(sender.url);
+  // Chrome can retain the content script's original URL across an SPA navigation.
+  // The trusted top-frame tab URL describes the currently displayed market.
+  const page = marketPage(sender.tab.url ?? sender.url);
   const match = typeof payload.marketUrl === 'string' && payload.marketUrl.match(/^https:\/\/future\.news\/(?:zh\/)?event\/btc-updown-5m-(0|[1-9]\d*)\/?$/);
   const now = Date.now() / 1000;
   const start = Math.floor(now / 300) * 300;
-  return Boolean(match && !page.username && !page.password && payload.marketUrl === page.origin + page.pathname &&
+  return Boolean(documentPage && page && match && payload.marketUrl === page.origin + page.pathname &&
     payload.schemaVersion === 1 && Number.isSafeInteger(payload.pagePeriodStart) && payload.pagePeriodStart >= 0 &&
     payload.pagePeriodStart % 300 === 0 && payload.pagePeriodStart === Number(match[1]) &&
     Number.isFinite(payload.checkedAt) && Math.abs(now - payload.checkedAt) <= 3 &&
