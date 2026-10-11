@@ -5,11 +5,14 @@ set -euo pipefail
 FUTURE_TUNNEL_HOST="root@66.135.16.16"
 FUTURE_TUNNEL_KEY="$HOME/.ssh/polymtrade_vultr_ed25519"
 REMOVE_STALE_SOCKET=false
+FUTURE_TUNNEL_CHILD=""
+RETRY_SECONDS=5
 
 usage() {
     echo "Usage: bash scripts/start-future-btc5m-tunnel.sh [--remove-stale-socket]"
     echo "Keep this foreground process running to connect the production relay to the local assistant."
     echo "The optional recovery removes only the fixed Unix socket after its connection is refused."
+    echo "SSH disconnects retry in 5/10/20/30 seconds; Ctrl-C or TERM stops reconnecting."
 }
 
 while [[ $# -gt 0 ]]; do
@@ -20,22 +23,44 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+stop_tunnel() {
+    trap - INT TERM
+    if [[ -n "$FUTURE_TUNNEL_CHILD" ]]; then
+        kill -TERM "$FUTURE_TUNNEL_CHILD" 2>/dev/null || true
+        wait "$FUTURE_TUNNEL_CHILD" 2>/dev/null || true
+    fi
+    exit "$1"
+}
+trap 'stop_tunnel 130' INT
+trap 'stop_tunnel 143' TERM
+
+run_foreground() {
+    local result=0
+    "$@" <&0 &
+    FUTURE_TUNNEL_CHILD=$!
+    wait "$FUTURE_TUNNEL_CHILD" || result=$?
+    FUTURE_TUNNEL_CHILD=""
+    return "$result"
+}
+
 [[ -r "$FUTURE_TUNNEL_KEY" ]] || { echo "Configured SSH key is unavailable" >&2; exit 1; }
 command -v ssh >/dev/null || { echo "SSH is unavailable" >&2; exit 1; }
-curl --noproxy '*' -fsS --max-time 3 -o /dev/null http://127.0.0.1:8766/status || {
+run_foreground curl --noproxy '*' -fsS --max-time 3 -o /dev/null http://127.0.0.1:8766/status || {
     echo "Local Future assistant is unavailable on 127.0.0.1:8766" >&2
     exit 1
 }
 
 SSH=(ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ControlMaster=no -o ControlPath=none
+     -o ServerAliveInterval=15 -o ServerAliveCountMax=3
      -i "$FUTURE_TUNNEL_KEY" "$FUTURE_TUNNEL_HOST")
 
-if [[ "$REMOVE_STALE_SOCKET" == true ]]; then
-    "${SSH[@]}" python3 - <<'PY'
+check_socket() {
+    run_foreground "${SSH[@]}" python3 - "$REMOVE_STALE_SOCKET" <<'PY'
 import errno
 import os
 import socket
 import stat
+import sys
 
 path = "/opt/polyhermes/future-btc5m/assistant.sock"
 try:
@@ -45,6 +70,8 @@ except FileNotFoundError:
     raise SystemExit(0)
 if not stat.S_ISSOCK(before.st_mode):
     raise SystemExit("Refusing recovery: fixed path is not a Unix socket")
+if sys.argv[1] != "true":
+    raise SystemExit("Refusing startup: fixed tunnel socket already exists; use explicit stale-socket recovery")
 connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 connection.settimeout(2)
 try:
@@ -62,11 +89,31 @@ if not stat.S_ISSOCK(after.st_mode) or (before.st_dev, before.st_ino) != (after.
 os.unlink(path)
 print("Removed only the confirmed stale Future tunnel socket")
 PY
-fi
+}
 
-echo "Starting foreground Future private tunnel; stop with Ctrl-C"
-exec ssh -T -N -o BatchMode=yes -o ConnectTimeout=10 -o ControlMaster=no -o ControlPath=none \
-    -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-    -o StreamLocalBindUnlink=no -o StreamLocalBindMask=0177 \
-    -i "$FUTURE_TUNNEL_KEY" \
-    -R /opt/polyhermes/future-btc5m/assistant.sock:127.0.0.1:8766 "$FUTURE_TUNNEL_HOST"
+retry_tunnel() {
+    echo "Future SSH transport disconnected; retrying in $RETRY_SECONDS seconds" >&2
+    run_foreground sleep "$RETRY_SECONDS"
+    RETRY_SECONDS=$((RETRY_SECONDS * 2))
+    [[ "$RETRY_SECONDS" -le 30 ]] || RETRY_SECONDS=30
+}
+
+while true; do
+    result=0
+    check_socket || result=$?
+    if [[ "$result" -eq 255 ]]; then
+        retry_tunnel
+        continue
+    fi
+    [[ "$result" -eq 0 ]] || exit "$result"
+
+    echo "Starting foreground Future private tunnel; stop with Ctrl-C"
+    run_foreground ssh -T -N -o BatchMode=yes -o ConnectTimeout=10 -o ControlMaster=no -o ControlPath=none \
+        -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+        -o StreamLocalBindUnlink=no -o StreamLocalBindMask=0177 \
+        -i "$FUTURE_TUNNEL_KEY" \
+        -R /opt/polyhermes/future-btc5m/assistant.sock:127.0.0.1:8766 "$FUTURE_TUNNEL_HOST" || result=$?
+    [[ "$result" -eq 255 ]] || exit "$result"
+    REMOVE_STALE_SOCKET=true
+    retry_tunnel
+done

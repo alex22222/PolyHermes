@@ -37,6 +37,8 @@ bash scripts/start-future-btc5m-tunnel.sh --remove-stale-socket
 
 恢复仅针对 `/opt/polyhermes/future-btc5m/assistant.sock`，要求路径为 Unix socket、连接报 `ECONNREFUSED`，且检查期间 inode 未变。活动 socket、其他错误、普通文件及符号链接都会拒绝清理。
 
+脚本在前台监督 SSH，不设置 daemon、cron 或 LaunchAgent。首次本机助手不可用时立即退出；默认首次启动发现已有 socket 也会拒绝，只有上述显式选项允许首次清理。启动后 SSH 以 255 断线时，按 5、10、20、30 秒退避重连，之后等待上限保持 30 秒。每次重连前沿用相同固定路径、socket 类型、`ECONNREFUSED` 和 inode 校验，只清理确认失效的 socket；活动 socket 或远端校验的其他错误会立即停止。校验 SSH 自身连接失败也退避重试，不放宽首次清理规则。Ctrl-C 或 TERM 会结束当前子 SSH/等待进程并停止重连；SSH 正常退出或其他非 255 退出也会结束脚本。关闭这个前台进程仍会使生产接口返回 503。
+
 在 VPS 上启动独立 relay。目录和 Python 文件应先通过审阅的部署流程准备：
 
 ```bash
@@ -80,10 +82,11 @@ docker exec polyhermes python3 -c 'import urllib.request; print(urllib.request.u
 
 ```bash
 scripts/future-btc5m-runtime/.venv/bin/python -m unittest scripts/test_future_btc5m_relay.py -q
+scripts/future-btc5m-runtime/.venv/bin/python -m unittest scripts/test_future_btc5m_tunnel.py -q
 bash -n scripts/start-future-btc5m-tunnel.sh
 ```
 
-测试只使用临时 Unix socket 和随机 loopback 端口，不建立生产 SSH、不读取账户凭据、不发订单。
+测试只使用临时 Unix socket 和随机 loopback 端口。隧道行为测试用独立 mock SSH、curl、sleep 和临时 key 路径，验证断线重连、退避、拒绝活动 socket 和信号退出，不建立生产 SSH、不读取账户凭据、不发订单。
 
 ## 2026-10-11 生产验收
 
