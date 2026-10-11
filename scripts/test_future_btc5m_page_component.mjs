@@ -210,11 +210,11 @@ const preparationIntent = () => ({schemaVersion: 2, id: `future-btc5m-prepare:${
   authorizationSource: 'USER_REQUEST', claimToken: null, upQuoteCents: 54, downQuoteCents: 46,
   quoteObservedAt: start + 65, selectionSource: 'HIGHER_BUTTON_PRICE'});
 
-test('the switch controls ticket preparation and keeps final buy manual with no running executor', async () => {
+test('the switch controls ticket preparation and the extension buy with no running server executor', async () => {
   const page = mountPage(receipt);
   await page.reply('status', healthyStatus());
   assert.equal(page.elements((node) => node.type === 'Card' && node.props.title === '自动准备票据控制').length, 1);
-  assert.equal(page.field('最终买入'), '由你在 Future 页面完成');
+  assert.equal(page.field('最终买入'), '浏览器扩展在票据准备好后自动点击（每轮最多一次）');
   assert.equal(page.field('实际下单'), '未运行');
   assert.equal(page.field('准备阶段'), '已关闭');
   assert.equal(page.elements((node) => node.type === 'Card' && node.props.title === '真实订单与历史跳过记录').length, 1);

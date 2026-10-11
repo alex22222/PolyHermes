@@ -473,8 +473,13 @@
   const preflightReport = document.createElement('p');
   const preparationReport = document.createElement('p');
   const note = document.createElement('p');
-  note.textContent = '自动票据选择按钮数字较大的一方并填入 $1；由你核对并点击 Future 买入。$1 为订单本金，费用以平台为准。';
-  panel.append(title, text, link, prepare, inspect, inspection, navigation, note, preflightReport, preparationReport);
+  const preparationNote = '开启自动票据后，仅在每轮第 60–80 秒、行情有效时选择按钮数字较大的一方并填入 $1，准备好后自动点击一次 Future 买入。$1 为订单本金，费用以平台为准。';
+  note.style.whiteSpace = 'pre-line';
+  note.textContent = preparationNote;
+  const autoBuyReport = document.createElement('p');
+  autoBuyReport.style.whiteSpace = 'pre-line';
+  panel.append(title, text, link, prepare, inspect, inspection, navigation, note, preflightReport, preparationReport,
+    autoBuyReport);
   document.body.append(panel);
   let latest = null;
   let polling = false;
@@ -482,6 +487,7 @@
   let autoCheckedUrl = null;
   let reporting = false;
   let reportPromise = null;
+  let autoBuyer = null;
 
   async function reportPage() {
     if (reporting) return;
@@ -515,11 +521,39 @@
     return reply.status;
   }
 
+  // buy_once.js follows the same switch and re-reads READY itself; an omitted value only
+  // redraws the current watcher state without arming or stopping it.
+  function showAutoBuy(enabled) {
+    let view;
+    try {
+      autoBuyer ??= globalThis.FutureBtc5mBuyOnce.createAutoBuyer({
+        readPreparation: () => preparationRequest('FUTURE_BTC5M_PREPARATION')});
+      view = enabled === undefined ? autoBuyer.status() : autoBuyer.sync(enabled);
+    } catch {
+      autoBuyReport.textContent = '自动买入：脚本未加载，不会点击';
+      return;
+    }
+    const reasons = {TICKET_CHANGED: '票据已改变', BUY_BUTTON_UNSAFE: '买入按钮不唯一或不可用',
+      READY_CHANGED: '准备记录已改变', STORAGE_FAILED: '本地点击记录不可用', FINAL_CHECK_FAILED: '最终核对失败',
+      ALREADY_CONSUMED: '本轮已点击过', WEB_LOCKS_REQUIRED: '浏览器缺少 Web Locks',
+      UPDATED_EXTENSION_CONTEXT_REQUIRED: '请重新加载扩展'};
+    const states = {OFF: '跟随“自动准备票据”开关，当前关闭，不会点击',
+      WATCHING: '已开启，新票据准备好后点击一次买入（每轮最多一次）',
+      PAUSED: '等待有效准备状态后重新监控，暂不点击',
+      BLOCKED: `无法启动（${reasons[view.reason] || view.reason}），不会点击`};
+    let report = `自动买入：${states[view.state]}`;
+    if (view.last?.state === 'CLICK_ATTEMPTED') {
+      report += `\n最近：已点击“买入 ${view.last.side === 'Up' ? '涨' : '跌'}” $1（btc-updown-5m-${view.last.periodStart}），成交以 Future 订单为准`;
+    } else if (view.last) report += `\n最近：未点击（${reasons[view.last.reason] || view.last.reason}）`;
+    autoBuyReport.textContent = report;
+  }
+
   async function pollPreparation() {
     try {
       const wrapper = await preparationRequest('FUTURE_BTC5M_PREPARATION');
-      const labels = {DISABLED: '已关闭', WAITING_SIGNAL: '等待本轮信号', WAITING_BROWSER: '等待浏览器报告', PENDING: '等待准备',
-        CLAIMED: '本轮已认领，不重复准备', READY: '已准备 $1 与按钮数字较大的一方，请核对后手动买入',
+      const labels = {DISABLED: '已关闭；本次检查未切换方向或填写金额，请在 PolyHermes 开启“自动准备票据”',
+        WAITING_SIGNAL: '等待本轮有效行情；本次检查未切换方向或填写金额', WAITING_BROWSER: '等待浏览器报告；本次检查未切换方向或填写金额', PENDING: '等待准备',
+        CLAIMED: '本轮已认领，不重复准备', READY: '已准备 $1 与按钮数字较大的一方',
         FAILED: '本轮准备失败，不重试', EXPIRED: '本轮准备窗口已过期', REVOKED: '本轮准备已停止',
         RECEIPT_UNKNOWN: '票据回执未知，请检查页面', BLOCKED: '准备受阻'};
       const value = wrapper?.preparation;
@@ -528,9 +562,26 @@
           value.noSubmission !== true || value.operatorAuthorized !== true ||
           value.authorizationSource !== 'USER_REQUEST' || typeof value.enabled !== 'boolean' ||
           !Object.hasOwn(labels, value.state)) throw preparationError('PREPARATION_FAILED');
+      // Arm before this poll can prepare a ticket, so the new READY is created after arming.
+      showAutoBuy(value.enabled);
       text.textContent = text.textContent.replace('本轮采样方向：', 'BTC参考价差（不决定票据方向）：');
       const state = value.state;
-      preparationReport.textContent = `自动票据：${labels[state] || '本地准备服务未就绪'}（未提交订单）`;
+      const now = Date.now() / 1000;
+      const elapsed = now - Math.floor(now / 300) * 300;
+      if (state === 'WAITING_SIGNAL') labels.WAITING_SIGNAL = elapsed < 60 ? '等待本轮第 60 秒；本次检查未切换方向或填写金额' :
+        elapsed >= 80 ? '本轮已超过第 80 秒，等待下一轮；本次检查未切换方向或填写金额' :
+        latest?.reason === 'CHAINLINK_PRICE_STALE_OR_FUTURE' ? '行情过期或采样时间无效，等待有效行情；本次检查未切换方向或填写金额' :
+        labels.WAITING_SIGNAL;
+      const reasons = {BROWSER_NOT_CONNECTED: '浏览器报告过期', MARKET_NOT_CURRENT: '页面不是本轮市场',
+        TICKET_CHECK_FAILED: '买入栏未核对', BUTTON_QUOTES_UNAVAILABLE: '按钮数字读取失败',
+        BUTTON_QUOTES_TIED: '两边按钮数字相同', BUTTON_QUOTES_NOT_FRESH: '按钮报价已过期',
+        HIGHER_BUTTON_SIDE_CHANGED: '较大方向已改变', PREPARED_TICKET_CHANGED: '准备后的票据已改变',
+        STOP_FILE_PRESENT: '助手已停止', PREPARATION_RECEIPT_UNKNOWN: '票据回执未知',
+        PREPARATION_REVOKED: '行情过期或准备许可已失效', DIRECTION_WRITE_FAILED: '方向切换回读失败',
+        AMOUNT_WRITE_FAILED: '$1 金额回读失败', POSTCHECK_FAILED: '准备后核对失败'};
+      const details = Array.isArray(value.reasons) ? value.reasons.filter((reason) => Object.hasOwn(reasons, reason))
+        .map((reason) => reasons[reason]).join('、') : '';
+      preparationReport.textContent = `自动票据：${labels[state]}${details ? ` · ${details}` : ''}（未提交订单）`;
       if (reportPromise) await reportPromise.catch(() => {});
       const result = await prepareOnlyOnce(wrapper, document, () => location.href, globalThis.sessionStorage, {
         readPreparation: () => preparationRequest('FUTURE_BTC5M_PREPARATION'),
@@ -542,10 +593,21 @@
         },
       });
       if (result) preparationReport.textContent = result.status === 'READY' ?
-        `自动票据：已准备 $1，并按按钮较大数值选择${value.intent.side === 'Up' ? '涨 Up' : '跌 Down'}，请核对后手动买入（未提交订单）` :
-        `自动票据：${result.status} · ${result.reason}（未提交订单，不重试）`;
+        `自动票据：已准备 $1，并按按钮较大数值选择${value.intent.side === 'Up' ? '涨 Up' : '跌 Down'}（准备本身未提交订单）` :
+        `自动票据：${result.status} · ${reasons[result.reason] || result.reason}（未提交订单，不重试）`;
+      const report = readPreflight(document, location.href);
+      const sideText = (side) => side === 'Up' ? '涨 Up' : side === 'Down' ? '跌 Down' : '未核对';
+      note.textContent = preparationNote;
+      if (report?.navigation === 'CURRENT' && report.ticketStatus === 'PASS' &&
+          validButtonQuote(report.upQuoteCents) && validButtonQuote(report.downQuoteCents)) {
+        const higherSide = report.upQuoteCents === report.downQuoteCents ? null :
+          report.upQuoteCents > report.downQuoteCents ? 'Up' : 'Down';
+        note.textContent += `\n报价观察：涨 ${report.upQuoteCents}¢ / 跌 ${report.downQuoteCents}¢；数字较大：${higherSide ? sideText(higherSide) : '同价，暂停准备'}；当前选中：${sideText(report.selectedSide)}。`;
+      }
     } catch {
+      note.textContent = preparationNote;
       preparationReport.textContent = '自动票据：本地准备服务未连接（未提交订单）';
+      showAutoBuy();
     }
   }
 
@@ -587,11 +649,13 @@
       await pollPreparation();
     } catch (error) {
       latest = null;
+      note.textContent = preparationNote;
       text.textContent = error.message;
       inspection.textContent = '';
       autoCheckedUrl = null;
       navigation.textContent = '自动换轮：暂停（本地助手未连接）';
       preparationReport.textContent = '自动票据：暂停（本地助手未连接，未提交订单）';
+      showAutoBuy();
     } finally {
       polling = false;
     }

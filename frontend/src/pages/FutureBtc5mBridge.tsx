@@ -214,7 +214,7 @@ const FutureBtc5mBridge: React.FC = () => {
       setStatusReceivedAt(receivedAt)
       setClock(receivedAt)
       setStatusError(null)
-      message.success(enabled ? '自动准备票据已开启，最终买入由你完成' : '自动准备票据已关闭')
+      message.success(enabled ? '自动准备票据已开启，票据准备好后扩展将自动点击买入' : '自动准备票据已关闭，扩展不再自动买入')
       fetchOrders()
     } catch (error: unknown) {
       if (!mounted.current) return
@@ -294,13 +294,13 @@ const FutureBtc5mBridge: React.FC = () => {
   const intent = intentFresh ? preparation?.intent : null
   const lastAttempt = preparation?.lastAttempt
   const actualState = runtime && !statusStale
-    ? preparation?.enabled ? '自动准备已开启，买入由你完成' : '自动准备已关闭'
+    ? preparation?.enabled ? '自动准备与自动买入已开启' : '自动准备与自动买入已关闭'
     : '状态未知'
 
   return <Space direction="vertical" size="middle" style={{ width: '100%' }}>
     <div>
       <Typography.Title level={3} style={{ marginBottom: 4 }}>Future BTC 5 分钟 Bridge</Typography.Title>
-      <Typography.Text type="secondary">按 Future 按钮报价较高的一侧自动准备 BTC 5 分钟 $1 票据，最终买入由你完成。每 5 秒更新准备状态与真实订单记录。</Typography.Text>
+      <Typography.Text type="secondary">按 Future 按钮报价较高的一侧自动准备 BTC 5 分钟 $1 票据，准备好后由浏览器扩展自动点击一次买入。每 5 秒更新准备状态与真实订单记录。</Typography.Text>
     </div>
 
     <Card title="自动准备票据控制" extra={<Button icon={<ReloadOutlined />} loading={statusLoading} onClick={() => { fetchStatus(); fetchOrders() }}>刷新</Button>}>
@@ -316,12 +316,12 @@ const FutureBtc5mBridge: React.FC = () => {
         {statusError && <Alert type="error" showIcon message="Bridge 状态未知" description={statusError} />}
         {statusStale && <Alert type="error" showIcon message="运行状态已过期，请刷新核对" description="当前状态时间已失效，开关与准备情况未知；仍可点击关闭自动准备票据。" />}
         {runtime && !runtime.executorReady && <Alert type="info" showIcon message="当前尚未接入 Future 交易执行器"
-          description="开启后会前往当前市场，按 Up / Down 按钮数字较高的一侧选择方向并填写 $1；报价缺失或相同则等待。Chainlink 价格仅作参考。核对结果后由你检查并点击 Future 买入。准备流程不会点击买入或提交订单。" />}
+          description="开启后会前往当前市场，按 Up / Down 按钮数字较高的一侧选择方向并填写 $1；报价缺失或相同则等待。Chainlink 价格仅作参考。票据准备好后，浏览器扩展会自动点击一次 Future 买入（每轮最多一次）；实际成交以 Future 订单为准。" />}
         <Descriptions size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="Bridge 连接">{runtime ? runtime.online ? '在线' : '离线' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="执行器">{runtime ? '未接入' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="实际下单">{runtime && !statusStale ? '未运行' : '未知'}</Descriptions.Item>
-          <Descriptions.Item label="最终买入">由你在 Future 页面完成</Descriptions.Item>
+          <Descriptions.Item label="最终买入">浏览器扩展在票据准备好后自动点击（每轮最多一次）</Descriptions.Item>
           <Descriptions.Item label="行情状态">{runtime?.feedStatus || '—'}</Descriptions.Item>
           <Descriptions.Item label="当前轮次">{formatTime(runtime?.periodStart)}</Descriptions.Item>
           <Descriptions.Item label="服务器更新时间">{formatTime(runtime?.serverTime)}</Descriptions.Item>
@@ -340,7 +340,7 @@ const FutureBtc5mBridge: React.FC = () => {
     <Card title="票据准备状态">
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Alert type="info" showIcon message="准备结果不代表买入或成交"
-          description="准备报告只记录页面金额、方向及检查结果。历史报告不能用于当前轮次入场，最终买入前请核对实时市场与票据。" />
+          description="准备报告只记录页面金额、方向及检查结果。历史报告不能用于当前轮次入场；自动买入的实际订单与成交以 Future 订单记录为准。" />
         <Descriptions size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="准备阶段">{preparationState ? preparationStateText[preparationState] : '状态未知'}</Descriptions.Item>
           <Descriptions.Item label="准备方向规则">Future Up / Down 按钮报价较高的一侧</Descriptions.Item>
@@ -372,7 +372,7 @@ const FutureBtc5mBridge: React.FC = () => {
     </Tag>}>
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Alert type="info" showIcon message="只读预检，不提交订单"
-          description="此预检核对已登录 Chrome 当前市场、票据现有金额和选中方向。自动准备票据另由上方开关控制，最终买入由你完成。" />
+          description="此预检核对已登录 Chrome 当前市场、票据现有金额和选中方向。自动准备票据与自动买入由上方开关控制。" />
         <Descriptions size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="项目接口">{runtime && !statusStale && runtime.online ? '已连接' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="Chrome 预检报告">{browserFresh ? '新鲜' : '未连接或已过期'}</Descriptions.Item>

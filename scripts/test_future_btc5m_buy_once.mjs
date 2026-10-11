@@ -4,32 +4,32 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 
 const content = readFileSync(new URL('./future-btc5m-extension/content.js', import.meta.url), 'utf8');
-const source = readFileSync(new URL('./future_btc5m_buy_once.js', import.meta.url), 'utf8');
+const source = readFileSync(new URL('./future-btc5m-extension/buy_once.js', import.meta.url), 'utf8');
 const context = vm.createContext({URL, Event});
 vm.runInContext(content, context);
 const core = context.FutureBtc5m;
 vm.runInContext(source, context);
-const {createWatcher} = context.FutureBtc5mBuyOnce;
+const {createWatcher, createAutoBuyer} = context.FutureBtc5mBuyOnce;
 const start = 1791650700;
 const now = start + 65;
 const marketUrl = `https://future.news/zh/event/btc-updown-5m-${start}`;
 const storageKey = 'polyhermes.future-btc5m.buy-once';
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
-const ready = (at = now, side = 'Down') => {
-  const record = {schemaVersion: 2, id: `future-btc5m-prepare:${start}`, slug: `btc-updown-5m-${start}`,
-    periodStart: start, periodEnd: start + 300, side, amountUsd: 1, createdAt: at,
-    expiresAt: start + 80, priceObservedAt: at, openPrice: 82000, currentPrice: 82001,
+const ready = (at = now, side = 'Down', round = start) => {
+  const record = {schemaVersion: 2, id: `future-btc5m-prepare:${round}`, slug: `btc-updown-5m-${round}`,
+    periodStart: round, periodEnd: round + 300, side, amountUsd: 1, createdAt: at,
+    expiresAt: round + 80, priceObservedAt: at, openPrice: 82000, currentPrice: 82001,
     priceSource: 'chainlink', openPriceSource: 'polymarket_crypto_price_fiveminute_twap60_openPrice',
     twapLookbackSeconds: 60, mode: 'PREPARE_ONLY', noSubmission: true, operatorAuthorized: true,
     authorizationSource: 'USER_REQUEST', claimToken: 'a'.repeat(32),
     upQuoteCents: side === 'Down' ? 12 : 88, downQuoteCents: side === 'Down' ? 88 : 12,
     quoteObservedAt: at, selectionSource: 'HIGHER_BUTTON_PRICE', state: 'READY',
     updatedAt: at, claimedAt: at, reason: null,
-    receipt: {checkedAt: at, marketUrl, amountUsd: 1, selectedSide: side}};
-  return {bridgeId: 'future-btc5m', online: true, serverTime: at, periodStart: start, feedStatus: 'CURRENT',
+    receipt: {checkedAt: at, marketUrl: `https://future.news/zh/event/btc-updown-5m-${round}`, amountUsd: 1, selectedSide: side}};
+  return {bridgeId: 'future-btc5m', online: true, serverTime: at, periodStart: round, feedStatus: 'CURRENT',
     requestedEnabled: true, effectiveEnabled: false, executorReady: false, amountUsd: 1, series: '5m', mode: 'BLOCKED',
-    signal: {slug: record.slug, period_start: start, period_end: start + 300, side: 'Up',
+    signal: {slug: record.slug, period_start: round, period_end: round + 300, side: 'Up',
       price_observed_at: at, open_price: 82000, current_price: 82001, price_source: 'chainlink',
       open_price_source: record.openPriceSource, twap_lookback_seconds: 60},
     preparation: {mode: 'PREPARE_ONLY', noSubmission: true, operatorAuthorized: true,
@@ -575,4 +575,117 @@ test('receipt URL compatibility never accepts query hash credentials or another 
     assert.equal(env.storage.values.size, 0);
     assertUnchangedTicket(env.ticket);
   }
+});
+
+const waiting = (at) => {
+  const value = ready(at);
+  value.preparation = {...value.preparation, state: 'WAITING_SIGNAL', lastAttempt: null, reasons: ['WAITING_CURRENT_SIGNAL']};
+  return value;
+};
+// The switch-following controller owns its watchers; ticks run their scheduled polls.
+const setupAuto = ({ticket = ticketFixture(), storage = memoryStorage(), withLock = mutex(),
+  read = () => waiting(start + 30)} = {}) => {
+  let currentTime = start + 30;
+  let currentUrl = marketUrl;
+  let currentRead = read;
+  let nextId = 0;
+  const intervals = new Map();
+  const reads = [];
+  const buyer = createAutoBuyer({core, document: ticket.doc, readUrl: () => currentUrl, storage,
+    readPreparation: async () => {reads.push(currentTime); return currentRead(reads.length);},
+    nowFn: () => currentTime, withLock,
+    setIntervalFn(callback) {intervals.set(++nextId, callback); return nextId;},
+    clearIntervalFn(id) {intervals.delete(id);}});
+  return {buyer, ticket, storage, intervals, reads,
+    setTime(value) {currentTime = value;}, setUrl(value) {currentUrl = value;}, setRead(value) {currentRead = value;},
+    async tick() {
+      for (const callback of [...intervals.values()]) callback();
+      for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+    }};
+};
+
+test('the automatic-ticket switch keeps one live watcher armed and clicks each new READY round once', async () => {
+  const env = setupAuto();
+  assert.equal(env.buyer.status().state, 'OFF');
+  assert.equal(env.buyer.sync(true).state, 'WATCHING');
+  assert.equal(env.intervals.size, 1);
+  await env.tick();
+  assert.equal(env.buyer.sync(true).state, 'WATCHING');
+  assertUnchangedTicket(env.ticket);
+
+  env.setTime(now);
+  env.setRead(() => ready());
+  await env.tick();
+  assert.equal(env.buyer.status().state, 'PAUSED', 'a finished watcher is not reported as still watching');
+  assert.equal(env.buyer.status().last.state, 'CLICK_ATTEMPTED');
+  assertUnchangedTicket(env.ticket, 1);
+
+  // Re-armed after the click: the same round's READY predates arming and is never retried.
+  env.setTime(now + 1);
+  const view = env.buyer.sync(true);
+  assert.equal(view.state, 'WATCHING');
+  assert.equal(view.last.periodStart, start);
+  assert.equal(view.last.side, 'Down');
+  assert.equal(env.intervals.size, 1);
+  await env.tick();
+  await env.tick();
+  assert.equal(env.buyer.sync(true).state, 'WATCHING');
+  assertUnchangedTicket(env.ticket, 1);
+
+  const next = start + 300;
+  env.setTime(next + 65);
+  env.setUrl(`https://future.news/zh/event/btc-updown-5m-${next}`);
+  env.ticket.setTitle('Bitcoin Up or Down - October 10, 12:50PM-12:55PM ET');
+  env.setRead(() => ready(next + 65, 'Down', next));
+  await env.tick();
+  assert.equal(env.buyer.sync(true).last.periodStart, next);
+  assert.equal(JSON.parse(env.storage.values.get(storageKey)).periodStart, next);
+  assertUnchangedTicket(env.ticket, 2);
+});
+
+test('turning the switch off stops the watcher and re-enabling never catches up an existing READY', async () => {
+  const env = setupAuto();
+  env.buyer.sync(true);
+  assert.equal(env.buyer.sync(false).state, 'OFF');
+  assert.equal(env.intervals.size, 0);
+  env.setTime(now);
+  env.setRead(() => ready());
+  await env.tick();
+  assert.equal(env.reads.length, 0);
+  env.setTime(now + 1);
+  assert.equal(env.buyer.sync(true).state, 'WATCHING');
+  await env.tick();
+  await env.tick();
+  assert.equal(env.buyer.sync(true).state, 'WATCHING');
+  assert.equal(env.buyer.sync(false).state, 'OFF');
+  assert.equal(env.intervals.size, 0);
+  assert.equal(env.storage.values.size, 0);
+  assertUnchangedTicket(env.ticket);
+});
+
+test('start failures and transient read failures re-arm without clicking or hiding the last attempt', async () => {
+  const noLock = setupAuto({withLock: null});
+  const blocked = noLock.buyer.sync(true);
+  assert.equal(blocked.state, 'BLOCKED');
+  assert.equal(blocked.reason, 'WEB_LOCKS_REQUIRED');
+  assert.equal(noLock.intervals.size, 0);
+  assert.equal(noLock.buyer.sync(false).reason, null);
+  assertUnchangedTicket(noLock.ticket);
+
+  const env = setupAuto({read: () => {throw new Error('bridge timeout');}});
+  env.buyer.sync(true);
+  await env.tick();
+  assert.equal(env.buyer.status().state, 'PAUSED');
+  assert.equal(env.buyer.status().last, null, 'a transient read failure is not a ticket result');
+  assert.equal(env.buyer.sync(true).state, 'WATCHING');
+  env.setTime(now);
+  env.setRead(() => ready());
+  await env.tick();
+  assertUnchangedTicket(env.ticket, 1);
+  env.setTime(now + 1);
+  env.setRead(() => {throw new Error('bridge timeout');});
+  env.buyer.sync(true);
+  await env.tick();
+  assert.equal(env.buyer.sync(true).last.state, 'CLICK_ATTEMPTED');
+  assertUnchangedTicket(env.ticket, 1);
 });

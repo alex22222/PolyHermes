@@ -1,5 +1,6 @@
-// Standalone, user-started code. Not loaded by the production extension manifest.
-// Loading defines the watcher only; start() defaults to a non-clicking dry run.
+// Loaded by the extension manifest after content.js. Loading defines the watcher only.
+// content.js drives createAutoBuyer() from the project's automatic-ticket switch; a bare
+// start() still defaults to a non-clicking dry run.
 (() => {
   'use strict';
   const KEY = 'polyhermes.future-btc5m.buy-once';
@@ -188,6 +189,48 @@
     };
   }
 
+  // Follows the project's automatic-ticket switch: while it is on, one live watcher stays
+  // armed and a finished one is replaced. createdAt >= armedAt and the persistent
+  // per-round mark keep every round to at most one click; a READY that existed before
+  // re-arming is never caught up.
+  function createAutoBuyer(env = {}) {
+    let enabled = false, watcher = null, failure = null, last = null;
+    const noteworthy = (value) => value?.state === 'CLICK_ATTEMPTED' ||
+      value?.state === 'BLOCKED' && value.reason !== 'READ_FAILED';
+    const view = () => {
+      const current = watcher?.status() ?? null;
+      const finished = current && current.state !== 'WATCHING' ? current : null;
+      const recent = noteworthy(finished) ? finished : last;
+      return {state: !enabled ? 'OFF' : failure ? 'BLOCKED' : finished || !current ? 'PAUSED' : 'WATCHING',
+        reason: enabled ? failure : null, last: recent && {...recent}};
+    };
+    return {
+      sync(value) {
+        const current = watcher?.status();
+        if (current && current.state !== 'WATCHING') {
+          if (noteworthy(current)) last = current;
+          watcher = null;
+        }
+        enabled = value === true;
+        failure = null;
+        if (!enabled) {
+          watcher?.stop();
+          watcher = null;
+        } else if (!watcher) {
+          const next = createWatcher(env);
+          try {
+            next.start({live: true});
+            watcher = next;
+          } catch (error) {
+            failure = error.message;
+          }
+        }
+        return view();
+      },
+      status: view,
+    };
+  }
+
   if (globalThis.FutureBtc5mBuyOnce) throw new Error('WATCHER_ALREADY_LOADED');
-  globalThis.FutureBtc5mBuyOnce = {...createWatcher(), createWatcher};
+  globalThis.FutureBtc5mBuyOnce = {...createWatcher(), createWatcher, createAutoBuyer};
 })();

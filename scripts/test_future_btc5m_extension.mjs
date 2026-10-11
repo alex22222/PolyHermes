@@ -146,7 +146,7 @@ async function renderedPanel(value, url, time, ticketDoc, runtime = {}) {
     setInterval(listener) { interval = listener; }, chrome: {runtime: {sendMessage: async (message) => {
       runtime.messages?.push(message);
       return runtime.reply ? runtime.reply(message) : ({ok: true, status: value});
-    }}}});
+    }}}, ...runtime.globals});
   await new Promise((resolve) => setImmediate(resolve));
   body.panel.children.poll = async () => {
     interval();
@@ -790,13 +790,147 @@ test('polling independently prepares a USER_REQUEST ticket while legacy UNKNOWN 
   assert.equal(children[3].disabled, true, 'the legacy eligibility path stays blocked');
   assert.match(children[1].textContent, /BTC参考价差（不决定票据方向）/);
   assert.doesNotMatch(children[1].textContent, /本轮采样方向/);
-  assert.match(children[9].textContent, /已准备.*手动买入/);
+  assert.match(children[9].textContent, /已准备 \$1/);
+  assert.doesNotMatch(children[9].textContent, /手动买入/);
   assert.match(children[9].textContent, /按按钮较大数值选择跌 Down/);
+  assert.match(children[10].textContent, /自动买入：脚本未加载，不会点击/);
   const acknowledgement = messages.find((item) => item.type === 'FUTURE_BTC5M_PREPARATION_ACK');
   assert.equal(acknowledgement.payload.status, 'READY');
   await children.poll();
   assert.equal(messages.filter((item) => item.type === 'FUTURE_BTC5M_PREPARATION_CLAIM').length, 1);
   assert.equal(fixture.writes(), 1);
+});
+
+test('the panel arms automatic Buy from the project switch before preparing and only reports its state', async () => {
+  const fixture = ticketFixture();
+  const flow = preparationTransport();
+  const events = [];
+  let enabled = true;
+  let offline = false;
+  let claimed = false;
+  let view = {state: 'WATCHING', reason: null, last: null};
+  let buyerEnv;
+  const autoBuyer = {
+    sync(value) { events.push(`sync:${value}`); return value ? view : {state: 'OFF', reason: null, last: null}; },
+    status() { events.push('status'); return view; }};
+  const children = await renderedPanel(observing, marketUrl, now, fixture.doc, {
+    globals: {FutureBtc5mBuyOnce: {createAutoBuyer(env) { buyerEnv = env; return autoBuyer; }}},
+    reply(message) {
+      events.push(message.type);
+      if (message.type === 'FUTURE_BTC5M_PREPARATION') {
+        if (offline) return {ok: false};
+        return {ok: true, status: !enabled ? {...preparation, preparation: {...preparation.preparation,
+          enabled: false, state: 'DISABLED', intent: null}} : claimed ? flow.claimed : preparation};
+      }
+      if (message.type === 'FUTURE_BTC5M_PREPARATION_CLAIM') {
+        claimed = true;
+        return {ok: true, status: flow.claimed};
+      }
+      if (message.type === 'FUTURE_BTC5M_PREPARATION_ACK') return {ok: true,
+        status: {...flow.claimed, preparation: {...flow.claimed.preparation, state: message.payload.status}}};
+      if (message.type === 'FUTURE_BTC5M_PREFLIGHT') return {ok: true};
+      return {ok: true, status: observing};
+    }});
+  assert.ok(events.indexOf('sync:true') >= 0 &&
+    events.indexOf('sync:true') < events.indexOf('FUTURE_BTC5M_PREPARATION_CLAIM'), 'armed before this round is prepared');
+  assert.match(children[10].textContent, /自动买入：已开启.*每轮最多一次/);
+  assert.equal(fixture.buyClicks(), 0, 'the panel itself never clicks Buy');
+  events.length = 0;
+  assert.equal((await buyerEnv.readPreparation()).bridgeId, 'future-btc5m');
+  assert.deepEqual(events, ['FUTURE_BTC5M_PREPARATION']);
+
+  view = {state: 'PAUSED', reason: null, last: {state: 'CLICK_ATTEMPTED', reason: 'PLATFORM_RESULT_UNKNOWN',
+    periodStart: start, side: 'Down', amountUsd: 1}};
+  await children.poll();
+  assert.match(children[10].textContent, new RegExp(`最近：已点击“买入 跌” \\$1（btc-updown-5m-${start}），成交以 Future 订单为准`));
+  view = {state: 'WATCHING', reason: null, last: {state: 'BLOCKED', reason: 'TICKET_CHANGED',
+    periodStart: null, side: null, amountUsd: null}};
+  await children.poll();
+  assert.match(children[10].textContent, /最近：未点击（票据已改变）/);
+
+  offline = true;
+  events.length = 0;
+  await children.poll();
+  assert.equal(events.includes('status'), true);
+  assert.equal(events.some((event) => event.startsWith('sync:')), false, 'an unreadable switch neither arms nor stops');
+  offline = false;
+  enabled = false;
+  await children.poll();
+  assert.equal(events.includes('sync:false'), true);
+  assert.match(children[10].textContent, /跟随“自动准备票据”开关，当前关闭，不会点击/);
+  assert.equal(fixture.buyClicks(), 0);
+});
+
+test('disabled automatic tickets explain the missing switch and show higher Up separately from selected Down', async () => {
+  const fixture = ticketFixture({upQuote: '74¢', downQuote: '27¢', buySide: '跌'});
+  fixture.input.amount = '1';
+  const disabled = {...preparation, preparation: {...preparation.preparation,
+    enabled: false, state: 'DISABLED', intent: null, reasons: ['AUTO_PREPARATION_DISABLED']}};
+  const children = await renderedPanel({...observing, status: 'SKIPPED', reason: 'CHAINLINK_PRICE_STALE_OR_FUTURE'},
+    marketUrl, now, fixture.doc, {reply(message) {
+      if (message.type === 'FUTURE_BTC5M_PREPARATION') return {ok: true, status: disabled};
+      if (message.type === 'FUTURE_BTC5M_PREFLIGHT') return {ok: true};
+      return {ok: true, status: observing};
+    }});
+  assert.match(children[9].textContent, /已关闭.*未切换方向.*开启/);
+  assert.match(children[7].textContent, /开启.*60.*80/);
+  assert.match(children[7].textContent, /涨 74¢.*跌 27¢.*较大.*涨 Up.*当前选中.*跌 Down/);
+  assert.doesNotMatch(children[9].textContent, /已准备/);
+  assert.equal(fixture.directionClicks(), 0);
+  assert.equal(fixture.writes(), 0);
+  assert.equal(fixture.buyClicks(), 0);
+});
+
+test('restoring the automatic switch selects the higher Up button and immediately displays its actual readback', async () => {
+  const fixture = ticketFixture({upQuote: '74¢', downQuote: '27¢', buySide: '跌'});
+  const initial = {...preparation, preparation: {...preparation.preparation,
+    intent: {...preparationIntent, side: 'Up', upQuoteCents: 74, downQuoteCents: 27}}};
+  const claimed = {...initial, preparation: {...initial.preparation, state: 'CLAIMED',
+    intent: {...initial.preparation.intent, claimToken: token}}};
+  let enabled = false;
+  let state = 'PENDING';
+  const children = await renderedPanel(observing, marketUrl, now, fixture.doc, {reply(message) {
+    if (message.type === 'FUTURE_BTC5M_PREPARATION') return {ok: true, status: enabled ?
+      state === 'PENDING' ? initial : claimed : {...initial, preparation: {...initial.preparation,
+        enabled: false, state: 'DISABLED', intent: null}}};
+    if (message.type === 'FUTURE_BTC5M_PREPARATION_CLAIM') {
+      state = 'CLAIMED';
+      return {ok: true, status: claimed};
+    }
+    if (message.type === 'FUTURE_BTC5M_PREPARATION_ACK') return {ok: true,
+      status: {...claimed, preparation: {...claimed.preparation, state: message.payload.status}}};
+    if (message.type === 'FUTURE_BTC5M_PREFLIGHT') return {ok: true};
+    return {ok: true, status: observing};
+  }});
+  assert.equal(fixture.directionClicks(), 0);
+  assert.match(children[7].textContent, /当前选中：跌 Down/);
+  enabled = true;
+  await children.poll();
+  assert.equal(fixture.directionClicks(), 1);
+  assert.equal(fixture.input.value, '1');
+  assert.equal(fixture.buyClicks(), 0);
+  assert.match(children[9].textContent, /已准备.*选择涨 Up/);
+  assert.match(children[7].textContent, /涨 74¢.*跌 27¢.*当前选中：涨 Up/);
+});
+
+test('waiting automatic tickets explain freshness and the entry window without claiming selection', async () => {
+  for (const time of [now, start + 81]) {
+    const fixture = ticketFixture({upQuote: '74¢', downQuote: '27¢', buySide: '跌'});
+    const waiting = {...preparation, serverTime: time, preparation: {...preparation.preparation,
+      state: 'WAITING_SIGNAL', intent: null, reasons: ['WAITING_CURRENT_SIGNAL']}};
+    const source = {...observing, server_time: time, reason: 'CHAINLINK_PRICE_STALE_OR_FUTURE'};
+    const children = await renderedPanel(source,
+      marketUrl, time, fixture.doc, {reply(message) {
+        if (message.type === 'FUTURE_BTC5M_PREPARATION') return {ok: true, status: waiting};
+        if (message.type === 'FUTURE_BTC5M_PREFLIGHT') return {ok: true};
+        return {ok: true, status: source};
+      }});
+    assert.match(children[9].textContent, time < start + 80 ? /行情过期.*未切换方向/ : /80.*等待下一轮.*未切换方向/);
+    assert.doesNotMatch(children[9].textContent, /已准备/);
+    assert.equal(fixture.directionClicks(), 0);
+    assert.equal(fixture.writes(), 0);
+    assert.equal(fixture.buyClicks(), 0);
+  }
 });
 
 test('the worker exposes only fixed prepare/claim/ack endpoints and refuses financial or unscoped messages', async () => {
