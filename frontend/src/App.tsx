@@ -45,6 +45,7 @@ import BacktestDetail from './pages/BacktestDetail'
 import CryptoTailStrategyList from './pages/CryptoTailStrategyList'
 import CryptoTailMonitor from './pages/CryptoTailMonitor'
 import BridgeTradeRecordList from './pages/BridgeTradeRecordList'
+import FutureBtc5mBridge from './pages/FutureBtc5mBridge'
 import { wsManager } from './services/websocket'
 import type { OrderPushMessage } from './types'
 import { apiService } from './services/api'
@@ -293,6 +294,7 @@ function App() {
           <Route path="/backtest" element={<ProtectedRoute><BacktestList /></ProtectedRoute>} />
           <Route path="/backtest/detail/:id" element={<ProtectedRoute><BacktestDetail /></ProtectedRoute>} />
           <Route path="/bridge-trade-records" element={<ProtectedRoute><BridgeTradeRecordList /></ProtectedRoute>} />
+          <Route path="/future-btc5m-bridge" element={<ProtectedRoute><FutureBtc5mBridge /></ProtectedRoute>} />
           <Route path="/config" element={<ProtectedRoute><ConfigPage /></ProtectedRoute>} />
           <Route path="/positions" element={<ProtectedRoute><PositionList /></ProtectedRoute>} />
           <Route path="/mobile-portfolio" element={<ProtectedRoute><MobilePortfolio /></ProtectedRoute>} />

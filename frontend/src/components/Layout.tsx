@@ -189,6 +189,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       label: t('menu.bridgeTradeRecords') || '桥接交易记录'
     },
     {
+      key: '/future-btc5m-bridge',
+      icon: <SwapOutlined />,
+      label: 'Future BTC 5 分钟'
+    },
+    {
       key: '/statistics',
       icon: <BarChartOutlined />,
       label: t('menu.statistics')

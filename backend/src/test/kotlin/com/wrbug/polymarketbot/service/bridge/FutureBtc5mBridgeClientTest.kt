@@ -1,0 +1,283 @@
+package com.wrbug.polymarketbot.service.bridge
+
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.sun.net.httpserver.HttpServer
+import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListRequest
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import java.net.InetSocketAddress
+import java.util.concurrent.CopyOnWriteArrayList
+
+class FutureBtc5mBridgeClientTest {
+    private val mapper = jacksonObjectMapper()
+    private lateinit var server: HttpServer
+    private lateinit var client: FutureBtc5mBridgeClient
+    private val requests = CopyOnWriteArrayList<Request>()
+    private var responseCode = 200
+    private var responseBody = ""
+
+    private data class Request(val method: String, val rawPath: String, val query: String?, val body: String,
+                               val controlHeader: String?, val authorization: String?)
+
+    @BeforeEach
+    fun setUp() {
+        responseBody = mapper.writeValueAsString(status())
+        server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            requests.add(Request(exchange.requestMethod, exchange.requestURI.rawPath, exchange.requestURI.rawQuery,
+                exchange.requestBody.readAllBytes().toString(Charsets.UTF_8),
+                exchange.requestHeaders.getFirst("X-PolyHermes-Future-Control"), exchange.requestHeaders.getFirst("Authorization")))
+            val bytes = responseBody.toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.set("Content-Type", "application/json")
+            if (responseCode == 302) exchange.responseHeaders.set("Location", "http://127.0.0.1:${server.address.port}/redirect")
+            exchange.sendResponseHeaders(responseCode, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        client = FutureBtc5mBridgeClient("http://127.0.0.1:${server.address.port}/")
+    }
+
+    @AfterEach
+    fun tearDown() {
+        server.stop(0)
+    }
+
+    @Test
+    fun `client uses only scoped paths and sends control header only for control without authorization`() {
+        assertFalse(client.status().requestedEnabled)
+        responseBody = mapper.writeValueAsString(status(true))
+        assertTrue(client.control(true).requestedEnabled)
+        responseBody = mapper.writeValueAsString(mapOf("list" to listOf(order()), "total" to 21, "page" to 2, "size" to 20))
+        assertEquals(21, client.orders(FutureBtc5mOrderListRequest(2, 20, "SKIPPED")).total)
+        responseBody = mapper.writeValueAsString(order())
+        assertEquals("future-btc5m:1791706200", client.detail("future-btc5m:1791706200").id)
+
+        assertEquals(listOf("/bridge/status", "/bridge/control", "/bridge/orders", "/bridge/orders/future-btc5m%3A1791706200"), requests.map { it.rawPath })
+        assertEquals(listOf("GET", "POST", "GET", "GET"), requests.map { it.method })
+        assertEquals("page=2&size=20&status=SKIPPED", requests[2].query)
+        assertEquals(mapper.readTree("""{"enabled":true}"""), mapper.readTree(requests[1].body))
+        assertEquals("1", requests[1].controlHeader)
+        assertTrue(requests.filterIndexed { index, _ -> index != 1 }.all { it.controlHeader == null })
+        assertTrue(requests.all { it.authorization == null })
+    }
+
+    @Test
+    fun `input validation happens before any local request`() {
+        listOf(FutureBtc5mOrderListRequest(0, 20), FutureBtc5mOrderListRequest(1, 0),
+            FutureBtc5mOrderListRequest(1, 101), FutureBtc5mOrderListRequest(1, 20, "SUCCESS")).forEach { request ->
+            assertThrows(IllegalArgumentException::class.java) { client.orders(request) }
+        }
+        listOf("", "other:1", "future-btc5m:../status", "future-btc5m:1234567890123456").forEach { id ->
+            assertThrows(IllegalArgumentException::class.java) { client.detail(id) }
+        }
+        listOf("http://user:pass@127.0.0.1:1234", "http://127.0.0.1:1234/path", "http://127.0.0.1:1234?x=1",
+            "http://127.0.0.1:1234#fragment", "http://127.0.0.1:0", "http://127.0.0.1:65536", "file:///tmp/future").forEach { url ->
+            assertThrows(IllegalStateException::class.java) { FutureBtc5mBridgeClient(url).status() }
+        }
+        assertTrue(requests.isEmpty())
+    }
+
+    @Test
+    fun `non-success redirects not found empty and malformed bodies cannot confirm an operation`() {
+        responseCode = 503
+        assertThrows(IllegalStateException::class.java) { client.control(false) }
+        responseCode = 302
+        val beforeRedirect = requests.size
+        assertThrows(IllegalStateException::class.java) { client.status() }
+        assertEquals(beforeRedirect + 1, requests.size)
+        responseCode = 404
+        assertThrows(NoSuchElementException::class.java) { client.detail("future-btc5m:1791706200") }
+        responseCode = 200
+        listOf("", "null", "{}", "[]", "broken-json").forEach { body ->
+            responseBody = body
+            assertThrows(Exception::class.java) { client.status() }
+        }
+        server.stop(0)
+        assertThrows(Exception::class.java) { client.control(false) }
+    }
+
+    @Test
+    fun `status rejects wrong bridge amount capabilities or incomplete and coerced fields`() {
+        val invalid = listOf(
+            status() + ("bridgeId" to "polymtrade-bridge"),
+            status() + ("amountUsd" to 2),
+            status() + ("series" to "15m"),
+            status() + ("executorReady" to true),
+            status() + ("effectiveEnabled" to true),
+            status() + ("mode" to "LIVE"),
+            status() + ("online" to "true"),
+            status() + ("requestedEnabled" to "false"),
+            status() - "orderCounts",
+            status() - "executorReady",
+            status() - "periodStart",
+            status() - "signal",
+            status() + ("orderCounts" to mapOf("total" to 1, "pending" to 0, "submitted" to 0, "filled" to 1, "failed" to 0, "skipped" to 0))
+        )
+        invalid.forEach { payload ->
+            responseBody = mapper.writeValueAsString(payload)
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+    }
+
+    @Test
+    fun `control requires response confirmation of the requested value`() {
+        responseBody = mapper.writeValueAsString(status(false))
+        assertThrows(IllegalStateException::class.java) { client.control(true) }
+        responseBody = mapper.writeValueAsString(status(true))
+        assertThrows(IllegalStateException::class.java) { client.control(false) }
+    }
+
+    @Test
+    fun `signal prices retain a nullable flat direction and reject mismatched prices identity or observation time`() {
+        val signal = mapOf("slug" to "btc-updown-5m-1791706200", "side" to "Up", "period_start" to 1791706200,
+            "price_observed_at" to 1791706265.0, "open_price" to 82999.0, "current_price" to 83000.0)
+        responseBody = mapper.writeValueAsString(status() + ("signal" to signal))
+        assertEquals("Up", client.status().signal!!.side)
+        responseBody = mapper.writeValueAsString(status() + ("signal" to (signal + mapOf("side" to null, "current_price" to 82999.0))))
+        assertNull(client.status().signal!!.side)
+        listOf(signal + ("side" to "Down"), signal + ("slug" to "btc-updown-5m-1791706500"),
+            signal + ("period_start" to 1791706500), signal + ("price_observed_at" to 1791706266.0),
+            signal + ("open_price" to 0), signal - "side").forEach { value ->
+            responseBody = mapper.writeValueAsString(status() + ("signal" to value))
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+    }
+
+    @Test
+    fun `order evidence remains skipped and cannot contain fabricated execution or mismatched identity`() {
+        responseBody = mapper.writeValueAsString(order())
+        val valid = client.detail("future-btc5m:1791706200")
+        assertNull(valid.platformOrderId)
+        assertNull(valid.filledQuantity)
+        assertEquals("SKIPPED", valid.status)
+        val invalid = listOf(
+            order() + ("status" to "FILLED"),
+            order() + ("status" to "SUBMITTED_UNVERIFIED"),
+            order() + ("reason" to "SUCCESS"),
+            order() + ("amountUsd" to 2),
+            order() + ("id" to "future-btc5m:1791706500"),
+            order() + ("slug" to "btc-updown-5m-1791706500"),
+            order() + ("periodEnd" to 1791706501),
+            order() + ("submittedAt" to 1791706265),
+            order() + ("platformOrderId" to "fabricated-order"),
+            order() + ("filledQuantity" to 2),
+            order() - "feeUsd"
+        )
+        invalid.forEach { payload ->
+            responseBody = mapper.writeValueAsString(payload)
+            assertThrows(IllegalStateException::class.java) { client.detail("future-btc5m:1791706200") }
+        }
+    }
+
+    @Test
+    fun `list rejects wrong page size totals and unsafe records`() {
+        val valid = mapOf("list" to listOf(order()), "total" to 1, "page" to 1, "size" to 20)
+        listOf(valid + ("page" to 2), valid + ("size" to 100), valid + ("total" to -1), valid + ("total" to 0),
+            valid + mapOf("list" to listOf(order(), order()), "total" to 2),
+            valid + ("list" to listOf(order() + ("filledQuantity" to 1)))).forEach { payload ->
+            responseBody = mapper.writeValueAsString(payload)
+            assertThrows(IllegalStateException::class.java) { client.orders(FutureBtc5mOrderListRequest()) }
+        }
+    }
+
+    @Test
+    fun `read only preflight retains current checks and historical pass without execution`() {
+        responseBody = mapper.writeValueAsString(status() + mapOf("signal" to freshSignal(), "preflight" to preflight()))
+        val payload = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status())
+        assertEquals("READ_ONLY_READY", payload.path("preflight").path("result").asText())
+        assertEquals(60, payload.path("signal").path("twap_lookback_seconds").asInt())
+        assertTrue(payload.path("preflight").path("noSubmission").asBoolean())
+        assertFalse(payload.path("effectiveEnabled").asBoolean())
+        responseBody = mapper.writeValueAsString(status() + ("preflight" to (preflight() + mapOf(
+            "browserConnected" to false, "signalFresh" to false, "signalSide" to null,
+            "sideMatches" to false, "result" to "WAITING_BROWSER", "reasons" to listOf("BROWSER_NOT_CONNECTED")))))
+        val historical = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preflight")
+        assertEquals("WAITING_BROWSER", historical.path("result").asText())
+        assertEquals(1791706200, historical.path("lastPassed").path("periodStart").asLong())
+    }
+
+    @Test
+    fun `preflight rejects missing coerced unsafe or inconsistent readiness evidence`() {
+        val invalid = listOf(
+            preflight() - "noSubmission", preflight() + ("noSubmission" to false),
+            preflight() + ("browserConnected" to "true"), preflight() + ("mode" to "LIVE"),
+            preflight() + ("amountUsd" to 2), preflight() + ("selectedSide" to "Down"),
+            preflight() + ("checkedAt" to 1791706281), preflight() + ("receivedAt" to 1791706250),
+            preflight() + ("navigation" to "ENDED"), preflight() + ("signalFresh" to false),
+            preflight() + ("marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200?secret=x"),
+            preflight() + ("lastPassed" to mapOf("periodStart" to 1791706200)),
+            preflight() + ("reasons" to listOf("SIGNAL_NOT_FRESH"))
+        )
+        invalid.forEach { value ->
+            responseBody = mapper.writeValueAsString(status() + mapOf("signal" to freshSignal(), "preflight" to value))
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+        responseBody = mapper.writeValueAsString(status() + mapOf("signal" to (freshSignal() + ("price_source" to "binance")), "preflight" to preflight()))
+        assertThrows(IllegalStateException::class.java) { client.status() }
+    }
+
+    @Test
+    fun `preflight accepts bounded browser clock skew expiry and restart without claiming current readiness`() {
+        listOf(-3.0, 3.0).forEach { skew ->
+            val checked = 1791706265.0 + skew
+            val history = (preflight()["lastPassed"] as Map<*, *>) + ("checkedAt" to checked)
+            responseBody = mapper.writeValueAsString(status() + mapOf("signal" to freshSignal(),
+                "preflight" to (preflight() + mapOf("checkedAt" to checked, "lastPassed" to history))))
+            assertEquals("READ_ONLY_READY", mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preflight").path("result").asText())
+        }
+        val expired = preflight() + mapOf("browserConnected" to false, "sideMatches" to false,
+            "result" to "WAITING_BROWSER", "reasons" to listOf("BROWSER_NOT_CONNECTED"))
+        responseBody = mapper.writeValueAsString(status() + mapOf("serverTime" to 1791706271.0,
+            "signal" to (freshSignal() + ("price_observed_at" to 1791706271.0)), "preflight" to expired))
+        assertFalse(mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preflight").path("browserConnected").asBoolean())
+        val restarted = expired + mapOf("checkedAt" to null, "receivedAt" to null, "marketUrl" to null,
+            "pagePeriodStart" to null, "navigation" to "UNKNOWN", "ticketStatus" to "UNKNOWN", "amountUsd" to null,
+            "selectedSide" to null, "buyButtonEnabled" to false, "signalFresh" to false, "signalSide" to null)
+        responseBody = mapper.writeValueAsString(status() + ("preflight" to restarted))
+        val result = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(client.status()).path("preflight")
+        assertTrue(result.path("checkedAt").isNull)
+        assertEquals(1791706200, result.path("lastPassed").path("periodStart").asLong())
+    }
+
+    private fun freshSignal() = mapOf("slug" to "btc-updown-5m-1791706200", "side" to "Up", "period_start" to 1791706200,
+        "period_end" to 1791706500, "price_observed_at" to 1791706265.0, "open_price" to 82999.0, "current_price" to 83000.0,
+        "price_source" to "chainlink", "open_price_source" to "polymarket_crypto_price_fiveminute_twap60_openPrice", "twap_lookback_seconds" to 60)
+
+    private fun preflight() = mapOf(
+        "mode" to "READ_ONLY", "noSubmission" to true, "browserConnected" to true,
+        "checkedAt" to 1791706265.0, "receivedAt" to 1791706265.0,
+        "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200", "pagePeriodStart" to 1791706200,
+        "navigation" to "CURRENT", "ticketStatus" to "PASS", "amountUsd" to 1, "selectedSide" to "Up",
+        "buyButtonEnabled" to true, "signalFresh" to true, "signalSide" to "Up", "sideMatches" to true,
+        "result" to "READ_ONLY_READY", "reasons" to emptyList<String>(),
+        "lastPassed" to mapOf("periodStart" to 1791706200, "checkedAt" to 1791706265.0,
+            "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200", "signalSide" to "Up",
+            "amountUsd" to 1, "noSubmission" to true)
+    )
+
+    private fun status(enabled: Boolean = false) = mapOf(
+        "bridgeId" to "future-btc5m", "online" to true, "requestedEnabled" to enabled,
+        "effectiveEnabled" to false, "amountUsd" to 1, "series" to "5m",
+        "mode" to if (enabled) "BLOCKED" else "DISABLED", "serverTime" to 1791706265.0,
+        "periodStart" to 1791706200, "feedStatus" to "CURRENT",
+        "reason" to if (enabled) "EXECUTOR_NOT_CONNECTED" else "AUTO_DISABLED",
+        "blockReasons" to listOf("EXECUTOR_NOT_CONNECTED"), "executorReady" to false, "signal" to null,
+        "orderCounts" to mapOf("total" to 0, "pending" to 0, "submitted" to 0, "filled" to 0, "failed" to 0, "skipped" to 0)
+    )
+
+    private fun order() = mapOf(
+        "id" to "future-btc5m:1791706200", "bridgeId" to "future-btc5m", "slug" to "btc-updown-5m-1791706200",
+        "periodStart" to 1791706200, "periodEnd" to 1791706500, "side" to "Up", "amountUsd" to 1,
+        "status" to "SKIPPED", "reason" to "EXECUTOR_NOT_CONNECTED", "createdAt" to 1791706265.0, "updatedAt" to 1791706265.0,
+        "submittedAt" to null, "filledAt" to null, "platformOrderId" to null,
+        "filledQuantity" to null, "avgFilledPrice" to null, "feeUsd" to null,
+        "events" to listOf(mapOf("stage" to "SIGNAL_ACCEPTED", "at" to 1791706265.0, "reason" to null),
+            mapOf("stage" to "EXECUTION_BLOCKED", "at" to 1791706265.0, "reason" to "EXECUTOR_NOT_CONNECTED"))
+    )
+}

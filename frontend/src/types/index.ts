@@ -3002,3 +3002,104 @@ export interface BridgeRuntimeStatus {
   copyTradingAccountId?: number | null
   copyTradingConfigCount?: number
 }
+
+export type FutureBtc5mOrderStatus = 'PENDING' | 'SKIPPED' | 'FAILED' | 'SUBMITTED_UNVERIFIED' | 'FILLED'
+
+export interface FutureBtc5mPreflight {
+  mode: 'READ_ONLY'
+  noSubmission: true
+  browserConnected: boolean
+  checkedAt: number | null
+  receivedAt: number | null
+  marketUrl: string | null
+  pagePeriodStart: number | null
+  navigation: 'UNKNOWN' | 'CURRENT' | 'ENDED' | 'MISMATCH'
+  ticketStatus: 'UNKNOWN' | 'PASS' | 'FAIL'
+  amountUsd: number | null
+  selectedSide: 'Up' | 'Down' | null
+  buyButtonEnabled: boolean
+  signalFresh: boolean
+  signalSide: 'Up' | 'Down' | null
+  sideMatches: boolean
+  result: 'WAITING_BROWSER' | 'BLOCKED' | 'READ_ONLY_READY'
+  reasons: string[]
+  lastPassed: {
+    periodStart: number
+    checkedAt: number
+    marketUrl: string
+    signalSide: 'Up' | 'Down'
+    amountUsd: 1
+    noSubmission: true
+  } | null
+}
+
+export interface FutureBtc5mBridgeStatus {
+  bridgeId: 'future-btc5m'
+  online: boolean
+  requestedEnabled: boolean
+  effectiveEnabled: boolean
+  amountUsd: 1
+  series: '5m'
+  mode: 'DISABLED' | 'BLOCKED' | 'LIVE'
+  serverTime: number
+  periodStart: number | null
+  feedStatus: string
+  reason: string | null
+  blockReasons: string[]
+  executorReady: boolean
+  preflight?: FutureBtc5mPreflight | null
+  signal: {
+    slug: string
+    side: 'Up' | 'Down' | null
+    period_start: number
+    period_end: number
+    price_observed_at: number
+    price_source: string
+    open_price_source: string
+    twap_lookback_seconds: number
+    open_price: number
+    current_price: number
+  } | null
+  orderCounts: {
+    total: number
+    pending: number
+    submitted: number
+    filled: number
+    failed: number
+    skipped: number
+  }
+}
+
+export interface FutureBtc5mOrder {
+  id: string
+  bridgeId: string
+  slug: string
+  periodStart: number
+  periodEnd: number
+  side: 'Up' | 'Down'
+  amountUsd: 1
+  status: FutureBtc5mOrderStatus
+  reason: string | null
+  createdAt: number
+  updatedAt: number
+  submittedAt: number | null
+  filledAt: number | null
+  platformOrderId: string | null
+  filledQuantity: number | null
+  avgFilledPrice: number | null
+  feeUsd: number | null
+  events: Array<{ stage: string; at: number; reason: string | null }>
+}
+
+export interface FutureBtc5mOrderListRequest {
+  page: number
+  size: number
+  status?: FutureBtc5mOrderStatus
+}
+
+export interface FutureBtc5mOrderListResponse {
+  list: FutureBtc5mOrder[]
+  total: number
+  page: number
+  size: number
+}

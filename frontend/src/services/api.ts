@@ -12,6 +12,10 @@ import type {
   BridgeTradeRecordListResponse,
   BridgeTradeStatistics,
   BridgeTradeStatisticsRequest,
+  FutureBtc5mBridgeStatus,
+  FutureBtc5mOrder,
+  FutureBtc5mOrderListRequest,
+  FutureBtc5mOrderListResponse,
   LeaderPoolAddRequest,
   LeaderPoolCreateTrialConfigRequest,
   LeaderPoolItem,
@@ -1192,6 +1196,20 @@ export const apiService = {
           total?: number
         }
       }>>('/announcements/detail', data)
+  },
+
+  futureBtc5mBridge: {
+    status: () =>
+      apiClient.post<ApiResponse<FutureBtc5mBridgeStatus>>('/future-btc5m/status', {}),
+
+    control: (data: { enabled: boolean }) =>
+      apiClient.post<ApiResponse<FutureBtc5mBridgeStatus>>('/future-btc5m/control', data),
+
+    list: (data: FutureBtc5mOrderListRequest) =>
+      apiClient.post<ApiResponse<FutureBtc5mOrderListResponse>>('/future-btc5m/orders/list', data),
+
+    detail: (data: { id: string }) =>
+      apiClient.post<ApiResponse<FutureBtc5mOrder>>('/future-btc5m/orders/detail', data)
   },
 
   /**
