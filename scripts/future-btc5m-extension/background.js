@@ -1,4 +1,9 @@
 // Fixed local endpoints only. Preflight carries a whitelist of read-only ticket facts.
+const MARKET_QUOTE_ERROR_CODES = ['HTTP_SOURCE_TIMEOUT', 'HTTP_SOURCE_UNAVAILABLE', 'INVALID_MARKET_QUOTE',
+  'CLOB_BOOKS_MISMATCH', 'CLOB_BOOK_TIME_INVALID', 'ROUND_CHANGED_DURING_READ', 'INVALID_BOOK', 'INVALID_BOOK_LEVEL',
+  'WRONG_MARKET_PRICE_CONFIG', 'MARKET_NOT_UNIQUE', 'WRONG_OR_INACTIVE_EVENT', 'WRONG_OR_INACTIVE_MARKET',
+  'WRONG_MARKET_PERIOD', 'INVALID_OUTCOME_TOKENS', 'LOCAL_QUOTE_TIMEOUT', 'LOCAL_QUOTE_NOT_FOUND'];
+
 function marketPage(value) {
   try {
     const parsed = new URL(value);
@@ -48,15 +53,17 @@ function validBuyAudit(message) {
   const keys = ['schemaVersion', 'auditId', 'id', 'claimToken', 'periodStart', 'side', 'amountUsd', 'state', 'reason',
     'armedAt', 'attemptedAt', 'marketUrl', 'upQuoteCents', 'downQuoteCents', 'selectedSide', 'ticketAmountUsd',
     'extensionVersion'];
+  // Schema 2 adds the independent Polymarket CLOB asks the price gates compared, or nulls when none was read.
+  if (value?.schemaVersion === 2) keys.push('marketUpAskCents', 'marketDownAskCents', 'marketQuoteObservedAt');
   const reasons = {CLICK_ATTEMPTED: ['PLATFORM_RESULT_UNKNOWN', 'CLICK_THROWN_RESULT_UNKNOWN'],
     BLOCKED: ['TICKET_CHANGED', 'BUY_BUTTON_UNSAFE', 'READY_CHANGED', 'STORAGE_FAILED', 'FINAL_CHECK_FAILED',
-      'ALREADY_CONSUMED']};
+      'ALREADY_CONSUMED', 'PRICE_BELOW_MIN', 'MARKET_QUOTE_UNAVAILABLE', 'MARKET_QUOTE_MISMATCH', 'PRICE_ABOVE_MAX']};
   const quote = (cents) => cents === null ||
     Number.isFinite(cents) && cents >= 0 && cents <= 100 && Number(cents.toFixed(2)) === cents;
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length ||
       !keys.every((key) => Object.hasOwn(value, key))) return false;
   const page = marketPage(value.marketUrl);
-  return value.schemaVersion === 1 && Number.isSafeInteger(value.periodStart) && value.periodStart >= 0 &&
+  return [1, 2].includes(value.schemaVersion) && Number.isSafeInteger(value.periodStart) && value.periodStart >= 0 &&
     value.periodStart % 300 === 0 && value.id === `future-btc5m-prepare:${value.periodStart}` &&
     Number.isFinite(value.armedAt) && Number.isFinite(value.attemptedAt) && value.armedAt <= value.attemptedAt &&
     value.auditId === `${value.id}:${Math.floor(value.attemptedAt * 1000)}` &&
@@ -67,7 +74,9 @@ function validBuyAudit(message) {
     Number(page.pathname.match(/btc-updown-5m-(\d+)/)[1]) === value.periodStart &&
     quote(value.upQuoteCents) && quote(value.downQuoteCents) && ['Up', 'Down', null].includes(value.selectedSide) &&
     (value.ticketAmountUsd === null || Number.isFinite(value.ticketAmountUsd) && value.ticketAmountUsd >= 0) &&
-    typeof value.extensionVersion === 'string' && /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(value.extensionVersion);
+    typeof value.extensionVersion === 'string' && /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(value.extensionVersion) &&
+    (value.schemaVersion === 1 || quote(value.marketUpAskCents) && quote(value.marketDownAskCents) &&
+      (value.marketQuoteObservedAt === null || Number.isFinite(value.marketQuoteObservedAt)));
 }
 
 function preparationMessage(message, sender) {
@@ -75,7 +84,14 @@ function preparationMessage(message, sender) {
   if (!marketPage(sender.url) || !page) return null;
   const type = message.type;
   if (type === 'FUTURE_BTC5M_PREPARATION') return Object.keys(message).length === 1 ? '' : null;
+  if (type === 'FUTURE_BTC5M_MARKET_QUOTE') return Object.keys(message).length === 1 ? '/market-quote' : null;
   if (type === 'FUTURE_BTC5M_BUY_AUDIT') return validBuyAudit(message) ? '/buy-audit' : null;
+  if (type === 'FUTURE_BTC5M_SCHEDULE') return Object.keys(message).length === 1 ? '/schedule' : null;
+  if (type === 'FUTURE_BTC5M_SCHEDULE_SET') {
+    const payload = message.payload;
+    return Object.keys(message).length === 2 && payload && typeof payload === 'object' && !Array.isArray(payload) &&
+      Object.keys(payload).length === 1 && typeof payload.weekendOnly === 'boolean' ? '/schedule' : null;
+  }
   if (Object.keys(message).length !== 2 || !Object.hasOwn(message, 'payload')) return null;
   const payload = message.payload;
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
@@ -103,9 +119,73 @@ function preparationMessage(message, sender) {
   return '/ack';
 }
 
+// WebSocket messages wake the page even when Chrome suspends its hidden-page timers.
+// The clock is read-only; the existing preparation, STOP and Buy checks still decide actions.
+const runtimePorts = new Set();
+let runtimeSocket = null, runtimeRetry = null;
+// A locked or dark screen stops Future rendering the next round's ticket even while this
+// clock keeps the page awake, so the display also stays on while the automatic-ticket
+// switch is on. Off or unknown, only the system stays awake.
+let displayAwake = false;
+const keepAwakeLevel = () => displayAwake ? 'display' : 'system';
+
+function followAutoSwitch(status) {
+  const enabled = status?.bridgeId === 'future-btc5m' ? status.preparation?.enabled : undefined;
+  if (typeof enabled !== 'boolean' || enabled === displayAwake) return;
+  displayAwake = enabled;
+  // A newer request from this extension replaces the previous one.
+  if (runtimePorts.size) chrome.power.requestKeepAwake(keepAwakeLevel());
+}
+
+function connectRuntimeClock() {
+  if (!runtimePorts.size || runtimeSocket) return;
+  const socket = new WebSocket('ws://127.0.0.1:8767/runtime');
+  runtimeSocket = socket;
+  socket.onmessage = ({data}) => {
+    let tick;
+    try { tick = JSON.parse(data); } catch { return; }
+    if (!tick || Object.keys(tick).length !== 2 || tick.type !== 'FUTURE_BTC5M_TICK' ||
+        !Number.isFinite(tick.serverTime) || Math.abs(Date.now() / 1000 - tick.serverTime) > 3) return;
+    for (const port of runtimePorts) {
+      try { port.postMessage(tick); } catch { /* onDisconnect removes the closed port. */ }
+    }
+  };
+  socket.onclose = () => {
+    if (runtimeSocket !== socket) return;
+    runtimeSocket = null;
+    if (runtimePorts.size) runtimeRetry = setTimeout(() => {
+      runtimeRetry = null;
+      connectRuntimeClock();
+    }, 1000);
+  };
+  socket.onerror = () => socket.close();
+}
+
+chrome.runtime.onConnect?.addListener((port) => {
+  const sender = port.sender;
+  if (port.name !== 'FUTURE_BTC5M_RUNTIME' || !sender?.tab || sender.frameId !== 0 ||
+      !marketPage(sender.url) || !marketPage(sender.tab.url ?? sender.url)) {
+    port.disconnect();
+    return;
+  }
+  runtimePorts.add(port);
+  chrome.power.requestKeepAwake(keepAwakeLevel());
+  port.onDisconnect.addListener(() => {
+    runtimePorts.delete(port);
+    if (runtimePorts.size) return;
+    if (runtimeRetry !== null) clearTimeout(runtimeRetry);
+    runtimeRetry = null;
+    const socket = runtimeSocket;
+    runtimeSocket = null;
+    socket?.close();
+    chrome.power.releaseKeepAwake();
+  });
+  connectRuntimeClock();
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const preparationTypes = ['FUTURE_BTC5M_PREPARATION', 'FUTURE_BTC5M_PREPARATION_CLAIM', 'FUTURE_BTC5M_PREPARATION_ACK',
-    'FUTURE_BTC5M_BUY_AUDIT'];
+    'FUTURE_BTC5M_BUY_AUDIT', 'FUTURE_BTC5M_MARKET_QUOTE', 'FUTURE_BTC5M_SCHEDULE', 'FUTURE_BTC5M_SCHEDULE_SET'];
   if (!['FUTURE_BTC5M_STATUS', 'FUTURE_BTC5M_PREFLIGHT', ...preparationTypes].includes(message?.type) ||
       !sender.tab || sender.frameId !== 0) return;
   let origin;
@@ -118,17 +198,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (preparationTypes.includes(message.type)) {
     const suffix = preparationMessage(message, sender);
     if (suffix === null) return;
-    const options = {method: suffix ? 'POST' : 'GET', credentials: 'omit', cache: 'no-store',
-      redirect: 'error', headers: {'X-PolyHermes-Future-Preparation': '1'}, signal: AbortSignal.timeout(2000)};
-    if (suffix) {
+    // Reads (preparation state, CLOB quote, schedule) carry no payload; only payload messages POST.
+    const read = !Object.hasOwn(message, 'payload');
+    const marketQuote = message.type === 'FUTURE_BTC5M_MARKET_QUOTE';
+    const error = marketQuote ? '本地盘口服务未确认' : '本地准备服务未确认';
+    const options = {method: read ? 'GET' : 'POST', credentials: 'omit', cache: 'no-store',
+      redirect: 'error', headers: {'X-PolyHermes-Future-Preparation': '1'}, signal: AbortSignal.timeout(marketQuote ? 4500 : 2000)};
+    if (!read) {
       options.headers['Content-Type'] = 'application/json';
       options.body = JSON.stringify(message.payload);
     }
-    fetch(`http://127.0.0.1:8766/bridge/preparation${suffix}`, options).then((response) => {
-      if (!response.ok) throw new Error('本地准备服务未确认');
-      return response.json();
-    }).then((status) => sendResponse({ok: true, status}))
-      .catch(() => sendResponse({ok: false, error: '本地准备服务未确认'}));
+    fetch(`http://127.0.0.1:8766/bridge/preparation${suffix}`, options).then(async (response) => {
+      if (!marketQuote) {
+        if (!response.ok) throw new Error(error);
+        return response.json();
+      }
+      if (response.status === 404) throw Object.assign(new Error(error), {errorCode: 'LOCAL_QUOTE_NOT_FOUND'});
+      let status;
+      try {
+        status = await response.json();
+      } catch (failure) {
+        if (['TimeoutError', 'AbortError'].includes(failure?.name)) throw failure;
+        throw Object.assign(new Error(error), {errorCode: 'INVALID_MARKET_QUOTE'});
+      }
+      if (!response.ok) throw Object.assign(new Error(error), {errorCode:
+        MARKET_QUOTE_ERROR_CODES.includes(status?.errorCode) ? status.errorCode : 'MARKET_QUOTE_UNAVAILABLE'});
+      return status;
+    }).then((status) => {
+      if (!marketQuote) followAutoSwitch(status);
+      sendResponse({ok: true, status});
+    }).catch((failure) => {
+      const reply = {ok: false, error};
+      if (marketQuote) reply.errorCode = ['TimeoutError', 'AbortError'].includes(failure?.name) ? 'LOCAL_QUOTE_TIMEOUT' :
+        MARKET_QUOTE_ERROR_CODES.includes(failure?.errorCode) ? failure.errorCode : 'MARKET_QUOTE_UNAVAILABLE';
+      sendResponse(reply);
+    });
     return true;
   }
   if (message.type === 'FUTURE_BTC5M_PREFLIGHT') {

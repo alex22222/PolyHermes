@@ -129,7 +129,7 @@
     return view;
   }
 
-  function findAmountTicket(doc, input) {
+  function findAmountTicket(doc, input, marketOnly = true) {
     let ticket = input.parentElement;
     for (let depth = 0; ticket && depth < 7; depth++, ticket = ticket.parentElement) {
       if (ticket === doc.body) break;
@@ -137,9 +137,11 @@
         .filter((button) => button.getClientRects().length)
         .map((button) => button.textContent.trim());
       if (/金额\s*\(\$\)/.test(ticket.textContent) &&
-          labels.includes('买入') && labels.includes('卖出') && labels.includes('市价单') &&
-          !labels.includes('限价单') &&
-          labels.some((label) => /^买入\s+(涨|跌)$/.test(label)) &&
+          labels.includes('买入') && labels.includes('卖出') &&
+          (marketOnly ? labels.includes('市价单') && !labels.includes('限价单') :
+            labels.filter((label) => /^(市价单|限价单)$/.test(label)).length === 1) &&
+          labels.some((label) => /^买入\s+(涨|跌)$/.test(label) ||
+            !marketOnly && /^最低购买金额为\s*\$/.test(label)) &&
           !labels.some((label) => /^卖出\s+(涨|跌)$/.test(label)) &&
           labels.some((label) => /^涨(?:\s|\d|--)/.test(label)) &&
           labels.some((label) => /^跌(?:\s|\d|--)/.test(label))) return ticket;
@@ -187,6 +189,103 @@
           ancestor.hasAttribute?.('inert') || ancestor.getAttribute?.('aria-disabled') === 'true') return false;
     }
     return true;
+  }
+
+  function orderTypeTicket(doc, url, now) {
+    const start = Math.floor(now / 300) * 300;
+    if (!matchesMarket(url, {slug: `btc-updown-5m-${start}`}) || endedMarketButtons(doc).length) {
+      throw preparationError('MARKET_NOT_CURRENT');
+    }
+    const inputs = [...doc.querySelectorAll('input[placeholder="订单大小"]')]
+      .filter((input) => !input.disabled && !input.readOnly && input.getClientRects().length);
+    if (inputs.length !== 1 || !buttonIsEnabled(inputs[0])) throw preparationError('TICKET_CHECK_FAILED');
+    const ticket = findAmountTicket(doc, inputs[0], false);
+    if (!ticketMatchesPeriod(doc, ticket, start)) throw preparationError('MARKET_NOT_CURRENT');
+    const controls = [...ticket.querySelectorAll('button')].filter((button) => button.getClientRects().length);
+    if (controls.filter((button) => /^买入\s+(涨|跌)$|^最低购买金额为\s*\$/.test(button.textContent.trim())).length !== 1) {
+      throw preparationError('TICKET_CHECK_FAILED');
+    }
+    const modes = controls.filter((button) => /^(市价单|限价单)$/.test(button.textContent.trim()));
+    if (modes.length !== 1) throw preparationError('ORDER_TYPE_CONTROL_UNSAFE');
+    return {ticket, control: modes[0], mode: modes[0].textContent.trim(), controls};
+  }
+
+  // Normalize only the order type, ahead of the 60-second window. Each subsequent
+  // menu/readback step requires another fresh, enabled, unclaimed preparation read.
+  function restoreMarketOrder(wrapper, status, doc, url, attempt, now) {
+    const start = Math.floor(now / 300) * 300;
+    const value = wrapper?.preparation;
+    if (wrapper?.bridgeId !== 'future-btc5m' || !Number.isFinite(wrapper.serverTime) ||
+        Math.abs(now - wrapper.serverTime) > 3 || value?.mode !== 'PREPARE_ONLY' ||
+        value.noSubmission !== true || value.operatorAuthorized !== true ||
+        value.authorizationSource !== 'USER_REQUEST' || value.enabled !== true ||
+        !['WAITING_SIGNAL', 'WAITING_BROWSER', 'BLOCKED'].includes(value.state) || value.intent ||
+        value.lastAttempt?.periodStart >= start || !Array.isArray(value.reasons) ||
+        value.reasons.some((reason) => !['WAITING_CURRENT_SIGNAL', 'BROWSER_NOT_CONNECTED', 'MARKET_NOT_CURRENT',
+          'TICKET_CHECK_FAILED', 'BUTTON_QUOTES_UNAVAILABLE', 'BUTTON_QUOTES_TIED'].includes(reason)) ||
+        status?.reason === 'NOT_ET_WEEKEND' || !navigationTarget(status, url, now) || now >= start + 80) return;
+    if (attempt.phase === 'FAILED') return;
+    try {
+      const {control, mode} = orderTypeTicket(doc, url, now);
+      if (mode === '市价单') {
+        attempt.phase = 'READY';
+        attempt.reason = null;
+        return;
+      }
+      if (attempt.phase === 'SELECTED') throw preparationError('ORDER_TYPE_READBACK_FAILED');
+      if (control.tagName !== 'BUTTON' || control.type !== 'button' || !buttonIsEnabled(control)) {
+        throw preparationError('ORDER_TYPE_CONTROL_UNSAFE');
+      }
+      if (attempt.phase !== 'OPENED') {
+        attempt.phase = 'OPENED';
+        control.click();
+        return;
+      }
+      // Future's visible portal contains these five choices. Scope to the linked
+      // popup when available; otherwise require that exact, unique menu container.
+      const popupId = control.getAttribute?.('aria-controls');
+      const menus = popupId ? [doc.getElementById?.(popupId)].filter(Boolean) :
+        [...doc.querySelectorAll('div')].filter((element) => element.getClientRects().length &&
+          element.textContent.replace(/\s+/g, '') === '市价单限价单Stop拆分合并');
+      const scopes = menus.filter((element) => !menus.some((other) => other !== element && element.contains(other)));
+      if (scopes.length !== 1 || !scopes[0].getClientRects().length) throw preparationError('ORDER_TYPE_MENU_UNAVAILABLE');
+      if (scopes[0].textContent.replace(/\s+/g, '') !== '市价单限价单Stop拆分合并') {
+        throw preparationError('ORDER_TYPE_MENU_UNAVAILABLE');
+      }
+      const candidates = [...scopes[0].querySelectorAll('button,[role="menuitem"],[role="option"],div,span')]
+        .filter((element) => element.getClientRects().length && element.textContent.trim() === '市价单');
+      const options = candidates.filter((element) => !candidates.some((other) => other !== element && element.contains(other)));
+      if (options.length !== 1 || !buttonIsEnabled(options[0]) ||
+          options[0].tagName === 'BUTTON' && options[0].type !== 'button') {
+        throw preparationError('ORDER_TYPE_MENU_UNAVAILABLE');
+      }
+      attempt.phase = 'SELECTED';
+      options[0].click();
+    } catch (error) {
+      attempt.reason = error.code || 'TICKET_CHECK_FAILED';
+      // A late-loading or mismatched ticket may become valid; an uncertain click
+      // or menu selection never repeats in this round.
+      if (attempt.phase === 'OPENED' || attempt.phase === 'SELECTED') attempt.phase = 'FAILED';
+    }
+  }
+
+  function ticketBlockers(doc, url, now) {
+    try {
+      const {controls, mode} = orderTypeTicket(doc, url, now);
+      const reasons = [];
+      if (mode !== '市价单') reasons.push('ORDER_TYPE_LIMIT');
+      if (controls.some((button) => /^最低购买金额为\s*\$/.test(button.textContent.trim()))) {
+        reasons.push('PLATFORM_MINIMUM_UNAVAILABLE');
+      }
+      if (reasons.length) return reasons;
+      const report = readPreflight(doc, url, now);
+      if (report?.navigation !== 'CURRENT' || report.ticketStatus !== 'PASS') return ['TICKET_CHECK_FAILED'];
+      if (!validButtonQuote(report.upQuoteCents) || !validButtonQuote(report.downQuoteCents)) return ['BUTTON_QUOTES_UNAVAILABLE'];
+      if (report.upQuoteCents === report.downQuoteCents) return ['BUTTON_QUOTES_TIED'];
+      return [];
+    } catch (error) {
+      return [error.code || 'TICKET_CHECK_FAILED'];
+    }
   }
 
   function parseButtonQuote(text, side) {
@@ -407,7 +506,7 @@
         ticket = await check();
         if (ticket.selectedSide !== intent.side) throw preparationError('DIRECTION_WRITE_FAILED');
       }
-      ticket = await check();
+      // The validated ticket is used immediately: no await between the guard and write.
       try {
         const setter = Object.getOwnPropertyDescriptor(ticket.input.ownerDocument.defaultView.HTMLInputElement.prototype, 'value').set;
         setter.call(ticket.input, '1');
@@ -454,7 +553,7 @@
   if (typeof document === 'undefined') return;
 
   const panel = document.createElement('aside');
-  panel.style.cssText = 'position:fixed;left:16px;bottom:48px;z-index:2147483647;width:300px;padding:14px;background:#171b22;color:#f4f4f4;border:1px solid #616976;border-radius:10px;font:13px/1.6 system-ui;box-shadow:0 4px 20px #0008';
+  panel.style.cssText = 'position:fixed;left:16px;bottom:48px;z-index:2147483647;width:300px;max-width:calc(100vw - 32px);max-height:calc(100vh - 80px);overflow-y:auto;box-sizing:border-box;padding:14px;background:#171b22;color:#f4f4f4;border:1px solid #616976;border-radius:10px;font:13px/1.6 system-ui;box-shadow:0 4px 20px #0008';
   const title = document.createElement('strong');
   title.textContent = 'PolyHermes · BTC 5m · $1';
   const text = document.createElement('p');
@@ -473,13 +572,22 @@
   const preflightReport = document.createElement('p');
   const preparationReport = document.createElement('p');
   const note = document.createElement('p');
-  const preparationNote = '开启自动票据后，仅在每轮第 60–80 秒、行情有效时选择按钮数字较大的一方并填入 $1，准备好后自动点击一次 Future 买入。$1 为订单本金，费用以平台为准。';
+  const preparationNote = '开启自动票据后，仅在每轮第 60–80 秒、行情有效时选择按钮数字较大的一方并填入 $1，准备好后自动点击一次 Future 买入。' +
+    '每轮准备前自动切回市价单并核对。自动买入仅在热门方向 ≥60¢、页面与 Polymarket 盘口价差不超过 3¢，且两者均在准备价 ±5¢ 内、最高不超过 97¢ 时进行，否则本轮不点击。$1 为订单本金，费用以平台为准。';
   note.style.whiteSpace = 'pre-line';
   note.textContent = preparationNote;
   const autoBuyReport = document.createElement('p');
   autoBuyReport.style.whiteSpace = 'pre-line';
+  // Weekend-only is held by the local assistant and resets to on whenever it restarts.
+  const scheduleRow = document.createElement('p');
+  const weekendOnly = document.createElement('input');
+  weekendOnly.type = 'checkbox';
+  weekendOnly.disabled = true;
+  const scheduleText = document.createElement('span');
+  scheduleText.textContent = ' 仅周末运行：读取中';
+  scheduleRow.append(weekendOnly, scheduleText);
   panel.append(title, text, link, prepare, inspect, inspection, navigation, note, preflightReport, preparationReport,
-    autoBuyReport);
+    autoBuyReport, scheduleRow);
   document.body.append(panel);
   let latest = null;
   let polling = false;
@@ -488,6 +596,12 @@
   let reporting = false;
   let reportPromise = null;
   let autoBuyer = null;
+  let runtimePort = null, lastRuntimeTick = null;
+  let scheduleVersion = 0;
+  let scheduleBusy = false;
+  let orderTypeAttempt = {periodStart: null, phase: null, reason: null};
+  let lastBlockers = [];
+  preparationReport.style.whiteSpace = 'pre-line';
 
   async function reportPage() {
     if (reporting) return;
@@ -515,9 +629,23 @@
     return reply.status;
   }
 
+  const marketQuoteDetails = {HTTP_SOURCE_TIMEOUT: 'Polymarket 行情请求超时', HTTP_SOURCE_UNAVAILABLE: 'Polymarket 行情源不可用',
+    INVALID_MARKET_QUOTE: '盘口响应格式或时间无效', CLOB_BOOKS_MISMATCH: '盘口代币与本轮不一致',
+    CLOB_BOOK_TIME_INVALID: '盘口源时间无效', ROUND_CHANGED_DURING_READ: '读取时已切换到下一轮',
+    INVALID_BOOK: '盘口结构无效', INVALID_BOOK_LEVEL: '盘口价量无效',
+    WRONG_MARKET_PRICE_CONFIG: '市场价格源或 TWAP 配置不一致', MARKET_NOT_UNIQUE: '本轮市场不唯一',
+    WRONG_OR_INACTIVE_EVENT: '本轮事件无效或已停用', WRONG_OR_INACTIVE_MARKET: '本轮市场无效或已停用',
+    WRONG_MARKET_PERIOD: '本轮市场时间不一致', INVALID_OUTCOME_TOKENS: '方向代币映射无效',
+    LOCAL_QUOTE_TIMEOUT: '本地盘口请求超时', LOCAL_QUOTE_NOT_FOUND: '本地盘口接口不存在，请更新助手',
+    MARKET_QUOTE_STALE: '盘口源采样超过 2 秒', MARKET_QUOTE_EMPTY: '盘口缺少可成交 $1 的报价'};
+
   async function preparationRequest(type, payload) {
     const reply = await chrome.runtime.sendMessage(payload ? {type, payload} : {type});
-    if (!reply?.ok) throw preparationError('PREPARATION_FAILED');
+    if (!reply?.ok) {
+      if (type === 'FUTURE_BTC5M_MARKET_QUOTE') throw Object.assign(preparationError('MARKET_QUOTE_UNAVAILABLE'), {
+        detail: Object.hasOwn(marketQuoteDetails, reply?.errorCode) ? reply.errorCode : 'MARKET_QUOTE_UNAVAILABLE'});
+      throw preparationError('PREPARATION_FAILED');
+    }
     return reply.status;
   }
 
@@ -528,6 +656,8 @@
     try {
       autoBuyer ??= globalThis.FutureBtc5mBuyOnce.createAutoBuyer({
         readPreparation: () => preparationRequest('FUTURE_BTC5M_PREPARATION'),
+        // Independent Polymarket CLOB snapshot for the pre-click price gates.
+        readMarketQuote: () => preparationRequest('FUTURE_BTC5M_MARKET_QUOTE'),
         reportAudit: (payload) => preparationRequest('FUTURE_BTC5M_BUY_AUDIT', payload)});
       view = enabled === undefined ? autoBuyer.status() : autoBuyer.sync(enabled);
     } catch {
@@ -537,19 +667,119 @@
     const reasons = {TICKET_CHANGED: '票据已改变', BUY_BUTTON_UNSAFE: '买入按钮不唯一或不可用',
       READY_CHANGED: '准备记录已改变', STORAGE_FAILED: '本地点击记录不可用', FINAL_CHECK_FAILED: '最终核对失败',
       ALREADY_CONSUMED: '本轮已点击过', WEB_LOCKS_REQUIRED: '浏览器缺少 Web Locks',
-      UPDATED_EXTENSION_CONTEXT_REQUIRED: '请重新加载扩展'};
+      UPDATED_EXTENSION_CONTEXT_REQUIRED: '请重新加载扩展',
+      PRICE_BELOW_MIN: '价格低于 60¢ 或准备价 −5¢，本轮跳过', MARKET_QUOTE_UNAVAILABLE: '读不到 Polymarket 盘口，未点击',
+      MARKET_QUOTE_MISMATCH: '页面按钮与 Polymarket 盘口不一致，未点击', PRICE_ABOVE_MAX: '价格高于准备价 +5¢ 或 97¢，未点击'};
     const states = {OFF: '跟随“自动准备票据”开关，当前关闭，不会点击',
-      WATCHING: '已开启，新票据准备好后点击一次买入（每轮最多一次）',
+      WATCHING: '已开启，新票据准备好后点击一次买入（每轮最多一次；热门价 ≥60¢ 且与 Polymarket 盘口一致才买）',
       PAUSED: '等待有效准备状态后重新监控，暂不点击',
       BLOCKED: `无法启动（${reasons[view.reason] || view.reason}），不会点击`};
     let report = `自动买入：${states[view.state]}`;
     if (view.last?.state === 'CLICK_ATTEMPTED') {
       report += `\n最近：已点击“买入 ${view.last.side === 'Up' ? '涨' : '跌'}” $1（btc-updown-5m-${view.last.periodStart}），成交以 Future 订单为准`;
-    } else if (view.last) report += `\n最近：未点击（${reasons[view.last.reason] || view.last.reason}）`;
+    } else if (view.last) {
+      report += `\n最近：未点击（${reasons[view.last.reason] || view.last.reason}）`;
+      if (Number.isSafeInteger(view.last.periodStart) && view.last.periodStart >= 0 && view.last.periodStart % 300 === 0) {
+        report += `\n拒绝轮次：btc-updown-5m-${view.last.periodStart}（${view.last.periodStart ===
+          Math.floor(Date.now() / 1000 / 300) * 300 ? '本轮' : '历史轮次'}）`;
+      }
+      const prices = view.last.priceCheck;
+      if (validButtonQuote(prices?.upQuoteCents) && validButtonQuote(prices?.downQuoteCents)) {
+        report += `\n拒绝时页面：涨 ${prices.upQuoteCents}¢ / 跌 ${prices.downQuoteCents}¢`;
+      }
+      if (validButtonQuote(prices?.marketUpAskCents) && validButtonQuote(prices?.marketDownAskCents)) {
+        report += `\n拒绝时盘口：涨 ${prices.marketUpAskCents}¢ / 跌 ${prices.marketDownAskCents}¢`;
+        if (view.last.reason === 'MARKET_QUOTE_MISMATCH') {
+          const favorite = prices.marketUpAskCents === prices.marketDownAskCents ? null :
+            prices.marketUpAskCents > prices.marketDownAskCents ? 'Up' : 'Down';
+          if (!favorite) report += '\n盘口两边同价，无法核对较大方向。';
+          else if (favorite !== view.last.side) report += '\n盘口较大方向与准备方向不一致。';
+        }
+        const up = view.last.side === 'Up';
+        const pagePrice = up ? prices.upQuoteCents : prices.downQuoteCents;
+        const marketPrice = up ? prices.marketUpAskCents : prices.marketDownAskCents;
+        if (['Up', 'Down'].includes(view.last.side) && validButtonQuote(pagePrice)) {
+          const gap = Math.abs(Math.round(marketPrice * 100) - Math.round(pagePrice * 100)) / 100;
+          report += `\n${up ? '涨' : '跌'}价差：${gap}¢（上限 3¢）`;
+        }
+      }
+      if (view.last.reason === 'MARKET_QUOTE_UNAVAILABLE' && Object.hasOwn(marketQuoteDetails, view.last.detail)) {
+        report += `\n盘口原因：${marketQuoteDetails[view.last.detail]}`;
+      }
+    }
     report += view.auditError === 'AUDIT_STORAGE_FAILED' || view.last?.audit === 'FAILED' ? '\n审计：本地记录写入失败，请检查' :
       view.pendingAudits ? `\n审计：${view.pendingAudits} 条已保存在本页，等待写入本机账本` : '\n审计：全部已写入本机账本';
     autoBuyReport.textContent = report;
   }
+
+  // Local observation must keep updating while any bridge request is pending.
+  // It reads the current ticket only; it cannot change selection, amount or Buy state.
+  function refreshTicketView() {
+    const now = Date.now() / 1000;
+    const report = readPreflight(document, location.href, now);
+    const sideText = (side) => side === 'Up' ? '涨 Up' : side === 'Down' ? '跌 Down' : '未核对';
+    note.textContent = preparationNote;
+    if (report?.navigation === 'CURRENT' && report.ticketStatus === 'PASS' &&
+        validButtonQuote(report.upQuoteCents) && validButtonQuote(report.downQuoteCents)) {
+      const higherSide = report.upQuoteCents === report.downQuoteCents ? null :
+        report.upQuoteCents > report.downQuoteCents ? 'Up' : 'Down';
+      note.textContent += `\n报价观察：涨 ${report.upQuoteCents}¢ / 跌 ${report.downQuoteCents}¢；数字较大：${higherSide ? sideText(higherSide) : '同价，暂停准备'}；当前选中：${sideText(report.selectedSide)}。`;
+      if (now >= report.pagePeriodStart + 80) {
+        note.textContent += '\n入场窗口已过期，保留先前选边，本轮不再切换或买入。';
+      }
+    } else note.textContent += '\n报价观察不可用：当前票据未核对或报价缺失。';
+    note.textContent += lastRuntimeTick !== null && now >= lastRuntimeTick && now - lastRuntimeTick <= 3 ?
+      '\n锁屏心跳：已连接；系统保持运行，允许锁屏和息屏。' : '\n锁屏心跳：未连接，后台运行可能错过窗口。';
+  }
+
+  function showSchedule(value) {
+    if (typeof value !== 'boolean') {
+      weekendOnly.disabled = true;
+      scheduleText.textContent = ' 仅周末运行：本机助手未连接';
+      return;
+    }
+    weekendOnly.checked = value;
+    weekendOnly.disabled = false;
+    scheduleText.textContent = value ? ' 仅周末运行（美东周六、周日）' : ' 仅周末运行：已关闭，工作日也会准备并自动买入';
+  }
+
+  async function scheduleRequest(payload) {
+    const status = await preparationRequest(payload ? 'FUTURE_BTC5M_SCHEDULE_SET' : 'FUTURE_BTC5M_SCHEDULE', payload);
+    if (!status || typeof status !== 'object' || Array.isArray(status) || Object.keys(status).length !== 1 ||
+        typeof status.weekendOnly !== 'boolean') throw preparationError('PREPARATION_FAILED');
+    return status.weekendOnly;
+  }
+
+  async function refreshSchedule() {
+    if (scheduleBusy) return;
+    const version = scheduleVersion;
+    let value = null;
+    try {
+      value = await scheduleRequest();
+    } catch {}
+    // A read that started before a change must not overwrite the confirmed new value.
+    if (!scheduleBusy && version === scheduleVersion) showSchedule(value);
+  }
+
+  weekendOnly.addEventListener('change', async () => {
+    const wanted = weekendOnly.checked;
+    if (!wanted && globalThis.confirm?.('关闭“仅周末运行”后，工作日也会自动准备票据并买入。回测里工作日比周末亏得更多。确定关闭吗？') !== true) {
+      weekendOnly.checked = true;
+      return;
+    }
+    scheduleVersion++;
+    scheduleBusy = true;
+    weekendOnly.disabled = true;
+    try {
+      showSchedule(await scheduleRequest({weekendOnly: wanted}));
+    } catch {
+      weekendOnly.checked = !wanted;
+      weekendOnly.disabled = false;
+      scheduleText.textContent = ' 仅周末运行：修改未被本机助手确认，请重试';
+    } finally {
+      scheduleBusy = false;
+    }
+  });
 
   async function pollPreparation() {
     try {
@@ -570,7 +800,16 @@
       text.textContent = text.textContent.replace('本轮采样方向：', 'BTC参考价差（不决定票据方向）：');
       const state = value.state;
       const now = Date.now() / 1000;
-      const elapsed = now - Math.floor(now / 300) * 300;
+      const start = Math.floor(now / 300) * 300;
+      const elapsed = now - start;
+      if (orderTypeAttempt.periodStart !== start) {
+        orderTypeAttempt = {periodStart: start, phase: null, reason: null};
+        lastBlockers = [];
+      }
+      restoreMarketOrder(wrapper, latest, document, location.href, orderTypeAttempt, now);
+      // Inspection describes the present DOM, not a passed check left over from
+      // before an order-type change or a fill cleared the amount.
+      const pagePassed = inspectPage();
       if (state === 'WAITING_SIGNAL') labels.WAITING_SIGNAL = elapsed < 60 ? '等待本轮第 60 秒；本次检查未切换方向或填写金额' :
         elapsed >= 80 ? '本轮已超过第 80 秒，等待下一轮；本次检查未切换方向或填写金额' :
         latest?.reason === 'CHAINLINK_PRICE_STALE_OR_FUTURE' ? '行情过期或采样时间无效，等待有效行情；本次检查未切换方向或填写金额' :
@@ -581,10 +820,35 @@
         HIGHER_BUTTON_SIDE_CHANGED: '较大方向已改变', PREPARED_TICKET_CHANGED: '准备后的票据已改变',
         STOP_FILE_PRESENT: '助手已停止', PREPARATION_RECEIPT_UNKNOWN: '票据回执未知',
         PREPARATION_REVOKED: '行情过期或准备许可已失效', DIRECTION_WRITE_FAILED: '方向切换回读失败',
-        AMOUNT_WRITE_FAILED: '$1 金额回读失败', POSTCHECK_FAILED: '准备后核对失败'};
-      const details = Array.isArray(value.reasons) ? value.reasons.filter((reason) => Object.hasOwn(reasons, reason))
-        .map((reason) => reasons[reason]).join('、') : '';
+        AMOUNT_WRITE_FAILED: '$1 金额回读失败', POSTCHECK_FAILED: '准备后核对失败',
+        ORDER_TYPE_LIMIT: '当前是限价单，市价单尚未核对',
+        ORDER_TYPE_CONTROL_UNSAFE: '市价单切换按钮不唯一或不可用',
+        ORDER_TYPE_MENU_UNAVAILABLE: '市价单菜单选项缺失、不唯一或不可用',
+        ORDER_TYPE_READBACK_FAILED: '市价单切换回读失败，本轮不重复切换',
+        PLATFORM_MINIMUM_UNAVAILABLE: '平台显示最低购买金额提示，买入栏不可用',
+        WAITING_CURRENT_SIGNAL: latest?.reason === 'CHAINLINK_PRICE_STALE_OR_FUTURE' ||
+          latest?.signal?.period_start === start && Number.isFinite(latest.signal.price_observed_at) &&
+          (latest.signal.price_observed_at > now || now - latest.signal.price_observed_at > 5) ?
+          '行情采样已过期或时间无效' : '本轮行情尚未满足准备条件',
+        SOURCE_STATE_UNAVAILABLE: '行情服务状态不可用', AUTO_PREPARATION_DISABLED: '自动准备已关闭',
+        PREPARATION_LEDGER_WRITE_FAILED: '准备账本写入失败（PREPARATION_LEDGER_WRITE_FAILED）',
+        PREFLIGHT_LEDGER_WRITE_FAILED: '预检账本写入失败（PREFLIGHT_LEDGER_WRITE_FAILED）'};
+      const blockers = ticketBlockers(document, location.href, now);
+      const codes = [...new Set([...(Array.isArray(value.reasons) ? value.reasons.filter((reason) => typeof reason === 'string') : []),
+        ...blockers, ...(orderTypeAttempt.reason ? [orderTypeAttempt.reason] : [])])];
+      const details = codes.map((reason) => reasons[reason] || reason).join('、');
       preparationReport.textContent = `自动票据：${labels[state]}${details ? ` · ${details}` : ''}（未提交订单）`;
+      if (value.enabled && elapsed < 80 && (orderTypeAttempt.phase === 'OPENED' || orderTypeAttempt.phase === 'SELECTED')) {
+        preparationReport.textContent += '\n订单类型：正在切回市价单，等待回读';
+      } else if (orderTypeAttempt.phase === 'READY' && pagePassed) preparationReport.textContent += '\n订单类型：市价单已核对';
+      if (value.enabled && ((elapsed >= 60 && elapsed < 80 &&
+          ['WAITING_SIGNAL', 'WAITING_BROWSER', 'BLOCKED'].includes(state)) || orderTypeAttempt.phase === 'FAILED')) {
+        if (codes.length) lastBlockers = codes;
+      }
+      if (state === 'READY') lastBlockers = [];
+      if (lastBlockers.length && (elapsed >= 80 || orderTypeAttempt.phase === 'FAILED')) {
+        preparationReport.textContent += `\n本轮阻断：${lastBlockers.map((reason) => reasons[reason] || reason).join('、')}`;
+      }
       if (reportPromise) await reportPromise.catch(() => {});
       const result = await prepareOnlyOnce(wrapper, document, () => location.href, globalThis.sessionStorage, {
         readPreparation: () => preparationRequest('FUTURE_BTC5M_PREPARATION'),
@@ -592,23 +856,17 @@
         reportPreflight: (payload) => chrome.runtime.sendMessage({type: 'FUTURE_BTC5M_PREFLIGHT', payload}),
         acknowledge: async (payload) => {
           const status = await preparationRequest('FUTURE_BTC5M_PREPARATION_ACK', payload);
-          return {ok: status?.bridgeId === 'future-btc5m' && status.preparation?.state === payload.status};
+          const ok = status?.bridgeId === 'future-btc5m' && status.preparation?.state === payload.status;
+          if (ok && payload.status === 'READY') void autoBuyer?.notifyReady?.(status);
+          return {ok};
         },
       });
       if (result) preparationReport.textContent = result.status === 'READY' ?
         `自动票据：已准备 $1，并按按钮较大数值选择${value.intent.side === 'Up' ? '涨 Up' : '跌 Down'}（准备本身未提交订单）` :
         `自动票据：${result.status} · ${reasons[result.reason] || result.reason}（未提交订单，不重试）`;
-      const report = readPreflight(document, location.href);
-      const sideText = (side) => side === 'Up' ? '涨 Up' : side === 'Down' ? '跌 Down' : '未核对';
-      note.textContent = preparationNote;
-      if (report?.navigation === 'CURRENT' && report.ticketStatus === 'PASS' &&
-          validButtonQuote(report.upQuoteCents) && validButtonQuote(report.downQuoteCents)) {
-        const higherSide = report.upQuoteCents === report.downQuoteCents ? null :
-          report.upQuoteCents > report.downQuoteCents ? 'Up' : 'Down';
-        note.textContent += `\n报价观察：涨 ${report.upQuoteCents}¢ / 跌 ${report.downQuoteCents}¢；数字较大：${higherSide ? sideText(higherSide) : '同价，暂停准备'}；当前选中：${sideText(report.selectedSide)}。`;
-      }
+      refreshTicketView();
     } catch {
-      note.textContent = preparationNote;
+      refreshTicketView();
       preparationReport.textContent = '自动票据：本地准备服务未连接（未提交订单）';
       showAutoBuy();
     }
@@ -650,15 +908,17 @@
         prepare.disabled = false;
       }
       await pollPreparation();
+      await refreshSchedule();
     } catch (error) {
       latest = null;
-      note.textContent = preparationNote;
+      refreshTicketView();
       text.textContent = error.message;
       inspection.textContent = '';
       autoCheckedUrl = null;
       navigation.textContent = '自动换轮：暂停（本地助手未连接）';
       preparationReport.textContent = '自动票据：暂停（本地助手未连接，未提交订单）';
       showAutoBuy();
+      if (!scheduleBusy) showSchedule(null);
     } finally {
       polling = false;
     }
@@ -691,7 +951,40 @@
       text.textContent = error.message;
     }
   });
-  poll();
-  reportPage();
-  setInterval(() => { poll(); reportPage(); }, 1000);
+  function runTick() {
+    refreshTicketView();
+    showAutoBuy();
+    poll();
+    reportPage();
+  }
+
+  function connectRuntimeClock() {
+    if (runtimePort || !chrome.runtime.connect) return;
+    try {
+      const port = chrome.runtime.connect({name: 'FUTURE_BTC5M_RUNTIME'});
+      runtimePort = port;
+      port.onMessage.addListener((tick) => {
+        const now = Date.now() / 1000;
+        if (!tick || Object.keys(tick).length !== 2 || tick.type !== 'FUTURE_BTC5M_TICK' ||
+            !Number.isFinite(tick.serverTime) || Math.abs(now - tick.serverTime) > 3) return;
+        lastRuntimeTick = now;
+        runTick();
+      });
+      port.onDisconnect.addListener(() => {
+        if (runtimePort !== port) return;
+        runtimePort = null;
+        lastRuntimeTick = null;
+        // Reading lastError handles a disconnected extension context without exposing it.
+        if (!chrome.runtime.lastError) connectRuntimeClock();
+      });
+    } catch {
+      runtimePort = null;
+      lastRuntimeTick = null;
+    }
+  }
+
+  connectRuntimeClock();
+  runTick();
+  // Foreground/reconnect fallback only; the lock-screen critical path is the pushed clock.
+  setInterval(() => { connectRuntimeClock(); runTick(); }, 1000);
 })();

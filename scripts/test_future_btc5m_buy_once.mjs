@@ -116,19 +116,37 @@ const deferred = () => {
   const promise = new Promise((done) => {resolve = done;});
   return {promise, resolve};
 };
+// A consistent Polymarket CLOB book snapshot of a READY round, observed now: the READY
+// favorite asks exactly its prepared quote and the other side asks 101 minus it.
+const clobQuote = (record, at, overrides = {}) => {
+  const sideAsk = record.side === 'Up' ? record.upQuoteCents : record.downQuoteCents;
+  const [upAskCents, downAskCents] = record.side === 'Up' ? [sideAsk, 101 - sideAsk] : [101 - sideAsk, sideAsk];
+  return {schemaVersion: 1, source: 'polymarket_clob_book', periodStart: record.periodStart, slug: record.slug,
+    upAskCents, downAskCents, upBidCents: upAskCents - 1, downBidCents: downAskCents - 1,
+    observedAt: at, serverTime: at, ...overrides};
+};
+// readMarketQuote is not async, so a market stub may also throw synchronously.
+const marketStub = (market, reads, state) => () => {
+  reads.push(state.time());
+  return market({record: state.latest?.preparation?.lastAttempt, time: state.time(), index: reads.length});
+};
 const setup = ({ticket = ticketFixture(), storage = memoryStorage(), read = () => ready(),
+  market = ({record, time}) => clobQuote(record, time),
   time = now, withLock = mutex(), url = marketUrl, auditStorage = auditMemory()} = {}) => {
   let currentTime = time;
   let currentUrl = url;
   const intervals = new Map();
   const reads = [];
+  const marketReads = [];
+  const state = {latest: null, time: () => currentTime};
   const watcher = createWatcher({core, document: ticket.doc, readUrl: () => currentUrl,
     storage, auditStorage, extensionVersion: '0.4.1',
-    readPreparation: async () => {reads.push(currentTime); return read(reads.length);},
+    readPreparation: async () => {reads.push(currentTime); state.latest = await read(reads.length); return state.latest;},
+    readMarketQuote: marketStub(market, marketReads, state),
     nowFn: () => currentTime, withLock,
     setIntervalFn(callback) {const id = intervals.size + 1; intervals.set(id, callback); return id;},
     clearIntervalFn(id) {intervals.delete(id);}});
-  return {watcher, ticket, storage, auditStorage, intervals, reads,
+  return {watcher, ticket, storage, auditStorage, intervals, reads, marketReads,
     setTime(value) {currentTime = value;}, setUrl(value) {currentUrl = value;}};
 };
 const assertUnchangedTicket = (fixture, buys = 0) => {
@@ -171,7 +189,7 @@ test('explicit live start clicks the exact prepared final Buy once and records o
     assert.equal(env.watcher.status().state, 'CLICK_ATTEMPTED');
     assert.equal(env.watcher.status().periodStart, start);
     assert.equal(env.watcher.status().side, side);
-    assert.equal(env.reads.length, 2, 're-read READY inside the origin lock before clicking');
+    assert.equal(env.reads.length, 3, 're-read READY inside the origin lock, again after the order book, before clicking');
     assert.equal(env.intervals.size, 0);
     assert.deepEqual(JSON.parse(env.storage.values.get(storageKey)), {schemaVersion: 1,
       periodStart: start, id: `future-btc5m-prepare:${start}`, side, amountUsd: 1, state: 'CLICK_ATTEMPTED'});
@@ -592,22 +610,28 @@ const waiting = (at) => {
 };
 // The switch-following controller owns its watchers; ticks run their scheduled polls.
 const setupAuto = ({ticket = ticketFixture(), storage = memoryStorage(), withLock = mutex(),
-  read = () => waiting(start + 30), auditStorage = auditMemory(), reportAudit = async (entry) =>
+  read = () => waiting(start + 30), market = ({record, time}) => clobQuote(record, time),
+  auditStorage = auditMemory(), reportAudit = async (entry) =>
     ({bridgeId: 'future-btc5m', auditId: entry.auditId, stored: true, duplicate: false})} = {}) => {
   let currentTime = start + 30;
   let currentUrl = marketUrl;
   let currentRead = read;
+  let currentMarket = market;
   let nextId = 0;
   const intervals = new Map();
   const reads = [];
+  const marketReads = [];
+  const state = {latest: null, time: () => currentTime};
   const buyer = createAutoBuyer({core, document: ticket.doc, readUrl: () => currentUrl, storage,
     auditStorage, extensionVersion: '0.4.1', reportAudit,
-    readPreparation: async () => {reads.push(currentTime); return currentRead(reads.length);},
+    readPreparation: async () => {reads.push(currentTime); state.latest = await currentRead(reads.length); return state.latest;},
+    readMarketQuote: marketStub((context) => currentMarket(context), marketReads, state),
     nowFn: () => currentTime, withLock,
     setIntervalFn(callback) {intervals.set(++nextId, callback); return nextId;},
     clearIntervalFn(id) {intervals.delete(id);}});
-  return {buyer, ticket, storage, auditStorage, intervals, reads,
+  return {buyer, ticket, storage, auditStorage, intervals, reads, marketReads,
     setTime(value) {currentTime = value;}, setUrl(value) {currentUrl = value;}, setRead(value) {currentRead = value;},
+    setMarket(value) {currentMarket = value;},
     async tick() {
       for (const callback of [...intervals.values()]) callback();
       for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
@@ -673,6 +697,118 @@ test('turning the switch off stops the watcher and re-enabling never catches up 
   assertUnchangedTicket(env.ticket);
 });
 
+test('a confirmed READY notification checks immediately without waiting for the 500 ms timer or a discovery GET', async () => {
+  const env = setupAuto();
+  env.buyer.sync(true);
+  env.setTime(now);
+  env.setRead(() => ready());
+  await env.buyer.notifyReady(ready());
+  assert.equal(env.reads.length, 2, 'retain the in-lock and post-book READY reads');
+  assert.equal(env.buyer.status().last.state, 'CLICK_ATTEMPTED');
+  assertUnchangedTicket(env.ticket, 1);
+  await env.buyer.notifyReady(ready());
+  await env.tick();
+  assertUnchangedTicket(env.ticket, 1);
+  env.buyer.sync(false);
+  await env.buyer.notifyReady(ready());
+  assert.equal(env.reads.length, 2, 'notification does not arm a disabled watcher');
+});
+
+test('the order-book read overlaps the in-lock READY read but never replaces the post-book check', async () => {
+  const second = deferred();
+  const market = deferred();
+  let started = false;
+  const env = setup({read: (index) => index === 2 ? second.promise : ready(),
+    market: () => { started = true; return market.promise; }});
+  env.watcher.start({live: true});
+  const poll = env.watcher.poll();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(started, true, 'book I/O must start before the second READY request finishes');
+  assert.equal(env.reads.length, 2);
+  assertUnchangedTicket(env.ticket);
+  second.resolve(ready());
+  market.resolve(clobQuote(ready().preparation.lastAttempt, now));
+  await poll;
+  assert.equal(env.reads.length, 3);
+  assertUnchangedTicket(env.ticket, 1);
+});
+
+test('a READY notification arriving during a pending timer read is processed as soon as that read finishes', async () => {
+  const wait = deferred();
+  const env = setupAuto({read: (index) => index === 1 ? wait.promise : ready()});
+  env.buyer.sync(true);
+  await env.tick();
+  env.setTime(now);
+  await env.buyer.notifyReady(ready());
+  wait.resolve(waiting(now));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(env.buyer.status().last?.state, 'CLICK_ATTEMPTED');
+  assert.equal(env.reads.length, 3, 'one old timer GET and two current permission checks');
+  assertUnchangedTicket(env.ticket, 1);
+});
+
+test('the immediate READY path still refuses STOP, expired evidence and a price move above five cents', async () => {
+  for (const reason of ['READY_CHANGED', 'PRICE_ABOVE_MAX']) {
+    const round = pricedRound(62, 39);
+    const env = setupAuto({ticket: round.ticket});
+    env.buyer.sync(true);
+    env.setTime(now);
+    env.setRead((index) => {
+      const value = clone(round.read());
+      if (reason === 'READY_CHANGED' && index === 2) {
+        value.preparation.enabled = false;
+        value.preparation.state = 'DISABLED';
+      }
+      return value;
+    });
+    if (reason === 'PRICE_ABOVE_MAX') {
+      env.ticket.setQuotes('68¢', '33¢');
+      env.setMarket(book({upAskCents: 68, downAskCents: 33}));
+    }
+    await env.buyer.notifyReady(round.read());
+    assert.equal(env.buyer.status().last.reason, reason);
+    assert.equal(env.storage.values.size, 0);
+    assertUnchangedTicket(env.ticket);
+  }
+  const expired = setupAuto();
+  expired.buyer.sync(true);
+  expired.setTime(now + 5.01);
+  await expired.buyer.notifyReady(ready());
+  assert.equal(expired.reads.length, 0);
+  assertUnchangedTicket(expired.ticket);
+});
+
+test('a queued READY notification is discarded when the switch is turned off', async () => {
+  const wait = deferred();
+  const env = setupAuto({read: () => wait.promise});
+  env.buyer.sync(true);
+  await env.tick();
+  env.setTime(now);
+  await env.buyer.notifyReady(ready());
+  env.buyer.sync(false);
+  wait.resolve(waiting(now));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(env.buyer.status().state, 'OFF');
+  assert.equal(env.reads.length, 1);
+  assertUnchangedTicket(env.ticket);
+});
+
+test('parallel notification and timer polling cannot consume a round twice', async () => {
+  const wait = deferred();
+  const env = setupAuto({read: (index) => index === 1 ? wait.promise : ready(),
+    market: ({time}) => clobQuote(ready().preparation.lastAttempt, time)});
+  env.buyer.sync(true);
+  env.setTime(now);
+  const immediate = env.buyer.notifyReady(ready());
+  await env.buyer.notifyReady(ready());
+  await env.tick();
+  wait.resolve(ready());
+  await immediate;
+  assertUnchangedTicket(env.ticket, 1);
+  assert.equal(env.reads.length, 2);
+});
+
 test('start failures and transient read failures re-arm without clicking or hiding the last attempt', async () => {
   const noLock = setupAuto({withLock: null});
   const blocked = noLock.buyer.sync(true);
@@ -712,11 +848,12 @@ test('a live click queues one audit after the click with the final ticket facts 
   assertUnchangedTicket(ticket, 1);
   assert.equal(env.watcher.status().audit, 'QUEUED');
   const record = ready().preparation.lastAttempt;
-  assert.deepEqual(auditStorage.entries(), [{schemaVersion: 1,
+  assert.deepEqual(auditStorage.entries(), [{schemaVersion: 2,
     auditId: `${record.id}:${Math.floor(now * 1000)}`, id: record.id, claimToken: record.claimToken,
     periodStart: start, side: 'Down', amountUsd: 1, state: 'CLICK_ATTEMPTED', reason: 'PLATFORM_RESULT_UNKNOWN',
     armedAt: now, attemptedAt: now, marketUrl, upQuoteCents: 12, downQuoteCents: 88,
-    selectedSide: 'Down', ticketAmountUsd: 1, extensionVersion: '0.4.1'}]);
+    selectedSide: 'Down', ticketAmountUsd: 1, extensionVersion: '0.4.1',
+    marketUpAskCents: 13, marketDownAskCents: 88, marketQuoteObservedAt: now}]);
 });
 
 test('READY refusals are audited while read failures, dry runs and stale READY leave no audit', async () => {
@@ -796,4 +933,522 @@ test('the auto buyer flushes audits, removes only acknowledged entries and keeps
   await partial.buyer.flushAudits();
   assert.deepEqual(env.auditStorage.entries(), [{auditId: 'a'}]);
   assert.equal(partial.buyer.status().pendingAudits, 1);
+});
+
+// Price gates: a READY round prepared at the given button quotes, shown with the same
+// quotes on the page unless a ticket option overrides them.
+const pricedRound = (up, down, ticketOptions = {}) => {
+  const side = up > down ? 'Up' : 'Down';
+  const value = ready(now, side);
+  Object.assign(value.preparation.lastAttempt, {upQuoteCents: up, downQuoteCents: down});
+  return {side, record: value.preparation.lastAttempt, read: () => value,
+    ticket: ticketFixture({side, upQuote: `${up}¢`, downQuote: `${down}¢`, ...ticketOptions})};
+};
+const book = (overrides) => ({record, time}) => clobQuote(record, time, overrides);
+const liveOnce = async (options) => {
+  const env = setup(options);
+  env.watcher.start({live: true});
+  await env.watcher.poll();
+  return env;
+};
+const assertRefused = (env, reason) => {
+  assert.equal(env.watcher.status().state, 'BLOCKED');
+  assert.equal(env.watcher.status().reason, reason);
+  assert.equal(env.storage.values.size, 0, 'a refused round is never marked consumed');
+  assertUnchangedTicket(env.ticket);
+};
+const assertClicked = (env) => {
+  assert.equal(env.watcher.status().state, 'CLICK_ATTEMPTED');
+  assert.equal(env.marketReads.length, 1);
+  assertUnchangedTicket(env.ticket, 1);
+};
+const auditFacts = (env) => env.auditStorage.entries().map((entry) => ({schemaVersion: entry.schemaVersion,
+  state: entry.state, reason: entry.reason, upQuoteCents: entry.upQuoteCents, downQuoteCents: entry.downQuoteCents,
+  marketUpAskCents: entry.marketUpAskCents, marketDownAskCents: entry.marketDownAskCents,
+  marketQuoteObservedAt: entry.marketQuoteObservedAt}));
+
+test('a READY favorite below 60 cents skips the round without asking the order book', async () => {
+  for (const [up, down] of [[45, 56], [56, 45], [40.01, 59.99]]) {
+    const round = pricedRound(up, down);
+    const env = await liveOnce({read: round.read, ticket: round.ticket});
+    assertRefused(env, 'PRICE_BELOW_MIN');
+    assert.equal(env.reads.length, 2, 'judged on the READY re-read inside the origin lock');
+    assert.equal(env.marketReads.length, 0, 'no CLOB request for a skipped round');
+    assert.deepEqual(env.auditStorage.entries(), [{schemaVersion: 2,
+      auditId: `${round.record.id}:${Math.floor(now * 1000)}`, id: round.record.id, claimToken: round.record.claimToken,
+      periodStart: start, side: round.side, amountUsd: 1, state: 'BLOCKED', reason: 'PRICE_BELOW_MIN',
+      armedAt: now, attemptedAt: now, marketUrl, upQuoteCents: up, downQuoteCents: down,
+      selectedSide: round.side, ticketAmountUsd: 1, extensionVersion: '0.4.1',
+      marketUpAskCents: null, marketDownAskCents: null, marketQuoteObservedAt: null}]);
+  }
+  const low = pricedRound(45, 56);
+  const dryRun = setup({read: low.read, ticket: low.ticket});
+  dryRun.watcher.start();
+  await dryRun.watcher.poll();
+  assertRefused(dryRun, 'PRICE_BELOW_MIN');
+  assert.equal(dryRun.marketReads.length, 0);
+  assert.deepEqual(dryRun.auditStorage.entries(), [], 'a dry run never queues an audit');
+
+  for (const [up, down] of [[41, 60], [60, 39.99]]) {
+    const round = pricedRound(up, down);
+    assertClicked(await liveOnce({read: round.read, ticket: round.ticket}));
+  }
+});
+
+test('an unavailable, stale, foreign or malformed order book blocks with MARKET_QUOTE_UNAVAILABLE', async () => {
+  const withKeys = (change) => ({record, time}) => {
+    const value = clobQuote(record, time);
+    change(value);
+    return value;
+  };
+  for (const market of [
+    () => Promise.reject(new Error('assistant offline')),
+    () => {throw new Error('extension context lost');},
+    () => null, () => undefined, () => [], () => ({}), () => 'snapshot',
+    book({observedAt: now - 2.01}), book({observedAt: now + 0.51}), book({observedAt: NaN}), book({observedAt: null}),
+    book({serverTime: now + 3.01}), book({serverTime: now - 3.01}), book({serverTime: String(now)}),
+    book({periodStart: start - 300}), book({periodStart: String(start)}),
+    book({slug: `btc-updown-5m-${start - 300}`}), book({periodStart: start + 300, slug: `btc-updown-5m-${start + 300}`}),
+    book({schemaVersion: 2}), book({source: 'future_button'}),
+    book({downAskCents: null}), book({upAskCents: null}), book({upAskCents: null, downAskCents: null}),
+    book({downAskCents: 88.001}), book({upAskCents: 101}), book({upBidCents: -1}), book({downBidCents: '87'}),
+    book({downAskCents: NaN}), book({upAskCents: Infinity}),
+    withKeys((value) => {value.extra = 1;}), withKeys((value) => {delete value.upBidCents;}),
+  ]) {
+    const env = await liveOnce({market});
+    assertRefused(env, 'MARKET_QUOTE_UNAVAILABLE');
+    assert.equal(env.marketReads.length, 1, 'one order-book read per round and never a retry');
+    assert.deepEqual(env.auditStorage.entries().map((entry) => [entry.schemaVersion, entry.state, entry.reason]),
+      [[2, 'BLOCKED', 'MARKET_QUOTE_UNAVAILABLE']]);
+  }
+  const rejected = await liveOnce({market: () => Promise.reject(new Error('assistant offline'))});
+  assert.deepEqual(auditFacts(rejected), [{schemaVersion: 2, state: 'BLOCKED', reason: 'MARKET_QUOTE_UNAVAILABLE',
+    upQuoteCents: 12, downQuoteCents: 88, marketUpAskCents: null, marketDownAskCents: null, marketQuoteObservedAt: null}]);
+  const emptySide = await liveOnce({market: book({downAskCents: null})});
+  assert.deepEqual(auditFacts(emptySide), [{schemaVersion: 2, state: 'BLOCKED', reason: 'MARKET_QUOTE_UNAVAILABLE',
+    upQuoteCents: 12, downQuoteCents: 88, marketUpAskCents: 13, marketDownAskCents: null, marketQuoteObservedAt: now}]);
+
+  // Age and clock boundaries are inclusive.
+  for (const market of [book({observedAt: now - 2}), book({observedAt: now + 0.5}),
+    book({serverTime: now + 3}), book({serverTime: now - 3}), book({upBidCents: null, downBidCents: null})]) {
+    assertClicked(await liveOnce({market}));
+  }
+});
+
+test('order-book failures retain only safe detail codes without changing the refusal or audit schema', async () => {
+  for (const detail of ['HTTP_SOURCE_TIMEOUT', 'HTTP_SOURCE_UNAVAILABLE', 'LOCAL_QUOTE_TIMEOUT', 'LOCAL_QUOTE_NOT_FOUND',
+    'INVALID_MARKET_QUOTE', 'CLOB_BOOKS_MISMATCH', 'CLOB_BOOK_TIME_INVALID', 'ROUND_CHANGED_DURING_READ',
+    'INVALID_BOOK', 'INVALID_BOOK_LEVEL', 'WRONG_MARKET_PRICE_CONFIG', 'MARKET_NOT_UNIQUE',
+    'WRONG_OR_INACTIVE_EVENT', 'WRONG_OR_INACTIVE_MARKET', 'WRONG_MARKET_PERIOD', 'INVALID_OUTCOME_TOKENS',
+    'private network detail', '__proto__', undefined]) {
+    const env = await liveOnce({market: () => Promise.reject(Object.assign(new Error('private network detail'), {detail}))});
+    assertRefused(env, 'MARKET_QUOTE_UNAVAILABLE');
+    assert.equal(env.watcher.status().detail, ['private network detail', '__proto__', undefined].includes(detail) ?
+      'MARKET_QUOTE_UNAVAILABLE' : detail);
+    assert.equal(env.marketReads.length, 1);
+    assert.equal(Object.hasOwn(env.auditStorage.entries()[0], 'detail'), false);
+    assert.equal(env.auditStorage.entries()[0].reason, 'MARKET_QUOTE_UNAVAILABLE');
+  }
+  for (const [market, detail] of [[book({observedAt: now - 2.01}), 'MARKET_QUOTE_STALE'],
+    [book({downAskCents: null}), 'MARKET_QUOTE_EMPTY'], [book({upAskCents: null}), 'MARKET_QUOTE_EMPTY'],
+    [book({schemaVersion: 2}), 'INVALID_MARKET_QUOTE'], [book({observedAt: now + 0.51}), 'INVALID_MARKET_QUOTE']]) {
+    const env = await liveOnce({market});
+    assertRefused(env, 'MARKET_QUOTE_UNAVAILABLE');
+    assert.equal(env.watcher.status().detail, detail);
+  }
+});
+
+test('the automatic buyer retains quote diagnostics after rearming and never retries the refused round', async () => {
+  const env = setupAuto({market: () => Promise.reject(Object.assign(new Error('private network detail'), {detail: 'HTTP_SOURCE_TIMEOUT'}))});
+  env.buyer.sync(true);
+  env.setTime(now);
+  env.setRead(() => ready());
+  await env.tick();
+  assert.equal(env.buyer.status().last.reason, 'MARKET_QUOTE_UNAVAILABLE');
+  assert.equal(env.buyer.status().last.detail, 'HTTP_SOURCE_TIMEOUT');
+  env.setTime(now + 1);
+  assert.equal(env.buyer.sync(true).last.detail, 'HTTP_SOURCE_TIMEOUT');
+  await env.tick();
+  assert.equal(env.marketReads.length, 1);
+  assert.equal(env.storage.values.size, 0);
+  assertUnchangedTicket(env.ticket);
+});
+
+test('a flipped or tied CLOB favorite blocks with MARKET_QUOTE_MISMATCH, including the 2026-10-12 00:11 round', async () => {
+  // Future showed Down 66 while the Polymarket book asked Down 37 / Up 64.
+  const round = pricedRound(35, 66);
+  const real = await liveOnce({read: round.read, ticket: round.ticket, market: book({upAskCents: 64, downAskCents: 37})});
+  assertRefused(real, 'MARKET_QUOTE_MISMATCH');
+  assert.deepEqual(auditFacts(real), [{schemaVersion: 2, state: 'BLOCKED', reason: 'MARKET_QUOTE_MISMATCH',
+    upQuoteCents: 35, downQuoteCents: 66, marketUpAskCents: 64, marketDownAskCents: 37, marketQuoteObservedAt: now}]);
+  for (const [roundQuotes, asks] of [[[35, 66], [66, 66]], [[35, 66], [66.01, 66]], [[66, 35], [37, 64]],
+    [[66, 35], [66, 66]]]) {
+    const priced = pricedRound(...roundQuotes);
+    const env = await liveOnce({read: priced.read, ticket: priced.ticket,
+      market: book({upAskCents: asks[0], downAskCents: asks[1]})});
+    assertRefused(env, 'MARKET_QUOTE_MISMATCH');
+  }
+});
+
+test('a price refusal preserves its READY round and the judged prices after rearming', async () => {
+  const round = pricedRound(36, 65, {upQuote: '41¢', downQuote: '60¢'});
+  const market = book({upAskCents: 37, downAskCents: 64});
+  const env = setupAuto({ticket: round.ticket, market});
+  env.buyer.sync(true);
+  env.setTime(now);
+  env.setRead(round.read);
+  await env.tick();
+  const refusal = env.buyer.status().last;
+  assert.equal(refusal.reason, 'MARKET_QUOTE_MISMATCH');
+  assert.equal(refusal.periodStart, start);
+  assert.equal(refusal.side, 'Down');
+  assert.equal(refusal.amountUsd, 1);
+  assert.deepEqual(clone(refusal.priceCheck), {upQuoteCents: 41, downQuoteCents: 60,
+    marketUpAskCents: 37, marketDownAskCents: 64});
+  round.ticket.setQuotes('62¢', '39¢');
+  env.setTime(now + 1);
+  const rearmed = env.buyer.sync(true);
+  assert.deepEqual(clone(rearmed.last), clone(refusal));
+  await env.tick();
+  assert.equal(env.marketReads.length, 1);
+  assert.equal(env.storage.values.size, 0);
+  assertUnchangedTicket(env.ticket);
+});
+
+test('the page button may differ from the CLOB ask of its side by at most 3 cents', async () => {
+  for (const [ticketOptions, downAsk, expected] of [
+    [{}, 62, 'MARKET_QUOTE_MISMATCH'], [{}, 70, 'MARKET_QUOTE_MISMATCH'], [{}, 63, null],
+    [{downQuote: '61.01¢'}, 64.02, 'MARKET_QUOTE_MISMATCH'], [{downQuote: '61.01¢'}, 57.99, 'MARKET_QUOTE_MISMATCH'],
+    // Float subtraction makes 64.01 - 61.01 exceed 3; the gate compares whole hundredths.
+    [{downQuote: '61.01¢'}, 64.01, null],
+  ]) {
+    const round = pricedRound(35, ticketOptions.downQuote ? 62.01 : 66, ticketOptions);
+    const env = await liveOnce({read: round.read, ticket: round.ticket, market: book({downAskCents: downAsk})});
+    if (expected) assertRefused(env, expected);
+    else assertClicked(env);
+  }
+});
+
+test('page and CLOB prices allow exactly five cents above or below READY for either side', async () => {
+  for (const side of ['Up', 'Down']) {
+    for (const [page, ask, reason] of [
+      [71, 71, null], [81, 81, null], [73, 71, null], [71, 73, null],
+      [79, 81, null], [81, 79, null],
+      [70.99, 73, 'PRICE_BELOW_MIN'], [73, 70.99, 'PRICE_BELOW_MIN'],
+      [81.01, 79, 'PRICE_ABOVE_MAX'], [79, 81.01, 'PRICE_ABOVE_MAX'],
+    ]) {
+      const up = side === 'Up';
+      const round = pricedRound(up ? 76 : 25, up ? 25 : 76,
+        {[up ? 'upQuote' : 'downQuote']: `${page}¢`});
+      const env = await liveOnce({read: round.read, ticket: round.ticket,
+        market: book({[up ? 'upAskCents' : 'downAskCents']: ask})});
+      if (reason) assertRefused(env, reason);
+      else assertClicked(env);
+    }
+  }
+  for (const cents of [67.01, 77.01]) {
+    const round = pricedRound(28, 72.01, {downQuote: `${cents}¢`});
+    assertClicked(await liveOnce({read: round.read, ticket: round.ticket,
+      market: book({downAskCents: cents, upAskCents: 29, upBidCents: 28})}));
+  }
+});
+
+test('neither the CLOB ask nor the page button may exceed the READY price by more than 5 cents', async () => {
+  for (const [domDown, downAsk, expected] of [
+    ['69¢', 71, null], ['71¢', 71, null], ['71¢', 69, null],
+    ['69¢', 71.01, 'PRICE_ABOVE_MAX'], ['69¢', 72, 'PRICE_ABOVE_MAX'],
+    ['72¢', 71, 'PRICE_ABOVE_MAX'], ['71.01¢', 69, 'PRICE_ABOVE_MAX'],
+  ]) {
+    const round = pricedRound(35, 66, {downQuote: domDown});
+    const env = await liveOnce({read: round.read, ticket: round.ticket, market: book({downAskCents: downAsk})});
+    if (expected) assertRefused(env, expected);
+    else assertClicked(env);
+  }
+  const up = pricedRound(66, 35, {upQuote: '69¢'});
+  const above = await liveOnce({read: up.read, ticket: up.ticket, market: book({upAskCents: 72})});
+  assertRefused(above, 'PRICE_ABOVE_MAX');
+  assert.deepEqual(auditFacts(above), [{schemaVersion: 2, state: 'BLOCKED', reason: 'PRICE_ABOVE_MAX',
+    upQuoteCents: 69, downQuoteCents: 35, marketUpAskCents: 72, marketDownAskCents: 35, marketQuoteObservedAt: now}]);
+  const decimal = pricedRound(35, 62.01, {downQuote: '67.01¢'});
+  assertClicked(await liveOnce({read: decimal.read, ticket: decimal.ticket, market: book({downAskCents: 67.01})}));
+});
+
+test('page or CLOB prices more than five cents below READY refuse without consuming the round', async () => {
+  for (const side of ['Up', 'Down']) {
+    for (const [page, ask] of [[70.99, 73], [73, 70.99]]) {
+      const up = side === 'Up';
+      const round = pricedRound(up ? 76 : 25, up ? 25 : 76,
+        {[up ? 'upQuote' : 'downQuote']: `${page}¢`});
+      const env = await liveOnce({read: round.read, ticket: round.ticket,
+        market: book({[up ? 'upAskCents' : 'downAskCents']: ask})});
+      assertRefused(env, 'PRICE_BELOW_MIN');
+      assert.equal(env.auditStorage.entries()[0].reason, 'PRICE_BELOW_MIN');
+      await env.watcher.poll();
+      assert.equal(env.marketReads.length, 1, 'a refused round is not retried');
+    }
+  }
+});
+
+test('a page button or CLOB ask below 60 cents at click time blocks a READY favorite of at least 60', async () => {
+  for (const [domDown, downAsk] of [['58¢', 60], ['61¢', 59], ['59.99¢', 61]]) {
+    const round = pricedRound(35, 61, {downQuote: domDown});
+    const env = await liveOnce({read: round.read, ticket: round.ticket, market: book({downAskCents: downAsk})});
+    assertRefused(env, 'PRICE_BELOW_MIN');
+    assert.equal(env.marketReads.length, 1);
+    assert.deepEqual(auditFacts(env), [{schemaVersion: 2, state: 'BLOCKED', reason: 'PRICE_BELOW_MIN',
+      upQuoteCents: 35, downQuoteCents: Number(domDown.slice(0, -1)), marketUpAskCents: 40,
+      marketDownAskCents: downAsk, marketQuoteObservedAt: now}]);
+  }
+});
+
+test('a page change during the order-book read is checked again before the gates and the marker', async () => {
+  for (const [change, reason] of [
+    [(env) => env.ticket.setQuotes('35¢', '72¢'), 'PRICE_ABOVE_MAX'],
+    [(env) => env.ticket.setQuotes('35¢', '62¢'), 'MARKET_QUOTE_MISMATCH'],
+    [(env) => env.ticket.setQuotes('35¢', '59¢'), 'MARKET_QUOTE_MISMATCH'],
+    [(env) => env.ticket.setQuotes('70¢', '35¢'), 'TICKET_CHANGED'],
+    [(env) => env.ticket.setAmount('2'), 'TICKET_CHANGED'],
+    // The core rejects a moved page as a market mismatch, which the watcher reports as READ_FAILED.
+    [(env) => env.setUrl(`https://future.news/zh/event/btc-updown-5m-${start - 300}`), 'READ_FAILED'],
+  ]) {
+    const round = pricedRound(35, 66);
+    let env;
+    env = setup({read: round.read, ticket: round.ticket, market: ({record, time}) => {
+      change(env);
+      return clobQuote(record, time, reason === 'PRICE_ABOVE_MAX' ? {downAskCents: 69} : {});
+    }});
+    env.watcher.start({live: true});
+    await env.watcher.poll();
+    assertRefused(env, reason);
+    assert.equal(env.marketReads.length, 1);
+  }
+  const round = pricedRound(35, 66);
+  let env;
+  env = setup({read: round.read, ticket: round.ticket, market: ({record, time}) => {
+    env.ticket.setQuotes('35¢', '72¢');
+    return clobQuote(record, time, {downAskCents: 69});
+  }});
+  env.watcher.start({live: true});
+  await env.watcher.poll();
+  assert.deepEqual(auditFacts(env), [{schemaVersion: 2, state: 'BLOCKED', reason: 'PRICE_ABOVE_MAX',
+    upQuoteCents: 35, downQuoteCents: 72, marketUpAskCents: 35, marketDownAskCents: 69, marketQuoteObservedAt: now}],
+  'the refusal records the page re-read after the order book, not the earlier check');
+});
+
+test('stop while the order-book read is pending forbids the click', async () => {
+  for (const settle of ['resolve', 'reject']) {
+    const wait = deferred();
+    const entered = deferred();
+    let fail;
+    const env = setup({market: () => {
+      entered.resolve();
+      return new Promise((resolve, reject) => {fail = reject; wait.promise.then(resolve);});
+    }});
+    env.watcher.start({live: true});
+    const poll = env.watcher.poll();
+    await entered.promise;
+    env.watcher.stop();
+    if (settle === 'resolve') wait.resolve(clobQuote(ready().preparation.lastAttempt, now));
+    else fail(new Error('assistant offline'));
+    await poll;
+    assert.equal(env.watcher.status().state, 'STOPPED');
+    assert.equal(env.intervals.size, 0);
+    assert.equal(env.storage.values.size, 0);
+    assert.deepEqual(env.auditStorage.entries(), []);
+    assertUnchangedTicket(env.ticket);
+  }
+});
+
+test('a price move or stale order book after the marker fails the final check, consumed and unclicked', async () => {
+  for (const [change, downQuoteCents, downAskCents] of [
+    [(env) => env.ticket.setQuotes('35¢', '72¢'), 72, 69],
+    [(env) => env.ticket.setQuotes('35¢', '60.99¢'), 60.99, 63.99],
+    [(env) => env.ticket.setQuotes('35¢', '62.5¢'), 62.5, 66],
+    [(env) => env.setTime(now + 2.01), 66, 66],
+  ]) {
+    const round = pricedRound(35, 66);
+    let env;
+    const storage = memoryStorage(new Map(), {afterWrite() {change(env);}});
+    env = setup({read: round.read, ticket: round.ticket, storage, market: book({downAskCents})});
+    env.watcher.start({live: true});
+    await env.watcher.poll();
+    assert.equal(env.watcher.status().state, 'BLOCKED');
+    assert.equal(env.watcher.status().reason, 'FINAL_CHECK_FAILED');
+    assert.equal(JSON.parse(storage.values.get(storageKey)).state, 'CLICK_ATTEMPTED', 'the round stays consumed');
+    assert.throws(() => env.watcher.start({live: true}), /CONSUMED/);
+    assertUnchangedTicket(env.ticket);
+    assert.deepEqual(auditFacts(env), [{schemaVersion: 2, state: 'BLOCKED', reason: 'FINAL_CHECK_FAILED',
+      upQuoteCents: 35, downQuoteCents, marketUpAskCents: 35, marketDownAskCents: downAskCents, marketQuoteObservedAt: now}]);
+  }
+});
+
+test('a dry run reports DRY_RUN_READY only when the price gates pass', async () => {
+  const round = pricedRound(35, 66);
+  for (const [market, reason, downQuote = '66¢'] of [
+    [book({upAskCents: 64, downAskCents: 37}), 'MARKET_QUOTE_MISMATCH'],
+    [book({downAskCents: 72}), 'PRICE_ABOVE_MAX', '69¢'],
+    [book({downAskCents: 59}), 'MARKET_QUOTE_MISMATCH'],
+    [book({observedAt: now - 3}), 'MARKET_QUOTE_UNAVAILABLE'],
+    [() => Promise.reject(new Error('assistant offline')), 'MARKET_QUOTE_UNAVAILABLE'],
+  ]) {
+    const env = setup({read: round.read, ticket: ticketFixture({side: 'Down', upQuote: '35¢', downQuote}), market});
+    env.watcher.start();
+    await env.watcher.poll();
+    assertRefused(env, reason);
+    assert.equal(env.marketReads.length, 1);
+    assert.deepEqual(env.auditStorage.entries(), []);
+  }
+  const env = setup({read: round.read, ticket: ticketFixture({side: 'Down', upQuote: '35¢', downQuote: '66¢'})});
+  env.watcher.start();
+  await env.watcher.poll();
+  assert.equal(env.watcher.status().state, 'DRY_RUN_READY');
+  assert.equal(env.marketReads.length, 1);
+  assertUnchangedTicket(env.ticket);
+});
+
+test('every audit is schema 2 and carries the CLOB asks only once a valid order book was read', async () => {
+  const changed = await liveOnce({ticket: ticketFixture({buyDisabled: true})});
+  assert.equal(changed.marketReads.length, 0);
+  assert.deepEqual(auditFacts(changed), [{schemaVersion: 2, state: 'BLOCKED', reason: 'TICKET_CHANGED',
+    upQuoteCents: null, downQuoteCents: null, marketUpAskCents: null, marketDownAskCents: null, marketQuoteObservedAt: null}]);
+  const consumed = await liveOnce({storage: memoryStorage(new Map([[storageKey, JSON.stringify({schemaVersion: 1,
+    periodStart: start, id: `future-btc5m-prepare:${start}`, side: 'Down', amountUsd: 1, state: 'CLICK_ATTEMPTED'})]]))});
+  assert.deepEqual(auditFacts(consumed), [{schemaVersion: 2, state: 'BLOCKED', reason: 'ALREADY_CONSUMED',
+    upQuoteCents: null, downQuoteCents: null, marketUpAskCents: 13, marketDownAskCents: 88, marketQuoteObservedAt: now}]);
+  const clicked = await liveOnce({market: book({downAskCents: 89.5, observedAt: now - 1.25})});
+  assertClicked(clicked);
+  assert.deepEqual(auditFacts(clicked), [{schemaVersion: 2, state: 'CLICK_ATTEMPTED', reason: 'PLATFORM_RESULT_UNKNOWN',
+    upQuoteCents: 12, downQuoteCents: 88, marketUpAskCents: 13, marketDownAskCents: 89.5, marketQuoteObservedAt: now - 1.25}]);
+});
+
+test('the auto buyer re-arms after a price-gate refusal and never retries that round', async () => {
+  for (const [quotes, market, reason] of [
+    [[35, 66], book({upAskCents: 64, downAskCents: 37}), 'MARKET_QUOTE_MISMATCH'],
+    [[45, 56], book({}), 'PRICE_BELOW_MIN'],
+  ]) {
+    const round = pricedRound(...quotes);
+    const env = setupAuto({ticket: round.ticket, market});
+    env.buyer.sync(true);
+    env.setTime(now);
+    env.setRead(round.read);
+    await env.tick();
+    assert.equal(env.buyer.status().state, 'PAUSED');
+    assert.equal(env.buyer.status().last.state, 'BLOCKED');
+    assert.equal(env.buyer.status().last.reason, reason);
+    const marketReads = env.marketReads.length;
+    assertUnchangedTicket(env.ticket);
+
+    // Re-armed: the refused READY predates arming, so even a consistent book never retries it.
+    env.setMarket(book({}));
+    env.setTime(now + 1);
+    assert.equal(env.buyer.sync(true).state, 'WATCHING');
+    await env.tick();
+    await env.tick();
+    assert.equal(env.buyer.sync(true).state, 'WATCHING');
+    assert.equal(env.marketReads.length, marketReads);
+    assert.equal(env.storage.values.size, 0);
+    assertUnchangedTicket(env.ticket);
+
+    const next = start + 300;
+    env.setTime(next + 65);
+    env.setUrl(`https://future.news/zh/event/btc-updown-5m-${next}`);
+    env.ticket.setTitle('Bitcoin Up or Down - October 10, 12:50PM-12:55PM ET');
+    env.ticket.setQuotes('12¢', '88¢');
+    env.setRead(() => ready(next + 65, 'Down', next));
+    await env.tick();
+    assert.equal(env.buyer.sync(true).last.state, 'CLICK_ATTEMPTED');
+    assert.equal(JSON.parse(env.storage.values.get(storageKey)).periodStart, next);
+    assertUnchangedTicket(env.ticket, 1);
+  }
+});
+
+test('the default order-book read sends a bare typed worker message and fails closed', async () => {
+  const sent = [];
+  let reply = null;
+  const chrome = {runtime: {lastError: undefined, sendMessage(message, callback) {
+    sent.push(message);
+    const [lastError, value] = reply;
+    chrome.runtime.lastError = lastError;
+    callback(value);
+    chrome.runtime.lastError = undefined;
+  }}};
+  const isolated = vm.createContext({URL, Event, chrome});
+  vm.runInContext(source, isolated);
+  const snapshot = clobQuote(ready().preparation.lastAttempt, now);
+  for (const [answer, expected, detail] of [
+    [[undefined, {ok: true, status: snapshot}], 'DRY_RUN_READY', null],
+    [[{message: 'Receiving end does not exist.'}, {ok: true, status: snapshot, errorCode: 'HTTP_SOURCE_TIMEOUT'}],
+      'MARKET_QUOTE_UNAVAILABLE', 'MARKET_QUOTE_UNAVAILABLE'],
+    [[undefined, {ok: false, error: '本地盘口服务未确认'}], 'MARKET_QUOTE_UNAVAILABLE', 'MARKET_QUOTE_UNAVAILABLE'],
+    [[undefined, {ok: false, errorCode: 'HTTP_SOURCE_TIMEOUT'}], 'MARKET_QUOTE_UNAVAILABLE', 'HTTP_SOURCE_TIMEOUT'],
+    [[undefined, {ok: false, errorCode: 'private network detail'}], 'MARKET_QUOTE_UNAVAILABLE', 'MARKET_QUOTE_UNAVAILABLE'],
+    [[undefined, {ok: true}], 'MARKET_QUOTE_UNAVAILABLE', 'MARKET_QUOTE_UNAVAILABLE'],
+    [[undefined, undefined], 'MARKET_QUOTE_UNAVAILABLE', 'MARKET_QUOTE_UNAVAILABLE'],
+  ]) {
+    reply = answer;
+    const ticket = ticketFixture();
+    const watcher = isolated.FutureBtc5mBuyOnce.createWatcher({core, document: ticket.doc, readUrl: () => marketUrl,
+      readPreparation: async () => ready(), nowFn: () => now, setIntervalFn: () => 1, clearIntervalFn() {}});
+    watcher.start();
+    await watcher.poll();
+    assert.equal(watcher.status().state, expected === 'DRY_RUN_READY' ? expected : 'BLOCKED');
+    if (expected !== 'DRY_RUN_READY') assert.equal(watcher.status().reason, expected);
+    assert.equal(watcher.status().detail, detail);
+    assertUnchangedTicket(ticket);
+  }
+  assert.deepEqual(sent.map(clone), Array(7).fill({type: 'FUTURE_BTC5M_MARKET_QUOTE'}));
+});
+
+test('a switch-off or STOP during the order-book read refuses before the round is marked', async () => {
+  const env = setup({read: (n) => {
+    const value = ready();
+    if (n >= 3) value.preparation = {...value.preparation, enabled: false, state: 'DISABLED'};
+    return value;
+  }});
+  env.watcher.start({live: true});
+  await env.watcher.poll();
+  assert.equal(env.watcher.status().state, 'BLOCKED');
+  assert.equal(env.watcher.status().reason, 'READY_CHANGED');
+  assert.equal(env.marketReads.length, 1);
+  assert.equal(env.storage.values.size, 0, 'the round is not consumed');
+  assertUnchangedTicket(env.ticket);
+});
+
+test('a READY that ages out of its 5 s sample window during the order-book read is refused unmarked', async () => {
+  let env;
+  env = setup({read: (n) => {
+    if (n === 3) env.setTime(now + 5.01);
+    return ready();
+  }});
+  env.watcher.start({live: true});
+  await env.watcher.poll();
+  assert.equal(env.watcher.status().reason, 'READY_CHANGED');
+  assert.equal(env.storage.values.size, 0);
+  assertUnchangedTicket(env.ticket);
+});
+
+test('an absolute 97¢ ceiling refuses near-certain favorites whatever the READY price', async () => {
+  const high = (cents) => () => {
+    const value = ready();
+    Object.assign(value.preparation.lastAttempt, {downQuoteCents: cents, upQuoteCents: 100 - cents + 1});
+    return value;
+  };
+  const early = setup({read: high(98), ticket: ticketFixture({upQuote: '3¢', downQuote: '98¢'})});
+  early.watcher.start({live: true});
+  await early.watcher.poll();
+  assert.equal(early.watcher.status().reason, 'PRICE_ABOVE_MAX');
+  assert.equal(early.marketReads.length, 0, 'no order-book read above the ceiling');
+  assertUnchangedTicket(early.ticket);
+  for (const [dom, ask] of [['97.5¢', 96], ['96¢', 97.5]]) {
+    const env = setup({read: high(96), ticket: ticketFixture({upQuote: '5¢', downQuote: dom}),
+      market: ({record, time}) => ({...clobQuote(record, time), downAskCents: ask})});
+    env.watcher.start({live: true});
+    await env.watcher.poll();
+    assert.equal(env.watcher.status().reason, 'PRICE_ABOVE_MAX', `${dom} / ${ask}`);
+    assertUnchangedTicket(env.ticket);
+  }
+  const ok = setup({read: high(97), ticket: ticketFixture({upQuote: '4¢', downQuote: '97¢'})});
+  ok.watcher.start({live: true});
+  await ok.watcher.poll();
+  assert.equal(ok.watcher.status().state, 'CLICK_ATTEMPTED', 'exactly 97¢ is allowed');
 });

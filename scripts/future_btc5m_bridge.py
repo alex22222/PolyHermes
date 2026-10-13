@@ -35,9 +35,12 @@ PREPARATION_FAILURES = {"PREPARATION_FAILED", "MARKET_MISMATCH", "TICKET_CHANGED
 BUY_AUDIT_FIELDS = {"schemaVersion", "auditId", "id", "claimToken", "periodStart", "side", "amountUsd", "state",
                     "reason", "armedAt", "attemptedAt", "marketUrl", "upQuoteCents", "downQuoteCents",
                     "selectedSide", "ticketAmountUsd", "extensionVersion"}
+# Schema 2 adds the independent Polymarket CLOB asks the price gates compared, or nulls when none was read.
+BUY_AUDIT_V2_FIELDS = BUY_AUDIT_FIELDS | {"marketUpAskCents", "marketDownAskCents", "marketQuoteObservedAt"}
 BUY_AUDIT_REASONS = {"CLICK_ATTEMPTED": {"PLATFORM_RESULT_UNKNOWN", "CLICK_THROWN_RESULT_UNKNOWN"},
                      "BLOCKED": {"TICKET_CHANGED", "BUY_BUTTON_UNSAFE", "READY_CHANGED", "STORAGE_FAILED",
-                                 "FINAL_CHECK_FAILED", "ALREADY_CONSUMED"}}
+                                 "FINAL_CHECK_FAILED", "ALREADY_CONSUMED", "PRICE_BELOW_MIN",
+                                 "MARKET_QUOTE_UNAVAILABLE", "MARKET_QUOTE_MISMATCH", "PRICE_ABOVE_MAX"}}
 
 
 class PreparationConflict(ValueError):
@@ -140,7 +143,8 @@ class FutureBridge:
                 with buy_audit_ledger.open(encoding="utf-8") as stream:
                     for line in stream:
                         record = json.loads(line, object_pairs_hook=strict_json_object)
-                        if (not line.endswith("\n") or type(record) is not dict or set(record) != BUY_AUDIT_FIELDS | {"receivedAt"}
+                        fields = self._buy_audit_fields(record)
+                        if (not line.endswith("\n") or fields is None or set(record) != fields | {"receivedAt"}
                                 or not self._valid_buy_audit(record) or not finite_number(record["receivedAt"])
                                 or record["auditId"] in self.buy_audits):
                             raise ValueError("Invalid buy audit ledger")
@@ -423,11 +427,17 @@ class FutureBridge:
                                     "reason": payload["reason"], "receipt": receipt})
             return self.preparation()
 
+    @staticmethod
+    def _buy_audit_fields(value):
+        # The exact key set for the audit's own schema version, or None for anything else.
+        version = value.get("schemaVersion") if type(value) is dict else None
+        return {1: BUY_AUDIT_FIELDS, 2: BUY_AUDIT_V2_FIELDS}.get(version) if type(version) is int else None
+
     @classmethod
     def _valid_buy_audit(cls, value):
         start = value.get("periodStart")
         quote_ok = lambda quote: quote is None or valid_button_quote(quote)
-        return (type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+        return (type(value["schemaVersion"]) is int and value["schemaVersion"] in (1, 2)
                 and type(start) is int and start >= 0 and start % 300 == 0
                 and value["id"] == f"future-btc5m-prepare:{start}"
                 and isinstance(value["claimToken"], str) and re.fullmatch(r"[0-9a-f]{32}", value["claimToken"]) is not None
@@ -441,10 +451,14 @@ class FutureBridge:
                 and value["selectedSide"] in (None, "Up", "Down")
                 and (value["ticketAmountUsd"] is None or finite_number(value["ticketAmountUsd"]) and value["ticketAmountUsd"] >= 0)
                 and isinstance(value["extensionVersion"], str)
-                and re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", value["extensionVersion"]) is not None)
+                and re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", value["extensionVersion"]) is not None
+                and (value["schemaVersion"] == 1
+                     or quote_ok(value["marketUpAskCents"]) and quote_ok(value["marketDownAskCents"])
+                     and (value["marketQuoteObservedAt"] is None or finite_number(value["marketQuoteObservedAt"]))))
 
     def report_buy_attempt(self, payload):
-        if type(payload) is not dict or set(payload) != BUY_AUDIT_FIELDS or not self._valid_buy_audit(payload):
+        fields = self._buy_audit_fields(payload)
+        if fields is None or set(payload) != fields or not self._valid_buy_audit(payload):
             raise ValueError("INVALID_BUY_AUDIT")
         with self.lock:
             if self.buy_audit_error:
@@ -452,7 +466,8 @@ class FutureBridge:
             previous = self.buy_audits.get(payload["auditId"])
             if previous is not None:
                 # The extension outbox resends until acknowledged; an identical resend is a no-op.
-                if {field: previous[field] for field in BUY_AUDIT_FIELDS} != payload:
+                # A resend under another schema version has another field set and is a reuse.
+                if {field: value for field, value in previous.items() if field != "receivedAt"} != payload:
                     raise PreparationConflict("BUY_AUDIT_ID_REUSED")
                 return {"bridgeId": BRIDGE_ID, "auditId": payload["auditId"], "stored": True, "duplicate": True}
             record = self.preparations.get(payload["id"])

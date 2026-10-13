@@ -12,6 +12,7 @@ import math
 import os
 import re
 import ssl
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -23,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 import websockets
 from future_btc5m_bridge import FutureBridge, PreparationConflict, strict_json_object
+from future_btc5m_runtime import start_runtime_server
 
 
 STATE_DIR = Path(__file__).resolve().parents[1] / "reports/future-btc5m-assistant"
@@ -30,7 +32,18 @@ GAMMA = "https://gamma-api.polymarket.com/events"
 CRYPTO_PRICE = "https://polymarket.com/api/crypto/crypto-price"
 GEOBLOCK = "https://polymarket.com/api/geoblock"
 RTDS = "wss://ws-live-data.polymarket.com"
+CLOB_BOOKS = "https://clob.polymarket.com/books"
+# Read or change whether rounds outside the US-Eastern weekend are traded (extension panel).
+SCHEDULE_PATH = "/bridge/preparation/schedule"
 LOCAL_ADDRESS = ("127.0.0.1", 8766)
+MARKET_QUOTE_PATH = "/bridge/preparation/market-quote"
+MARKET_QUOTE_FIELDS = {"schemaVersion", "source", "periodStart", "slug", "upAskCents", "downAskCents",
+                       "upBidCents", "downBidCents", "observedAt", "serverTime"}
+MARKET_QUOTE_ERRORS = {"HTTP_SOURCE_TIMEOUT", "HTTP_SOURCE_UNAVAILABLE", "INVALID_MARKET_QUOTE",
+                       "CLOB_BOOKS_MISMATCH", "CLOB_BOOK_TIME_INVALID", "ROUND_CHANGED_DURING_READ",
+                       "INVALID_BOOK", "INVALID_BOOK_LEVEL", "WRONG_MARKET_PRICE_CONFIG", "MARKET_NOT_UNIQUE",
+                       "WRONG_OR_INACTIVE_EVENT", "WRONG_OR_INACTIVE_MARKET", "WRONG_MARKET_PERIOD",
+                       "INVALID_OUTCOME_TOKENS"}
 
 
 def iso(timestamp):
@@ -197,6 +210,190 @@ class ChainlinkFeed:
                 await asyncio.sleep(2)
 
 
+def book_number(value):
+    # CLOB levels carry decimal strings; numbers are accepted, booleans and other types are not.
+    if type(value) not in (int, float, str):
+        raise ValueError("INVALID_BOOK_LEVEL")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("INVALID_BOOK_LEVEL")
+    return number
+
+
+def best_book_cents(levels, best):
+    """Best price in cents over levels with size, or None for an empty side. Never assumes order."""
+    if not isinstance(levels, list):
+        raise ValueError("INVALID_BOOK")
+    prices = []
+    for level in levels:
+        if not isinstance(level, dict):
+            raise ValueError("INVALID_BOOK_LEVEL")
+        price, size = book_number(level.get("price")), book_number(level.get("size"))
+        if not 0 < price < 1 or size < 0:
+            raise ValueError("INVALID_BOOK_LEVEL")
+        if size > 0:
+            prices.append(price)
+    return round(best(prices) * 100, 2) if prices else None
+
+
+def fill_ask_cents(levels, notional=1.0):
+    """Price in cents of the ask level that completes a buy of `notional` USD, walking asks from
+    the cheapest; None when the side cannot fill it. A dust level never sets the price."""
+    if not isinstance(levels, list):
+        raise ValueError("INVALID_BOOK")
+    asks = []
+    for level in levels:
+        if not isinstance(level, dict):
+            raise ValueError("INVALID_BOOK_LEVEL")
+        price, size = book_number(level.get("price")), book_number(level.get("size"))
+        if not 0 < price < 1 or size < 0:
+            raise ValueError("INVALID_BOOK_LEVEL")
+        if size > 0:
+            asks.append((price, size))
+    spent = 0.0
+    for price, size in sorted(asks):
+        spent += price * size
+        if spent >= notional - 1e-9:
+            return round(price * 100, 2)
+    return None
+
+
+class ClobMarketQuotes:
+    """Read-only Polymarket CLOB book snapshot for the extension's pre-click price check.
+
+    It never places orders. Any source or shape failure raises, and the route answers 503.
+    Network reads run outside the lock; the lock only guards the cached tokens and snapshot.
+    """
+
+    def __init__(self, fetch_json, now_fn=time.time, ttl=0.8):
+        self.fetch_json = fetch_json
+        self.now_fn = now_fn
+        # A reply is served from a snapshot received at most ttl seconds ago.
+        self.ttl = ttl
+        self.lock = threading.Lock()
+        self.read_lock = threading.Lock()
+        self.tokens = None
+        self.snapshot = None  # (received_at, snapshot)
+        self.warming = False
+        self.warm_attempted_at = -math.inf
+        self.refreshing = False
+
+    def _round_tokens(self, start):
+        with self.lock:
+            if self.tokens and self.tokens[0] == start:
+                return self.tokens[1]
+        # Gamma takes ~0.8 s through the operator proxy, so it is validated early by warm().
+        market = validate_market(self.fetch_json(f"{GAMMA}?slug=btc-updown-5m-{start}"), start)
+        with self.lock:
+            if round_start(self.now_fn()) == start:
+                self.tokens = (start, market["tokens"])
+        return market["tokens"]
+
+    def prefetch_tokens(self):
+        self._round_tokens(round_start(self.now_fn()))
+
+    def warm(self):
+        """Called from the main loop: prefetch the round's tokens (a failure retries after 10 s)
+        and, inside +55..+80 s, keep refreshing the books so the pre-click read is served from
+        a snapshot instead of waiting ~1 s for the CLOB."""
+        now = self.now_fn()
+        start = round_start(now)
+        started = False
+        if not (self.tokens and self.tokens[0] == start) and not self.warming and now - self.warm_attempted_at >= 10:
+            self.warming = True
+            self.warm_attempted_at = now
+            threading.Thread(target=self._background, args=("warming", self.prefetch_tokens), daemon=True).start()
+            started = True
+        if start + 55 <= now < start + 80 and self.tokens and self.tokens[0] == start and not self.refreshing:
+            self.refreshing = True
+            threading.Thread(target=self._background, args=("refreshing", lambda: self._read(start)), daemon=True).start()
+            started = True
+        return started
+
+    def _background(self, flag, task):
+        try:
+            task()
+        except Exception:
+            pass  # quote() reads again and fails closed with 503.
+        finally:
+            setattr(self, flag, False)
+
+    def quote(self):
+        now = self.now_fn()
+        start = round_start(now)
+        with self.lock:
+            cached = self.snapshot
+        if cached and cached[1]["periodStart"] == start and 0 <= now - cached[0] <= self.ttl:
+            snapshot = cached[1]
+        else:
+            snapshot = self._read(start)
+        replied = self.now_fn()
+        if round_start(replied) != start:
+            raise ValueError("ROUND_CHANGED_DURING_READ")
+        return {**snapshot, "serverTime": replied}
+
+    def _read(self, start):
+        # Reuse a background refresh already in flight instead of starting a second slow read.
+        with self.read_lock:
+            now = self.now_fn()
+            if round_start(now) != start:
+                raise ValueError("ROUND_CHANGED_DURING_READ")
+            with self.lock:
+                cached = self.snapshot
+            if cached and cached[1]["periodStart"] == start and 0 <= now - cached[0] <= self.ttl:
+                return cached[1]
+            return self._fetch_snapshot(start)
+
+    def _fetch_snapshot(self, start):
+        tokens = self._round_tokens(start)
+        up, down = tokens["Up"], tokens["Down"]
+        books = self.fetch_json(CLOB_BOOKS, [{"token_id": up}, {"token_id": down}])
+        received = self.now_fn()
+        if (not isinstance(books, list) or len(books) != 2 or any(not isinstance(book, dict) for book in books)
+                or {book.get("asset_id") for book in books} != {up, down}):
+            raise ValueError("CLOB_BOOKS_MISMATCH")
+        if round_start(received) != start:
+            raise ValueError("ROUND_CHANGED_DURING_READ")
+        # The book's own server timestamp (epoch ms) is its age; the extension's 2 s age gate
+        # then bounds the market data, not the local transit.
+        stamps = [book_number(book.get("timestamp")) / 1000 for book in books]
+        observed = min(stamps)
+        if observed > received + 1:
+            raise ValueError("CLOB_BOOK_TIME_INVALID")
+        by_token = {book["asset_id"]: book for book in books}
+        snapshot = {
+            "schemaVersion": 1, "source": "polymarket_clob_book", "periodStart": start,
+            "slug": f"btc-updown-5m-{start}",
+            "upAskCents": fill_ask_cents(by_token[up].get("asks")),
+            "downAskCents": fill_ask_cents(by_token[down].get("asks")),
+            "upBidCents": best_book_cents(by_token[up].get("bids"), max),
+            "downBidCents": best_book_cents(by_token[down].get("bids"), max),
+            "observedAt": observed,
+        }
+        with self.lock:
+            if not self.snapshot or self.snapshot[0] <= received:
+                self.snapshot = (received, snapshot)
+        return snapshot
+
+
+def curl_json(url, body=None):
+    """Synchronous JSON read for the market-quote route; a JSON body makes it a POST."""
+    # Same route as the async get_json: inherit the configured proxy, never disable TLS.
+    command = ["curl", "--fail", "--silent", "--show-error", "--max-time", "4",
+               "--max-filesize", "1000000", "--user-agent", "PolyHermes-BTC5m-Assistant/1.0",
+               "--header", "Accept: application/json"]
+    if body is not None:
+        command += ["--header", "Content-Type: application/json",
+                    "--data-binary", json.dumps(body, separators=(",", ":"), allow_nan=False)]
+    try:
+        process = subprocess.run(command + ["--url", url], capture_output=True, timeout=5, check=False)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("HTTP_SOURCE_TIMEOUT") from None
+    if process.returncode:
+        raise RuntimeError("HTTP_SOURCE_TIMEOUT" if process.returncode == 28 else "HTTP_SOURCE_UNAVAILABLE")
+    return json.loads(process.stdout)
+
+
 def future_eligibility():
     """Amount-preparation eligibility remains unknown until an official source is verified."""
     return {"status": "UNKNOWN", "venue": "future.news", "operation": "PREPARE_USD_BUY_AMOUNT",
@@ -243,10 +440,23 @@ class Assistant:
         self.lock = threading.RLock()
         self.state = empty_status(self.boot_time)
         self.seen = set()
+        # Every start is weekend-only again, as every start turns the auto-ticket switch off.
+        self.weekend_only = True
         ledger = self.state_dir / "rounds.jsonl"
         if ledger.exists():
             for line in ledger.read_text(encoding="utf-8").splitlines():
                 self.seen.add(json.loads(line)["period_start"])
+
+    def schedule(self):
+        with self.lock:
+            return {"weekendOnly": self.weekend_only}
+
+    def set_schedule(self, weekend_only):
+        if type(weekend_only) is not bool:
+            raise ValueError("WEEKEND_ONLY_MUST_BE_BOOLEAN")
+        with self.lock:
+            self.weekend_only = weekend_only
+        return self.schedule()
 
     def status(self):
         with self.lock:
@@ -310,7 +520,7 @@ class Assistant:
                 return self.status()
             self.state = empty_status(now)
             self.state["period_start"] = start
-            if not is_et_weekend(start):
+            if self.weekend_only and not is_et_weekend(start):
                 self.state.update(status="SKIPPED", reason="NOT_ET_WEEKEND")
                 return self.status()
             if now < start + 60:
@@ -381,7 +591,7 @@ class Assistant:
         return self.status()
 
 
-def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
+def make_server(assistant, address=LOCAL_ADDRESS, bridge=None, market_quote=None):
     if address[0] != "127.0.0.1":
         raise ValueError("ASSISTANT_REQUIRES_LOOPBACK")
 
@@ -392,9 +602,9 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
                 return False
             return True
 
-        def reply(self, value):
+        def reply(self, value, status=200):
             body = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
-            self.send_response(200)
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
@@ -414,16 +624,38 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
                 return False
             return True
 
+        def reply_market_quote(self):
+            # Same access as the preparation read; the extension compares it before its Buy click.
+            if not self.preparation_access():
+                return
+            if self.path != MARKET_QUOTE_PATH or self.headers.get("Content-Length", "0") != "0":
+                self.send_error(400)
+                return
+            try:
+                value = market_quote()
+                if type(value) is not dict or set(value) != MARKET_QUOTE_FIELDS:
+                    raise ValueError("INVALID_MARKET_QUOTE")
+                json.dumps(value, allow_nan=False)
+            except Exception as error:
+                # Any source, shape or timeout failure: the extension must not click.
+                code = str(error) if str(error) in MARKET_QUOTE_ERRORS else "INVALID_MARKET_QUOTE"
+                self.reply({"errorCode": code}, status=503)
+                return
+            self.reply(value)
+
         def do_GET(self):
             if not self.valid_host():
                 return
             if self.path in ("/status", "/draft"):
                 self.reply(assistant.status())
                 return
+            url = urllib.parse.urlsplit(self.path)
+            if market_quote is not None and url.path == MARKET_QUOTE_PATH:
+                self.reply_market_quote()
+                return
             if bridge is None:
                 self.send_error(404)
                 return
-            url = urllib.parse.urlsplit(self.path)
             try:
                 if url.path == "/bridge/status" and not url.query:
                     self.reply(bridge.status())
@@ -433,6 +665,12 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
                     if self.headers.get("Content-Length", "0") != "0":
                         raise ValueError("GET_BODY_NOT_ALLOWED")
                     self.reply(bridge.preparation())
+                elif self.path == SCHEDULE_PATH:
+                    if not self.preparation_access():
+                        return
+                    if self.headers.get("Content-Length", "0") != "0":
+                        raise ValueError("GET_BODY_NOT_ALLOWED")
+                    self.reply(assistant.schedule())
                 elif url.path == "/bridge/orders":
                     params = urllib.parse.parse_qs(url.query, keep_blank_values=True)
                     if set(params) - {"page", "size", "status"} or any(len(values) != 1 for values in params.values()):
@@ -460,7 +698,8 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
                 return
             if not self.valid_host():
                 return
-            preparation = self.path in ("/bridge/preparation/claim", "/bridge/preparation/ack", "/bridge/preparation/buy-audit")
+            preparation = self.path in ("/bridge/preparation/claim", "/bridge/preparation/ack", "/bridge/preparation/buy-audit",
+                                        SCHEDULE_PATH)
             if self.path not in ("/bridge/control", "/bridge/preflight") and not preparation:
                 self.send_error(404)
                 return
@@ -498,6 +737,10 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None):
                     self.reply(bridge.report_preparation(payload))
                 elif self.path == "/bridge/preparation/buy-audit":
                     self.reply(bridge.report_buy_attempt(payload))
+                elif self.path == SCHEDULE_PATH:
+                    if type(payload) is not dict or set(payload) != {"weekendOnly"}:
+                        raise ValueError("WEEKEND_ONLY_MUST_BE_BOOLEAN")
+                    self.reply(assistant.set_schedule(payload["weekendOnly"]))
                 elif preflight:
                     self.reply(bridge.report_preflight(payload))
                 else:
@@ -537,6 +780,7 @@ async def run(args):
 
     feed_task = asyncio.create_task(feed.run(single_attempt=args.once))
     server = None
+    runtime_server = None
     try:
         if args.once:
             # A bounded, read-only probe. No daemon and no persisted round claim.
@@ -548,10 +792,13 @@ async def run(args):
             print(json.dumps(snapshot, ensure_ascii=False))
             return
         bridge = FutureBridge(args.state_dir / "bridge", assistant.status)
-        server = make_server(assistant, bridge=bridge)
+        market_quotes = ClobMarketQuotes(curl_json)
+        server = make_server(assistant, bridge=bridge, market_quote=market_quotes.quote)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        runtime_server = await start_runtime_server()
         print("ASSIST_ONLY http://127.0.0.1:8766/status; no order submission. STOP: " + str(args.state_dir / "STOP"), flush=True)
         while True:
+            market_quotes.warm()
             await assistant.poll(get_json)
             assistant.state["feed_reason"] = feed.error
             assistant.save_state()
@@ -560,6 +807,9 @@ async def run(args):
     finally:
         feed_task.cancel()
         await asyncio.gather(feed_task, return_exceptions=True)
+        if runtime_server:
+            runtime_server.close()
+            await runtime_server.wait_closed()
         if server:
             server.shutdown()
             server.server_close()

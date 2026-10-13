@@ -75,6 +75,22 @@ class BacktestExportTest(unittest.TestCase):
         again = build_rows(self.path, lambda slug: self.fail("resolved rounds come from the cache") if slug in cached else None)
         self.assertEqual("Up", {row["periodStart"]: row for row in again}[START]["resolvedOutcome"])
 
+    def test_mixed_schema1_and_schema2_audits_with_price_gate_reasons_export(self):
+        self.write("preparations.jsonl", [
+            preparation(START, "PENDING"), preparation(START, "CLAIMED"), preparation(START, "READY"),
+            preparation(START + 300, "PENDING"), preparation(START + 300, "CLAIMED"), preparation(START + 300, "READY"),
+        ])
+        v2 = lambda start, state="CLICK_ATTEMPTED", reason="PLATFORM_RESULT_UNKNOWN": {
+            **audit(start, state, reason), "schemaVersion": 2, "extensionVersion": "0.5.0",
+            "marketUpAskCents": 46, "marketDownAskCents": 57, "marketQuoteObservedAt": start + 62.2}
+        self.write("buy_attempts.jsonl", [{**audit(START, "BLOCKED", "FINAL_CHECK_FAILED", START + 62.1), "schemaVersion": 1},
+                                          v2(START), v2(START + 300, "BLOCKED", "PRICE_BELOW_MIN")])
+        by_start = {row["periodStart"]: row for row in build_rows(self.path, None)}
+        self.assertEqual(("CLICK_ATTEMPTED", "PLATFORM_RESULT_UNKNOWN", 1, "0.5.0"),
+                         tuple(by_start[START][key] for key in ("buyState", "buyReason", "buyAttempts", "extensionVersion")))
+        self.assertEqual(("BLOCKED", "PRICE_BELOW_MIN", 0), tuple(by_start[START + 300][key] for key in (
+            "buyState", "buyReason", "buyAttempts")))
+
     def test_cli_writes_csv_and_jsonl_and_can_skip_network(self):
         self.write("preparations.jsonl", [preparation(START, "PENDING"), preparation(START, "CLAIMED"),
                                           preparation(START, "READY")])

@@ -9,22 +9,35 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from future_btc5m_assistant import make_server
+from future_btc5m_assistant import ClobMarketQuotes, MARKET_QUOTE_FIELDS, make_server
 from future_btc5m_bridge import FutureBridge
+from test_future_btc5m_assistant import START as ROUND, FakeClob
 from test_future_btc5m_bridge import START, browser_report, source
 
 
 class Source:
+    weekend_only = True
+
     def status(self):
         return {"mode": "ASSIST_ONLY", "status": "WAITING", "feed_status": "CURRENT"}
+
+    def schedule(self):
+        return {"weekendOnly": self.weekend_only}
+
+    def set_schedule(self, value):
+        if type(value) is not bool:
+            raise ValueError("WEEKEND_ONLY_MUST_BE_BOOLEAN")
+        self.weekend_only = value
+        return self.schedule()
 
 
 class FutureBridgeHttpTest(unittest.TestCase):
     def setUp(self):
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.bridge = FutureBridge(Path(directory.name), Source().status)
-        self.server = make_server(Source(), ("127.0.0.1", 0), bridge=self.bridge)
+        self.source = Source()
+        self.bridge = FutureBridge(Path(directory.name), self.source.status)
+        self.server = make_server(self.source, ("127.0.0.1", 0), bridge=self.bridge)
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(self.server.server_close)
@@ -42,6 +55,25 @@ class FutureBridgeHttpTest(unittest.TestCase):
                 return error.code, None, dict(error.headers)
             finally:
                 error.close()
+
+    def test_extension_reads_and_sets_weekend_only_with_the_preparation_header(self):
+        path = "/bridge/preparation/schedule"
+        headers = {"X-PolyHermes-Future-Preparation": "1"}
+        self.assertEqual((200, {"weekendOnly": True}), self.request(path, headers=headers)[:2])
+        json_headers = {**headers, "Content-Type": "application/json",
+                        "Origin": "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+        status, body, _ = self.request(path, json.dumps({"weekendOnly": False}).encode(), json_headers)
+        self.assertEqual((200, {"weekendOnly": False}), (status, body))
+        self.assertFalse(self.source.weekend_only)
+        for payload in ({"weekendOnly": "false"}, {"weekendOnly": 0}, {}, {"weekendOnly": False, "x": 1}, []):
+            with self.subTest(payload=payload):
+                self.assertEqual(400, self.request(path, json.dumps(payload).encode(), json_headers)[0])
+        self.assertEqual(403, self.request(path, json.dumps({"weekendOnly": True}).encode(),
+                                           {"Content-Type": "application/json"})[0])
+        self.assertEqual(403, self.request(path, json.dumps({"weekendOnly": True}).encode(),
+                                           {**json_headers, "Origin": "https://future.news"})[0])
+        self.assertEqual(403, self.request(path)[0])
+        self.assertFalse(self.source.weekend_only, "refused requests change nothing")
 
     def control(self, payload, **headers):
         return self.request("/bridge/control", json.dumps(payload).encode(), {
@@ -279,6 +311,131 @@ class FutureBridgeHttpTest(unittest.TestCase):
         self.assertIsNone(status["preflight"]["preferredSide"])
         self.assertIsNone(status["preflight"]["selectionSource"])
         self.assertIn("BUTTON_QUOTES_UNAVAILABLE", status["preflight"]["reasons"])
+
+
+class FutureMarketQuoteHttpTest(unittest.TestCase):
+    path = "/bridge/preparation/market-quote"
+
+    def setUp(self):
+        self.clock = ROUND + 61.5  # FakeClob stamps book server times with this clock
+        self.clob = FakeClob(self)
+        self.quotes = ClobMarketQuotes(self.clob, lambda: self.clock)
+        self.calls = []
+
+        def market_quote():
+            self.calls.append(1)
+            return self.quotes.quote()
+
+        self.market_quote = market_quote
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def serve(self, bridge=None, market_quote=None):
+        server = make_server(Source(), ("127.0.0.1", 0), bridge, market_quote)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def get(self, url, path=None, body=None, method=None, **headers):
+        request = urllib.request.Request(url + (path or self.path), data=body, method=method, headers={
+            "X-PolyHermes-Future-Preparation": "1", **headers})
+        try:
+            with self.opener.open(request, timeout=2) as response:
+                return response.status, json.loads(response.read()), dict(response.headers)
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code, None, dict(error.headers)
+            finally:
+                error.close()
+
+    def test_extension_reads_exact_clob_quote_without_the_bridge(self):
+        url = self.serve(market_quote=self.market_quote)
+        for headers in ({}, {"Origin": "chrome-extension://" + "a" * 32}):
+            with self.subTest(headers=headers):
+                code, quote, response_headers = self.get(url, **headers)
+                self.assertEqual(200, code)
+                self.assertEqual(MARKET_QUOTE_FIELDS, set(quote))
+                self.assertEqual((1, "polymarket_clob_book", ROUND, f"btc-updown-5m-{ROUND}", 60, 45, 55, 43),
+                                 tuple(quote[key] for key in ("schemaVersion", "source", "periodStart", "slug",
+                                                              "upAskCents", "downAskCents", "upBidCents", "downBidCents")))
+                self.assertEqual((ROUND + 61.5, ROUND + 61.5), (quote["observedAt"], quote["serverTime"]))
+                self.assertEqual("no-store", response_headers["Cache-Control"])
+                self.assertNotIn("Access-Control-Allow-Origin", response_headers)
+        self.assertEqual(404, self.get(url, "/bridge/preparation")[0], "the bridge routes stay absent")
+
+    def test_route_requires_header_extension_origin_and_host_before_any_upstream_read(self):
+        url = self.serve(market_quote=self.market_quote)
+        request = urllib.request.Request(url + self.path)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.opener.open(request, timeout=2)
+        self.assertEqual(403, error.exception.code)
+        error.exception.close()
+        for headers in ({"X-PolyHermes-Future-Preparation": "true"}, {"Origin": "https://future.news"},
+                        {"Origin": "null"}, {"Origin": "chrome-extension://" + "z" * 32},
+                        {"Host": "attacker.invalid"}):
+            with self.subTest(headers=headers):
+                self.assertEqual(403, self.get(url, **headers)[0])
+        self.assertEqual([], self.calls)
+
+    def test_query_body_and_post_are_refused(self):
+        url = self.serve(FutureBridge(self.directory(), Source().status), self.market_quote)
+        for path in (self.path + "?slug=btc-updown-5m-1", self.path + "?"):
+            with self.subTest(path=path):
+                self.assertEqual(400, self.get(url, path)[0])
+        self.assertEqual(400, self.get(url, **{"Content-Length": "1"})[0])
+        self.assertEqual(400, self.get(url, body=b"{}", method="GET", **{"Content-Type": "application/json"})[0])
+        self.assertEqual(404, self.get(url, body=b"{}", **{"Content-Type": "application/json"})[0])
+        self.assertEqual(404, self.get(url, self.path + "/")[0])
+        self.assertEqual([], self.calls)
+
+    def test_any_quote_failure_is_503(self):
+        def failing(error):
+            def market_quote():
+                raise error
+            return market_quote
+
+        current = [None]
+        url = self.serve(market_quote=lambda: current[0]())
+        for market_quote in (failing(RuntimeError("HTTP_SOURCE_UNAVAILABLE")), failing(ValueError("CLOB_BOOKS_MISMATCH")),
+                             failing(KeyError("endDate")), failing(OSError("timeout")),
+                             lambda: {**self.quotes.quote(), "upAskCents": float("nan")},
+                             lambda: {**self.quotes.quote(), "extra": 1}, lambda: None):
+            with self.subTest(market_quote=market_quote):
+                current[0] = market_quote
+                self.assertEqual(503, self.get(url)[0])
+        self.clob.books = []
+        current[0] = ClobMarketQuotes(self.clob, lambda: ROUND + 61.5).quote
+        self.assertEqual(503, self.get(url)[0], "a malformed CLOB answer")
+
+    def test_quote_failure_returns_a_safe_json_diagnostic_without_raw_errors(self):
+        current = [None]
+
+        def failing():
+            raise current[0]
+
+        url = self.serve(market_quote=failing)
+        for error, expected in [(RuntimeError("HTTP_SOURCE_TIMEOUT"), "HTTP_SOURCE_TIMEOUT"),
+                                (ValueError("CLOB_BOOKS_MISMATCH"), "CLOB_BOOKS_MISMATCH"),
+                                (OSError("private proxy credentials"), "INVALID_MARKET_QUOTE")]:
+            with self.subTest(error=error):
+                current[0] = error
+                request = urllib.request.Request(url + self.path, headers={"X-PolyHermes-Future-Preparation": "1"})
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    self.opener.open(request, timeout=2)
+                with caught.exception as response:
+                    self.assertEqual(503, response.code)
+                    self.assertEqual({"errorCode": expected}, json.loads(response.read()))
+                    self.assertEqual("no-store", response.headers["Cache-Control"])
+                    self.assertNotIn("Access-Control-Allow-Origin", response.headers)
+
+    def test_route_is_absent_without_a_market_quote_source(self):
+        self.assertEqual(404, self.get(self.serve())[0])
+        self.assertEqual(404, self.get(self.serve(FutureBridge(self.directory(), Source().status)))[0])
+
+    def directory(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return Path(directory.name)
 
 
 if __name__ == "__main__":
