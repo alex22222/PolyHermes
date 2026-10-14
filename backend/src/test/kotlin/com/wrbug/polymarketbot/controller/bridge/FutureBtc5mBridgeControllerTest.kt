@@ -5,8 +5,10 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.sun.net.httpserver.HttpServer
 import com.wrbug.polymarketbot.config.JwtAuthenticationInterceptor
 import com.wrbug.polymarketbot.enums.ErrorCode
+import com.wrbug.polymarketbot.dto.FutureBtc5mAssets
 import com.wrbug.polymarketbot.repository.UserRepository
 import com.wrbug.polymarketbot.service.bridge.FutureBtc5mBridgeClient
+import com.wrbug.polymarketbot.service.bridge.FutureBtc5mAssetsService
 import com.wrbug.polymarketbot.util.JwtUtils
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -31,6 +33,7 @@ class FutureBtc5mBridgeControllerTest {
     private var responseCode = 200
     private var responseOverride: String? = null
     private var requestedEnabled = false
+    private val assetsService = Mockito.mock(FutureBtc5mAssetsService::class.java)
 
     private data class Request(val method: String, val path: String, val body: String, val authorization: String?)
 
@@ -59,7 +62,7 @@ class FutureBtc5mBridgeControllerTest {
         Mockito.`when`(jwt.validateToken("test-preview-token")).thenReturn(true)
         val interceptor = JwtAuthenticationInterceptor(jwt, Mockito.mock(UserRepository::class.java), "")
         val client = FutureBtc5mBridgeClient("http://127.0.0.1:${server.address.port}")
-        mvc = MockMvcBuilders.standaloneSetup(FutureBtc5mBridgeController(client))
+        mvc = MockMvcBuilders.standaloneSetup(FutureBtc5mBridgeController(client, assetsService))
             .setMessageConverters(MappingJackson2HttpMessageConverter(mapper))
             .addInterceptors(interceptor)
             .build()
@@ -101,9 +104,21 @@ class FutureBtc5mBridgeControllerTest {
     }
 
     @Test
+    fun `authenticated assets read returns unknown values without touching trading control`() {
+        Mockito.`when`(assetsService.assets()).thenReturn(FutureBtc5mAssets(null, "WAITING_WALLET", null, null,
+            null, null, listOf("等待 Chrome 同步 Future 登录钱包")))
+        val result = api("/assets", "{}")
+        assertEquals(0, result.path("code").asInt())
+        assertTrue(result.path("data").path("positionsValueUsd").isNull)
+        assertEquals("WAITING_WALLET", result.path("data").path("dataStatus").asText())
+        assertTrue(requests.isEmpty())
+        assertFalse(requestedEnabled)
+    }
+
+    @Test
     fun `all Future endpoints require a valid jwt and never forward it to local bridge`() {
         val bodies = mapOf("/status" to "{}", "/control" to """{"enabled":false}""",
-            "/orders/list" to "{}", "/orders/detail" to """{"id":"future-btc5m:1791706200"}""")
+            "/assets" to "{}", "/orders/list" to "{}", "/orders/detail" to """{"id":"future-btc5m:1791706200"}""")
         bodies.forEach { (path, body) ->
             assertEquals(ErrorCode.AUTH_ERROR.code, api(path, body, null).path("code").asInt())
             assertEquals(ErrorCode.AUTH_ERROR.code, api(path, body, "invalid-test-token").path("code").asInt())

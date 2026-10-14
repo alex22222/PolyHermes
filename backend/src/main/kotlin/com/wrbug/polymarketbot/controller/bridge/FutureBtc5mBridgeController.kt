@@ -7,9 +7,11 @@ import com.wrbug.polymarketbot.dto.FutureBtc5mOrder
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderDetailRequest
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListRequest
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListResponse
+import com.wrbug.polymarketbot.dto.FutureBtc5mAssets
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.bridge.FutureBtc5mBridgeClient
 import com.wrbug.polymarketbot.service.bridge.FutureBtc5mConnectionException
+import com.wrbug.polymarketbot.service.bridge.FutureBtc5mAssetsService
 import org.slf4j.LoggerFactory
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.PostMapping
@@ -19,11 +21,14 @@ import org.springframework.web.bind.annotation.RestController
 
 @RestController
 @RequestMapping("/api/future-btc5m")
-class FutureBtc5mBridgeController(private val client: FutureBtc5mBridgeClient) {
+class FutureBtc5mBridgeController(private val client: FutureBtc5mBridgeClient, private val assetsService: FutureBtc5mAssetsService) {
     private val logger = LoggerFactory.getLogger(FutureBtc5mBridgeController::class.java)
 
     @PostMapping("/status")
     fun status(): ResponseEntity<ApiResponse<FutureBtc5mBridgeStatus>> = respond { client.status() }
+
+    @PostMapping("/assets")
+    fun assets(): ResponseEntity<ApiResponse<FutureBtc5mAssets>> = respond { assetsService.assets() }
 
     @PostMapping("/control")
     fun control(@RequestBody request: JsonNode): ResponseEntity<ApiResponse<FutureBtc5mBridgeStatus>> = respond {

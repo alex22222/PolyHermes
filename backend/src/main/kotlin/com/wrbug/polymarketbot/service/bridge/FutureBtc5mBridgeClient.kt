@@ -9,6 +9,8 @@ import com.wrbug.polymarketbot.dto.FutureBtc5mBridgeStatus
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrder
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListRequest
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListResponse
+import com.wrbug.polymarketbot.dto.FutureBtc5mWalletEnvelope
+import com.wrbug.polymarketbot.dto.FutureBtc5mWalletSnapshot
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
 import java.net.URI
@@ -69,6 +71,27 @@ class FutureBtc5mBridgeClient(
     fun status(): FutureBtc5mBridgeStatus = request("/bridge/status", FutureBtc5mBridgeStatus::class.java) {
         validateStatus(it)
     }
+
+    fun wallet(): FutureBtc5mWalletSnapshot? = request("/bridge/status", FutureBtc5mWalletEnvelope::class.java) { status ->
+        check(string(status, "bridgeId") == "future-btc5m") { "Future 钱包来源无效" }
+        if (status.has("wallet") && !status.get("wallet").isJsonNull) {
+            val value = objectValue(status.get("wallet"))
+            check(Regex("0x[0-9a-f]{40}").matches(string(value, "walletAddress")) &&
+                string(value, "source") == "FUTURE_PAGE" && marketUrlStart(string(value, "marketUrl")) != null) {
+                "Future 钱包来源或地址无效"
+            }
+            val now = number(status, "serverTime")
+            val observed = number(value, "observedAt")
+            val received = number(value, "receivedAt")
+            check(observed >= 0 && received >= 0 && observed <= received + 3 && received <= now && observed <= now + 3 &&
+                (!boolean(value, "fresh") || now - observed in 0.0..15.0 && now - received in 0.0..15.0)) {
+                "Future 钱包快照时间无效"
+            }
+            if (!field(value, "cashUsd").isJsonNull) check(boolean(value, "fresh") && number(value, "cashUsd") >= 0) {
+                "Future 钱包现金无效或已过期"
+            }
+        }
+    }.wallet
 
     fun control(enabled: Boolean): FutureBtc5mBridgeStatus = request(
         "/bridge/control", FutureBtc5mBridgeStatus::class.java, gson.toJson(mapOf("enabled" to enabled))

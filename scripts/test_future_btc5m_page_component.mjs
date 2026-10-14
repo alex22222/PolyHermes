@@ -52,7 +52,7 @@ const mountPage = (initialTime) => {
     removeEventListener(type, callback) {listeners.get(type)?.delete(callback);},
   };
   const document = {visibilityState: 'visible', ...events};
-  const requests = {status: [], control: []};
+  const requests = {status: [], control: [], assets: []};
   const sameDeps = (left, right) => left && right && left.length === right.length &&
     left.every((value, index) => Object.is(value, right[index]));
   const react = {
@@ -95,7 +95,7 @@ const mountPage = (initialTime) => {
     '@ant-design/icons': {ReloadOutlined: 'ReloadOutlined'},
     'react-responsive': {useMediaQuery: () => false},
     '../services/api': {apiService: {futureBtc5mBridge: {
-      status: pending('status'), control: pending('control'),
+      status: pending('status'), control: pending('control'), assets: pending('assets'),
       list: async () => ({data: {code: 0, data: {list: [], total: 0}}}),
     }}},
     '../utils/futureBtc5mPreflight': guards.exports,
@@ -173,6 +173,65 @@ const assertHealthy = (page) => {
   assert.equal(page.field('Chrome 预检报告'), '新鲜', 'a fresh response must retain its browser evidence');
   assert.equal(page.elements((node) => node.type === 'Switch')[0].props.disabled, false);
 };
+
+const walletAssets = (at = receipt, wallet = `0x${'a'.repeat(40)}`) => ({
+  wallet: {walletAddress: wallet, cashUsd: 0, observedAt: at / 1000, receivedAt: at / 1000,
+    marketUrl: `https://future.news/zh/event/btc-updown-5m-${start}`, source: 'FUTURE_PAGE', fresh: true},
+  dataStatus: 'READY', positions: [{asset: 'up-token', slug: `btc-updown-5m-${start}`,
+    title: 'BTC 5m', side: 'Up', quantity: 1.5, avgPrice: 0.65, currentPrice: 0.8,
+    currentValueUsd: 1.2, cashPnlUsd: 0.225, redeemable: false}],
+  recentBuys: [{id: 'buy-1', asset: 'up-token', slug: `btc-updown-5m-${start}`,
+    title: 'BTC 5m', side: 'Up', quantity: 1.5, price: 0.65, amountUsd: 0.975,
+    boughtAt: at / 1000 - 1, transactionHash: '0xtransaction'}],
+  positionsValueUsd: 1.2, marketDataObservedAt: at / 1000, reasons: [],
+});
+
+test('wallet assets refresh independently from preparation and preserve genuine zero cash', async () => {
+  const page = mountPage(receipt);
+  await page.fail('status', 'Bridge 状态暂不可用');
+  await page.reply('assets', walletAssets());
+  assert.equal(page.field('钱包现金'), '$0.00');
+  assert.equal(page.field('BTC 5 分钟持仓市值'), '$1.20');
+  assert.equal(page.field('当前钱包'), `0x${'a'.repeat(40)}`);
+  assert.equal(page.pendingCount('control'), 0);
+  const tables = page.elements(node => node.type === 'Table');
+  assert.equal(tables.find(node => node.props.dataSource?.[0]?.asset === 'up-token').props.dataSource[0].quantity, 1.5);
+  const buyPrice = tables.find(node => node.props.columns.some(column => column.dataIndex === 'price'))
+    .props.columns.find(column => column.dataIndex === 'price').render;
+  assert.equal(buyPrice(0.859999914), '86¢');
+  assert.equal(buyPrice(null), '—');
+});
+
+test('stale cash and valuation disappear between polls and source failures never become zero', async () => {
+  const page = mountPage(receipt);
+  await page.reply('assets', walletAssets());
+  page.tick(receipt + 15001);
+  assert.equal(page.field('钱包现金'), '—');
+  assert.equal(page.field('BTC 5 分钟持仓市值'), '—');
+  page.poll(receipt + 16000);
+  await page.fail('assets', '钱包连接中断');
+  assert.equal(page.field('钱包现金'), '—');
+  assert.equal(page.field('当前钱包'), '等待同步');
+  assert.equal(page.elements(node => node.type === 'Alert' && node.props.message === '钱包资产暂不可用').length, 1);
+});
+
+test('wallet change clears previous buys and polling resume does not duplicate reads or mutate trading controls', async () => {
+  const page = mountPage(receipt);
+  await page.reply('assets', walletAssets());
+  page.emit('focus');
+  page.emit('online');
+  assert.equal(page.pendingCount('assets'), 1);
+  await page.reply('assets', {...walletAssets(receipt, `0x${'b'.repeat(40)}`),
+    dataStatus: 'PARTIAL', positions: null, recentBuys: null, positionsValueUsd: null,
+    reasons: ['当前 BTC 5 分钟持仓暂时无法完整核实']});
+  assert.equal(page.field('当前钱包'), `0x${'b'.repeat(40)}`);
+  assert.equal(page.field('BTC 5 分钟持仓市值'), '—');
+  assert.equal(page.elements(node => node.type === 'Table').some(node => node.props.dataSource?.[0]?.asset === 'up-token'), false);
+  assert.equal(page.pendingCount('control'), 0);
+  page.unmount();
+  page.emit('online');
+  assert.equal(page.pendingCount('assets'), 0);
+});
 
 test('visibility restoration immediately retries a connection error without a page timer or control mutation', async () => {
   const page = mountPage(receipt);

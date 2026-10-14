@@ -17,6 +17,7 @@ FILL_FIELDS = ("submittedAt", "filledAt", "platformOrderId", "filledQuantity", "
 PREFLIGHT_FIELDS = {"schemaVersion", "marketUrl", "pagePeriodStart", "checkedAt", "navigation",
                     "ticketStatus", "amountUsd", "selectedSide", "buyButtonEnabled"}
 PREFLIGHT_V2_FIELDS = PREFLIGHT_FIELDS | {"upQuoteCents", "downQuoteCents"}
+PREFLIGHT_V3_FIELDS = PREFLIGHT_V2_FIELDS | {"walletAddress", "cashUsd"}
 PREPARATION_INTENT_FIELDS = {"schemaVersion", "id", "slug", "periodStart", "periodEnd", "side", "amountUsd",
     "createdAt", "expiresAt", "priceObservedAt", "openPrice", "currentPrice", "priceSource", "openPriceSource",
     "twapLookbackSeconds", "mode", "noSubmission", "operatorAuthorized", "authorizationSource", "claimToken"}
@@ -86,6 +87,7 @@ class FutureBridge:
         self.storage_error = None
         self.browser_report = None
         self.browser_received_at = None
+        self.wallet_report = None
         self.preflight_error = None
         self.preflight_seen = set()
         self.last_preflight_pass = None
@@ -299,7 +301,7 @@ class FutureBridge:
             return ["MARKET_NOT_CURRENT"]
         if report["ticketStatus"] != "PASS":
             return ["TICKET_CHECK_FAILED"]
-        if (report["schemaVersion"] != 2 or report["upQuoteCents"] is None or report["downQuoteCents"] is None):
+        if (report["schemaVersion"] not in (2, 3) or report["upQuoteCents"] is None or report["downQuoteCents"] is None):
             return ["BUTTON_QUOTES_UNAVAILABLE"]
         if report["upQuoteCents"] == report["downQuoteCents"]:
             return ["BUTTON_QUOTES_TIED"]
@@ -550,8 +552,8 @@ class FutureBridge:
         with self.lock:
             now = self.now_fn()
             if (type(payload) is not dict or type(payload.get("schemaVersion")) is not int
-                    or payload["schemaVersion"] not in (1, 2)
-                    or set(payload) != (PREFLIGHT_V2_FIELDS if payload["schemaVersion"] == 2 else PREFLIGHT_FIELDS)
+                    or payload["schemaVersion"] not in (1, 2, 3)
+                    or set(payload) != {1: PREFLIGHT_FIELDS, 2: PREFLIGHT_V2_FIELDS, 3: PREFLIGHT_V3_FIELDS}[payload["schemaVersion"]]
                     or type(payload["pagePeriodStart"]) is not int
                     or self._market_url_start(payload["marketUrl"]) != payload["pagePeriodStart"]
                     or not finite_number(payload["checkedAt"]) or abs(now - payload["checkedAt"]) > 3
@@ -561,9 +563,15 @@ class FutureBridge:
                     or payload["selectedSide"] not in ("Up", "Down", None)
                     or type(payload["buyButtonEnabled"]) is not bool):
                 raise ValueError("INVALID_PREFLIGHT_REPORT")
-            if payload["schemaVersion"] == 2 and any(payload[field] is not None and not valid_button_quote(payload[field])
+            if payload["schemaVersion"] >= 2 and any(payload[field] is not None and not valid_button_quote(payload[field])
                                                     for field in ("upQuoteCents", "downQuoteCents")):
                 raise ValueError("INVALID_BUTTON_QUOTES")
+            if payload["schemaVersion"] == 3 and (
+                    payload["walletAddress"] is not None and (not isinstance(payload["walletAddress"], str)
+                    or re.fullmatch(r"0x[0-9a-f]{40}", payload["walletAddress"]) is None)
+                    or payload["cashUsd"] is not None and (payload["walletAddress"] is None
+                    or not finite_number(payload["cashUsd"]) or payload["cashUsd"] < 0)):
+                raise ValueError("INVALID_WALLET_REPORT")
             start = int(now // 300) * 300
             if (payload["pagePeriodStart"] > start
                     or payload["navigation"] == "CURRENT" and payload["pagePeriodStart"] != start
@@ -572,6 +580,10 @@ class FutureBridge:
                 raise ValueError("INVALID_PREFLIGHT_MARKET_OR_TIME")
             self.browser_report = copy.deepcopy(payload)
             self.browser_received_at = now
+            if payload["schemaVersion"] == 3:
+                self.wallet_report = {"walletAddress": payload["walletAddress"], "cashUsd": payload["cashUsd"],
+                                      "observedAt": payload["checkedAt"], "receivedAt": now,
+                                      "marketUrl": payload["marketUrl"], "source": "FUTURE_PAGE"}
             source, error = self._read_source()
             return self._status(source, error, now, persist_preflight=True)
 
@@ -648,7 +660,7 @@ class FutureBridge:
                 "selectedSide": report["selectedSide"] if report else None,
                 "buyButtonEnabled": report["buyButtonEnabled"] if report else False,
                 "upQuoteCents": up, "downQuoteCents": down, "preferredSide": preferred,
-                "selectionSource": "HIGHER_BUTTON_PRICE" if report and report["schemaVersion"] == 2 else None,
+                "selectionSource": "HIGHER_BUTTON_PRICE" if report and report["schemaVersion"] >= 2 else None,
                 "signalFresh": bool(signal), "signalSide": signal["side"] if signal else None,
                 "sideMatches": side_matches, "result": result, "reasons": reasons,
                 "lastPassed": copy.deepcopy(self.last_preflight_pass)}
@@ -693,6 +705,12 @@ class FutureBridge:
         if self._stopped(source):
             self._revoke_preparation(now)
 
+    def _wallet_view(self, now):
+        if not self.wallet_report or self.wallet_report["walletAddress"] is None:
+            return None
+        fresh = 0 <= now - self.wallet_report["observedAt"] <= 15 and 0 <= now - self.wallet_report["receivedAt"] <= 15
+        return {**self.wallet_report, "cashUsd": self.wallet_report["cashUsd"] if fresh else None, "fresh": fresh}
+
     def _status(self, source, source_error, now, persist_preflight=False):
         self._disable_for_stop(source, now)
         reasons = [self.storage_error] if self.storage_error else []
@@ -718,6 +736,7 @@ class FutureBridge:
                             "filled": 0, "failed": 0, "skipped": len(self.records)},
             "preflight": self._preflight(source, source_error, now, persist_preflight),
             "preparation": self._preparation_view(source, source_error, now),
+            "wallet": self._wallet_view(now),
         }
 
     def status(self):

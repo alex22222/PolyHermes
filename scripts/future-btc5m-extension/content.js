@@ -375,6 +375,30 @@
 
   // User-authorized ticket preparation has no order-submission capability and does not
   // change the legacy official-eligibility guard above.
+  // The account badge has two dollar amounts: positions, then available cash.
+  // Reading the badge never opens a wallet menu or touches an order control.
+  function readWalletSnapshot(doc, url) {
+    const unknown = {walletAddress: null, cashUsd: null};
+    try {
+      const page = new URL(url);
+      if (page.origin !== 'https://future.news' || page.username || page.password) return unknown;
+      const badges = [...doc.querySelectorAll('a[href]')].filter((element) => {
+        if (!element.getClientRects().length || typeof element.textContent !== 'string') return false;
+        const address = new URL(element.getAttribute('href'), page);
+        return address.origin === page.origin && !address.username && !address.password &&
+          /^\/(?:zh\/)?address\/0x[0-9a-fA-F]{40}\/?$/.test(address.pathname) &&
+          /^\s*\$[^$]+\$[^$]+\s*$/.test(element.textContent);
+      });
+      if (badges.length !== 1) return unknown;
+      const address = new URL(badges[0].getAttribute('href'), page).pathname.match(/0x[0-9a-fA-F]{40}/)[0].toLowerCase();
+      const cashText = badges[0].textContent.split('$')[2].trim();
+      const cash = /^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/.test(cashText) ? Number(cashText.replaceAll(',', '')) : null;
+      return {walletAddress: address, cashUsd: Number.isFinite(cash) && cash >= 0 ? cash : null};
+    } catch {
+      return unknown;
+    }
+  }
+
   function usablePreparation(wrapper, now = Date.now() / 1000) {
     const preparation = wrapper?.preparation;
     const intent = preparation?.intent;
@@ -549,7 +573,7 @@
 
   // Export pure guards for the local fixture tests; this is an isolated extension world.
   globalThis.FutureBtc5m = {usableDraft, matchesMarket, observationView, findAmountInput, findAmountTicket, buttonIsEnabled, prepareAmount,
-    navigationTarget, followCurrentMarket, readPreflight, usablePreparation, readPreparationTicket, prepareOnlyOnce, parseButtonQuote};
+    navigationTarget, followCurrentMarket, readPreflight, usablePreparation, readPreparationTicket, prepareOnlyOnce, parseButtonQuote, readWalletSnapshot};
   if (typeof document === 'undefined') return;
 
   const panel = document.createElement('aside');
@@ -605,7 +629,8 @@
 
   async function reportPage() {
     if (reporting) return;
-    const payload = readPreflight(document, location.href);
+    const report = readPreflight(document, location.href);
+    const payload = report && {...report, schemaVersion: 3, ...readWalletSnapshot(document, location.href)};
     if (!payload) {
       preflightReport.textContent = '只读预检：等待 BTC 5 分钟市场页面';
       return;

@@ -21,7 +21,8 @@ function validPreflight(message, sender) {
   const payload = message.payload;
   const keys = ['schemaVersion', 'marketUrl', 'pagePeriodStart', 'checkedAt', 'navigation', 'ticketStatus',
     'amountUsd', 'selectedSide', 'buyButtonEnabled'];
-  if (payload?.schemaVersion === 2) keys.push('upQuoteCents', 'downQuoteCents');
+  if ([2, 3].includes(payload?.schemaVersion)) keys.push('upQuoteCents', 'downQuoteCents');
+  if (payload?.schemaVersion === 3) keys.push('walletAddress', 'cashUsd');
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
       Object.keys(payload).length !== keys.length || !keys.every((key) => Object.hasOwn(payload, key))) return false;
   const documentPage = marketPage(sender.url);
@@ -32,7 +33,7 @@ function validPreflight(message, sender) {
   const now = Date.now() / 1000;
   const start = Math.floor(now / 300) * 300;
   return Boolean(documentPage && page && match && payload.marketUrl === page.origin + page.pathname &&
-    [1, 2].includes(payload.schemaVersion) && Number.isSafeInteger(payload.pagePeriodStart) && payload.pagePeriodStart >= 0 &&
+    [1, 2, 3].includes(payload.schemaVersion) && Number.isSafeInteger(payload.pagePeriodStart) && payload.pagePeriodStart >= 0 &&
     payload.pagePeriodStart % 300 === 0 && payload.pagePeriodStart === Number(match[1]) &&
     Number.isFinite(payload.checkedAt) && Math.abs(now - payload.checkedAt) <= 3 &&
     ['CURRENT', 'ENDED', 'MISMATCH'].includes(payload.navigation) &&
@@ -42,7 +43,10 @@ function validPreflight(message, sender) {
     (payload.amountUsd === null || Number.isFinite(payload.amountUsd) && payload.amountUsd >= 0) &&
     ['Up', 'Down', null].includes(payload.selectedSide) && typeof payload.buyButtonEnabled === 'boolean' &&
     (payload.schemaVersion === 1 || ['upQuoteCents', 'downQuoteCents'].every((key) => payload[key] === null ||
-      Number.isFinite(payload[key]) && payload[key] >= 0 && payload[key] <= 100 && Number(payload[key].toFixed(2)) === payload[key])));
+      Number.isFinite(payload[key]) && payload[key] >= 0 && payload[key] <= 100 && Number(payload[key].toFixed(2)) === payload[key])) &&
+    (payload.schemaVersion !== 3 || (payload.walletAddress === null ||
+      typeof payload.walletAddress === 'string' && /^0x[0-9a-f]{40}$/.test(payload.walletAddress)) &&
+      (payload.cashUsd === null || payload.walletAddress !== null && Number.isFinite(payload.cashUsd) && payload.cashUsd >= 0)));
 }
 
 // An attempt audit may be flushed after the tab moved to a later round, so it is bound

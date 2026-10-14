@@ -560,6 +560,9 @@ test('polling sends a preflight even when eligibility blocks all draft preparati
   assert.equal(reports.length, 1);
   assert.equal(reports[0].payload.ticketStatus, 'PASS');
   assert.equal(reports[0].payload.amountUsd, 1);
+  assert.equal(reports[0].payload.schemaVersion, 3);
+  assert.equal(reports[0].payload.walletAddress, null);
+  assert.equal(reports[0].payload.cashUsd, null);
   assert.equal(children[3].disabled, true);
   assert.equal(fixture.writes(), 0);
   assert.equal(fixture.clicks(), 0);
@@ -1609,7 +1612,9 @@ test('the worker accepts exact schema2 quote snapshots, keeps schema1 read-only 
   const payload = {schemaVersion: 2, marketUrl, pagePeriodStart: start, checkedAt: now, navigation: 'CURRENT',
     ticketStatus: 'PASS', amountUsd: 1, selectedSide: 'Down', buyButtonEnabled: true, upQuoteCents: 12, downQuoteCents: 88};
   const {upQuoteCents, downQuoteCents, ...legacy} = payload;
-  for (const report of [payload, {...legacy, schemaVersion: 1}, {...payload, upQuoteCents: null, downQuoteCents: null}]) {
+  const wallet = {...payload, schemaVersion: 3, walletAddress: '0x' + 'a'.repeat(40), cashUsd: 0};
+  for (const report of [payload, {...legacy, schemaVersion: 1}, {...payload, upQuoteCents: null, downQuoteCents: null},
+    wallet, {...wallet, walletAddress: null, cashUsd: null}]) {
     await new Promise((resolve) => {
       assert.equal(handler({type: 'FUTURE_BTC5M_PREFLIGHT', payload: report}, sender,
         (reply) => { assert.equal(reply.ok, true); resolve(); }), true);
@@ -1620,7 +1625,12 @@ test('the worker accepts exact schema2 quote snapshots, keeps schema1 read-only 
     {quoteObservedAt: now}, {dom: 'private-page-data'}]) {
     assert.equal(handler({type: 'FUTURE_BTC5M_PREFLIGHT', payload: {...payload, ...change}}, sender, () => {}), undefined);
   }
-  assert.equal(requests.length, 3);
+  for (const change of [{walletAddress: '0xabc'}, {walletAddress: null}, {cashUsd: -1}, {cashUsd: '22'},
+    {cashUsd: Infinity}, {cashUsd: true}, {privateKey: 'must-not-forward'}]) {
+    assert.equal(handler({type: 'FUTURE_BTC5M_PREFLIGHT', payload: {...wallet, ...change}}, sender, () => {}), undefined);
+  }
+  assert.equal(handler({type: 'FUTURE_BTC5M_PREFLIGHT', payload: wallet}, {...sender, frameId: 1}, () => {}), undefined);
+  assert.equal(requests.length, 5);
   assert.deepEqual(JSON.parse(requests[0].options.body), payload);
   assert.equal(requests[0].options.credentials, 'omit');
   for (const reason of ['BUTTON_QUOTES_UNAVAILABLE', 'BUTTON_QUOTES_TIED', 'BUTTON_QUOTES_NOT_FRESH', 'HIGHER_BUTTON_SIDE_CHANGED']) {
@@ -1631,7 +1641,7 @@ test('the worker accepts exact schema2 quote snapshots, keeps schema1 read-only 
       }}, sender, (reply) => { assert.equal(reply.ok, true); resolve(); }), true);
     });
   }
-  assert.equal(requests.length, 7);
+  assert.equal(requests.length, 9);
 });
 
 function workerHandler(fetchImpl, abortSignal = AbortSignal) {
@@ -2028,9 +2038,9 @@ test('the panel preserves safe quote diagnostics and shows Chinese causes withou
   assert.equal(fixture.writes(), 0);
 });
 
-test('the 0.6.1 manifest keeps price gates and only the power permission for the clock push', () => {
+test('the 0.6.6 manifest keeps price gates and only the power permission for the clock push', () => {
   const manifest = JSON.parse(readFileSync(new URL('./future-btc5m-extension/manifest.json', import.meta.url), 'utf8'));
-  assert.equal(manifest.version, '0.6.1');
+  assert.equal(manifest.version, '0.6.6');
   assert.equal(manifest.minimum_chrome_version, '116');
   assert.ok([...manifest.description].length < 132, `${[...manifest.description].length} characters`);
   assert.match(manifest.description, /60¢.*Polymarket 盘口价差 ≤3¢.*准备价 ±5¢/);

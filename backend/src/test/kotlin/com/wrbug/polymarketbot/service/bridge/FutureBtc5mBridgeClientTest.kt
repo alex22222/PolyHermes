@@ -70,6 +70,22 @@ class FutureBtc5mBridgeClientTest {
     }
 
     @Test
+    fun `wallet read accepts absent old schema and fresh zero without forwarding control or credentials`() {
+        assertNull(client.wallet())
+        val wallet = mapOf("walletAddress" to "0x${"a".repeat(40)}", "cashUsd" to 0.0,
+            "observedAt" to 1791706265.0, "receivedAt" to 1791706265.0,
+            "marketUrl" to "https://future.news/zh/event/btc-updown-5m-1791706200", "source" to "FUTURE_PAGE", "fresh" to true)
+        responseBody = mapper.writeValueAsString(status() + ("wallet" to wallet))
+        assertEquals(0.0, client.wallet()!!.cashUsd)
+        for (change in listOf(mapOf("walletAddress" to "0xabc"), mapOf("cashUsd" to -1),
+            mapOf("cashUsd" to "22"), mapOf("fresh" to false), mapOf("observedAt" to 1791706200.0))) {
+            responseBody = mapper.writeValueAsString(status() + ("wallet" to (wallet + change)))
+            assertThrows(IllegalStateException::class.java) { client.wallet() }
+        }
+        assertTrue(requests.all { it.method == "GET" && it.rawPath == "/bridge/status" && it.controlHeader == null && it.authorization == null })
+    }
+
+    @Test
     fun `input validation happens before any local request`() {
         listOf(FutureBtc5mOrderListRequest(0, 20), FutureBtc5mOrderListRequest(1, 0),
             FutureBtc5mOrderListRequest(1, 101), FutureBtc5mOrderListRequest(1, 20, "SUCCESS")).forEach { request ->

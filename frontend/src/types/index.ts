@@ -3005,6 +3005,52 @@ export interface BridgeRuntimeStatus {
 
 export type FutureBtc5mOrderStatus = 'PENDING' | 'SKIPPED' | 'FAILED' | 'SUBMITTED_UNVERIFIED' | 'FILLED'
 
+export interface FutureBtc5mWalletSnapshot {
+  walletAddress: string
+  cashUsd: number | null
+  observedAt: number
+  receivedAt: number
+  marketUrl: string
+  source: 'FUTURE_PAGE'
+  fresh: boolean
+}
+
+export interface FutureBtc5mAssetPosition {
+  asset: string
+  slug: string
+  title: string
+  side: 'Up' | 'Down'
+  quantity: number
+  avgPrice: number | null
+  currentPrice: number | null
+  currentValueUsd: number | null
+  cashPnlUsd: number | null
+  redeemable: boolean
+}
+
+export interface FutureBtc5mAssetBuy {
+  id: string
+  asset: string
+  slug: string
+  title: string
+  side: 'Up' | 'Down'
+  quantity: number
+  price: number | null
+  amountUsd: number | null
+  boughtAt: number
+  transactionHash: string | null
+}
+
+export interface FutureBtc5mAssets {
+  wallet: FutureBtc5mWalletSnapshot | null
+  dataStatus: 'READY' | 'PARTIAL' | 'WAITING_WALLET' | 'STALE_WALLET'
+  positions: FutureBtc5mAssetPosition[] | null
+  recentBuys: FutureBtc5mAssetBuy[] | null
+  positionsValueUsd: number | null
+  marketDataObservedAt: number | null
+  reasons: string[]
+}
+
 export interface FutureBtc5mPreflight {
   mode: 'READ_ONLY'
   noSubmission: true

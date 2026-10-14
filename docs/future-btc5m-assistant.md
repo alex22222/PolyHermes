@@ -80,7 +80,7 @@ scripts/future-btc5m-runtime/.venv/bin/python scripts/future_btc5m_assistant.py 
 scripts/future-btc5m-runtime/.venv/bin/python scripts/future_btc5m_assistant.py --watch
 ```
 
-扩展读取 `GET /status`，只读报告使用 `POST /bridge/preflight`；0.3.0 新增本机 `/bridge/preparation` 的读取、唯一认领和准备回执。仅发送白名单字段，不发送账户、余额或登录资料。项目控制页与准备/订单事实见 [Future BTC5m Bridge 控制页面](future-btc5m-bridge.md)。`--watch` 不提交买入，`Ctrl+C` 退出服务并要求下次从新轮次开始。
+扩展读取 `GET /status`，只读报告使用 `POST /bridge/preflight`；0.3.0 新增本机 `/bridge/preparation` 的读取、唯一认领和准备回执。0.6.6 的只读报告增加当前 Future 页面的钱包地址和显示现金，供项目页面展示资产；仍不读取或发送 Cookie、私钥、登录令牌及其它页面数据。项目控制页与准备/订单事实见 [Future BTC5m Bridge 控制页面](future-btc5m-bridge.md)，资产口径与更新步骤见 [我的资产](future-btc5m-assets.md)。`--watch` 不提交买入，`Ctrl+C` 退出服务并要求下次从新轮次开始。
 
 扩展需由用户在 Chrome 加载：
 

@@ -5,7 +5,7 @@ import { ReloadOutlined } from '@ant-design/icons'
 import { useMediaQuery } from 'react-responsive'
 import { apiService } from '../services/api'
 import { higherButtonSide, preflightIsFresh, preflightReasonText, referenceIsFresh } from '../utils/futureBtc5mPreflight'
-import type { FutureBtc5mBridgeStatus, FutureBtc5mOrder, FutureBtc5mOrderStatus, FutureBtc5mPreparationState } from '../types'
+import type { FutureBtc5mAssets, FutureBtc5mAssetBuy, FutureBtc5mAssetPosition, FutureBtc5mBridgeStatus, FutureBtc5mOrder, FutureBtc5mOrderStatus, FutureBtc5mPreparationState } from '../types'
 
 const preparationStateText: Record<FutureBtc5mPreparationState, string> = {
   DISABLED: '已关闭',
@@ -45,6 +45,12 @@ const formatTime = (value?: number | null): string => {
 const formatValue = (value?: number | null, prefix = ''): string =>
   value == null || !Number.isFinite(value) ? '—' : `${prefix}${value.toLocaleString('zh-CN', { maximumFractionDigits: 6 })}`
 
+const formatMoney = (value?: number | null): string => value == null || !Number.isFinite(value)
+  ? '—' : `$${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+const formatCents = (value?: number | null): string => value == null || !Number.isFinite(value)
+  ? '—' : `${(value * 100).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}¢`
+
 const errorText = (error: unknown, fallback: string): string =>
   error instanceof Error ? error.message : fallback
 
@@ -63,6 +69,9 @@ const FutureBtc5mBridge: React.FC = () => {
   const [statusError, setStatusError] = useState<string | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
   const [controlLoading, setControlLoading] = useState(false)
+  const [assets, setAssets] = useState<FutureBtc5mAssets | null>(null)
+  const [assetsError, setAssetsError] = useState<string | null>(null)
+  const [assetsLoading, setAssetsLoading] = useState(false)
   const [orders, setOrders] = useState<FutureBtc5mOrder[]>([])
   const [ordersLoading, setOrdersLoading] = useState(false)
   const [ordersError, setOrdersError] = useState<string | null>(null)
@@ -77,9 +86,11 @@ const FutureBtc5mBridge: React.FC = () => {
   const statusRequestSeq = useRef(0)
   const ordersRequestSeq = useRef(0)
   const detailRequestSeq = useRef(0)
+  const assetsRequestSeq = useRef(0)
   const statusInFlight = useRef<number | null>(null)
   const ordersInFlight = useRef<number | null>(null)
   const detailInFlight = useRef<number | null>(null)
+  const assetsInFlight = useRef<number | null>(null)
 
   useEffect(() => {
     mounted.current = true
@@ -90,6 +101,31 @@ const FutureBtc5mBridge: React.FC = () => {
       statusRequestSeq.current += 1
       ordersRequestSeq.current += 1
       detailRequestSeq.current += 1
+      assetsRequestSeq.current += 1
+    }
+  }, [])
+
+  const fetchAssets = useCallback(async () => {
+    if (assetsInFlight.current === assetsRequestSeq.current) return
+    const requestSeq = ++assetsRequestSeq.current
+    assetsInFlight.current = requestSeq
+    setAssetsLoading(true)
+    try {
+      const response = await apiService.futureBtc5mBridge.assets()
+      if (!mounted.current || requestSeq !== assetsRequestSeq.current) return
+      if (response.data.code !== 0 || !response.data.data) {
+        throw new Error(response.data.msg || '获取钱包资产失败')
+      }
+      setAssets(response.data.data)
+      setAssetsError(null)
+      setClock(Date.now())
+    } catch (error: unknown) {
+      if (!mounted.current || requestSeq !== assetsRequestSeq.current) return
+      setAssets(null)
+      setAssetsError(errorText(error, '获取钱包资产失败'))
+    } finally {
+      if (assetsInFlight.current === requestSeq) assetsInFlight.current = null
+      if (mounted.current && requestSeq === assetsRequestSeq.current) setAssetsLoading(false)
     }
   }, [])
 
@@ -177,6 +213,12 @@ const FutureBtc5mBridge: React.FC = () => {
   }, [fetchStatus])
 
   useEffect(() => {
+    fetchAssets()
+    const interval = window.setInterval(fetchAssets, 5000)
+    return () => window.clearInterval(interval)
+  }, [fetchAssets])
+
+  useEffect(() => {
     fetchOrders()
     const interval = window.setInterval(fetchOrders, 5000)
     return () => {
@@ -204,6 +246,7 @@ const FutureBtc5mBridge: React.FC = () => {
       fetchStatus()
       fetchOrders()
       fetchDetail()
+      fetchAssets()
     }
     window.addEventListener('focus', refreshConnection)
     window.addEventListener('online', refreshConnection)
@@ -213,7 +256,7 @@ const FutureBtc5mBridge: React.FC = () => {
       window.removeEventListener('online', refreshConnection)
       document.removeEventListener('visibilitychange', refreshConnection)
     }
-  }, [fetchStatus, fetchOrders, fetchDetail])
+  }, [fetchStatus, fetchOrders, fetchDetail, fetchAssets])
 
   const handleControl = async (enabled: boolean) => {
     if (controlPending.current) return
@@ -274,6 +317,37 @@ const FutureBtc5mBridge: React.FC = () => {
     }}>详情</Button> }
   ]
 
+  const positionColumns: ColumnsType<FutureBtc5mAssetPosition> = [
+    { title: '市场', key: 'market', width: 285, render: (_, record) => <Space direction="vertical" size={0}>
+      <Typography.Text>{record.title}</Typography.Text>{marketLink(record.slug)}
+    </Space> },
+    { title: '方向', dataIndex: 'side', width: 75, render: (side: string) => <Tag color={side === 'Up' ? 'green' : 'red'}>{side === 'Up' ? '涨' : '跌'}</Tag> },
+    { title: '持有份额', dataIndex: 'quantity', width: 110, render: (value: number) => formatValue(value) },
+    { title: '买入均价', dataIndex: 'avgPrice', width: 100, render: formatCents },
+    { title: '当前价格', dataIndex: 'currentPrice', width: 100, render: formatCents },
+    { title: '当前市值', dataIndex: 'currentValueUsd', width: 110, render: formatMoney },
+    { title: '持仓盈亏', dataIndex: 'cashPnlUsd', width: 110, render: (value: number | null) =>
+      <Typography.Text type={value == null ? 'secondary' : value < 0 ? 'danger' : 'success'}>{formatMoney(value)}</Typography.Text> },
+    { title: '状态', dataIndex: 'redeemable', width: 95, render: (value: boolean) => value ? <Tag>待领取</Tag> : <Tag color="processing">持有中</Tag> }
+  ]
+
+  const buyColumns: ColumnsType<FutureBtc5mAssetBuy> = [
+    { title: '买入时间', dataIndex: 'boughtAt', width: 175, render: (value: number) => formatTime(value) },
+    { title: '市场', key: 'market', width: 285, render: (_, record) => <Space direction="vertical" size={0}>
+      <Typography.Text>{record.title}</Typography.Text>{marketLink(record.slug)}
+    </Space> },
+    { title: '方向', dataIndex: 'side', width: 75, render: (side: string) => <Tag color={side === 'Up' ? 'green' : 'red'}>{side === 'Up' ? '涨' : '跌'}</Tag> },
+    { title: '买入份额', dataIndex: 'quantity', width: 110, render: (value: number) => formatValue(value) },
+    { title: '买入价格', dataIndex: 'price', width: 100, render: formatCents },
+    { title: '买入金额', dataIndex: 'amountUsd', width: 110, render: formatMoney }
+  ]
+
+  const wallet = assets?.wallet
+  const walletFresh = Boolean(wallet?.fresh && [wallet.observedAt, wallet.receivedAt].every(value =>
+    Number.isFinite(value) && clock / 1000 - value >= 0 && clock / 1000 - value <= 15))
+  const marketDataFresh = Boolean(walletFresh && assets?.marketDataObservedAt != null &&
+    clock / 1000 - assets.marketDataObservedAt >= 0 && clock / 1000 - assets.marketDataObservedAt <= 15)
+
   const statusStale = Boolean(runtime && (clock < statusReceivedAt || clock - statusReceivedAt > 15000 ||
     !Number.isFinite(runtime.serverTime) || Math.abs(runtime.serverTime - statusReceivedAt / 1000) > 3))
   const ledgerError = runtime?.blockReasons.some((reason) => reason.startsWith('ORDER_LEDGER_')) ?? false
@@ -320,6 +394,37 @@ const FutureBtc5mBridge: React.FC = () => {
       <Typography.Title level={3} style={{ marginBottom: 4 }}>Future BTC 5 分钟 Bridge</Typography.Title>
       <Typography.Text type="secondary">按 Future 按钮报价较高的一侧自动准备 BTC 5 分钟 $1 票据，准备好后由浏览器扩展自动点击一次买入。每 5 秒更新准备状态与真实订单记录。</Typography.Text>
     </div>
+
+    <Card title="我的资产 · BTC 5 分钟" extra={<Button icon={<ReloadOutlined />} loading={assetsLoading} onClick={fetchAssets}>刷新资产</Button>}>
+      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+        <Descriptions size="small" column={isMobile ? 1 : 3}>
+          <Descriptions.Item label="钱包现金"><Typography.Text strong style={{ fontSize: 24 }}>{formatMoney(walletFresh ? wallet?.cashUsd : null)}</Typography.Text></Descriptions.Item>
+          <Descriptions.Item label="BTC 5 分钟持仓市值"><Typography.Text strong style={{ fontSize: 24 }}>{formatMoney(marketDataFresh ? assets?.positionsValueUsd : null)}</Typography.Text></Descriptions.Item>
+          <Descriptions.Item label="数据状态"><Tag color={marketDataFresh && assets?.dataStatus === 'READY' ? 'success' : 'warning'}>
+            {!assets ? assetsLoading ? '读取中' : '未连接' : !wallet ? '等待钱包' : !walletFresh ? '钱包数据已过期' :
+              assets.dataStatus === 'PARTIAL' ? '部分数据不可用' : !marketDataFresh ? '持仓等待更新' : '已更新'}</Tag></Descriptions.Item>
+          <Descriptions.Item label="当前钱包" span={isMobile ? 1 : 3}>{wallet
+            ? <Typography.Link href={`https://future.news/zh/address/${wallet.walletAddress}`} target="_blank" rel="noopener noreferrer" style={{ wordBreak: 'break-all' }}>{wallet.walletAddress}</Typography.Link>
+            : '等待同步'}</Descriptions.Item>
+          <Descriptions.Item label="现金采样时间">{formatTime(wallet?.observedAt)}</Descriptions.Item>
+          <Descriptions.Item label="持仓与买入更新时间">{formatTime(assets?.marketDataObservedAt)}</Descriptions.Item>
+        </Descriptions>
+        <Typography.Text type="secondary">每 5 秒自动刷新。现金取自当前 Future 登录钱包的页面显示；持仓与最近买入按同一地址查询 Polymarket，可能有索引延迟。市值包含待领取持仓，不计入现金。</Typography.Text>
+        {assetsError && <Alert type="error" showIcon message="钱包资产暂不可用" description={assetsError} />}
+        {assets && (assets.reasons.length > 0 || !walletFresh || !marketDataFresh) && <Alert type="warning" showIcon message="资产数据等待同步"
+          description={assets.reasons.join('；') || (!walletFresh ? 'Future 钱包采样已过期，请保持当前市场页面打开。' : '持仓数据已过期，正在重新读取。')} />}
+        <Typography.Title level={5} style={{ margin: 0 }}>当前买入资产</Typography.Title>
+        {marketDataFresh && assets?.positions != null
+          ? <Table rowKey="asset" size="small" dataSource={assets.positions} columns={positionColumns} pagination={false} scroll={{ x: 1085 }}
+            locale={{ emptyText: '当前暂无 BTC 5 分钟持仓' }} />
+          : <Typography.Text type="secondary">{assetsLoading ? '正在读取持仓…' : '持仓暂未核实'}</Typography.Text>}
+        <Typography.Title level={5} style={{ margin: 0 }}>最近买入 · 最多 10 笔</Typography.Title>
+        {marketDataFresh && assets?.recentBuys != null
+          ? <Table rowKey={(record, index) => `${record.id}:${index}`} size="small" dataSource={assets.recentBuys} columns={buyColumns} pagination={false} scroll={{ x: 855 }}
+            locale={{ emptyText: '最近买入记录中暂无 BTC 5 分钟买入' }} />
+          : <Typography.Text type="secondary">{assetsLoading ? '正在读取买入记录…' : '最近买入暂未核实'}</Typography.Text>}
+      </Space>
+    </Card>
 
     <Card title="自动准备票据控制" extra={<Button icon={<ReloadOutlined />} loading={statusLoading} onClick={() => { fetchStatus(); fetchOrders() }}>刷新</Button>}>
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
