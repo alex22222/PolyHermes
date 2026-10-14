@@ -3039,6 +3039,8 @@ export interface FutureBtc5mAssetBuy {
   amountUsd: number | null
   boughtAt: number
   transactionHash: string | null
+  result: 'WIN' | 'LOSS' | 'PENDING' | 'UNKNOWN'
+  winningSide: 'Up' | 'Down' | null
 }
 
 export interface FutureBtc5mAssets {
@@ -3046,6 +3048,7 @@ export interface FutureBtc5mAssets {
   dataStatus: 'READY' | 'PARTIAL' | 'WAITING_WALLET' | 'STALE_WALLET'
   positions: FutureBtc5mAssetPosition[] | null
   recentBuys: FutureBtc5mAssetBuy[] | null
+  buyHistoryComplete: boolean
   positionsValueUsd: number | null
   marketDataObservedAt: number | null
   reasons: string[]

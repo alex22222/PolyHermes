@@ -1,5 +1,6 @@
 package com.wrbug.polymarketbot.api
 
+import com.google.gson.annotations.SerializedName
 import retrofit2.Response
 import retrofit2.http.GET
 import retrofit2.http.Query
@@ -10,6 +11,16 @@ import retrofit2.http.Query
  * Base URL: https://data-api.polymarket.com
  */
 interface PolymarketDataApi {
+    @GET("/v2/activity")
+    suspend fun getActivityHistory(
+        @Query("user") user: String,
+        @Query("limit") limit: Int = 500,
+        @Query("cursor") cursor: String? = null,
+        @Query("type") type: String = "TRADE",
+        @Query("side") side: String = "BUY",
+        @Query("start") start: Long = 1,
+        @Query("sort_direction") sortDirection: String = "DESC"
+    ): Response<FutureBtc5mActivityPage>
     
     /**
      * 获取用户当前仓位
@@ -104,21 +115,21 @@ data class ValueResponse(
  * 文档: https://docs.polymarket.com/api-reference/core/get-user-activity
  */
 data class UserActivityResponse(
-    val proxyWallet: String,
+    @SerializedName(value = "proxyWallet", alternate = ["proxy_wallet"]) val proxyWallet: String,
     val timestamp: Long,
-    val conditionId: String,
+    @SerializedName(value = "conditionId", alternate = ["condition_id"]) val conditionId: String,
     val type: String,  // TRADE, SPLIT, MERGE, REDEEM, REWARD, CONVERSION
     val size: Double? = null,
-    val usdcSize: Double? = null,
-    val transactionHash: String? = null,
+    @SerializedName(value = "usdcSize", alternate = ["usdc_size"]) val usdcSize: Double? = null,
+    @SerializedName(value = "transactionHash", alternate = ["transaction_hash"]) val transactionHash: String? = null,
     val price: Double? = null,
-    val asset: String? = null,
+    @SerializedName(value = "asset", alternate = ["token_id"]) val asset: String? = null,
     val side: String? = null,  // BUY, SELL
-    val outcomeIndex: Int? = null,
+    @SerializedName(value = "outcomeIndex", alternate = ["outcome_index"]) val outcomeIndex: Int? = null,
     val title: String? = null,
     val slug: String? = null,
     val icon: String? = null,
-    val eventSlug: String? = null,
+    @SerializedName(value = "eventSlug", alternate = ["event_slug"]) val eventSlug: String? = null,
     val outcome: String? = null,
     val name: String? = null,
     val pseudonym: String? = null,

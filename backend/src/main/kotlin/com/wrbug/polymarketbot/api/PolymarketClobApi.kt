@@ -10,6 +10,8 @@ import retrofit2.http.*
  * 用于程序化地管理市场订单
  */
 interface PolymarketClobApi {
+    @GET("/markets/{conditionId}")
+    suspend fun getSettlementMarket(@Path("conditionId") conditionId: String): Response<FutureBtc5mSettlementMarket>
     
     /**
      * 获取订单簿

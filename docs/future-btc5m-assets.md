@@ -1,10 +1,12 @@
 # Future BTC 5 分钟：我的资产
 
-2026-10-14 新增“我的资产 · BTC 5 分钟”卡片，使用 Chrome 当前 Future 登录钱包，独立于项目导入的其它账户。卡片展示钱包现金、BTC5m 持仓市值、当前买入资产及最近最多 10 笔买入，每 5 秒刷新，窗口恢复焦点或网络恢复时立即重新读取。
+2026-10-14 新增“我的资产 · BTC 5 分钟”卡片，使用 Chrome 当前 Future 登录钱包，独立于项目导入的其它账户。卡片展示钱包现金、BTC5m 持仓市值、当前买入资产及全部买入记录，每 5 秒刷新，窗口恢复焦点或网络恢复时立即重新读取。买入记录默认每页 20 笔，支持 10 / 20 / 50 / 100 笔；同钱包刷新保留页码，切换钱包或历史缩短时回到第一页。
 
 现金来自 Future 导航栏的钱包徽标，读取显示金额而非链上精确原始余额。仅唯一可见、同源 `/address/0x…` 链接能识别账户；缺失、缩略金额或歧义不视为零。扩展 0.6.6 通过严格白名单 schema3 报告地址与现金；旧 schema1/2 仍兼容，不刷新现金时间。钱包快照只存于助手内存，不写入票据或订单账本。15 秒后现金与当前估值隐藏，显示过期原因。
 
-后端新增鉴权只读接口 `POST /api/future-btc5m/assets`。按该地址并行查询公开 [当前持仓](https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user) 和 [用户活动](https://docs.polymarket.com/api-reference/core/get-user-activity)，只接受精确 BTC5m 市场与匹配钱包。最近买入从最新 500 条 BUY/TRADE 索引记录中选取 10 笔，可能受索引延迟影响；不以浏览器点击审计推断成交。当前资产保留持有份额和待领取赢家，排除已过期、已结算且价格与价值均为零的输家份额。买入历史仍保留这些轮次。
+后端鉴权只读接口 `POST /api/future-btc5m/assets` 按该地址并行查询公开 [当前持仓](https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user) 和 [v2 用户活动](https://docs.polymarket.com/api-reference/feeds/list-account-activity)，只接受精确 BTC5m 市场与匹配钱包。买入历史从 `start=1` 开始，按 `next_cursor` 读取全部 BUY/TRADE，保留同秒、同交易中内容相同的成交行；不再截取 10 笔。读取达到 6 秒预算或后页失败时保留已验证前缀与游标，后续刷新继续，并以 `buyHistoryComplete=false` 明示尚未完整。字段 `recentBuys` 保留接口兼容，但内容为全部已读取记录。此功能读取平台索引历史，不创建或修改交易账本。当前资产保留持有份额和待领取赢家，排除已过期、已结算且价格与价值均为零的输家份额。买入历史仍保留这些轮次。
+
+每笔 `result` 为 `WIN / LOSS / PENDING / UNKNOWN`，页面显示“赢 / 亏 / 待结算 / 待确认”。结算读取公开 CLOB `GET /markets/{condition_id}`，严格核对 condition、slug、token 和 Up/Down；仅轮次结束、`closed=true`、两个不同 token 且恰有一个明确赢家时标注赢亏。未关闭且无赢家显示待结算；超时、缺失或矛盾显示待确认。结算查询并发 4、每次最多 6 秒，轮转未确认市场以避免慢失败项持续阻塞后续记录；已确认赢家使用有容量限制的缓存。依据是[市场最终结算](https://docs.polymarket.com/concepts/resolution)，不以当前报价、持仓消失或买入点击推断。赢亏表示买入方向是否命中最终方向，不代表已领取，也不是包含提前卖出和手续费的逐笔已实现净盈亏。
 
 市场数据缓存 10 秒，现金每次重新读取。接口失败返回未知值与具体来源提示；持仓达到 500 条、身份不匹配或份额异常时不宣称完整持仓。查询结束重新核对钱包，切换账户后清除旧账户持仓与买入记录。资产读取不改变自动准备开关、交易规则、金额或 Buy 逻辑。
 
@@ -13,3 +15,5 @@
 助手重启本身仍按既有逻辑关闭自动准备并恢复周末默认值；本次维护只恢复刚读取的原有设置，不改变交易规则或金额。没有取得钱包快照时，不以旧余额或零替代。生产发布与待激活状态见 [部署记录](../reports/future-btc5m-assistant/wallet-assets-deploy-20261014/REVIEW.md)。
 
 验收记录：[wallet-assets-20261014](../reports/future-btc5m-assistant/wallet-assets-20261014/verification.md)。模拟截图中的余额和持仓是测试数据，不能当作当前真实资产。
+
+全部买入及结算结果扩展的本地验收记录：[buy-history-20261014](../reports/future-btc5m-assistant/buy-history-20261014/verification.md)。本次扩展尚未发布，前面的 `6240437` 发布记录仅对应原资产卡片。

@@ -3,9 +3,16 @@ package com.wrbug.polymarketbot.service.bridge
 import com.wrbug.polymarketbot.api.PolymarketDataApi
 import com.wrbug.polymarketbot.api.PositionResponse
 import com.wrbug.polymarketbot.api.UserActivityResponse
+import com.wrbug.polymarketbot.api.FutureBtc5mActivityPage
+import com.wrbug.polymarketbot.api.FutureBtc5mActivityPagination
+import com.wrbug.polymarketbot.api.FutureBtc5mSettlementMarket
+import com.wrbug.polymarketbot.api.FutureBtc5mSettlementToken
+import com.wrbug.polymarketbot.api.PolymarketClobApi
+import com.google.gson.Gson
 import com.wrbug.polymarketbot.dto.FutureBtc5mWalletSnapshot
 import com.wrbug.polymarketbot.util.RetrofitFactory
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.BeforeEach
@@ -21,21 +28,24 @@ class FutureBtc5mAssetsServiceTest {
     private val client = Mockito.mock(FutureBtc5mBridgeClient::class.java)
     private val factory = Mockito.mock(RetrofitFactory::class.java)
     private val api = Mockito.mock(PolymarketDataApi::class.java)
+    private val clob = Mockito.mock(PolymarketClobApi::class.java)
     private val service = FutureBtc5mAssetsService(client, factory)
 
     @BeforeEach
     fun setUp() = runBlocking<Unit> {
         Mockito.`when`(client.wallet()).thenReturn(wallet())
         Mockito.`when`(factory.createDataApi()).thenReturn(api)
+        Mockito.`when`(factory.createClobApiWithoutAuth()).thenReturn(clob)
+        Mockito.`when`(clob.getSettlementMarket("condition")).thenReturn(Response.success(market()))
         Mockito.`when`(positions()).thenReturn(Response.success(emptyList()))
-        Mockito.`when`(buys()).thenReturn(Response.success(emptyList()))
+        Mockito.`when`(buys()).thenReturn(activity(emptyList()))
     }
 
     @Test
     fun `queries same wallet and returns only BTC five minute positions and newest actual buys`() = runBlocking<Unit> {
         Mockito.`when`(positions()).thenReturn(Response.success(listOf(position(),
             position().copy(slug = "eth-updown-5m-$start"), position().copy(size = 0.0))))
-        Mockito.`when`(buys()).thenReturn(Response.success(listOf(buy(now - 20), buy(now - 10),
+        Mockito.`when`(buys()).thenReturn(activity(listOf(buy(now - 20), buy(now - 10),
             buy().copy(side = "SELL"), buy().copy(slug = "btc-updown-15m-$start"))))
         val result = service.assets()
         assertEquals("READY", result.dataStatus)
@@ -46,6 +56,130 @@ class FutureBtc5mAssetsServiceTest {
         assertEquals(address, result.wallet!!.walletAddress)
         positions(Mockito.verify(api))
         buys(Mockito.verify(api))
+    }
+
+    @Test
+    fun `all indexed BTC buys are returned instead of truncating history to ten`() = runBlocking {
+        Mockito.`when`(buys()).thenReturn(activity(List(25) { buy(now - it - 1) }))
+        val result = service.assets()
+        assertEquals(25, result.recentBuys!!.size)
+        assertEquals(true, result.buyHistoryComplete)
+    }
+
+    @Test
+    fun `cursor pages retain same second identical fills with distinct row ids`() = runBlocking<Unit> {
+        Mockito.`when`(buys()).thenReturn(activity(List(500) { buy() }, "next-page"))
+        Mockito.`when`(buys(cursor = "next-page")).thenReturn(activity(listOf(buy(), buy())))
+        val result = service.assets()
+        assertEquals(502, result.recentBuys!!.size)
+        assertEquals(502, result.recentBuys!!.map { it.id }.distinct().size)
+        assertEquals(true, result.buyHistoryComplete)
+        buys(Mockito.verify(api), "next-page")
+    }
+
+    @Test
+    fun `failed later page retains verified rows and resumes its cursor on next refresh`() = runBlocking<Unit> {
+        Mockito.`when`(buys()).thenReturn(activity(listOf(buy()), "next-page"))
+        Mockito.`when`(buys(cursor = "next-page")).thenThrow(IllegalStateException("unavailable"))
+            .thenReturn(activity(listOf(buy(now - 10))))
+        val result = service.assets()
+        assertEquals("PARTIAL", result.dataStatus)
+        assertEquals(false, result.buyHistoryComplete)
+        assertEquals(1, result.recentBuys!!.size)
+        val recovered = service.assets()
+        assertEquals(true, recovered.buyHistoryComplete)
+        assertEquals(2, recovered.recentBuys!!.size)
+        buys(Mockito.verify(api, Mockito.times(1)))
+        buys(Mockito.verify(api, Mockito.times(2)), "next-page")
+    }
+
+    @Test
+    fun `repeated cursor and missing pagination cannot report all history`() = runBlocking {
+        Mockito.`when`(buys()).thenReturn(activity(listOf(buy()), "repeat"))
+        Mockito.`when`(buys(cursor = "repeat")).thenReturn(activity(listOf(buy()), "repeat"))
+        assertEquals(false, service.assets().buyHistoryComplete)
+        Mockito.`when`(buys()).thenReturn(Response.success(FutureBtc5mActivityPage(emptyList(), null)))
+        assertEquals(false, service.assets().buyHistoryComplete)
+    }
+
+    @Test
+    fun `settled winner determines every fill result independently from current holdings`() = runBlocking {
+        Mockito.`when`(buys()).thenReturn(activity(listOf(buy(), buy().copy(asset = "down-token", outcome = "Down"))))
+        Mockito.`when`(clob.getSettlementMarket("condition")).thenReturn(Response.success(market().copy(closed = true,
+            tokens = market().tokens!!.map { it.copy(winner = it.outcome == "Up") })))
+        val result = service.assets()
+        assertEquals(listOf("WIN", "LOSS"), result.recentBuys!!.map { it.result })
+        assertEquals(listOf("Up", "Up"), result.recentBuys!!.map { it.winningSide })
+        assertEquals(emptyList<Any>(), result.positions)
+    }
+
+    @Test
+    fun `unresolved market stays pending even after period end and missing market stays unknown`() = runBlocking {
+        Mockito.`when`(buys()).thenReturn(activity(listOf(buy())))
+        assertEquals("PENDING", service.assets().recentBuys!!.single().result)
+        val uncached = FutureBtc5mAssetsService(client, factory)
+        Mockito.`when`(clob.getSettlementMarket("condition")).thenThrow(IllegalStateException("timeout"))
+        val result = uncached.assets()
+        assertEquals("UNKNOWN", result.recentBuys!!.single().result)
+        assertNull(result.recentBuys!!.single().winningSide)
+        assertEquals("PARTIAL", result.dataStatus)
+        assertEquals(true, result.buyHistoryComplete)
+    }
+
+    @Test
+    fun `inconsistent identities winners or outcomes never become win or loss`() = runBlocking {
+        val settled = market().copy(closed = true, tokens = market().tokens!!.map { it.copy(winner = it.outcome == "Up") })
+        for (value in listOf(settled.copy(conditionId = "other"), settled.copy(slug = "btc-updown-5m-${start - 300}"),
+            settled.copy(closed = false), settled.copy(tokens = settled.tokens!!.map { it.copy(winner = true) }),
+            settled.copy(tokens = settled.tokens!!.map { it.copy(winner = null) }),
+            settled.copy(tokens = settled.tokens!!.map { it.copy(tokenId = "other-token") }),
+            settled.copy(tokens = settled.tokens!!.map { it.copy(outcome = if (it.outcome == "Up") "Down" else "Up") }))) {
+            Mockito.`when`(buys()).thenReturn(activity(listOf(buy())))
+            Mockito.`when`(clob.getSettlementMarket("condition")).thenReturn(Response.success(value))
+            val result = FutureBtc5mAssetsService(client, factory).assets().recentBuys!!.single()
+            assertEquals("UNKNOWN", result.result)
+            assertNull(result.winningSide)
+        }
+    }
+
+    @Test
+    fun `slow failing markets cannot starve later settlement queries on every refresh`() = runBlocking {
+        Mockito.`when`(buys()).thenReturn(activity((0..7).map { buy().copy(conditionId = "condition-$it") }))
+        val slowClob = object : PolymarketClobApi by clob {
+            override suspend fun getSettlementMarket(conditionId: String): Response<FutureBtc5mSettlementMarket> {
+                if (conditionId.substringAfterLast('-').toInt() < 4) {
+                    delay(4000)
+                    error("unavailable")
+                }
+                delay(3000)
+                return Response.success(market().copy(conditionId = conditionId, closed = true,
+                    tokens = market().tokens!!.map { it.copy(winner = it.outcome == "Up") }))
+            }
+        }
+        Mockito.`when`(factory.createClobApiWithoutAuth()).thenReturn(slowClob)
+        assertEquals(List(8) { "UNKNOWN" }, service.assets().recentBuys!!.map { it.result })
+        assertEquals(List(4) { "WIN" }, service.assets().recentBuys!!.drop(4).map { it.result })
+    }
+
+    @Test
+    fun `v2 snake case activity and public winner response decode to the same identities`() {
+        val page = Gson().fromJson("""{"data":[{"proxy_wallet":"$address","timestamp":$now,
+            "condition_id":"condition","type":"TRADE","side":"BUY","token_id":"up-token",
+            "usdc_size":1.03,"transaction_hash":"hash","outcome_index":0,"event_slug":"btc-updown-5m-$start"}],
+            "pagination":{"has_more":false,"next_cursor":null}}""", FutureBtc5mActivityPage::class.java)
+        assertEquals(address, page.data!!.single().proxyWallet)
+        assertEquals("up-token", page.data!!.single().asset)
+        assertEquals("condition", page.data!!.single().conditionId)
+        assertEquals(1.03, page.data!!.single().usdcSize)
+        assertEquals("hash", page.data!!.single().transactionHash)
+        assertEquals(0, page.data!!.single().outcomeIndex)
+        assertEquals("btc-updown-5m-$start", page.data!!.single().eventSlug)
+        assertEquals(false, page.pagination!!.hasMore)
+        val market = Gson().fromJson("""{"condition_id":"condition","market_slug":"btc-updown-5m-$start",
+            "closed":true,"tokens":[{"token_id":"up-token","outcome":"Up","winner":true},
+            {"token_id":"down-token","outcome":"Down","winner":false}]}""", FutureBtc5mSettlementMarket::class.java)
+        assertEquals("condition", market.conditionId)
+        assertEquals("up-token", market.tokens!!.single { it.winner == true }.tokenId)
     }
 
     @Test
@@ -76,7 +210,7 @@ class FutureBtc5mAssetsServiceTest {
     @Test
     fun `position failure is unknown while successful buys and cash are retained`() = runBlocking {
         Mockito.`when`(positions()).thenThrow(IllegalStateException("timeout"))
-        Mockito.`when`(buys()).thenReturn(Response.success(listOf(buy())))
+        Mockito.`when`(buys()).thenReturn(activity(listOf(buy())))
         val result = service.assets()
         assertEquals("PARTIAL", result.dataStatus)
         assertNull(result.positions)
@@ -138,6 +272,12 @@ class FutureBtc5mAssetsServiceTest {
     private suspend fun positions(source: PolymarketDataApi = api) =
         source.getPositions(user = address, sizeThreshold = 0.0, limit = 500, offset = 0)
 
-    private suspend fun buys(source: PolymarketDataApi = api) = source.getUserActivity(user = address,
-        limit = 500, offset = 0, type = listOf("TRADE"), side = "BUY", sortBy = "TIMESTAMP", sortDirection = "DESC")
+    private suspend fun buys(source: PolymarketDataApi = api, cursor: String? = null) =
+        source.getActivityHistory(user = address, cursor = cursor)
+
+    private fun activity(rows: List<UserActivityResponse>, next: String? = null, more: Boolean = next != null) =
+        Response.success(FutureBtc5mActivityPage(rows, FutureBtc5mActivityPagination(more, next)))
+
+    private fun market() = FutureBtc5mSettlementMarket("condition", "btc-updown-5m-$start", false,
+        listOf(FutureBtc5mSettlementToken("up-token", "Up", false), FutureBtc5mSettlementToken("down-token", "Down", false)))
 }

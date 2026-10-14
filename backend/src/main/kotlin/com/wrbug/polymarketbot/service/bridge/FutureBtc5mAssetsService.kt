@@ -1,15 +1,25 @@
 package com.wrbug.polymarketbot.service.bridge
 
+import com.github.benmanes.caffeine.cache.Caffeine
+import com.wrbug.polymarketbot.api.FutureBtc5mSettlementMarket
+import com.wrbug.polymarketbot.api.UserActivityResponse
 import com.wrbug.polymarketbot.dto.FutureBtc5mAssetBuy
 import com.wrbug.polymarketbot.dto.FutureBtc5mAssetPosition
 import com.wrbug.polymarketbot.dto.FutureBtc5mAssets
 import com.wrbug.polymarketbot.dto.FutureBtc5mWalletSnapshot
 import com.wrbug.polymarketbot.util.RetrofitFactory
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.springframework.stereotype.Service
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 @Service
 class FutureBtc5mAssetsService(
@@ -18,9 +28,13 @@ class FutureBtc5mAssetsService(
 ) {
     private data class MarketData(
         val wallet: String, val at: Double, val positions: List<FutureBtc5mAssetPosition>?,
-        val buys: List<FutureBtc5mAssetBuy>?, val reasons: List<String>
+        val buys: List<FutureBtc5mAssetBuy>?, val reasons: List<String>, val historyComplete: Boolean
     )
+    private data class History(val rows: List<UserActivityResponse>, val cursor: String?, val seen: Set<String>)
     @Volatile private var cache: MarketData? = null
+    private val historyProgress = Caffeine.newBuilder().maximumSize(5).build<String, History>()
+    private val settlements = Caffeine.newBuilder().maximumSize(10000).build<String, FutureBtc5mSettlementMarket>()
+    private val settlementOffset = AtomicInteger()
 
     fun assets(): FutureBtc5mAssets {
         val wallet = client.wallet() ?: return empty(null, "WAITING_WALLET", "等待 Chrome 同步 Future 登录钱包")
@@ -37,7 +51,7 @@ class FutureBtc5mAssetsService(
         val total = data.positions?.takeIf { positions -> positions.all { it.currentValueUsd != null } }
             ?.sumOf { it.currentValueUsd!! }
         return FutureBtc5mAssets(current, if (data.reasons.isEmpty()) "READY" else "PARTIAL", data.positions,
-            data.buys, total, data.at, data.reasons)
+            data.buys, total, data.at, data.reasons, data.historyComplete)
     }
 
     private suspend fun fetch(wallet: String): MarketData = coroutineScope {
@@ -62,33 +76,113 @@ class FutureBtc5mAssetsService(
                 }.sortedByDescending { it.slug.substringAfterLast('-').toLong() }
             }
         }
-        val buys = async {
-            runCatching {
-                val response = withTimeout(3500) {
-                    api.getUserActivity(user = wallet, limit = 500, offset = 0, type = listOf("TRADE"),
-                        side = "BUY", sortBy = "TIMESTAMP", sortDirection = "DESC")
-                }
-                check(response.isSuccessful && response.body() != null)
-                val rows = response.body()!!
-                check(rows.all { it.proxyWallet.equals(wallet, ignoreCase = true) })
-                rows.filter { it.type == "TRADE" && it.side == "BUY" }
-                    .sortedByDescending { it.timestamp }.mapNotNull { row ->
-                        val slug = btcSlug(row.eventSlug) ?: btcSlug(row.slug) ?: return@mapNotNull null
-                        val quantity = row.size
-                        check(quantity != null && quantity.isFinite() && quantity > 0 && !row.asset.isNullOrBlank() &&
-                            row.outcome in setOf("Up", "Down") && row.timestamp >= 0 && row.timestamp <= System.currentTimeMillis() / 1000 + 3)
-                        FutureBtc5mAssetBuy("${row.transactionHash}:${row.asset}:${row.timestamp}:${row.price}:${row.size}",
-                            row.asset, slug, row.title ?: slug, row.outcome!!, quantity,
-                            price(row.price), money(row.usdcSize), row.timestamp, row.transactionHash)
-                    }.take(10)
-            }
-        }
+        val buys = async { fetchBuys(wallet) }
         val positionResult = positions.await()
         val buyResult = buys.await()
         val reasons = mutableListOf<String>()
         if (positionResult.isFailure) reasons += "当前 BTC 5 分钟持仓暂时无法完整核实"
-        if (buyResult.isFailure) reasons += "最近买入记录暂时无法读取"
-        MarketData(wallet, System.currentTimeMillis() / 1000.0, positionResult.getOrNull(), buyResult.getOrNull(), reasons)
+        reasons += buyResult.third
+        MarketData(wallet, System.currentTimeMillis() / 1000.0, positionResult.getOrNull(), buyResult.first, reasons, buyResult.second)
+    }
+
+    private suspend fun fetchBuys(wallet: String): Triple<List<FutureBtc5mAssetBuy>?, Boolean, List<String>> {
+        val api = retrofitFactory.createDataApi()
+        val progress = historyProgress.getIfPresent(wallet)
+        val rows = progress?.rows?.toMutableList() ?: mutableListOf()
+        var cursor = progress?.cursor
+        val seen = progress?.seen?.toMutableSet() ?: mutableSetOf()
+        var complete = false
+        runCatching {
+            withTimeoutOrNull(6000) {
+                do {
+                    val response = withTimeout(3500) { api.getActivityHistory(user = wallet, cursor = cursor) }
+                    check(response.isSuccessful)
+                    val page = checkNotNull(response.body())
+                    val pageRows = checkNotNull(page.data)
+                    val pagination = checkNotNull(page.pagination)
+                    check(pageRows.size <= 500 && pageRows.all { it.proxyWallet.equals(wallet, ignoreCase = true) })
+                    val more = checkNotNull(pagination.hasMore)
+                    val next = pagination.nextCursor
+                    check(if (more) !next.isNullOrBlank() && next !in seen && pageRows.isNotEmpty() else next == null)
+                    rows += pageRows
+                    cursor = next
+                    if (next != null) seen += next
+                    complete = !more
+                } while (!complete)
+            }
+        }
+        if (!complete && cursor != null && rows.isNotEmpty()) historyProgress.put(wallet, History(rows.toList(), cursor, seen.toSet()))
+        else historyProgress.invalidate(wallet)
+        val reasons = mutableListOf<String>()
+        if (!complete) reasons += "买入历史尚未完整读取，当前仅展示已核实记录，后续刷新继续同步"
+        if (rows.isEmpty() && !complete) return Triple(null, false, reasons)
+        val occurrences = mutableMapOf<String, Int>()
+        val parsed = runCatching {
+            rows.filter { it.type == "TRADE" && it.side == "BUY" }.sortedByDescending { it.timestamp }.mapNotNull { row ->
+                val slug = btcSlug(row.eventSlug) ?: btcSlug(row.slug) ?: return@mapNotNull null
+                val quantity = row.size
+                check(quantity != null && quantity.isFinite() && quantity > 0 && !row.asset.isNullOrBlank() &&
+                    row.outcome in setOf("Up", "Down") && !row.conditionId.isNullOrBlank() &&
+                    row.timestamp >= 0 && row.timestamp <= System.currentTimeMillis() / 1000 + 3)
+                val key = "${row.transactionHash}:${row.asset}:${row.timestamp}:${row.price}:${row.size}"
+                val occurrence = occurrences.getOrDefault(key, 0)
+                occurrences[key] = occurrence + 1
+                row.conditionId to FutureBtc5mAssetBuy("$key:$occurrence", row.asset, slug, row.title ?: slug,
+                    row.outcome!!, quantity, price(row.price), money(row.usdcSize), row.timestamp, row.transactionHash)
+            }
+        }.getOrElse {
+            historyProgress.invalidate(wallet)
+            return Triple(null, false, listOf("买入历史包含身份或成交数据异常，暂时无法核实"))
+        }
+        val markets = settlementMarkets(parsed.map { it.first }.distinct())
+        val buys = parsed.map { (condition, buy) ->
+            val market = markets[condition]
+            val tokens = market?.tokens
+            val valid = market?.conditionId == condition && market.slug == buy.slug && tokens?.size == 2 &&
+                tokens.map { it.outcome }.toSet() == setOf("Up", "Down") &&
+                tokens.all { !it.tokenId.isNullOrBlank() && it.winner != null } && tokens.map { it.tokenId }.distinct().size == 2 &&
+                tokens.singleOrNull { it.tokenId == buy.asset }?.outcome == buy.side
+            val winner = tokens?.singleOrNull { it.winner == true }
+            when {
+                !valid -> buy
+                market?.closed == true && winner != null && System.currentTimeMillis() / 1000 >= buy.slug.substringAfterLast('-').toLong() + 300 ->
+                    buy.copy(result = if (winner.tokenId == buy.asset) "WIN" else "LOSS", winningSide = winner.outcome)
+                market?.closed == false && tokens?.none { it.winner == true } == true -> buy.copy(result = "PENDING")
+                else -> buy
+            }
+        }
+        if (buys.any { it.result == "UNKNOWN" }) reasons += "部分买入的结算结果暂未核实，刷新后继续查询"
+        return Triple(buys, complete, reasons)
+    }
+
+    private suspend fun settlementMarkets(conditions: List<String>): Map<String, FutureBtc5mSettlementMarket> = coroutineScope {
+        val results = ConcurrentHashMap<String, FutureBtc5mSettlementMarket>()
+        conditions.forEach { condition -> settlements.getIfPresent(condition)?.let { results[condition] = it } }
+        val semaphore = Semaphore(4)
+        val api = retrofitFactory.createClobApiWithoutAuth()
+        val pending = conditions.filter { !results.containsKey(it) }
+        val offset = if (pending.isEmpty()) 0 else Math.floorMod(settlementOffset.getAndAdd(4), pending.size)
+        withTimeoutOrNull(6000) {
+            (pending.drop(offset) + pending.take(offset)).map { condition -> async {
+                semaphore.withPermit {
+                    val market = try {
+                        withTimeoutOrNull(3500) { api.getSettlementMarket(condition).takeIf { it.isSuccessful }?.body() }
+                    } catch (error: CancellationException) { throw error }
+                    catch (_: Exception) { null }
+                    if (market != null) {
+                        results[condition] = market
+                        val tokens = market.tokens
+                        if (market.conditionId == condition && btcSlug(market.slug) != null && market.closed == true &&
+                            tokens?.size == 2 && tokens.map { it.outcome }.toSet() == setOf("Up", "Down") &&
+                            tokens.all { !it.tokenId.isNullOrBlank() && it.winner != null } &&
+                            tokens.map { it.tokenId }.distinct().size == 2 && tokens.count { it.winner == true } == 1) {
+                            settlements.put(condition, market)
+                        }
+                    }
+                }
+            } }.awaitAll()
+        }
+        results
     }
 
     private fun btcSlug(value: String?): String? {

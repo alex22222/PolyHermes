@@ -72,6 +72,7 @@ const FutureBtc5mBridge: React.FC = () => {
   const [assets, setAssets] = useState<FutureBtc5mAssets | null>(null)
   const [assetsError, setAssetsError] = useState<string | null>(null)
   const [assetsLoading, setAssetsLoading] = useState(false)
+  const [buyPagination, setBuyPagination] = useState({ current: 1, pageSize: 20 })
   const [orders, setOrders] = useState<FutureBtc5mOrder[]>([])
   const [ordersLoading, setOrdersLoading] = useState(false)
   const [ordersError, setOrdersError] = useState<string | null>(null)
@@ -91,6 +92,7 @@ const FutureBtc5mBridge: React.FC = () => {
   const ordersInFlight = useRef<number | null>(null)
   const detailInFlight = useRef<number | null>(null)
   const assetsInFlight = useRef<number | null>(null)
+  const buyHistorySnapshot = useRef<{ walletAddress: string | null, count: number }>({ walletAddress: null, count: 0 })
 
   useEffect(() => {
     mounted.current = true
@@ -116,7 +118,14 @@ const FutureBtc5mBridge: React.FC = () => {
       if (response.data.code !== 0 || !response.data.data) {
         throw new Error(response.data.msg || '获取钱包资产失败')
       }
-      setAssets(response.data.data)
+      const nextAssets = response.data.data
+      const walletAddress = nextAssets.wallet?.walletAddress.toLowerCase() ?? null
+      const count = nextAssets.recentBuys?.length ?? 0
+      if (walletAddress !== buyHistorySnapshot.current.walletAddress || count < buyHistorySnapshot.current.count) {
+        setBuyPagination((prev) => ({ ...prev, current: 1 }))
+      }
+      buyHistorySnapshot.current = { walletAddress, count }
+      setAssets(nextAssets)
       setAssetsError(null)
       setClock(Date.now())
     } catch (error: unknown) {
@@ -339,7 +348,14 @@ const FutureBtc5mBridge: React.FC = () => {
     { title: '方向', dataIndex: 'side', width: 75, render: (side: string) => <Tag color={side === 'Up' ? 'green' : 'red'}>{side === 'Up' ? '涨' : '跌'}</Tag> },
     { title: '买入份额', dataIndex: 'quantity', width: 110, render: (value: number) => formatValue(value) },
     { title: '买入价格', dataIndex: 'price', width: 100, render: formatCents },
-    { title: '买入金额', dataIndex: 'amountUsd', width: 110, render: formatMoney }
+    { title: '买入金额', dataIndex: 'amountUsd', width: 110, render: formatMoney },
+    { title: '结算结果', dataIndex: 'result', width: 145, render: (result: FutureBtc5mAssetBuy['result'], record) =>
+      <Space direction="vertical" size={0}>
+        <Tag color={result === 'WIN' ? 'green' : result === 'LOSS' ? 'red' : result === 'PENDING' ? 'processing' : 'default'}>
+          {result === 'WIN' ? '赢' : result === 'LOSS' ? '亏' : result === 'PENDING' ? '待结算' : '待确认'}
+        </Tag>
+        {record.winningSide && <Typography.Text type="secondary">结算方向：{record.winningSide === 'Up' ? '涨' : '跌'}</Typography.Text>}
+      </Space> }
   ]
 
   const wallet = assets?.wallet
@@ -409,7 +425,7 @@ const FutureBtc5mBridge: React.FC = () => {
           <Descriptions.Item label="现金采样时间">{formatTime(wallet?.observedAt)}</Descriptions.Item>
           <Descriptions.Item label="持仓与买入更新时间">{formatTime(assets?.marketDataObservedAt)}</Descriptions.Item>
         </Descriptions>
-        <Typography.Text type="secondary">每 5 秒自动刷新。现金取自当前 Future 登录钱包的页面显示；持仓与最近买入按同一地址查询 Polymarket，可能有索引延迟。市值包含待领取持仓，不计入现金。</Typography.Text>
+        <Typography.Text type="secondary">每 5 秒自动刷新。现金取自当前 Future 登录钱包的页面显示；持仓与买入历史按同一地址查询 Polymarket，可能有索引延迟。市值包含待领取持仓，不计入现金。</Typography.Text>
         {assetsError && <Alert type="error" showIcon message="钱包资产暂不可用" description={assetsError} />}
         {assets && (assets.reasons.length > 0 || !walletFresh || !marketDataFresh) && <Alert type="warning" showIcon message="资产数据等待同步"
           description={assets.reasons.join('；') || (!walletFresh ? 'Future 钱包采样已过期，请保持当前市场页面打开。' : '持仓数据已过期，正在重新读取。')} />}
@@ -418,11 +434,20 @@ const FutureBtc5mBridge: React.FC = () => {
           ? <Table rowKey="asset" size="small" dataSource={assets.positions} columns={positionColumns} pagination={false} scroll={{ x: 1085 }}
             locale={{ emptyText: '当前暂无 BTC 5 分钟持仓' }} />
           : <Typography.Text type="secondary">{assetsLoading ? '正在读取持仓…' : '持仓暂未核实'}</Typography.Text>}
-        <Typography.Title level={5} style={{ margin: 0 }}>最近买入 · 最多 10 笔</Typography.Title>
+        <Typography.Title level={5} style={{ margin: 0 }}>全部买入记录</Typography.Title>
+        <Typography.Text type="secondary">赢 / 亏按市场最终结算方向标注，表示买入方向是否命中；不代表已领取，也不表示包含提前卖出和手续费的实际净盈亏。</Typography.Text>
         {marketDataFresh && assets?.recentBuys != null
-          ? <Table rowKey={(record, index) => `${record.id}:${index}`} size="small" dataSource={assets.recentBuys} columns={buyColumns} pagination={false} scroll={{ x: 855 }}
-            locale={{ emptyText: '最近买入记录中暂无 BTC 5 分钟买入' }} />
-          : <Typography.Text type="secondary">{assetsLoading ? '正在读取买入记录…' : '最近买入暂未核实'}</Typography.Text>}
+          ? <>
+            <Typography.Text type="secondary">已加载 {assets.recentBuys.length} 笔 · {assets.buyHistoryComplete === true ? '历史记录已完整加载' : '历史记录未完整加载'}</Typography.Text>
+            {assets.buyHistoryComplete !== true && <Alert type="warning" showIcon message="买入历史尚未完整核实"
+              description="当前仅展示已加载记录，不能视为全部买入；请等待历史数据完整同步后核对。" />}
+            <Table rowKey={(record, index) => `${record.id}:${index}`} size="small" dataSource={assets.recentBuys} columns={buyColumns} scroll={{ x: 1000 }}
+              pagination={{ ...buyPagination, total: assets.recentBuys.length, showSizeChanger: true,
+                pageSizeOptions: ['10', '20', '50', '100'], showTotal: (total) => `已加载 ${total} 笔`,
+                onChange: (current, pageSize) => setBuyPagination({ current, pageSize }) }}
+              locale={{ emptyText: assets.buyHistoryComplete === true ? '暂无 BTC 5 分钟买入记录' : '当前尚未加载 BTC 5 分钟买入记录' }} />
+          </>
+          : <Typography.Text type="secondary">{assetsLoading ? '正在读取买入记录…' : '买入历史暂未核实'}</Typography.Text>}
       </Space>
     </Card>
 

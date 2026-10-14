@@ -1,6 +1,7 @@
 package com.wrbug.polymarketbot.service.copytrading.research
 
 import com.wrbug.polymarketbot.api.PolymarketDataApi
+import com.wrbug.polymarketbot.api.FutureBtc5mActivityPage
 import com.wrbug.polymarketbot.api.PositionResponse
 import com.wrbug.polymarketbot.api.UserActivityResponse
 import com.wrbug.polymarketbot.api.ValueResponse
@@ -135,6 +136,9 @@ class LeaderResearchActivityHistoryBackfillServiceTest {
     private inline fun <reified T> mock(): T = Mockito.mock(T::class.java)
 
     private class FakeDataApi(private val activities: List<UserActivityResponse>) : PolymarketDataApi {
+        override suspend fun getActivityHistory(user: String, limit: Int, cursor: String?, type: String,
+            side: String, start: Long, sortDirection: String): Response<FutureBtc5mActivityPage> = error("Not used by v1 backfill")
+
         override suspend fun getPositions(
             user: String,
             market: String?,
@@ -173,6 +177,9 @@ class LeaderResearchActivityHistoryBackfillServiceTest {
     }
 
     private class SlowDataApi : PolymarketDataApi {
+        override suspend fun getActivityHistory(user: String, limit: Int, cursor: String?, type: String,
+            side: String, start: Long, sortDirection: String): Response<FutureBtc5mActivityPage> = error("Not used by v1 backfill")
+
         override suspend fun getPositions(
             user: String,
             market: String?,

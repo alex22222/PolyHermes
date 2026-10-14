@@ -35,7 +35,9 @@ data class FutureBtc5mAssetBuy(
     val price: Double?,
     val amountUsd: Double?,
     val boughtAt: Long,
-    val transactionHash: String?
+    val transactionHash: String?,
+    val result: String = "UNKNOWN",
+    val winningSide: String? = null
 )
 
 data class FutureBtc5mAssets(
@@ -45,5 +47,6 @@ data class FutureBtc5mAssets(
     val recentBuys: List<FutureBtc5mAssetBuy>?,
     val positionsValueUsd: Double?,
     val marketDataObservedAt: Double?,
-    val reasons: List<String>
+    val reasons: List<String>,
+    val buyHistoryComplete: Boolean = false
 )

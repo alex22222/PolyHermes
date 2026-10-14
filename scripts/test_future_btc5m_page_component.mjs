@@ -182,8 +182,103 @@ const walletAssets = (at = receipt, wallet = `0x${'a'.repeat(40)}`) => ({
     currentValueUsd: 1.2, cashPnlUsd: 0.225, redeemable: false}],
   recentBuys: [{id: 'buy-1', asset: 'up-token', slug: `btc-updown-5m-${start}`,
     title: 'BTC 5m', side: 'Up', quantity: 1.5, price: 0.65, amountUsd: 0.975,
-    boughtAt: at / 1000 - 1, transactionHash: '0xtransaction'}],
+    boughtAt: at / 1000 - 1, transactionHash: '0xtransaction', result: 'PENDING', winningSide: null}],
+  buyHistoryComplete: true,
   positionsValueUsd: 1.2, marketDataObservedAt: at / 1000, reasons: [],
+});
+
+const buyHistory = (count, at = receipt, wallet) => {
+  const assets = walletAssets(at, wallet);
+  return {...assets, recentBuys: Array.from({length: count}, (_, index) => ({
+    ...assets.recentBuys[0], id: `buy-${index + 1}`, boughtAt: at / 1000 - index,
+  }))};
+};
+const buyTable = (page) => page.elements(node => node.type === 'Table' &&
+  node.props.columns.some(column => column.dataIndex === 'price'))[0];
+const nodeText = (value) => Array.isArray(value) ? value.map(nodeText).join('') :
+  value && typeof value === 'object' ? nodeText(value.props?.children) : value == null ? '' : String(value);
+
+test('all loaded buys remain available through client pagination and page size changes', async () => {
+  const page = mountPage(receipt);
+  await page.reply('assets', buyHistory(45));
+  assert.equal(page.elements(node => node.type === 'Typography.Title' && nodeText(node) === '全部买入记录').length, 1);
+  let table = buyTable(page);
+  assert.equal(table.props.dataSource.length, 45, 'the table must receive every loaded buy, including records beyond ten');
+  assert.equal(table.props.pagination.current, 1);
+  assert.equal(table.props.pagination.pageSize, 20);
+  assert.equal(table.props.pagination.total, 45);
+  assert.equal(table.props.pagination.showSizeChanger, true);
+  assert.deepEqual(Array.from(table.props.pagination.pageSizeOptions), ['10', '20', '50', '100']);
+  assert.match(table.props.pagination.showTotal(45), /已加载 45 笔/);
+  table.props.pagination.onChange(3, 20);
+  page.render();
+  table = buyTable(page);
+  assert.equal(table.props.pagination.current, 3);
+  const offset = (table.props.pagination.current - 1) * table.props.pagination.pageSize;
+  assert.deepEqual(Array.from(table.props.dataSource.slice(offset).map(buy => buy.id)),
+    ['buy-41', 'buy-42', 'buy-43', 'buy-44', 'buy-45']);
+  table.props.pagination.onChange(1, 50);
+  page.render();
+  assert.equal(buyTable(page).props.pagination.pageSize, 50);
+  assert.equal(page.pendingCount('control'), 0);
+});
+
+test('each buy shows its final direction result while pending and unavailable results stay distinct', async () => {
+  const page = mountPage(receipt);
+  const assets = buyHistory(5);
+  assets.recentBuys = assets.recentBuys.map((buy, index) => ({...buy,
+    result: ['WIN', 'LOSS', 'PENDING', 'UNKNOWN', undefined][index],
+    winningSide: index === 0 ? 'Up' : index === 1 ? 'Down' : null,
+  }));
+  await page.reply('assets', assets);
+  const table = buyTable(page);
+  const resultColumn = table.props.columns.find(column => column.dataIndex === 'result');
+  assert.ok(resultColumn, 'each buy needs a settlement result column');
+  const expected = [['赢', 'green'], ['亏', 'red'], ['待结算', 'processing'], ['待确认', 'default'], ['待确认', 'default']];
+  for (const [index, buy] of table.props.dataSource.entries()) {
+    const rendered = resultColumn.render(buy.result, buy);
+    const tag = rendered.props.children[0];
+    assert.equal(nodeText(tag), expected[index][0]);
+    assert.equal(tag.props.color, expected[index][1]);
+    if (index < 2) assert.match(nodeText(rendered), index === 0 ? /结算方向：涨/ : /结算方向：跌/);
+  }
+  assert.equal(page.elements(node => node.type === 'Typography.Text' && /不代表已领取/.test(nodeText(node)) &&
+    /提前卖出/.test(nodeText(node)) && /手续费/.test(nodeText(node))).length, 1);
+});
+
+test('buy pagination survives same-wallet polling and resets on wallet changes or shorter history', async () => {
+  const page = mountPage(receipt);
+  await page.reply('assets', buyHistory(45));
+  buyTable(page).props.pagination.onChange(3, 20);
+  page.render();
+  page.poll(receipt + 5000);
+  await page.reply('assets', buyHistory(46, receipt + 5000));
+  assert.equal(buyTable(page).props.pagination.current, 3, 'normal refresh must preserve the selected history page');
+  page.poll(receipt + 10000);
+  await page.reply('assets', buyHistory(5, receipt + 10000));
+  assert.equal(buyTable(page).props.pagination.current, 1, 'a shorter history must not leave an empty page');
+  page.poll(receipt + 15000);
+  await page.reply('assets', buyHistory(45, receipt + 15000));
+  buyTable(page).props.pagination.onChange(2, 20);
+  page.render();
+  page.poll(receipt + 20000);
+  await page.reply('assets', buyHistory(45, receipt + 20000, `0x${'b'.repeat(40)}`));
+  assert.equal(buyTable(page).props.pagination.current, 1, 'a new wallet must start from its own first page');
+});
+
+test('history completeness is explicit and false or missing completeness always shows a warning', async () => {
+  for (const complete of [true, false, undefined]) {
+    const page = mountPage(receipt);
+    await page.reply('assets', {...buyHistory(25), buyHistoryComplete: complete});
+    const label = page.elements(node => node.type === 'Typography.Text' &&
+      /已加载 25 笔/.test(nodeText(node)))[0];
+    assert.ok(label, 'the loaded count must be visible independently of pagination');
+    assert.match(nodeText(label), complete === true ? /历史记录已完整加载/ : /历史记录未完整加载/);
+    const warnings = page.elements(node => node.type === 'Alert' && node.props.type === 'warning' &&
+      node.props.message === '买入历史尚未完整核实');
+    assert.equal(warnings.length, complete === true ? 0 : 1);
+    if (complete !== true) assert.match(warnings[0].props.description, /不能视为全部买入/);
+  }
 });
 
 test('wallet assets refresh independently from preparation and preserve genuine zero cash', async () => {
