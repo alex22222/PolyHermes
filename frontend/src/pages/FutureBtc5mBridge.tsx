@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Alert, Button, Card, Descriptions, Drawer, Empty, Select, Space, Spin, Switch, Table, Tag, Typography, message } from 'antd'
+import { Alert, Button, Card, Descriptions, Drawer, Empty, Progress, Select, Space, Spin, Switch, Table, Tag, Typography, message } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined } from '@ant-design/icons'
 import { useMediaQuery } from 'react-responsive'
@@ -363,6 +363,17 @@ const FutureBtc5mBridge: React.FC = () => {
     Number.isFinite(value) && clock / 1000 - value >= 0 && clock / 1000 - value <= 15))
   const marketDataFresh = Boolean(walletFresh && assets?.marketDataObservedAt != null &&
     clock / 1000 - assets.marketDataObservedAt >= 0 && clock / 1000 - assets.marketDataObservedAt <= 15)
+  const buyResultCounts = { win: 0, loss: 0, pending: 0, unknown: 0 }
+  for (const buy of assets?.recentBuys ?? []) {
+    if (buy.result === 'WIN') buyResultCounts.win += 1
+    else if (buy.result === 'LOSS') buyResultCounts.loss += 1
+    else if (buy.result === 'PENDING') buyResultCounts.pending += 1
+    else buyResultCounts.unknown += 1
+  }
+  const settledBuyCount = buyResultCounts.win + buyResultCounts.loss
+  const buyWinPercent = settledBuyCount > 0 ? buyResultCounts.win / settledBuyCount * 100 : null
+  const buyWinPercentText = buyWinPercent == null ? '—' : `${buyWinPercent.toFixed(1)}%`
+  const buyLossPercentText = settledBuyCount > 0 ? `${(buyResultCounts.loss / settledBuyCount * 100).toFixed(1)}%` : '—'
 
   const statusStale = Boolean(runtime && (clock < statusReceivedAt || clock - statusReceivedAt > 15000 ||
     !Number.isFinite(runtime.serverTime) || Math.abs(runtime.serverTime - statusReceivedAt / 1000) > 3))
@@ -441,6 +452,29 @@ const FutureBtc5mBridge: React.FC = () => {
             <Typography.Text type="secondary">已加载 {assets.recentBuys.length} 笔 · {assets.buyHistoryComplete === true ? '历史记录已完整加载' : '历史记录未完整加载'}</Typography.Text>
             {assets.buyHistoryComplete !== true && <Alert type="warning" showIcon message="买入历史尚未完整核实"
               description="当前仅展示已加载记录，不能视为全部买入；请等待历史数据完整同步后核对。" />}
+            <div style={{ width: '100%', boxSizing: 'border-box', padding: isMobile ? 16 : 20, background: '#fafafa', borderRadius: 8 }}>
+              <Typography.Title level={5} style={{ marginTop: 0 }}>赢亏比例</Typography.Title>
+              <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', alignItems: 'center', gap: isMobile ? 20 : 32 }}>
+                <div role="img" aria-label={`赢亏比例：赢 ${buyResultCounts.win} 笔，亏 ${buyResultCounts.loss} 笔，${buyWinPercent == null ? '暂无已结算记录，胜率未知' : `已结算胜率 ${buyWinPercentText}`}`}>
+                  <Progress type="circle" size={160} percent={buyWinPercent ?? 0} status="normal" strokeWidth={10}
+                    strokeColor="#52c41a" trailColor={settledBuyCount > 0 ? '#ff4d4f' : '#f0f0f0'} strokeLinecap="butt"
+                    format={() => <>
+                      <Typography.Text strong style={{ display: 'block', fontSize: 28 }}>{buyWinPercentText}</Typography.Text>
+                      <Typography.Text style={{ fontSize: 12, color: '#595959' }}>{settledBuyCount > 0 ? '已结算胜率' : '暂无已结算记录'}</Typography.Text>
+                    </>} />
+                </div>
+                <Space direction="vertical" size={12} style={{ width: isMobile ? '100%' : undefined }}>
+                  <Typography.Text strong style={{ color: '#237804' }}>赢 {buyResultCounts.win} 笔 · {buyWinPercentText}</Typography.Text>
+                  <Typography.Text strong style={{ color: '#cf1322' }}>亏 {buyResultCounts.loss} 笔 · {buyLossPercentText}</Typography.Text>
+                  <Typography.Text style={{ color: '#595959' }}>待结算 {buyResultCounts.pending} 笔</Typography.Text>
+                  <Typography.Text style={{ color: '#595959' }}>待确认 {buyResultCounts.unknown} 笔</Typography.Text>
+                </Space>
+              </div>
+              <Typography.Paragraph style={{ marginTop: 16, marginBottom: 0, color: '#595959' }}>
+                已结算 {settledBuyCount} 笔。按已加载的全部买入笔数统计，同一轮多笔分别计数；待结算和待确认不计入胜率。
+              </Typography.Paragraph>
+              {assets.buyHistoryComplete !== true && <Typography.Text style={{ color: '#874d00' }}>仅统计已加载记录，完整历史同步后比例可能变化。</Typography.Text>}
+            </div>
             <Table rowKey={(record, index) => `${record.id}:${index}`} size="small" dataSource={assets.recentBuys} columns={buyColumns} scroll={{ x: 1000 }}
               pagination={{ ...buyPagination, total: assets.recentBuys.length, showSizeChanger: true,
                 pageSizeOptions: ['10', '20', '50', '100'], showTotal: (total) => `已加载 ${total} 笔`,

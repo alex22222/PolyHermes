@@ -83,7 +83,7 @@ const mountPage = (initialTime) => {
     },
   };
   const pending = (kind) => () => new Promise((resolve) => requests[kind].push(resolve));
-  const antd = Object.fromEntries(['Alert', 'Button', 'Card', 'Drawer', 'Empty', 'Select', 'Space',
+  const antd = Object.fromEntries(['Alert', 'Button', 'Card', 'Drawer', 'Empty', 'Progress', 'Select', 'Space',
     'Spin', 'Switch', 'Table', 'Tag'].map((name) => [name, name]));
   antd.Descriptions = Object.assign('Descriptions', {Item: 'Descriptions.Item'});
   antd.Typography = {Title: 'Typography.Title', Text: 'Typography.Text', Link: 'Typography.Link'};
@@ -133,7 +133,7 @@ const mountPage = (initialTime) => {
   const text = (value) => Array.isArray(value) ? value.map(text).join('') :
     value && typeof value === 'object' ? text(value.props?.children) : value == null ? '' : String(value);
   render();
-  return {render, elements,
+  return {render, elements, text: () => text(tree),
     pendingCount: (kind) => requests[kind].length,
     emit(type, visibility = 'visible') {
       document.visibilityState = visibility;
@@ -197,6 +197,107 @@ const buyTable = (page) => page.elements(node => node.type === 'Table' &&
   node.props.columns.some(column => column.dataIndex === 'price'))[0];
 const nodeText = (value) => Array.isArray(value) ? value.map(nodeText).join('') :
   value && typeof value === 'object' ? nodeText(value.props?.children) : value == null ? '' : String(value);
+
+const historyWithResults = (results, at = receipt) => {
+  const assets = buyHistory(results.length, at);
+  return {...assets, recentBuys: assets.recentBuys.map((buy, index) => ({...buy, result: results[index]}))};
+};
+const ratioProgress = (page) => {
+  const charts = page.elements(node => node.type === 'Progress');
+  assert.equal(charts.length, 1, 'fresh loaded history must provide one win/loss ratio chart');
+  assert.equal(charts[0].props.type, 'circle');
+  return charts[0];
+};
+const ratioDisplay = (progress) => nodeText(progress.props.format(progress.props.percent));
+const assertRatioLegend = (page, {win, loss, pending, unknown}) => {
+  assert.match(page.text(), new RegExp(`赢\\s*${win}\\s*笔`));
+  assert.match(page.text(), new RegExp(`亏\\s*${loss}\\s*笔`));
+  assert.match(page.text(), new RegExp(`待结算\\s*${pending}\\s*笔`));
+  assert.match(page.text(), new RegExp(`待确认\\s*${unknown}\\s*笔`));
+};
+
+test('win/loss ratio covers every loaded page and excludes unsettled buys from its denominator', async () => {
+  const page = mountPage(receipt);
+  // Page one contains no settled buys; settled evidence exists only on later pages.
+  const results = [...Array(13).fill('PENDING'), ...Array(7).fill('UNKNOWN'), undefined,
+    ...Array(18).fill('WIN'), ...Array(6).fill('LOSS')];
+  await page.reply('assets', historyWithResults(results));
+  assert.equal(page.elements(node => node.type === 'Typography.Title' && nodeText(node) === '赢亏比例').length, 1);
+  const chart = ratioProgress(page);
+  assert.equal(chart.props.percent, 75, '18 wins and 6 losses produce 75%, irrespective of pending and unknown records');
+  assert.match(ratioDisplay(chart), /已结算胜率/);
+  assert.match(ratioDisplay(chart), /75(?:\.0)?%/);
+  assertRatioLegend(page, {win: 18, loss: 6, pending: 13, unknown: 8});
+  assert.match(page.text(), /赢\s*18\s*笔[\s·/（(]*75(?:\.0)?%/);
+  assert.match(page.text(), /亏\s*6\s*笔[\s·/（(]*25(?:\.0)?%/);
+  buyTable(page).props.pagination.onChange(3, 20);
+  page.render();
+  assert.equal(ratioProgress(page).props.percent, 75, 'changing the history page must not change the chart denominator');
+  assertRatioLegend(page, {win: 18, loss: 6, pending: 13, unknown: 8});
+  assert.equal(page.pendingCount('control'), 0);
+});
+
+test('all-win and all-loss histories display their real 100% and 0% settled win rates', async () => {
+  for (const [result, percent, win, loss] of [['WIN', 100, 4, 0], ['LOSS', 0, 0, 4]]) {
+    const page = mountPage(receipt);
+    await page.reply('assets', historyWithResults(Array(4).fill(result)));
+    const chart = ratioProgress(page);
+    assert.equal(chart.props.percent, percent);
+    assert.match(ratioDisplay(chart), new RegExp(`(?:^|[^\\d])${percent}(?:\\.0)?%`));
+    assertRatioLegend(page, {win, loss, pending: 0, unknown: 0});
+    assert.match(page.text(), new RegExp(`赢\\s*${win}\\s*笔[\\s·/（(]*${percent}(?:\\.0)?%`));
+    assert.match(page.text(), new RegExp(`亏\\s*${loss}\\s*笔[\\s·/（(]*${100 - percent}(?:\\.0)?%`));
+  }
+});
+
+test('empty or entirely unsettled history has no asserted settled win rate', async () => {
+  for (const results of [[], ['PENDING', 'UNKNOWN', undefined]]) {
+    const page = mountPage(receipt);
+    await page.reply('assets', historyWithResults(results));
+    const chart = ratioProgress(page);
+    const display = ratioDisplay(chart);
+    assert.equal(chart.props.percent, 0, 'the empty chart must avoid an undefined or non-finite percentage');
+    assert.equal(chart.props.trailColor, '#f0f0f0', 'an empty chart must not paint a loss segment');
+    assert.match(display, /暂无已结算记录/);
+    assert.match(display, /—/);
+    assert.doesNotMatch(display, /\d+(?:\.\d+)?%/, 'no settled evidence must remain unknown rather than asserting 0%');
+    assertRatioLegend(page, {win: 0, loss: 0, pending: results.length ? 1 : 0, unknown: results.length ? 2 : 0});
+  }
+});
+
+test('a partial or legacy history labels the chart as based on loaded records only', async () => {
+  for (const complete of [false, undefined]) {
+    const page = mountPage(receipt);
+    await page.reply('assets', {...historyWithResults(['WIN', 'WIN', 'LOSS', 'UNKNOWN']), buyHistoryComplete: complete});
+    assert.ok(Math.abs(ratioProgress(page).props.percent - 200 / 3) < 1e-10, 'the circle receives the unrounded settled ratio');
+    assertRatioLegend(page, {win: 2, loss: 1, pending: 0, unknown: 1});
+    assert.match(page.text(), /仅统计已加载记录/, 'the chart must not suggest that partial history represents the whole account');
+    assert.equal(page.elements(node => node.type === 'Alert' && node.props.message === '买入历史尚未完整核实').length, 1);
+  }
+});
+
+test('expired, missing, or failed history clears the previously displayed ratio and counts', async () => {
+  for (const scenario of ['expired', 'market-stale', 'missing', 'wallet-missing', 'failed']) {
+    const page = mountPage(receipt);
+    await page.reply('assets', historyWithResults(['WIN', 'WIN', 'WIN', 'LOSS']));
+    assert.equal(ratioProgress(page).props.percent, 75);
+    if (scenario === 'expired') {
+      page.tick(receipt + 15001);
+    } else {
+      page.poll(receipt + 5000);
+      if (scenario === 'failed') await page.fail('assets', '模拟历史接口不可用');
+      else if (scenario === 'market-stale') await page.reply('assets', {
+        ...historyWithResults(['WIN', 'WIN', 'WIN', 'LOSS'], receipt + 5000), marketDataObservedAt: receipt / 1000 - 15,
+      });
+      else await page.reply('assets', {...walletAssets(receipt + 5000),
+        wallet: scenario === 'wallet-missing' ? null : walletAssets(receipt + 5000).wallet,
+        recentBuys: null, buyHistoryComplete: false, dataStatus: 'PARTIAL'});
+    }
+    assert.equal(page.elements(node => node.type === 'Progress').length, 0, `${scenario} must not retain the previous chart`);
+    assert.doesNotMatch(page.text(), /赢\s*3\s*笔|亏\s*1\s*笔/, `${scenario} must not retain the previous legend`);
+    assert.equal(page.pendingCount('control'), 0);
+  }
+});
 
 test('all loaded buys remain available through client pagination and page size changes', async () => {
   const page = mountPage(receipt);
