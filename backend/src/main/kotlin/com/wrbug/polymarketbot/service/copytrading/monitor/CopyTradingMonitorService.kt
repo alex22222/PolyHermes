@@ -5,10 +5,11 @@ import com.wrbug.polymarketbot.entity.Leader
 import com.wrbug.polymarketbot.repository.AccountRepository
 import com.wrbug.polymarketbot.repository.CopyTradingRepository
 import com.wrbug.polymarketbot.repository.LeaderRepository
-import jakarta.annotation.PostConstruct
 import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.*
 import org.slf4j.LoggerFactory
+import org.springframework.boot.context.event.ApplicationReadyEvent
+import org.springframework.context.event.EventListener
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
 import java.util.concurrent.ConcurrentHashMap
@@ -41,9 +42,9 @@ class CopyTradingMonitorService(
     private val monitoredAccountIds = ConcurrentHashMap.newKeySet<Long>()
     
     /**
-     * 系统启动时初始化监听
+     * 应用就绪后初始化监听，避免 Repository 查询与 Bean 初始化相互等待。
      */
-    @PostConstruct
+    @EventListener(ApplicationReadyEvent::class)
     fun init() {
         scope.launch {
             try {

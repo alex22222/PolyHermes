@@ -1,11 +1,12 @@
 package com.wrbug.polymarketbot.service.common
 
 import com.wrbug.polymarketbot.repository.CopyOrderTrackingRepository
-import jakarta.annotation.PostConstruct
 import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.*
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.boot.context.event.ApplicationReadyEvent
+import org.springframework.context.event.EventListener
 import org.springframework.stereotype.Service
 
 /**
@@ -34,9 +35,9 @@ class MarketPollingService(
     private val lock = Any()
     
     /**
-     * 初始化服务（后端启动时直接启动轮询）
+     * 应用就绪后启动轮询，避免 Repository 查询与 Bean 初始化相互等待。
      */
-    @PostConstruct
+    @EventListener(ApplicationReadyEvent::class)
     fun init() {
         logger.info("MarketPollingService 初始化，启动市场信息轮询任务，轮询间隔: ${pollingInterval}ms (${pollingInterval / 1000 / 60}分钟)")
         startPolling()

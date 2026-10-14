@@ -1,5 +1,6 @@
 package com.wrbug.polymarketbot.service.copytrading.monitor
 
+import com.wrbug.polymarketbot.entity.Account
 import com.wrbug.polymarketbot.entity.CopyTrading
 import com.wrbug.polymarketbot.entity.Leader
 import com.wrbug.polymarketbot.repository.AccountRepository
@@ -8,7 +9,12 @@ import com.wrbug.polymarketbot.repository.LeaderRepository
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito
+import org.springframework.boot.SpringApplication
+import org.springframework.boot.context.event.ApplicationReadyEvent
+import org.springframework.context.annotation.AnnotationConfigApplicationContext
+import java.time.Duration
 import java.util.Optional
+import java.util.function.Supplier
 
 class CopyTradingMonitorServiceTest {
     private val copyTradingRepository: CopyTradingRepository = mock()
@@ -25,6 +31,32 @@ class CopyTradingMonitorServiceTest {
         onChainWsService,
         accountOnChainMonitorService
     )
+
+    @Test
+    fun `repository discovery and monitoring wait until the application is ready`() {
+        val config = CopyTrading(id = 3, accountId = 1, leaderId = 31, enabled = true)
+        val leader = Leader(id = 31, leaderAddress = "0x0000000000000000000000000000000000000031")
+        val account = Account(id = 1, walletAddress = "wallet", proxyAddress = "proxy")
+        Mockito.`when`(copyTradingRepository.findByEnabledTrue()).thenReturn(listOf(config))
+        Mockito.`when`(leaderRepository.findById(31)).thenReturn(Optional.of(leader))
+        Mockito.`when`(accountRepository.findById(1)).thenReturn(Optional.of(account))
+
+        AnnotationConfigApplicationContext().use { context ->
+            context.registerBean("copyTradingMonitorService", CopyTradingMonitorService::class.java, Supplier { service })
+            context.refresh()
+
+            Mockito.verify(copyTradingRepository, Mockito.after(300).never()).findByEnabledTrue()
+            Mockito.verifyNoInteractions(activityWsService, onChainWsService, accountOnChainMonitorService)
+
+            context.publishEvent(ApplicationReadyEvent(SpringApplication(CopyTradingMonitorService::class.java),
+                emptyArray(), context, Duration.ZERO))
+
+            Mockito.verify(accountOnChainMonitorService, Mockito.timeout(2000)).start(listOf(account))
+            Mockito.verify(copyTradingRepository).findByEnabledTrue()
+            Mockito.verify(activityWsService).start(listOf(leader))
+            Mockito.verify(onChainWsService).start(listOf(leader))
+        }
+    }
 
     @Test
     fun `reconciliation adds every enabled leader and removes a disabled leader`() = runBlocking {
