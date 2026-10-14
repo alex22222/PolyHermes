@@ -8,11 +8,12 @@ import com.wrbug.polymarketbot.entity.Account
 import com.wrbug.polymarketbot.repository.AccountRepository
 import com.wrbug.polymarketbot.util.RetrofitFactory
 import com.wrbug.polymarketbot.websocket.PolymarketWebSocketClient
-import jakarta.annotation.PostConstruct
 import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.*
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.boot.context.event.ApplicationReadyEvent
+import org.springframework.context.event.EventListener
 import com.wrbug.polymarketbot.service.common.PolymarketClobService
 import com.wrbug.polymarketbot.util.CryptoUtils
 import com.wrbug.polymarketbot.repository.CopyOrderTrackingRepository
@@ -60,9 +61,10 @@ class OrderPushService(
 
     /**
      * 初始化服务
-     * 为所有有 API Key 的账户建立连接
+     * 应用就绪后为所有有 API Key 的账户建立连接，避免账户查询与
+     * Bean 初始化中的 Repository 指标注册相互等待。
      */
-    @PostConstruct
+    @EventListener(ApplicationReadyEvent::class)
     fun init() {
         scope.launch {
             connectAllAccounts()
