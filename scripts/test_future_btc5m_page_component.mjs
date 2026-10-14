@@ -43,6 +43,15 @@ const mountPage = (initialTime) => {
   const slots = [];
   const effects = [];
   const intervals = new Map();
+  const listeners = new Map();
+  const events = {
+    addEventListener(type, callback) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(callback);
+    },
+    removeEventListener(type, callback) {listeners.get(type)?.delete(callback);},
+  };
+  const document = {visibilityState: 'visible', ...events};
   const requests = {status: [], control: []};
   const sameDeps = (left, right) => left && right && left.length === right.length &&
     left.every((value, index) => Object.is(value, right[index]));
@@ -67,8 +76,9 @@ const mountPage = (initialTime) => {
     useEffect(callback, deps) {
       const index = cursor++;
       if (!(index in slots) || !sameDeps(slots[index].deps, deps)) {
+        slots[index]?.cleanup?.();
         slots[index] = {deps};
-        effects.push(callback);
+        effects.push(() => {slots[index].cleanup = callback();});
       }
     },
   };
@@ -91,7 +101,8 @@ const mountPage = (initialTime) => {
     '../utils/futureBtc5mPreflight': guards.exports,
   };
   const sandbox = {exports: {}, Date: class extends Date {static now() {return now;}},
-    window: {setInterval(callback, delay) {
+    document,
+    window: {...events, setInterval(callback, delay) {
       const id = intervals.size + 1;
       intervals.set(id, {callback, delay});
       return id;
@@ -123,6 +134,13 @@ const mountPage = (initialTime) => {
     value && typeof value === 'object' ? text(value.props?.children) : value == null ? '' : String(value);
   render();
   return {render, elements,
+    pendingCount: (kind) => requests[kind].length,
+    emit(type, visibility = 'visible') {
+      document.visibilityState = visibility;
+      for (const listener of listeners.get(type) || []) listener();
+      render();
+    },
+    unmount() {for (const slot of slots) slot?.cleanup?.();},
     field: (label) => text(elements((node) => node.type === 'Descriptions.Item' && node.props.label === label)[0]),
     expiredAlert: () => elements((node) => node.type === 'Alert' && node.props.message === '运行状态已过期，请刷新核对'),
     setTime(at) {now = at;},
@@ -141,6 +159,11 @@ const mountPage = (initialTime) => {
       await new Promise((resolve) => setImmediate(resolve));
       render();
     },
+    async fail(kind, msg) {
+      requests[kind].shift()({data: {code: -1, msg}});
+      await new Promise((resolve) => setImmediate(resolve));
+      render();
+    },
   };
 };
 
@@ -150,6 +173,40 @@ const assertHealthy = (page) => {
   assert.equal(page.field('Chrome 预检报告'), '新鲜', 'a fresh response must retain its browser evidence');
   assert.equal(page.elements((node) => node.type === 'Switch')[0].props.disabled, false);
 };
+
+test('visibility restoration immediately retries a connection error without a page timer or control mutation', async () => {
+  const page = mountPage(receipt);
+  await page.fail('status', 'SSH 隧道尚未建立');
+  page.setTime(receipt + 20000);
+  page.emit('visibilitychange', 'hidden');
+  assert.equal(page.pendingCount('status'), 0);
+  page.emit('visibilitychange');
+  assert.equal(page.pendingCount('status'), 1);
+  page.emit('focus');
+  page.emit('online');
+  assert.equal(page.pendingCount('status'), 1, 'simultaneous resume events share the pending read');
+  assert.equal(page.pendingCount('control'), 0);
+  await page.reply('status', healthyStatus(receipt + 20000));
+  assert.equal(page.field('Bridge 连接'), '在线');
+  assert.equal(page.elements(node => node.type === 'Alert' && node.props.message === 'Bridge 状态未知').length, 0);
+  page.unmount();
+  page.emit('online');
+  assert.equal(page.pendingCount('status'), 0);
+});
+
+test('resume invalidates old status immediately and respects an in-flight control', async () => {
+  const page = mountPage(receipt);
+  await page.reply('status', healthyStatus());
+  page.setTime(receipt + 20000);
+  page.emit('focus');
+  assert.equal(page.expiredAlert().length, 1);
+  await page.reply('status', healthyStatus(receipt + 20000));
+  page.elements(node => node.type === 'Button' && node.props.danger)[0].props.onClick();
+  page.emit('online');
+  assert.equal(page.pendingCount('status'), 0);
+  assert.equal(page.pendingCount('control'), 1);
+  await page.reply('control', healthyStatus(receipt + 20000));
+});
 
 test('first healthy response between clock ticks never renders an expired status', async () => {
   const page = mountPage(receipt - 700);

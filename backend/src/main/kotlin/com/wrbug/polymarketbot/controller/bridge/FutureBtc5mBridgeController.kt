@@ -9,6 +9,7 @@ import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListRequest
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListResponse
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.bridge.FutureBtc5mBridgeClient
+import com.wrbug.polymarketbot.service.bridge.FutureBtc5mConnectionException
 import org.slf4j.LoggerFactory
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.PostMapping
@@ -46,6 +47,9 @@ class FutureBtc5mBridgeController(private val client: FutureBtc5mBridgeClient) {
         ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, error.message))
     } catch (error: NoSuchElementException) {
         ResponseEntity.ok(ApiResponse.error(ErrorCode.NOT_FOUND, error.message))
+    } catch (error: FutureBtc5mConnectionException) {
+        logger.warn("Future Bridge connection unavailable: {}", error.reason)
+        ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, error.userMessage))
     } catch (error: Exception) {
         logger.warn("Future Bridge unavailable: {}", error.javaClass.simpleName)
         ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_ERROR, "Future Bridge 未连接或操作未获确认，请检查同机桥服务"))

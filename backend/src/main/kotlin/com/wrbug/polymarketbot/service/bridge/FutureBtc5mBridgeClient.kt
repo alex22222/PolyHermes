@@ -12,12 +12,47 @@ import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListResponse
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
 import java.net.URI
+import java.net.ConnectException
 import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.net.http.HttpTimeoutException
 import java.nio.charset.StandardCharsets
 import java.time.Duration
+
+class FutureBtc5mConnectionException(reason: String, cause: Throwable? = null) : IllegalStateException("Future Bridge connection unavailable", cause) {
+    val reason = reason.takeIf { it in HINTS } ?: "UNKNOWN"
+    val userMessage: String
+        get() = HINTS[reason]?.let { "$it。当前状态或操作结果未确认，恢复后自动刷新。" }
+            ?: "Future Bridge 未连接或操作未获确认，请检查同机桥服务"
+
+    companion object {
+        private val HINTS = mapOf(
+            "RELAY_UNAVAILABLE" to "VPS 转发服务未连接，请检查 relay 服务",
+            "REQUEST_TIMEOUT" to "Future 连接请求超时，请检查转发服务与网络",
+            "TUNNEL_SOCKET_MISSING" to "SSH 隧道尚未建立，请检查 Mac 隧道服务",
+            "TUNNEL_SOCKET_REFUSED" to "SSH 隧道已失效，请检查 Mac 隧道服务的恢复日志",
+            "TUNNEL_ACCESS_DENIED" to "私有隧道权限异常，请检查转发服务与 socket 权限",
+            "UPSTREAM_TIMEOUT" to "等待本机助手响应超时，请检查助手与 SSH 网络连接",
+            "UPSTREAM_DISCONNECTED" to "上游连接中断，请检查本机助手是否运行以及 SSH 转发是否正常",
+            "UPSTREAM_INVALID_RESPONSE" to "上游响应不完整或无效，请检查本机助手与转发连接",
+            "TUNNEL_CONNECTION_FAILED" to "私有连接失败，请检查助手与 SSH 隧道"
+        )
+
+        fun fromRelayResponse(body: String): FutureBtc5mConnectionException {
+            val reason = runCatching {
+                val payload = JsonParser.parseString(body).asJsonObject
+                if (payload.keySet() != setOf("error", "reason") ||
+                    !payload.get("error").isJsonPrimitive || !payload.get("error").asJsonPrimitive.isString ||
+                    payload.get("error").asString != "FUTURE_TUNNEL_UNAVAILABLE" ||
+                    !payload.get("reason").isJsonPrimitive || !payload.get("reason").asJsonPrimitive.isString) "UNKNOWN"
+                else payload.get("reason").asString
+            }.getOrDefault("UNKNOWN")
+            return FutureBtc5mConnectionException(reason)
+        }
+    }
+}
 
 /** Connect only to the configured Future bridge; never forward browser tokens or caller URLs. */
 @Component
@@ -96,10 +131,15 @@ class FutureBtc5mBridgeClient(
         } catch (error: InterruptedException) {
             Thread.currentThread().interrupt()
             throw IllegalStateException("Future Bridge 请求被中断，未确认操作成功", error)
+        } catch (error: HttpTimeoutException) {
+            throw FutureBtc5mConnectionException("REQUEST_TIMEOUT", error)
+        } catch (error: ConnectException) {
+            throw FutureBtc5mConnectionException("RELAY_UNAVAILABLE", error)
         } catch (error: Exception) {
             throw IllegalStateException("Future Bridge 请求失败，未确认操作成功", error)
         }
         if (response.statusCode() == 404) throw NoSuchElementException("Future 订单不存在或控制接口尚未加载")
+        if (response.statusCode() == 503) throw FutureBtc5mConnectionException.fromRelayResponse(response.body())
         check(response.statusCode() in 200..299) { "Future Bridge 返回 ${response.statusCode()}，未确认操作成功" }
         val payload = try {
             objectValue(JsonParser.parseString(response.body()))

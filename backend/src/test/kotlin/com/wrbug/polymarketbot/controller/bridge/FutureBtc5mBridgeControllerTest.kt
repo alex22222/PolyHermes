@@ -154,12 +154,47 @@ class FutureBtc5mBridgeControllerTest {
         assertEquals(ErrorCode.SERVER_ERROR.code, api("/control", """{"enabled":false}""").path("code").asInt())
     }
 
+    @Test
+    fun `safe connection reasons reach the page and recover without leaking upstream text`() {
+        responseCode = 503
+        listOf("TUNNEL_SOCKET_MISSING" to "SSH 隧道尚未建立", "TUNNEL_SOCKET_REFUSED" to "SSH 隧道已失效",
+            "UPSTREAM_TIMEOUT" to "等待本机助手响应超时", "UPSTREAM_DISCONNECTED" to "上游连接中断").forEach { (reason, hint) ->
+            responseOverride = mapper.writeValueAsString(mapOf("error" to "FUTURE_TUNNEL_UNAVAILABLE", "reason" to reason))
+            val result = api("/status", "{}")
+            assertEquals(ErrorCode.SERVER_ERROR.code, result.path("code").asInt())
+            assertTrue(result.path("msg").asText().contains(hint), reason)
+            assertTrue(result.path("data").isNull)
+        }
+        listOf("""{"error":"FUTURE_TUNNEL_UNAVAILABLE","reason":"secret-token-path"}""",
+            """{"error":"other","reason":"TUNNEL_SOCKET_MISSING"}""",
+            """{"error":"FUTURE_TUNNEL_UNAVAILABLE","reason":"TUNNEL_SOCKET_MISSING","secret":"fixture"}""").forEach { body ->
+            responseOverride = body
+            val msg = api("/control", """{"enabled":false}""").path("msg").asText()
+            assertFalse(msg.contains("secret"))
+            assertFalse(msg.contains("SSH 隧道尚未建立"))
+        }
+        server.stop(0)
+        assertTrue(api("/status", "{}").path("msg").asText().contains("VPS 转发服务未连接"))
+    }
+
+    @Test
+    fun `successful response after a relay failure clears the API error`() {
+        responseCode = 503
+        responseOverride = """{"error":"FUTURE_TUNNEL_UNAVAILABLE","reason":"UPSTREAM_TIMEOUT"}"""
+        assertTrue(api("/status", "{}").path("msg").asText().contains("等待本机助手响应超时"))
+        responseCode = 200
+        responseOverride = null
+        val recovered = api("/status", "{}")
+        assertEquals(0, recovered.path("code").asInt())
+        assertTrue(recovered.path("data").path("online").asBoolean())
+    }
+
     private fun api(path: String, body: String, token: String? = "test-preview-token"): JsonNode {
         val request = post("/api/future-btc5m$path").contentType(MediaType.APPLICATION_JSON).content(body)
         if (token != null) request.header("Authorization", "Bearer $token")
         val response = mvc.perform(request).andReturn().response
         assertEquals(200, response.status)
-        return mapper.readTree(response.contentAsString)
+        return mapper.readTree(response.contentAsByteArray)
     }
 
     private fun status() = mapOf(

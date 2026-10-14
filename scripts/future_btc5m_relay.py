@@ -46,8 +46,11 @@ def make_server(socket_path, address=LOCAL_ADDRESS):
             super().setup()
             self.connection.settimeout(TIMEOUT_SECONDS)
 
-        def fail(self, code, error):
-            self.reply(code, json.dumps({"error": error}).encode(), "application/json")
+        def fail(self, code, error, reason=None):
+            payload = {"error": error}
+            if reason is not None:
+                payload["reason"] = reason
+            self.reply(code, json.dumps(payload).encode(), "application/json")
 
         def reply(self, code, body, content_type):
             self.send_response(code)
@@ -118,8 +121,26 @@ def make_server(socket_path, address=LOCAL_ADDRESS):
                     raise ValueError("UPSTREAM_RESPONSE_TOO_LARGE")
                 code = response.status
                 content_type = response.getheader("Content-Type", "application/json")
-            except (OSError, http.client.HTTPException, ValueError):
-                self.fail(503, "FUTURE_TUNNEL_UNAVAILABLE")
+            except TimeoutError:
+                self.fail(503, "FUTURE_TUNNEL_UNAVAILABLE", "UPSTREAM_TIMEOUT")
+                return
+            except FileNotFoundError:
+                self.fail(503, "FUTURE_TUNNEL_UNAVAILABLE", "TUNNEL_SOCKET_MISSING")
+                return
+            except ConnectionRefusedError:
+                self.fail(503, "FUTURE_TUNNEL_UNAVAILABLE", "TUNNEL_SOCKET_REFUSED")
+                return
+            except PermissionError:
+                self.fail(503, "FUTURE_TUNNEL_UNAVAILABLE", "TUNNEL_ACCESS_DENIED")
+                return
+            except (ConnectionResetError, BrokenPipeError, http.client.RemoteDisconnected):
+                self.fail(503, "FUTURE_TUNNEL_UNAVAILABLE", "UPSTREAM_DISCONNECTED")
+                return
+            except (http.client.HTTPException, ValueError):
+                self.fail(503, "FUTURE_TUNNEL_UNAVAILABLE", "UPSTREAM_INVALID_RESPONSE")
+                return
+            except OSError:
+                self.fail(503, "FUTURE_TUNNEL_UNAVAILABLE", "TUNNEL_CONNECTION_FAILED")
                 return
             finally:
                 upstream.close()

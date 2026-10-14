@@ -21,6 +21,7 @@ class FutureBtc5mBridgeClientTest {
     private val requests = CopyOnWriteArrayList<Request>()
     private var responseCode = 200
     private var responseBody = ""
+    private var responseDelayMillis = 0L
 
     private data class Request(val method: String, val rawPath: String, val query: String?, val body: String,
                                val controlHeader: String?, val authorization: String?)
@@ -30,6 +31,7 @@ class FutureBtc5mBridgeClientTest {
         responseBody = mapper.writeValueAsString(status())
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/") { exchange ->
+            Thread.sleep(responseDelayMillis)
             requests.add(Request(exchange.requestMethod, exchange.requestURI.rawPath, exchange.requestURI.rawQuery,
                 exchange.requestBody.readAllBytes().toString(Charsets.UTF_8),
                 exchange.requestHeaders.getFirst("X-PolyHermes-Future-Control"), exchange.requestHeaders.getFirst("Authorization")))
@@ -100,6 +102,13 @@ class FutureBtc5mBridgeClientTest {
         }
         server.stop(0)
         assertThrows(Exception::class.java) { client.control(false) }
+    }
+
+    @Test
+    fun `a stalled relay is reported as a bounded request timeout`() {
+        responseDelayMillis = 4300
+        val error = assertThrows(FutureBtc5mConnectionException::class.java) { client.status() }
+        assertEquals("REQUEST_TIMEOUT", error.reason)
     }
 
     @Test

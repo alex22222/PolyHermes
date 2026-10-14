@@ -1,5 +1,7 @@
 import http.client
 import json
+import os
+import socket
 import socketserver
 import sys
 import threading
@@ -194,11 +196,31 @@ class FutureRelayTest(unittest.TestCase):
         code, body, _ = self.request("GET", "/bridge/status")
         self.assertEqual(503, code)
         self.assertEqual("FUTURE_TUNNEL_UNAVAILABLE", json.loads(body)["error"])
+        self.assertEqual("TUNNEL_SOCKET_MISSING", json.loads(body)["reason"])
         self.assertEqual([], self.requests)
+
+    def test_stale_socket_has_a_distinct_reason_without_exposing_its_path(self):
+        Path(self.socket_path).unlink()
+        connection = socket.socket(socket.AF_UNIX)
+        connection.bind(self.socket_path)
+        connection.close()
+        code, body, _ = self.request("GET", "/bridge/status")
+        self.assertEqual(503, code)
+        self.assertEqual("TUNNEL_SOCKET_REFUSED", json.loads(body)["reason"])
+        self.assertNotIn(self.socket_path.encode(), body)
+
+    def test_inaccessible_socket_has_a_permission_reason_without_leaking_path(self):
+        os.chmod(self.socket_path, 0)
+        code, body, _ = self.request("GET", "/bridge/status")
+        self.assertEqual(503, code)
+        self.assertEqual("TUNNEL_ACCESS_DENIED", json.loads(body)["reason"])
+        self.assertNotIn(self.socket_path.encode(), body)
 
     def test_disconnected_upstream_is_503(self):
         self.response_kind = "disconnect"
-        self.assertEqual(503, self.request("GET", "/status")[0])
+        code, body, _ = self.request("GET", "/status")
+        self.assertEqual(503, code)
+        self.assertEqual("UPSTREAM_DISCONNECTED", json.loads(body)["reason"])
 
     def test_oversized_upstream_response_is_503(self):
         self.response_kind = "oversize"
@@ -229,6 +251,7 @@ class FutureRelayTest(unittest.TestCase):
         elapsed = time.monotonic() - started
         self.assertEqual(503, code)
         self.assertEqual("FUTURE_TUNNEL_UNAVAILABLE", json.loads(body)["error"])
+        self.assertEqual("UPSTREAM_TIMEOUT", json.loads(body)["reason"])
         self.assertGreaterEqual(elapsed, 2.8)
         self.assertLess(elapsed, 3.3)
 

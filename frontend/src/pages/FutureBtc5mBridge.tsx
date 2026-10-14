@@ -197,6 +197,24 @@ const FutureBtc5mBridge: React.FC = () => {
     }
   }, [detailId, fetchDetail])
 
+  useEffect(() => {
+    const refreshConnection = () => {
+      if (document.visibilityState === 'hidden') return
+      setClock(Date.now())
+      fetchStatus()
+      fetchOrders()
+      fetchDetail()
+    }
+    window.addEventListener('focus', refreshConnection)
+    window.addEventListener('online', refreshConnection)
+    document.addEventListener('visibilitychange', refreshConnection)
+    return () => {
+      window.removeEventListener('focus', refreshConnection)
+      window.removeEventListener('online', refreshConnection)
+      document.removeEventListener('visibilitychange', refreshConnection)
+    }
+  }, [fetchStatus, fetchOrders, fetchDetail])
+
   const handleControl = async (enabled: boolean) => {
     if (controlPending.current) return
     controlPending.current = true
