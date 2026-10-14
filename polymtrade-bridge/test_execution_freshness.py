@@ -69,10 +69,10 @@ async def test_unknown_buy_baseline_never_confirms_existing_position():
 
 async def test_partial_parse_is_not_a_complete_portfolio():
     executor = PolymtradeExecutor()
-    executor.page = SimpleNamespace(evaluate=AsyncMock(return_value=[
+    executor.page = SimpleNamespace(evaluate=AsyncMock(return_value={"positions": [
         {"marketTitle": "Valid", "side": "Yes", "quantity": 2},
         {"marketTitle": "Not parsed", "side": "Yes", "quantity": None},
-    ]))
+    ], "hasErrorBanner": False}))
     executor._goto_with_retry = AsyncMock()
     executor._wait_for_portfolio_rows = AsyncMock(return_value=True)
     executor._scroll_portfolio_until_stable = AsyncMock()

@@ -672,8 +672,8 @@ class PolymtradeExecutor:
                 return result
             with self._page_scope(fresh_page):
                 result = await self._fetch_portfolio_positions_on_active_page()
-                if result.get("portfolio_complete") is False:
-                    await self.refresh_login_state()
+                if result.get("portfolio_complete") is False and not result.get("error"):
+                    result = self._defer_portfolio_read(result)
             self._cache_portfolio_snapshot(result)
             return result
         finally:
@@ -693,6 +693,15 @@ class PolymtradeExecutor:
         self._portfolio_access_retry_at = 0.0
         self._portfolio_snapshot_cache = copy.deepcopy(result)
         self._portfolio_snapshot_cached_at = time.monotonic()
+
+    def _defer_portfolio_read(self, result: dict) -> dict:
+        result = {**result, "portfolio_complete": False, "empty_state_confirmed": False}
+        result.setdefault("error", "Portfolio snapshot incomplete; holdings unknown; retry deferred for 300s")
+        self._portfolio_snapshot_cache = None
+        self._portfolio_access_error = copy.deepcopy(result)
+        self._portfolio_access_retry_at = time.monotonic() + 300.0
+        logger.warning(result["error"])
+        return result
 
     async def _fetch_portfolio_positions_on_active_page(self) -> dict:
         """Scrape current open positions from the Polymtrade portfolio page.
@@ -716,14 +725,9 @@ class PolymtradeExecutor:
                     "portfolio_complete": False,
                     "empty_state_confirmed": False,
                 }
-                self._portfolio_snapshot_cache = None
-                self._portfolio_access_error = copy.deepcopy(result)
-                self._portfolio_access_retry_at = time.monotonic() + 300.0
                 self._record_portfolio_render_result(False)
-                logger.warning(result["error"])
-                return result
+                return self._defer_portfolio_read(result)
             rendered = await self._wait_for_portfolio_rows(timeout=12.0)
-            self._record_portfolio_render_result(rendered)
             if not rendered:
                 logger.warning("Portfolio rows did not render before scrape; continuing with best effort")
 
@@ -804,12 +808,23 @@ class PolymtradeExecutor:
                         _rawLines: lines,
                     });
                 }
-                return positions;
+                return {
+                    positions,
+                    hasErrorBanner: !!document.querySelector('[data-test="portfolio-error-banner"]'),
+                };
             }
             """
-            positions = await self.page.evaluate(js)
+            snapshot = await self.page.evaluate(js)
+            positions = snapshot["positions"]
+            has_error_banner = snapshot.get("hasErrorBanner", False)
+            self._record_portfolio_render_result(rendered and not has_error_banner)
             for position in positions:
                 apply_portfolio_position_line_fallback(position)
+            if has_error_banner:
+                return self._defer_portfolio_read({
+                    "positions": [pos for pos in positions if validate_portfolio_position(pos)],
+                    "error": "Portfolio page reports a connection error; holdings unknown; retry deferred for 300s",
+                })
 
             # Enrich with Gamma API metadata so the backend can map titles to
             # market/condition IDs and slugs without relying on its local cache.
@@ -832,8 +847,11 @@ class PolymtradeExecutor:
             )
 
             synced_at = int(time.time() * 1000)
-            self._last_portfolio_synced_at = synced_at
-            wallet_address = await self.get_wallet_address()
+            if portfolio_complete:
+                self._last_portfolio_synced_at = synced_at
+            # /portfolio resolves the account address from the database. A
+            # second navigation just to extract it would discard this page.
+            wallet_address = self.cached_wallet_address
 
             return {
                 "positions": valid_positions,

@@ -15,7 +15,7 @@ def blocked_executor(status=403):
     page = SimpleNamespace(
         goto=AsyncMock(return_value=SimpleNamespace(status=status)),
         inner_text=AsyncMock(return_value="This request was blocked\n403 FORBIDDEN"),
-        evaluate=AsyncMock(return_value=[]),
+        evaluate=AsyncMock(return_value={"positions": [], "hasErrorBanner": False}),
         close=AsyncMock(),
         is_closed=lambda: False,
     )

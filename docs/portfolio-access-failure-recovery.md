@@ -27,6 +27,12 @@ not an empty account.
   clears the failure state; no previously failed signal is replayed.
 - Leave wallet data, browser profile, cookies, login state, trading settings,
   and existing fail-closed execution guards unchanged.
+- A visible `portfolio-error-banner` keeps even valid rows incomplete: they may
+  be cached. Do not advance the last successful synchronization time or enrich
+  those rows as a complete live snapshot.
+- Repeated render failures also enter the cooldown after one fresh-page retry.
+  Do not overwrite login state based on a failed portfolio page, or navigate a
+  second time merely to obtain the account's already-resolved wallet address.
 
 ## Release gate
 

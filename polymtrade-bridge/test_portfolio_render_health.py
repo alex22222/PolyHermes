@@ -53,8 +53,9 @@ def test_portfolio_shell_discards_page_and_retries_with_fresh_page():
     stale_page.close.assert_awaited_once()
 
 
-def test_repeated_incomplete_portfolio_refreshes_live_login_state():
+def test_repeated_incomplete_portfolio_does_not_clear_login_or_hammer_pages():
     executor = _live_executor()
+    executor._logged_in = True
     stale_page = SimpleNamespace(is_closed=lambda: False, close=AsyncMock())
     fresh_page = SimpleNamespace(is_closed=lambda: False, close=AsyncMock())
     executor.portfolio_page = stale_page
@@ -71,7 +72,12 @@ def test_repeated_incomplete_portfolio_refreshes_live_login_state():
     result = asyncio.run(executor.fetch_portfolio_positions())
 
     assert result["portfolio_complete"] is False
-    executor.refresh_login_state.assert_awaited_once()
+    assert "error" in result
+    executor.refresh_login_state.assert_not_awaited()
+    assert executor._logged_in is True
+    again = asyncio.run(executor.fetch_portfolio_positions(force_refresh=True))
+    assert again == result
+    assert executor._fetch_portfolio_positions_on_active_page.await_count == 2
 
 
 def test_complete_portfolio_snapshot_is_cached_without_reloading_page():
