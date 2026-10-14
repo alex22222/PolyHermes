@@ -16,4 +16,4 @@
 
 验收记录：[wallet-assets-20261014](../reports/future-btc5m-assistant/wallet-assets-20261014/verification.md)。模拟截图中的余额和持仓是测试数据，不能当作当前真实资产。
 
-全部买入及结算结果扩展的本地验收记录：[buy-history-20261014](../reports/future-btc5m-assistant/buy-history-20261014/verification.md)。本次扩展尚未发布，前面的 `6240437` 发布记录仅对应原资产卡片。
+全部买入及结算结果扩展的本地验收记录：[buy-history-20261014](../reports/future-btc5m-assistant/buy-history-20261014/verification.md)。2026-10-15 已发布代码 `69f91ce`（功能 `3f1a98f`，附最小启动死锁修复）；后端60项回归、公共产物哈希、鉴权、服务健康及89项迁移保护校验通过，监控已恢复。原有自动准备开启、周末限制关闭，数据库与独立Bridge保持原样。Chrome的OKX Wallet将该域名标为钓鱼风险，已登录页面的真实记录目视核对被拦截，未绕过警告；需用户自行处理。见[本次部署记录](../reports/future-btc5m-assistant/buy-history-deploy-20261015/REVIEW.md)。前面的 `6240437` 和扩展待激活描述为原资产卡片当时的发布记录。
