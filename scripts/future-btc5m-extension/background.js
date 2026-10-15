@@ -131,7 +131,8 @@ let runtimeSocket = null, runtimeRetry = null;
 // clock keeps the page awake, so the display also stays on while the automatic-ticket
 // switch is on. Off or unknown, only the system stays awake.
 let displayAwake = false;
-const keepAwakeLevel = () => displayAwake ? 'display' : 'system';
+const rendererPermitted = Boolean(chrome.runtime.getManifest?.()?.permissions?.includes('debugger'));
+const keepAwakeLevel = () => displayAwake && !rendererPermitted ? 'display' : 'system';
 
 function followAutoSwitch(status) {
   const enabled = status?.bridgeId === 'future-btc5m' ? status.preparation?.enabled : undefined;
@@ -261,3 +262,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     .catch(() => sendResponse({ok: false, error: '本地信号服务未连接'}));
   return true;
 });
+
+// The current installed manifest does not grant this permission. The reviewed
+// rendering candidate is activated only after the operator approves that upgrade.
+if (rendererPermitted) importScripts('renderer.js');

@@ -15,6 +15,7 @@ const now = start + 65;
 const marketUrl = `https://future.news/zh/event/btc-updown-5m-${start}`;
 const storageKey = 'polyhermes.future-btc5m.buy-once';
 const auditKey = 'polyhermes.future-btc5m.buy-audit';
+const resultKey = 'polyhermes.future-btc5m.buy-result';
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
 const ready = (at = now, side = 'Down', round = start) => {
@@ -103,6 +104,9 @@ const auditMemory = (values = new Map(), {failWrite = false} = {}) => ({values,
   getItem(key) { assert.equal(key, auditKey); return values.get(key) ?? null; },
   setItem(key, value) { assert.equal(key, auditKey); if (failWrite) throw new Error('audit storage full'); values.set(key, value); },
   entries() { return JSON.parse(values.get(auditKey) ?? '[]'); }});
+const resultMemory = (values = new Map(), {failWrite = false} = {}) => ({values,
+  getItem(key) { assert.equal(key, resultKey); return values.get(key) ?? null; },
+  setItem(key, value) { assert.equal(key, resultKey); if (failWrite) throw new Error('result storage full'); values.set(key, value); }});
 const mutex = () => {
   let previous = Promise.resolve();
   return (callback) => {
@@ -611,6 +615,7 @@ const waiting = (at) => {
 // The switch-following controller owns its watchers; ticks run their scheduled polls.
 const setupAuto = ({ticket = ticketFixture(), storage = memoryStorage(), withLock = mutex(),
   read = () => waiting(start + 30), market = ({record, time}) => clobQuote(record, time),
+  positionReader = () => null, resultStorage = resultMemory(),
   auditStorage = auditMemory(), reportAudit = async (entry) =>
     ({bridgeId: 'future-btc5m', auditId: entry.auditId, stored: true, duplicate: false})} = {}) => {
   let currentTime = start + 30;
@@ -622,14 +627,15 @@ const setupAuto = ({ticket = ticketFixture(), storage = memoryStorage(), withLoc
   const reads = [];
   const marketReads = [];
   const state = {latest: null, time: () => currentTime};
-  const buyer = createAutoBuyer({core, document: ticket.doc, readUrl: () => currentUrl, storage,
+  const buyer = createAutoBuyer({core: {...core, readPositionSnapshot: positionReader}, document: ticket.doc, readUrl: () => currentUrl, storage,
+    resultStorage,
     auditStorage, extensionVersion: '0.4.1', reportAudit,
     readPreparation: async () => {reads.push(currentTime); state.latest = await currentRead(reads.length); return state.latest;},
     readMarketQuote: marketStub((context) => currentMarket(context), marketReads, state),
     nowFn: () => currentTime, withLock,
     setIntervalFn(callback) {intervals.set(++nextId, callback); return nextId;},
     clearIntervalFn(id) {intervals.delete(id);}});
-  return {buyer, ticket, storage, auditStorage, intervals, reads, marketReads,
+  return {buyer, ticket, storage, auditStorage, resultStorage, intervals, reads, marketReads,
     setTime(value) {currentTime = value;}, setUrl(value) {currentUrl = value;}, setRead(value) {currentRead = value;},
     setMarket(value) {currentMarket = value;},
     async tick() {
@@ -1451,4 +1457,154 @@ test('an absolute 97¢ ceiling refuses near-certain favorites whatever the READY
   ok.watcher.start({live: true});
   await ok.watcher.poll();
   assert.equal(ok.watcher.status().state, 'CLICK_ATTEMPTED', 'exactly 97¢ is allowed');
+});
+
+// Readback is separate from the click marker, the ticket and the attempt audit.
+const positionSnapshot = (positions = [], round = start, side = 'Down') => ({periodStart: round, side, positions});
+const position = {shares: 1.51, avgPriceCents: 66, costUsd: 1};
+async function attemptWithPosition(options = {}) {
+  const env = setupAuto(options);
+  env.buyer.sync(true);
+  env.setTime(now);
+  env.setRead(() => ready());
+  await env.tick();
+  return env;
+}
+
+test('a newly appearing $1 position confirms shares and average without another Buy or fill audit', async () => {
+  let snapshot = positionSnapshot();
+  const env = await attemptWithPosition({positionReader: () => snapshot});
+  assert.equal(env.buyer.status().last.fill, null);
+  snapshot = positionSnapshot([position]);
+  env.setTime(now + 24);
+  const confirmed = env.buyer.status().last;
+  assert.deepEqual(clone(confirmed.fill), {source: 'FUTURE_POSITION_PAGE', shares: 1.51, avgPriceCents: 66, confirmedAt: now + 24});
+  assert.equal(confirmed.state, 'CLICK_ATTEMPTED', 'the platform readback does not rewrite the click fact');
+  assert.equal('platformOrderId' in confirmed, false);
+  for (let i = 0; i < 3; i++) { env.buyer.sync(true); await env.tick(); }
+  assertUnchangedTicket(env.ticket, 1);
+  assert.equal(JSON.parse(env.storage.values.get(storageKey)).state, 'CLICK_ATTEMPTED');
+  const audits = env.auditStorage.entries();
+  assert.equal(audits.every((entry) => ['CLICK_ATTEMPTED', 'BLOCKED'].includes(entry.state)), true);
+  assert.equal(env.buyer.sync(false).last.fill.avgPriceCents, 66);
+});
+
+test('pre-existing or unreadable positions never confirm this click, even when the record later changes', async () => {
+  for (const initial of [null, positionSnapshot([position])]) {
+    let snapshot = initial;
+    const env = await attemptWithPosition({positionReader: () => snapshot});
+    snapshot = positionSnapshot([{...position, shares: 3.02, costUsd: 2}]);
+    env.setTime(now + 1);
+    assert.equal(env.buyer.sync(true).last.fill, null);
+    snapshot = positionSnapshot([position]);
+    assert.equal(env.buyer.status().last.fill, null);
+    await env.tick();
+    assertUnchangedTicket(env.ticket, 1);
+  }
+});
+
+test('wrong round, side, partial amount, duplicate rows and invalid prices stay unconfirmed without retry', async () => {
+  const bad = [null, positionSnapshot(), positionSnapshot([position], start - 300),
+    positionSnapshot([position], start, 'Up'), positionSnapshot([position, position]),
+    positionSnapshot([{...position, costUsd: 0.5}]), positionSnapshot([{...position, costUsd: 2}]),
+    positionSnapshot([{...position, shares: 0}]), positionSnapshot([{...position, shares: NaN}]),
+    positionSnapshot([{...position, avgPriceCents: 0}]), positionSnapshot([{...position, avgPriceCents: 101}]),
+    positionSnapshot([{...position, avgPriceCents: 99}])];
+  for (const invalid of bad) {
+    let snapshot = positionSnapshot();
+    const env = await attemptWithPosition({positionReader: () => snapshot});
+    snapshot = invalid;
+    env.setTime(now + 1);
+    assert.equal(env.buyer.sync(true).last.fill, null);
+    await env.tick();
+    assertUnchangedTicket(env.ticket, 1);
+  }
+});
+
+test('readback errors, a changed page or backwards clock retain the consumed round', async () => {
+  let error = false, snapshot = positionSnapshot();
+  const env = await attemptWithPosition({positionReader: () => { if (error) throw new Error('page rerender'); return snapshot; }});
+  snapshot = positionSnapshot([position]);
+  error = true;
+  assert.equal(env.buyer.status().last.fill, null);
+  error = false;
+  env.setUrl(`https://future.news/zh/event/btc-updown-5m-${start + 300}`);
+  assert.equal(env.buyer.status().last.fill, null);
+  env.setUrl(marketUrl);
+  env.setTime(now - 1);
+  assert.equal(env.buyer.status().last.fill, null);
+  env.setTime(now + 1);
+  assert.equal(env.buyer.status().last.fill.shares, 1.51);
+  assertUnchangedTicket(env.ticket, 1);
+});
+
+test('pending readback and confirmed receipt survive reload without clearing the click marker', async () => {
+  let snapshot = positionSnapshot();
+  const env = await attemptWithPosition({positionReader: () => snapshot});
+  const restored = setupAuto({storage: env.storage, resultStorage: env.resultStorage, positionReader: () => snapshot});
+  restored.setTime(now + 1);
+  restored.setRead(() => ready(now + 1));
+  restored.buyer.sync(true);
+  await restored.tick();
+  assert.equal(restored.buyer.status().last.state, 'CLICK_ATTEMPTED');
+  assert.equal(restored.buyer.status().last.fill, null);
+  snapshot = positionSnapshot([position]);
+  restored.setTime(now + 24);
+  assert.equal(restored.buyer.status().last.fill.shares, 1.51);
+  const again = setupAuto({storage: env.storage, resultStorage: env.resultStorage});
+  again.setTime(start + 301);
+  assert.equal(again.buyer.status().last.fill.avgPriceCents, 66);
+  assertUnchangedTicket(env.ticket, 1);
+  assertUnchangedTicket(restored.ticket);
+  assertUnchangedTicket(again.ticket);
+});
+
+test('result storage failure and click exceptions never permit a second attempt', async () => {
+  for (const options of [{resultStorage: resultMemory(new Map(), {failWrite: true})},
+    {ticket: ticketFixture({beforeBuy() {throw new Error('unknown click');}})}]) {
+    let snapshot = positionSnapshot();
+    const env = await attemptWithPosition({...options, positionReader: () => snapshot});
+    snapshot = positionSnapshot([position]);
+    env.setTime(now + 1);
+    const view = env.buyer.sync(false);
+    if (options.ticket) assert.equal(view.last.fill, null);
+    else assert.equal(view.last.fill.shares, 1.51, 'memory readback remains usable if saving it failed');
+    env.buyer.sync(true);
+    await env.tick();
+    assertUnchangedTicket(env.ticket, 1);
+    assert.equal(JSON.parse(env.storage.values.get(storageKey)).state, 'CLICK_ATTEMPTED');
+  }
+});
+
+test('malformed stored readback is ignored without touching the consumption key', () => {
+  for (const raw of ['invalid-json', '{}', JSON.stringify({schemaVersion: 1, periodStart: start,
+    side: 'Down', amountUsd: 2, state: 'CLICK_ATTEMPTED', reason: 'PLATFORM_RESULT_UNKNOWN',
+    attemptedAt: now, baselineEmpty: true, fill: null})]) {
+    const resultStorage = resultMemory(new Map([[resultKey, raw]]));
+    const env = setupAuto({resultStorage});
+    assert.equal(env.buyer.status().last, null);
+    assert.equal(resultStorage.values.get(resultKey), raw);
+    assert.equal(env.storage.values.size, 0);
+    assertUnchangedTicket(env.ticket);
+  }
+});
+
+test('Up confirmation uses the prepared Up side and preserves confirmed history across the next round', async () => {
+  let snapshot = positionSnapshot([], start, 'Up');
+  const env = setupAuto({ticket: ticketFixture({side: 'Up'}), positionReader: () => snapshot});
+  env.buyer.sync(true);
+  env.setTime(now);
+  env.setRead(() => ready(now, 'Up'));
+  await env.tick();
+  snapshot = positionSnapshot([{shares: 1.14, avgPriceCents: 88, costUsd: 1}], start, 'Up');
+  env.setTime(now + 1);
+  assert.equal(env.buyer.status().last.fill.avgPriceCents, 88);
+  env.buyer.sync(false);
+  env.setTime(start + 301);
+  env.setUrl(`https://future.news/zh/event/btc-updown-5m-${start + 300}`);
+  const history = env.buyer.status().last;
+  assert.equal(history.periodStart, start);
+  assert.equal(history.side, 'Up');
+  assert.equal(history.fill.shares, 1.14);
+  assertUnchangedTicket(env.ticket, 1);
 });

@@ -6,6 +6,8 @@
   const KEY = 'polyhermes.future-btc5m.buy-once';
   // Durable outbox of attempt/refusal audits; entries leave only after the bridge stores them.
   const AUDIT_KEY = 'polyhermes.future-btc5m.buy-audit';
+  // Readback has its own key; confirming a position never clears the per-round click mark.
+  const RESULT_KEY = 'polyhermes.future-btc5m.buy-result';
   const INTENT_FIELDS = ['schemaVersion', 'id', 'slug', 'periodStart', 'periodEnd', 'side', 'amountUsd',
     'createdAt', 'expiresAt', 'priceObservedAt', 'openPrice', 'currentPrice', 'priceSource', 'openPriceSource',
     'twapLookbackSeconds', 'mode', 'noSubmission', 'operatorAuthorized', 'authorizationSource', 'claimToken',
@@ -139,6 +141,50 @@
     const list = raw === null ? [] : JSON.parse(raw);
     if (!Array.isArray(list)) throw new Error('AUDIT_STORAGE_FAILED');
     return list;
+  }
+
+  function positionSnapshot(env, record) {
+    try {
+      const core = env.core ?? globalThis.FutureBtc5m;
+      const url = env.readUrl ? env.readUrl() : globalThis.location.href;
+      if (!core.matchesMarket(url, {slug: `btc-updown-5m-${record.periodStart}`})) return null;
+      const value = core.readPositionSnapshot?.(env.document ?? globalThis.document, url, record.periodStart, record.side);
+      return value?.periodStart === record.periodStart && value.side === record.side && Array.isArray(value.positions) ? value : null;
+    } catch { return null; }
+  }
+
+  function validFill(fill, attemptedAt) {
+    return exact(fill, ['source', 'shares', 'avgPriceCents', 'confirmedAt']) && fill.source === 'FUTURE_POSITION_PAGE' &&
+      Number.isFinite(fill.shares) && fill.shares > 0 && quote(fill.avgPriceCents) && fill.avgPriceCents > 0 &&
+      Math.abs(fill.shares * fill.avgPriceCents / 100 - 1) <= 0.02 &&
+      Number.isFinite(fill.confirmedAt) && fill.confirmedAt >= attemptedAt;
+  }
+
+  function saveResult(env, value) {
+    try {
+      const saved = {schemaVersion: 1, state: value.state, reason: value.reason, periodStart: value.periodStart,
+        side: value.side, amountUsd: 1, attemptedAt: value.attemptedAt, baselineEmpty: value.baselineEmpty, fill: value.fill};
+      (env.resultStorage ?? globalThis.localStorage).setItem(RESULT_KEY, JSON.stringify(saved));
+    } catch { /* The click mark and in-memory readback remain intact if saving fails. */ }
+  }
+
+  function loadResult(env) {
+    try {
+      const value = JSON.parse((env.resultStorage ?? globalThis.localStorage).getItem(RESULT_KEY) ?? 'null');
+      if (!exact(value, ['schemaVersion', 'state', 'reason', 'periodStart', 'side', 'amountUsd', 'attemptedAt', 'baselineEmpty', 'fill']) ||
+          value.schemaVersion !== 1 || value.state !== 'CLICK_ATTEMPTED' ||
+          !['PLATFORM_RESULT_UNKNOWN', 'CLICK_THROWN_RESULT_UNKNOWN'].includes(value.reason) ||
+          !Number.isSafeInteger(value.periodStart) || value.periodStart < 0 || value.periodStart % 300 ||
+          !['Up', 'Down'].includes(value.side) || value.amountUsd !== 1 || typeof value.baselineEmpty !== 'boolean' ||
+          !Number.isFinite(value.attemptedAt) || value.attemptedAt < value.periodStart + 60 || value.attemptedAt >= value.periodStart + 80 ||
+          value.fill !== null && (!value.baselineEmpty || value.reason !== 'PLATFORM_RESULT_UNKNOWN' || !validFill(value.fill, value.attemptedAt))) return null;
+      const marker = JSON.parse((env.storage ?? globalThis.localStorage).getItem(KEY) ?? 'null');
+      if (marker?.schemaVersion !== 1 || marker.state !== 'CLICK_ATTEMPTED' || marker.amountUsd !== 1 ||
+          !Number.isSafeInteger(marker.periodStart) || marker.periodStart < value.periodStart || marker.periodStart % 300 ||
+          marker.id !== `future-btc5m-prepare:${marker.periodStart}` || !['Up', 'Down'].includes(marker.side) ||
+          marker.periodStart === value.periodStart && marker.side !== value.side) return null;
+      return value;
+    } catch { return null; }
   }
 
   function browserReportAudit(payload) {
@@ -280,6 +326,8 @@
           priceGate(freshRecord, report, market, nowFn());
           // A dry run reports READY only when the price gates pass as well.
           if (!live) return finish('DRY_RUN_READY', null, freshRecord);
+          // Only a reliably empty matching position table can establish this click's new holding.
+          const baseline = positionSnapshot(env, freshRecord);
           try {
             storage ??= globalThis.localStorage;
             const raw = storage.getItem(KEY);
@@ -323,9 +371,11 @@
           if (!current(run)) return;
           finish('CLICK_ATTEMPTED', 'PLATFORM_RESULT_UNKNOWN', freshRecord);
           const clickedAt = nowFn();
+          Object.assign(result, {attemptedAt: clickedAt, baselineEmpty: baseline?.positions.length === 0, fill: null});
           try { button.click(); } catch { result.reason = 'CLICK_THROWN_RESULT_UNKNOWN'; }
           // Queued after the click so the audit write never delays it.
           audit(freshRecord, 'CLICK_ATTEMPTED', result.reason, finalReport, market, clickedAt);
+          saveResult(env, result);
         };
         if (live) await withLock(attempt);
         else await attempt();
@@ -382,7 +432,7 @@
   // re-arming is never caught up.
   function createAutoBuyer(env = {}) {
     const reportAudit = env.reportAudit ?? browserReportAudit;
-    let enabled = false, watcher = null, failure = null, last = null;
+    let enabled = false, watcher = null, failure = null, last = loadResult(env);
     let flushing = false, pendingAudits = 0, auditError = null;
     // Every entry is retried until the bridge confirms storing it; one rejected entry
     // never hides the others.
@@ -411,10 +461,27 @@
     }
     const noteworthy = (value) => value?.state === 'CLICK_ATTEMPTED' ||
       value?.state === 'BLOCKED' && value.reason !== 'READ_FAILED';
+    const preserveAttempt = (value) => value?.reason === 'ALREADY_CONSUMED' && last?.state === 'CLICK_ATTEMPTED' &&
+      last.periodStart === value.periodStart;
+    const confirmPosition = (value) => {
+      const now = (env.nowFn ?? (() => Date.now() / 1000))();
+      if (value?.state !== 'CLICK_ATTEMPTED' || value.fill || !value.baselineEmpty ||
+          value.reason !== 'PLATFORM_RESULT_UNKNOWN' || !Number.isFinite(now) || now < value.attemptedAt) return value;
+      const snapshot = positionSnapshot(env, value);
+      if (snapshot?.positions.length !== 1 || snapshot.positions[0].costUsd !== 1) return value;
+      const {shares, avgPriceCents} = snapshot.positions[0];
+      const fill = {source: 'FUTURE_POSITION_PAGE', shares, avgPriceCents, confirmedAt: now};
+      if (!validFill(fill, value.attemptedAt)) return value;
+      last = {...value, fill};
+      saveResult(env, last);
+      return last;
+    };
     const view = () => {
       const current = watcher?.status() ?? null;
       const finished = current && current.state !== 'WATCHING' ? current : null;
-      const recent = noteworthy(finished) ? finished : last;
+      const candidate = noteworthy(finished) && !preserveAttempt(finished) ? finished : last;
+      const recent = confirmPosition(candidate?.state === 'CLICK_ATTEMPTED' && last?.fill &&
+        candidate.periodStart === last.periodStart && candidate.attemptedAt === last.attemptedAt ? last : candidate);
       return {state: !enabled ? 'OFF' : failure ? 'BLOCKED' : finished || !current ? 'PAUSED' : 'WATCHING',
         reason: enabled ? failure : null, last: recent && {...recent}, pendingAudits, auditError};
     };
@@ -422,7 +489,8 @@
       sync(value) {
         const current = watcher?.status();
         if (current && current.state !== 'WATCHING') {
-          if (noteworthy(current)) last = current;
+          if (noteworthy(current) && !preserveAttempt(current) && !(current.state === 'CLICK_ATTEMPTED' &&
+              last?.fill && current.periodStart === last.periodStart && current.attemptedAt === last.attemptedAt)) last = current;
           watcher = null;
         }
         enabled = value === true;

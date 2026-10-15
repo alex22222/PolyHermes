@@ -7,7 +7,7 @@ const content = readFileSync(new URL('./future-btc5m-extension/content.js', impo
 const context = vm.createContext({URL, Event});
 vm.runInContext(content, context);
 const {usableDraft, matchesMarket, prepareAmount, observationView, navigationTarget, followCurrentMarket, readPreflight,
-  usablePreparation, readPreparationTicket, prepareOnlyOnce, parseButtonQuote} = context.FutureBtc5m;
+  usablePreparation, readPreparationTicket, prepareOnlyOnce, parseButtonQuote, readPositionSnapshot} = context.FutureBtc5m;
 const start = 1791650700;
 const now = start + 65;
 const draft = {
@@ -132,10 +132,131 @@ test('navigation never clicks hidden, disabled, ambiguous or financial controls'
   assert.equal(fixture.clicks(), 0);
 });
 
+test('early round navigation reloads the document without depending on the site rendering its next-round button', () => {
+  const time = start + 10;
+  const source = {...observing, server_time: time};
+  const oldUrl = `https://future.news/zh/event/btc-updown-5m-${start - 300}`;
+  const fixture = navigationFixture({buttons: []});
+  const targets = [];
+  followCurrentMarket(source, oldUrl, fixture.doc, fixture.storage, time, (target) => targets.push(target));
+  assert.deepEqual(targets, [marketUrl]);
+  followCurrentMarket(source, oldUrl, fixture.doc, fixture.storage, time + 1, (target) => targets.push(target));
+  assert.equal(targets.length, 1, 'a frozen navigation never retries the same round');
+  assert.equal(fixture.clicks(), 0);
+});
+
+test('a current URL with a stale ticket is recovered before entry and the current ticket never reloads', () => {
+  const time = start + 10;
+  const source = {...observing, server_time: time};
+  const fixture = ticketFixture({title: 'Bitcoin Up or Down - October 10, 12:40PM-12:45PM ET'});
+  const targets = [];
+  followCurrentMarket(source, marketUrl, fixture.doc, navigationFixture().storage, time, (target) => targets.push(target));
+  assert.deepEqual(targets, [marketUrl], 'URL arrival does not prove the ticket rendered');
+  const healthy = ticketFixture();
+  followCurrentMarket(source, marketUrl, healthy.doc, navigationFixture().storage, time, () => assert.fail('current ticket reload'));
+  assert.equal(fixture.buyClicks(), 0);
+  assert.equal(fixture.writes(), 0);
+});
+
+test('document recovery has an early deadline and never gains authority from stale, future or STOP state', () => {
+  for (const time of [start + 4.99, start + 50, start + 60, start + 79, start + 80]) {
+    const fixture = ticketFixture({title: 'Bitcoin Up or Down - October 10, 12:40PM-12:45PM ET'});
+    followCurrentMarket({...observing, server_time: time}, marketUrl, fixture.doc, navigationFixture().storage,
+      time, () => assert.fail('recovery outside +5..+50'));
+  }
+  const time = start + 10;
+  for (const change of [{status: 'STOPPED'}, {server_time: time - 4}, {period_start: start - 300}]) {
+    followCurrentMarket({...observing, server_time: time, ...change}, marketUrl, ticketFixture().doc,
+      navigationFixture().storage, time, () => assert.fail('invalid source navigation'));
+  }
+  followCurrentMarket({...observing, server_time: time}, 'https://future.news/zh/updown', ticketFixture().doc,
+    navigationFixture().storage, time, () => assert.fail('unscoped navigation'));
+});
+
+test('failed recovery storage or navigation cannot loop or produce Buy attempts', () => {
+  const time = start + 10;
+  const source = {...observing, server_time: time};
+  const oldUrl = `https://future.news/zh/event/btc-updown-5m-${start - 300}`;
+  const failed = navigationFixture({storageError: true, buttons: []});
+  followCurrentMarket(source, oldUrl, failed.doc, failed.storage, time, () => assert.fail('storage must precede navigation'));
+  const fixture = navigationFixture({buttons: []});
+  let calls = 0;
+  const navigate = () => { calls++; throw new Error('navigation failed'); };
+  followCurrentMarket(source, oldUrl, fixture.doc, fixture.storage, time, navigate);
+  followCurrentMarket({...source, server_time: time + 1}, oldUrl, fixture.doc, fixture.storage, time + 1, navigate);
+  assert.equal(calls, 1);
+  assert.equal(fixture.clicks(), 0);
+});
+
+test('a pushed clock recovers an unrendered round without invoking any suspended page timer', async () => {
+  const fixture = ticketFixture({title: 'Bitcoin Up or Down - October 10, 12:40PM-12:45PM ET'});
+  let time = start + 4;
+  let receive;
+  const targets = [];
+  const location = {href: marketUrl, replace(target) { targets.push(target); }};
+  await renderedPanel(observing, marketUrl, time, fixture.doc, {location, now: () => time,
+    connect: () => ({onMessage: {addListener(fn) {receive = fn;}}, onDisconnect: {addListener() {}}}),
+    reply(message) {
+      if (message.type === 'FUTURE_BTC5M_PREFLIGHT') return {ok: true};
+      if (message.type === 'FUTURE_BTC5M_PREPARATION') return {ok: true, status: {...preparation, serverTime: time,
+        preparation: {...preparation.preparation, enabled: false, state: 'DISABLED', intent: null, lastAttempt: null}}};
+      return {ok: true, status: {...observing, server_time: time}};
+    }});
+  assert.deepEqual(targets, []);
+  time = start + 6;
+  receive({type: 'FUTURE_BTC5M_TICK', serverTime: time});
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(targets, [marketUrl]);
+  time++;
+  receive({type: 'FUTURE_BTC5M_TICK', serverTime: time});
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(targets.length, 1);
+  assert.equal(fixture.writes(), 0);
+  assert.equal(fixture.buyClicks(), 0);
+});
+
+test('rendering checks return only the canonical current location and never prepare or buy', async () => {
+  let receive;
+  const replies = [], fixture = ticketFixture();
+  await renderedPanel(observing, marketUrl + '?m=private#fragment', now, fixture.doc, {
+    connect: () => ({onMessage: {addListener(fn) {receive = fn;}}, onDisconnect: {addListener() {}},
+      postMessage(message) { replies.push(message); }})});
+  for (const change of [{checkedAt: now - 4}, {extra: true}]) {
+    receive({type: 'FUTURE_BTC5M_RENDERER_CHECK', checkedAt: now, ...change});
+  }
+  assert.equal(replies.length, 0);
+  receive({type: 'FUTURE_BTC5M_RENDERER_CHECK', checkedAt: now});
+  assert.equal(JSON.stringify(replies), JSON.stringify([{type: 'FUTURE_BTC5M_RENDERER_PAGE',
+    checkedAt: now, marketUrl}]));
+  assert.equal(fixture.writes(), 0);
+  assert.equal(fixture.buyClicks(), 0);
+});
+
+test('a disconnected renderer port cannot claim the replacement document is still being rendered', async () => {
+  const ports = [];
+  const children = await renderedPanel(observing, marketUrl, now, ticketFixture().doc, {
+    connect() {
+      const value = {onMessage: {addListener(fn) {value.receive = fn;}},
+        onDisconnect: {addListener(fn) {value.disconnected = fn;}}};
+      ports.push(value);
+      return value;
+    }});
+  ports[0].receive({type: 'FUTURE_BTC5M_RENDERER_STATUS', state: 'ACTIVE'});
+  assert.match(children[7].textContent, /锁屏渲染：浏览器渲染保持已开启/);
+  ports[0].disconnected();
+  assert.equal(ports.length, 2);
+  ports[0].receive({type: 'FUTURE_BTC5M_RENDERER_STATUS', state: 'ACTIVE'});
+  assert.doesNotMatch(children[7].textContent, /锁屏渲染：浏览器渲染保持已开启/);
+  ports[1].receive({type: 'FUTURE_BTC5M_RENDERER_STATUS', state: 'ERROR'});
+  assert.match(children[7].textContent, /锁屏渲染：开启失败/);
+});
+
 async function renderedPanel(value, url, time, ticketDoc, runtime = {}) {
   const body = ticketDoc?.body || {};
   body.append = function(panel) { this.panel = panel; };
-  const document = Object.assign(ticketDoc || {}, {body, createElement: () => ({style: {}, children: [], listeners: {},
+  const document = Object.assign(ticketDoc || {}, {body, createElement: () => ({style: {}, children: [], listeners: {}, attributes: {},
+    setAttribute(name, value) { this.attributes[name] = value; },
+    getAttribute(name) { return this.attributes[name] ?? null; },
     append(...children) { this.children.push(...children); },
     addEventListener(type, listener) { this.listeners[type] = listener; }})});
   if (!document.querySelectorAll) document.querySelectorAll = () => [];
@@ -148,12 +269,338 @@ async function renderedPanel(value, url, time, ticketDoc, runtime = {}) {
       return runtime.reply ? runtime.reply(message) : ({ok: true, status: value});
     }}}, ...runtime.globals});
   await new Promise((resolve) => setImmediate(resolve));
-  body.panel.children.poll = async () => {
+  const panelBody = body.panel.children.find((child) => child.id === 'polyhermes-btc5m-body');
+  const contents = panelBody?.children || body.panel.children.slice(1);
+  const details = contents.find((child) => child.id === 'polyhermes-btc5m-details');
+  const children = details ? [panelBody ? body.panel.children[0].children[0] : body.panel.children[0],
+    ...details.children.slice(1), contents[2]] : body.panel.children;
+  children.currentSummary = contents.find((child) => child.id === 'polyhermes-btc5m-current');
+  children.recentSummary = contents.find((child) => child.id === 'polyhermes-btc5m-recent');
+  children.details = details;
+  children.panelBody = panelBody;
+  children.collapse = panelBody && body.panel.children[0].children[1];
+  children.poll = async () => {
     interval();
     await new Promise((resolve) => setImmediate(resolve));
   };
-  return body.panel.children;
+  return children;
 }
+
+test('the compact panel separates current no-click causes from a previous click and observation geoblock', async () => {
+  const fixture = ticketFixture();
+  let time = now;
+  let sourceFresh = false;
+  const view = {state: 'WATCHING', last: {state: 'CLICK_ATTEMPTED', reason: 'PLATFORM_RESULT_UNKNOWN',
+    periodStart: start - 300, side: 'Down', amountUsd: 1}};
+  const children = await renderedPanel(observing, marketUrl, time, fixture.doc, {now: () => time,
+    globals: {FutureBtc5mBuyOnce: {createAutoBuyer: () => ({sync: () => view, status: () => view})}},
+    reply(message) { return {ok: true, status: message.type === 'FUTURE_BTC5M_PREPARATION' ? {
+      ...preparation, serverTime: time, preparation: {...preparation.preparation, state: 'WAITING_SIGNAL',
+        intent: null, reasons: ['WAITING_CURRENT_SIGNAL']}} : {...observing, server_time: time,
+          reason: sourceFresh ? 'GEOBLOCK_BLOCKED' : 'CHAINLINK_PRICE_STALE_OR_FUTURE',
+          signal: sourceFresh ? {...signal, price_observed_at: time} : signal}}; }});
+  assert.match(children.currentSummary.textContent, /未点击.*行情异常/);
+  assert.match(children.currentSummary.textContent, /行情采样已过期或时间无效/);
+  assert.doesNotMatch(children.currentSummary.textContent, /地区|GEOBLOCK|价格风控/);
+  assert.match(children.recentSummary.textContent, /已点击.*买入跌.*\$1/);
+  assert.match(children.recentSummary.textContent, /历史轮次.*北京时间/);
+  assert.match(children.recentSummary.textContent, /成交未确认/);
+  time = start + 90;
+  await children.poll();
+  assert.match(children.currentSummary.textContent, /窗口内记录.*行情采样已过期/);
+  assert.match(children.currentSummary.textContent, /已过第 80 秒.*等待下一轮/);
+  assert.match(children.recentSummary.textContent, /已点击.*买入跌/);
+  sourceFresh = true;
+  await children.poll();
+  assert.match(children.currentSummary.textContent, /窗口内记录.*行情采样已过期/,
+    'a recovered source after the deadline must not rewrite the observed window failure');
+  assert.equal(children.details.open, false);
+  assert.equal(fixture.clicks(), 0);
+  assert.equal(fixture.writes(), 0);
+});
+
+test('summary shows service failures, disabled automation and scheduled waits without calling them price risk', async () => {
+  for (const [state, time, sourceReason, expected] of [
+    ['DISABLED', now, 'GEOBLOCK_BLOCKED', /自动功能关闭/],
+    ['WAITING_SIGNAL', start + 10, 'GEOBLOCK_BLOCKED', /等待入场.*时间安排/],
+    ['WAITING_SIGNAL', now, 'NOT_ET_WEEKEND', /运行安排[\s\S]*美东周末/],
+    ['OFFLINE', now, 'GEOBLOCK_BLOCKED', /状态未知.*服务异常/],
+    ['BLOCKED', now, 'GEOBLOCK_BLOCKED', /已停止/],
+  ]) {
+    const fixture = ticketFixture();
+    const view = {state: state === 'DISABLED' ? 'OFF' : 'WATCHING', last: null};
+    const children = await renderedPanel({...observing, server_time: time}, marketUrl, time, fixture.doc, {
+      globals: {FutureBtc5mBuyOnce: {createAutoBuyer: () => ({sync: () => view, status: () => view})}},
+      reply(message) {
+        if (message.type === 'FUTURE_BTC5M_PREPARATION') return state === 'OFFLINE' ? {ok: false} : {ok: true, status: {
+          ...preparation, serverTime: time, preparation: {...preparation.preparation, state,
+            enabled: !['DISABLED', 'BLOCKED'].includes(state), intent: null,
+            reasons: [state === 'BLOCKED' ? 'STOP_FILE_PRESENT' : 'WAITING_CURRENT_SIGNAL']}}};
+        return {ok: true, status: {...observing, server_time: time, reason: sourceReason}};
+      }});
+    assert.match(children.currentSummary.textContent, expected);
+    assert.doesNotMatch(children.currentSummary.textContent, /价格风控|GEOBLOCK_BLOCKED/);
+    assert.equal(fixture.clicks(), 0);
+    assert.equal(fixture.writes(), 0);
+  }
+});
+
+test('the summary classifies price risk, missing quotes, page failures and duplicate protection separately', async () => {
+  for (const [reason, category] of [['PRICE_BELOW_MIN', '价格风控'], ['PRICE_ABOVE_MAX', '价格风控'],
+    ['MARKET_QUOTE_MISMATCH', '价格风控'], ['MARKET_QUOTE_UNAVAILABLE', '行情异常'],
+    ['TICKET_CHANGED', '页面核对失败'], ['ALREADY_CONSUMED', '防重复保护']]) {
+    const fixture = ticketFixture();
+    const view = {state: 'WATCHING', last: {state: 'BLOCKED', reason, periodStart: start, side: 'Down', amountUsd: 1,
+      priceCheck: {upQuoteCents: 41, downQuoteCents: 60, marketUpAskCents: 37, marketDownAskCents: 64}}};
+    const children = await renderedPanel(observing, marketUrl, now, fixture.doc, {
+      globals: {FutureBtc5mBuyOnce: {createAutoBuyer: () => ({sync: () => view, status: () => view})}},
+      reply(message) { return {ok: true, status: message.type === 'FUTURE_BTC5M_PREPARATION' ? {
+        ...preparation, preparation: {...preparation.preparation, state: 'READY', intent: null}} : observing}; }});
+    assert.match(children.currentSummary.textContent, new RegExp(`未点击.*${category}`));
+    assert.match(children.recentSummary.textContent, new RegExp(category));
+    if (reason === 'MARKET_QUOTE_MISMATCH') assert.match(children.currentSummary.textContent, /4¢.*上限 3¢/);
+    assert.equal(fixture.clicks(), 0);
+    assert.equal(fixture.writes(), 0);
+  }
+});
+
+test('the summary reports missing buyer scripts and does not keep a stale switch label during a pending read', async () => {
+  const fixture = ticketFixture();
+  const waiting = {...preparation, preparation: {...preparation.preparation, state: 'WAITING_SIGNAL', intent: null}};
+  const absent = await renderedPanel(observing, marketUrl, now, fixture.doc, {
+    reply(message) { return {ok: true, status: message.type === 'FUTURE_BTC5M_PREPARATION' ? waiting : observing}; }});
+  assert.match(absent.currentSummary.textContent, /未点击.*扩展异常/);
+  let time = now;
+  let pending = false;
+  const view = {state: 'WATCHING', last: null};
+  const children = await renderedPanel(observing, marketUrl, time, ticketFixture().doc, {now: () => time,
+    globals: {FutureBtc5mBuyOnce: {createAutoBuyer: () => ({sync: () => view, status: () => view})}},
+    reply(message) {
+      if (pending && message.type === 'FUTURE_BTC5M_STATUS') return new Promise(() => {});
+      return {ok: true, status: message.type === 'FUTURE_BTC5M_PREPARATION' ? waiting : observing};
+    }});
+  assert.match(children.currentSummary.textContent, /自动买入已开启/);
+  pending = true;
+  time = now + 4;
+  await children.poll();
+  assert.match(children.currentSummary.textContent, /开关未核实/);
+  assert.match(children.currentSummary.textContent, /状态未知.*服务异常/);
+  assert.doesNotMatch(children.currentSummary.textContent, /自动买入已开启/);
+});
+
+test('an expired window without observations cannot infer risk or claim there has never been an order', async () => {
+  const fixture = ticketFixture();
+  const time = start + 90;
+  const children = await renderedPanel({...observing, server_time: time}, marketUrl, time, fixture.doc, {
+    globals: {FutureBtc5mBuyOnce: {createAutoBuyer: () => ({sync: () => ({state: 'WATCHING', last: null}),
+      status: () => ({state: 'WATCHING', last: null})})}},
+    reply(message) { return {ok: true, status: message.type === 'FUTURE_BTC5M_PREPARATION' ? {
+      ...preparation, serverTime: time, preparation: {...preparation.preparation, state: 'WAITING_SIGNAL',
+        intent: null, reasons: ['WAITING_CURRENT_SIGNAL']}} : {...observing, server_time: time}}; }});
+  assert.match(children.currentSummary.textContent, /已过入场窗口/);
+  assert.match(children.currentSummary.textContent, /窗口内原因未记录.*无法判断是否触发风控/);
+  assert.match(children.recentSummary.textContent, /本页尚无买入检查记录/);
+  assert.doesNotMatch(children.recentSummary.textContent, /从未下单|未下过单/);
+  assert.equal(fixture.clicks(), 0);
+});
+
+test('a click attempt or click exception stays distinct from successful submission and fill', async () => {
+  for (const reason of ['PLATFORM_RESULT_UNKNOWN', 'CLICK_THROWN_RESULT_UNKNOWN']) {
+    const fixture = ticketFixture();
+    const view = {state: 'WATCHING', last: {state: 'CLICK_ATTEMPTED', reason, periodStart: start, side: 'Up', amountUsd: 1}};
+    const children = await renderedPanel(observing, marketUrl, now, fixture.doc, {
+      globals: {FutureBtc5mBuyOnce: {createAutoBuyer: () => ({sync: () => view, status: () => view})}},
+      reply(message) { return {ok: true, status: message.type === 'FUTURE_BTC5M_PREPARATION' ? {
+        ...preparation, preparation: {...preparation.preparation, state: 'READY', intent: null}} : observing}; }});
+    assert.match(children.currentSummary.textContent, reason === 'PLATFORM_RESULT_UNKNOWN' ? /已点击.*成交未确认/ : /点击异常.*结果未知/);
+    assert.match(children.recentSummary.textContent, reason === 'PLATFORM_RESULT_UNKNOWN' ? /已点击.*买入涨.*\$1/ : /点击异常.*结果未知/);
+    assert.doesNotMatch(children.currentSummary.textContent, /未点击|下单成功|成交成功/);
+    assert.doesNotMatch(children.recentSummary.textContent, /下单成功|成交成功/);
+    assert.equal(fixture.clicks(), 0);
+  }
+});
+
+function positionTableFixture({rows = [], headerText = '市场 结果 份额 均价 / 现价 投注额 预期获得 金额 手续费 止盈 / 止损 当前盈亏 时间 操作',
+  emptyText = '暂无仓位', hidden = false, duplicate = false, wrapped = true, outsideRows = [], missingBody = false, skeleton = false,
+  search = null, searchPlaceholder = '搜索', searchHidden = false} = {}) {
+  const node = (tagName, text = '', attributes = {}, invisible = false) => ({tagName, children: [], parentElement: null,
+    get textContent() { return text + this.children.map((child) => child.textContent).join(' '); },
+    get childNodes() { return [...(text ? [{nodeType: 3, textContent: text}] : []), ...this.children]; },
+    getAttribute(name) { return attributes[name] ?? null; },
+    getClientRects() { return invisible || this.parentElement?.getClientRects().length === 0 ? [] : [1]; },
+    contains(other) { return this === other || this.children.some((child) => child.contains(other)); },
+    append(...children) { for (const child of children) { child.parentElement = this; this.children.push(child); } },
+    querySelectorAll(selector) {
+      const result = [];
+      const visit = (parent) => {
+        for (const child of parent.children) {
+          if (selector === 'a[href]' ? child.tagName === 'A' && child.getAttribute('href') !== null :
+              selector === 'input[placeholder="搜索"]' ? child.tagName === 'INPUT' && child.getAttribute('placeholder') === '搜索' :
+              selector === 'div,thead,[role="row"]' && ['DIV', 'THEAD'].includes(child.tagName)) result.push(child);
+          visit(child);
+        }
+      };
+      visit(this);
+      return result;
+    },
+    click() { assert.fail('position inspection must never click'); }});
+  const row = ({text = 'Bitcoin Up or Down - October 10, 12:45PM-12:50PM ET 开始于 1 m 之前 Down 1.51 66¢ 69¢ $1 $1.51 $1.04 $0.03 -- / -- edit tp/sl +$0.04 24s 卖出',
+    href = marketUrl + '?m=condition', hidden: rowHidden = false, parts = null} = {}) => {
+    const element = node('A', parts ? '' : text, {href}, rowHidden);
+    if (parts) {
+      element.append(...parts.map((part) => node('SPAN', part)));
+      Object.defineProperty(element, 'textContent', {get: () => parts.join('')});
+    }
+    return element;
+  };
+  const body = node('BODY');
+  const table = () => {
+    const scope = node('DIV', '', {}, hidden);
+    scope.append(node('DIV', headerText));
+    if (!missingBody) {
+      if (!wrapped && rows.length) scope.append(...rows.map(row));
+      else {
+        const list = node('DIV', rows.length ? '' : emptyText);
+        list.append(...rows.map(row));
+        if (skeleton) list.append(node('DIV'));
+        scope.append(list);
+      }
+    }
+    return scope;
+  };
+  body.append(table(), ...outsideRows.map(row));
+  if (duplicate) body.append(table());
+  if (search !== null) {
+    const input = node('INPUT', '', {placeholder: searchPlaceholder}, searchHidden);
+    input.value = search;
+    body.append(input);
+  }
+  return {body, querySelectorAll: (selector) => body.querySelectorAll(selector)};
+}
+
+test('the read-only position snapshot reads shares and average from the scoped same-market position row', () => {
+  for (const wrapped of [true, false]) {
+    const value = readPositionSnapshot(positionTableFixture({rows: [{}], wrapped}), marketUrl, start, 'Down');
+    assert.deepEqual(JSON.parse(JSON.stringify(value)), {periodStart: start, side: 'Down',
+      positions: [{shares: 1.51, avgPriceCents: 66, costUsd: 1}]});
+  }
+  const compact = 'Bitcoin Up or Down - October 10, 12:45PM-12:50PM ET开始于1m之前Down1.5166¢69¢$1$1.51$1.04$0.03--/--edit tp/sl+$0.0424s卖出';
+  assert.equal(readPositionSnapshot(positionTableFixture({rows: [{text: compact}]}), marketUrl, start, 'Down'), null,
+    'without a separator, shares and average are ambiguous and cannot be guessed');
+});
+
+test('known empty positions require a visible distinct table header and a complete row list', () => {
+  for (const emptyText of ['暂无仓位', '暂无数据']) {
+    assert.deepEqual(JSON.parse(JSON.stringify(readPositionSnapshot(positionTableFixture({emptyText}), marketUrl, start, 'Down'))),
+      {periodStart: start, side: 'Down', positions: []});
+  }
+  for (const options of [{hidden: true}, {headerText: '市场 结果 份额'}, {missingBody: true},
+    {emptyText: '加载中'}, {emptyText: 'Down 1.51 $1.04'}, {duplicate: true}]) {
+    assert.equal(readPositionSnapshot(positionTableFixture(options), marketUrl, start, 'Down'), null);
+  }
+  const doc = positionTableFixture({headerText: '', outsideRows: [{}]});
+  doc.body.children.push({tagName: 'DIV', textContent: '市场 结果 份额 均价 / 现价 投注额 手续费 时间 操作',
+    parentElement: doc.body, children: [], getClientRects: () => [1], querySelectorAll: () => []});
+  assert.equal(readPositionSnapshot(doc, marketUrl, start, 'Down'), null, 'whole-document keywords do not define a position table');
+});
+
+test('a blank or skeleton position body remains unknown instead of establishing a zero baseline', () => {
+  for (const skeleton of [false, true]) {
+    assert.equal(readPositionSnapshot(positionTableFixture({emptyText: '', skeleton}), marketUrl, start, 'Down'), null);
+  }
+});
+
+test('malformed position row destinations cannot manufacture an empty baseline', () => {
+  for (const href of [null, '', '   ', 'https://future.news.evil.test/zh/event/another-market',
+    `https://user:secret@future.news/zh/event/btc-updown-5m-${start}`,
+    `http://future.news/zh/event/btc-updown-5m-${start}`, 'https://future.news/zh/watchlist']) {
+    assert.equal(readPositionSnapshot(positionTableFixture({rows: [{href}], wrapped: false}), marketUrl, start, 'Down'), null);
+  }
+});
+
+test('an active position-search filter cannot establish an empty position baseline', () => {
+  assert.equal(readPositionSnapshot(positionTableFixture({search: 'ETH'}), marketUrl, start, 'Down'), null);
+  for (const options of [{search: ''}, {search: '  '}, {search: 'ETH', searchHidden: true},
+    {search: 'ETH', searchPlaceholder: '搜索全部'}]) {
+    assert.deepEqual(JSON.parse(JSON.stringify(readPositionSnapshot(positionTableFixture(options), marketUrl, start, 'Down'))),
+      {periodStart: start, side: 'Down', positions: []});
+  }
+});
+
+test('adjacent position DOM cells are separated without guessing a glued shares-and-price number', () => {
+  const parts = ['Bitcoin Up or Down - October 10, 12:45PM-12:50PM ET', '开始于 1 m 之前',
+    'Down', '1.51', '66¢', '69¢', '$1', '$1.51', '$1.04', '$0.03', '-- / --', 'edit tp/sl', '+$0.04', '24s', '卖出'];
+  const doc = positionTableFixture({rows: [{parts}]});
+  assert.match(doc.body.children[0].children[1].children[0].textContent, /Down1\.5166¢69¢/);
+  assert.deepEqual(JSON.parse(JSON.stringify(readPositionSnapshot(doc, marketUrl, start, 'Down'))),
+    {periodStart: start, side: 'Down', positions: [{shares: 1.51, avgPriceCents: 66, costUsd: 1}]});
+});
+
+test('position snapshots exclude watchlists, other market rows and the opposite outcome', () => {
+  const wrongMarket = `https://future.news/zh/event/btc-updown-5m-${start - 300}`;
+  const up = 'Bitcoin Up or Down - October 10, 12:45PM-12:50PM ET 开始于 1 m 之前 Up 1.51 66¢ 69¢ $1 $1.51 $1.04 $0.03 -- / -- edit tp/sl +$0.04 24s 卖出';
+  for (const options of [{outsideRows: [{}]}, {rows: [{href: wrongMarket}]}, {rows: [{text: up}]}]) {
+    assert.deepEqual(JSON.parse(JSON.stringify(readPositionSnapshot(positionTableFixture(options), marketUrl, start, 'Down'))),
+      {periodStart: start, side: 'Down', positions: []});
+  }
+  for (const [url, period, side] of [[wrongMarket, start, 'Down'], [marketUrl, start + 1, 'Down'],
+    [marketUrl, start, 'Yes'], [marketUrl.replace('future.news', 'future.news.evil.test'), start, 'Down'],
+    [marketUrl.replace('https://', 'https://user:secret@'), start, 'Down']]) {
+    assert.equal(readPositionSnapshot(positionTableFixture({rows: [{}]}), url, period, side), null);
+  }
+});
+
+test('malformed, hidden or duplicate same-market rows never become a position confirmation', () => {
+  const normal = 'Bitcoin Up or Down - October 10, 12:45PM-12:50PM ET 开始于 1 m 之前 Down 1.51 66¢ 69¢ $1 $1.51 $1.04 $0.03 -- / -- edit tp/sl +$0.04 24s 卖出';
+  for (const rows of [[{}, {}], [{}, {hidden: true}], [{hidden: true}],
+    ...['Down NaN', 'Down 0', 'Down -1', 'Down 1e3'].map((text) => [{text: normal.replace('Down 1.51', text)}]),
+    ...['--', '101¢', '0¢', '66%'].map((text) => [{text: normal.replace('66¢', text)}]),
+    [{text: normal.replace('$1 $1.51', '$NaN $1.51')}], [{text: normal.replace('24s 卖出', '24s')}],
+    [{text: 'BTC 涨跌 - October 10 Down 1.51 66¢ $1'}]]) {
+    assert.equal(readPositionSnapshot(positionTableFixture({rows}), marketUrl, start, 'Down'), null);
+  }
+  const twoDollar = readPositionSnapshot(positionTableFixture({rows: [{text: normal.replace('$1 $1.51', '$2 $1.51')}]}),
+    marketUrl, start, 'Down');
+  assert.equal(twoDollar.positions[0].costUsd, 2, 'the parser reports cost; the runtime decides whether it matches this $1 click');
+});
+
+test('the panel shows a page-confirmed fill with shares and average while keeping the platform source clear', async () => {
+  let time = now;
+  const view = {state: 'WATCHING', last: {state: 'CLICK_ATTEMPTED', reason: 'PLATFORM_RESULT_UNKNOWN',
+    periodStart: start, side: 'Down', amountUsd: 1,
+    fill: {source: 'FUTURE_POSITION_PAGE', shares: 1.51, avgPriceCents: 66, confirmedAt: now}}};
+  const children = await renderedPanel(observing, marketUrl, now, ticketFixture().doc, {now: () => time,
+    globals: {FutureBtc5mBuyOnce: {createAutoBuyer: () => ({sync: () => view, status: () => view})}},
+    reply(message) { return {ok: true, status: message.type === 'FUTURE_BTC5M_PREPARATION' ? {
+      ...preparation, serverTime: time, preparation: {...preparation.preparation, state: 'READY', intent: null}} : {...observing, server_time: time}}; }});
+  for (const summary of [children.currentSummary, children.recentSummary]) {
+    assert.match(summary.textContent, /已成交/);
+    assert.match(summary.textContent, /跌 1\.51 份.*均价 66¢/);
+    assert.match(summary.textContent, /页面持仓核实/);
+    assert.doesNotMatch(summary.textContent, /成交未确认|订单号|完全成交|结算/);
+  }
+  assert.match(children[10].textContent, /跌 1\.51 份.*均价 66¢/);
+  time = start + 310;
+  await children.poll();
+  assert.match(children.recentSummary.textContent, /已成交.*页面持仓核实/);
+  assert.match(children.recentSummary.textContent, /历史轮次/);
+});
+
+test('invalid fill evidence and a click exception retain the unknown result label', async () => {
+  const fill = {source: 'FUTURE_POSITION_PAGE', shares: 1.51, avgPriceCents: 66, confirmedAt: now};
+  for (const change of [{fill: {...fill, source: 'UNKNOWN'}}, {fill: {...fill, shares: 0}},
+    {fill: {...fill, shares: NaN}}, {fill: {...fill, avgPriceCents: 101}}, {fill: {...fill, confirmedAt: now + 1}},
+    {fill, reason: 'CLICK_THROWN_RESULT_UNKNOWN'}, {fill, amountUsd: 2}, {fill, side: 'Yes'}]) {
+    const view = {state: 'WATCHING', last: {state: 'CLICK_ATTEMPTED', reason: 'PLATFORM_RESULT_UNKNOWN',
+      periodStart: start, side: 'Down', amountUsd: 1, ...change}};
+    const children = await renderedPanel(observing, marketUrl, now, ticketFixture().doc, {
+      globals: {FutureBtc5mBuyOnce: {createAutoBuyer: () => ({sync: () => view, status: () => view})}},
+      reply(message) { return {ok: true, status: message.type === 'FUTURE_BTC5M_PREPARATION' ? {
+        ...preparation, preparation: {...preparation.preparation, state: 'READY', intent: null}} : observing}; }});
+    assert.doesNotMatch(children.currentSummary.textContent, /已成交/);
+    assert.match(children.currentSummary.textContent, /成交未确认|结果未知/);
+  }
+});
 
 test('the rendered panel rejects another page round and stale samples', async () => {
   const wrongPage = await renderedPanel(observing,
@@ -1073,12 +1520,43 @@ test('a refusal also explains a flipped or tied book favorite when its price gap
   }
 });
 
-test('the long assistant panel is constrained to the viewport and scrolls internally', async () => {
+test('the assistant stays at the top and reserves the bottom notification area even with long details', async () => {
   const fixture = ticketFixture();
   await renderedPanel(observing, marketUrl, now, fixture.doc);
-  assert.match(fixture.doc.body.panel.style.cssText, /max-height:calc\(100(?:dvh|vh) - 80px\)/);
+  assert.match(fixture.doc.body.panel.style.cssText, /top:16px/);
+  assert.match(fixture.doc.body.panel.style.cssText, /left:50%;.*transform:translateX\(-50%\)/);
+  assert.match(fixture.doc.body.panel.style.cssText, /max-height:max\(64px,calc\(100dvh - 280px\)\)/);
+  assert.doesNotMatch(fixture.doc.body.panel.style.cssText, /bottom:48px/);
   assert.match(fixture.doc.body.panel.style.cssText, /overflow-y:auto/);
   assert.match(fixture.doc.body.panel.style.cssText, /box-sizing:border-box/);
+});
+
+test('collapse only hides the panel body while observation and reporting continue without ticket changes', async () => {
+  const fixture = ticketFixture();
+  const messages = [];
+  const waiting = {...preparation, preparation: {...preparation.preparation, state: 'WAITING_SIGNAL', intent: null}};
+  const children = await renderedPanel(observing, marketUrl, now, fixture.doc, {messages,
+    reply(message) { return {ok: true, status: message.type === 'FUTURE_BTC5M_PREPARATION' ? waiting : observing}; }});
+  assert.equal(children.collapse.type, 'button');
+  assert.equal(children.collapse.getAttribute?.('aria-controls'), children.panelBody.id);
+  assert.equal(children.collapse.ariaExpanded, 'true');
+  assert.equal(children.panelBody.hidden, false);
+  children.collapse.listeners.click();
+  assert.equal(children.panelBody.hidden, true);
+  assert.equal(children.collapse.textContent, '展开');
+  assert.equal(children.collapse.ariaExpanded, 'false');
+  messages.length = 0;
+  fixture.setQuotes('62¢', '39¢');
+  await children.poll();
+  assert.match(children[7].textContent, /涨 62¢.*跌 39¢/);
+  assert.ok(messages.some((message) => message.type === 'FUTURE_BTC5M_PREFLIGHT'));
+  assert.ok(messages.some((message) => message.type === 'FUTURE_BTC5M_PREPARATION'));
+  children.collapse.listeners.click();
+  assert.equal(children.panelBody.hidden, false);
+  assert.equal(children.collapse.textContent, '收起');
+  assert.equal(children.collapse.ariaExpanded, 'true');
+  assert.equal(fixture.clicks(), 0);
+  assert.equal(fixture.writes(), 0);
 });
 
 function modePanelRuntime(fixture, {time = start + 10, enabled = true, sourceChanges = {}, wrapperChanges = {}} = {}) {
@@ -2038,14 +2516,14 @@ test('the panel preserves safe quote diagnostics and shows Chinese causes withou
   assert.equal(fixture.writes(), 0);
 });
 
-test('the 0.6.6 manifest keeps price gates and only the power permission for the clock push', () => {
+test('the 0.6.6 manifest keeps price gates and the approved power and debugger permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('./future-btc5m-extension/manifest.json', import.meta.url), 'utf8'));
   assert.equal(manifest.version, '0.6.6');
   assert.equal(manifest.minimum_chrome_version, '116');
   assert.ok([...manifest.description].length < 132, `${[...manifest.description].length} characters`);
   assert.match(manifest.description, /60¢.*Polymarket 盘口价差 ≤3¢.*准备价 ±5¢/);
   assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*']);
-  assert.deepEqual(manifest.permissions, ['power']);
+  assert.deepEqual(manifest.permissions, ['power', 'debugger']);
   assert.deepEqual(manifest.content_scripts, [{matches: ['https://future.news/*'], js: ['content.js', 'buy_once.js'],
     run_at: 'document_idle'}]);
 });
