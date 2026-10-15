@@ -585,6 +585,89 @@ class FutureBtc5mBridgeClientTest {
         assertThrows(IllegalStateException::class.java) { client.status() }
     }
 
+    @Test
+    fun `15m strategy rounds pass with their own window slug and open price source`() {
+        listOf("PENDING", "CLAIMED", "READY").forEach { state ->
+            val record = record15(state)
+            responseBody = mapper.writeValueAsString(status15(true, state,
+                if (state == "READY") null else record.filterKeys { it in intent15().keys }, record))
+            val value = client.status()
+            assertEquals(state, value.preparation.state)
+            assertEquals("btc15m_counter_1h", value.strategy)
+            assertEquals("15m", value.series)
+            assertEquals("15m", value.preparation.series)
+        }
+        responseBody = mapper.writeValueAsString(status15(true, "WAITING_BROWSER", null, null, listOf("SAME_AS_1H_FAVORITE")))
+        assertEquals(listOf("SAME_AS_1H_FAVORITE"), client.status().preparation.reasons)
+        responseBody = mapper.writeValueAsString(status15(true, "WAITING_BROWSER", null, null, listOf("HOUR_QUOTE_UNAVAILABLE")))
+        assertEquals(listOf("HOUR_QUOTE_UNAVAILABLE"), client.status().preparation.reasons)
+    }
+
+    @Test
+    fun `15m status rejects a mismatched strategy or series window and a 5m record cannot be current`() {
+        val ready = record15("READY")
+        for (bad in listOf(
+            status15(true, "READY", null, ready) + ("strategy" to "btc5m_favorite"),
+            status15(true, "READY", null, ready) + ("series" to "1h"),
+            status15(true, "READY", null, ready + ("expiresAt" to s15 + 80.0)),
+            status15(true, "READY", null, ready + ("openPriceSource" to "polymarket_crypto_price_fiveminute_twap60_openPrice")),
+            status15(true, "READY", null, ready + ("slug" to "btc-updown-5m-$s15")),
+        )) {
+            responseBody = mapper.writeValueAsString(bad)
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+        // A 5m round prepared before the switch stays readable history, never a current READY.
+        val earlier = s15 - 300
+        val old5m = preparationRecord("READY") + mapOf("id" to "future-btc5m-prepare:$earlier", "slug" to "btc-updown-5m-$earlier",
+            "periodStart" to earlier, "periodEnd" to earlier + 300, "createdAt" to earlier + 65.0, "expiresAt" to earlier + 80.0,
+            "priceObservedAt" to earlier + 65.0, "quoteObservedAt" to earlier + 65.0, "updatedAt" to earlier + 65.0,
+            "claimedAt" to earlier + 65.0, "receipt" to mapOf("checkedAt" to earlier + 65.0,
+                "marketUrl" to "https://future.news/zh/event/btc-updown-5m-$earlier", "amountUsd" to 1, "selectedSide" to "Up"))
+        responseBody = mapper.writeValueAsString(status15(true, "WAITING_BROWSER", null, old5m, listOf("MARKET_NOT_CURRENT")))
+        assertEquals("future-btc5m-prepare:$earlier", client.status().preparation.lastAttempt?.id)
+        responseBody = mapper.writeValueAsString(status15(true, "READY", null, old5m))
+        assertThrows(IllegalStateException::class.java) { client.status() }
+    }
+
+    @Test
+    fun `strategy switch posts only the strategy and requires the bridge to confirm it`() {
+        assertThrows(IllegalArgumentException::class.java) { client.strategy("btc1h") }
+        assertTrue(requests.isEmpty())
+        responseBody = mapper.writeValueAsString(status(false) + ("strategy" to "btc5m_favorite"))
+        assertEquals("btc5m_favorite", client.strategy("btc5m_favorite").strategy)
+        assertEquals("/bridge/control", requests.single().rawPath)
+        assertEquals(mapper.readTree("""{"strategy":"btc5m_favorite"}"""), mapper.readTree(requests.single().body))
+        assertEquals("1", requests.single().controlHeader)
+        assertThrows(IllegalStateException::class.java) { client.strategy("btc15m_counter_1h") }
+    }
+
+    private val s15 = 1791705600L
+
+    private fun intent15() = preparationIntent() + mapOf(
+        "id" to "future-btc15m-prepare:$s15", "slug" to "btc-updown-15m-$s15", "periodStart" to s15, "periodEnd" to s15 + 900,
+        "createdAt" to s15 + 155.0, "expiresAt" to s15 + 170.0, "priceObservedAt" to s15 + 155.0, "quoteObservedAt" to s15 + 155.0,
+        "openPriceSource" to "polymarket_crypto_price_fifteen_twap60_openPrice")
+
+    private fun record15(state: String) = intent15() + mapOf(
+        "state" to state, "updatedAt" to s15 + 155.0, "claimedAt" to if (state == "PENDING") null else s15 + 155.0,
+        "claimToken" to if (state == "PENDING") null else "a".repeat(32), "reason" to null,
+        "receipt" to if (state == "READY") mapOf("checkedAt" to s15 + 155.0,
+            "marketUrl" to "https://future.news/zh/event/btc-updown-15m-$s15", "amountUsd" to 1, "selectedSide" to "Up") else null)
+
+    private fun status15(enabled: Boolean, state: String, intent: Map<String, Any?>?, record: Map<String, Any?>?,
+                         reasons: List<String> = emptyList()): Map<String, Any?> {
+        val url = "https://future.news/zh/event/btc-updown-15m-$s15"
+        return status(enabled) + mapOf(
+            "series" to "15m", "strategy" to "btc15m_counter_1h", "serverTime" to s15 + 155.0, "periodStart" to s15,
+            "signal" to freshSignal() + mapOf("slug" to "btc-updown-15m-$s15", "period_start" to s15, "period_end" to s15 + 900,
+                "price_observed_at" to s15 + 155.0, "open_price_source" to "polymarket_crypto_price_fifteen_twap60_openPrice"),
+            "preflight" to preflight() + mapOf("checkedAt" to s15 + 155.0, "receivedAt" to s15 + 155.0, "marketUrl" to url,
+                "pagePeriodStart" to s15, "lastPassed" to mapOf("periodStart" to s15, "checkedAt" to s15 + 155.0, "marketUrl" to url,
+                    "signalSide" to "Up", "amountUsd" to 1, "noSubmission" to true)),
+            "preparation" to preparation(enabled, state, intent, record) + mapOf("reasons" to reasons,
+                "strategy" to "btc15m_counter_1h", "series" to "15m"))
+    }
+
     private fun preparationIntent() = mapOf(
         "schemaVersion" to 2, "id" to "future-btc5m-prepare:1791706200", "slug" to "btc-updown-5m-1791706200",
         "periodStart" to 1791706200, "periodEnd" to 1791706500, "side" to "Up", "amountUsd" to 1,

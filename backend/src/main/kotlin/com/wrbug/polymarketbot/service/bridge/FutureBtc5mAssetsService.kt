@@ -68,7 +68,7 @@ class FutureBtc5mAssetsService(
                     check(quantity != null && quantity.isFinite() && quantity >= 0)
                     if (quantity == 0.0) return@mapNotNull null
                     if (row.redeemable == true && row.curPrice == 0.0 && row.currentValue == 0.0 &&
-                        System.currentTimeMillis() / 1000 >= slug.substringAfterLast('-').toLong() + 300) return@mapNotNull null
+                        System.currentTimeMillis() / 1000 >= slug.substringAfterLast('-').toLong() + roundSeconds(slug)) return@mapNotNull null
                     val asset = row.asset
                     check(!asset.isNullOrBlank() && row.outcome in setOf("Up", "Down"))
                     FutureBtc5mAssetPosition(asset, slug, row.title ?: slug, row.outcome!!, quantity,
@@ -145,7 +145,8 @@ class FutureBtc5mAssetsService(
             val winner = tokens?.singleOrNull { it.winner == true }
             when {
                 !valid -> buy
-                market?.closed == true && winner != null && System.currentTimeMillis() / 1000 >= buy.slug.substringAfterLast('-').toLong() + 300 ->
+                market?.closed == true && winner != null &&
+                    System.currentTimeMillis() / 1000 >= buy.slug.substringAfterLast('-').toLong() + roundSeconds(buy.slug) ->
                     buy.copy(result = if (winner.tokenId == buy.asset) "WIN" else "LOSS", winningSide = winner.outcome)
                 market?.closed == false && tokens?.none { it.winner == true } == true -> buy.copy(result = "PENDING")
                 else -> buy
@@ -185,10 +186,14 @@ class FutureBtc5mAssetsService(
         results
     }
 
+    // BTC 5-minute and 15-minute rounds (both strategies trade one of them).
     private fun btcSlug(value: String?): String? {
-        val start = value?.let { Regex("btc-updown-5m-(0|[1-9][0-9]{0,14})").matchEntire(it)?.groupValues?.get(1)?.toLongOrNull() }
-        return value?.takeIf { start != null && start % 300 == 0L }
+        val match = value?.let { Regex("btc-updown-(5m|15m)-(0|[1-9][0-9]{0,14})").matchEntire(it) } ?: return null
+        val start = match.groupValues[2].toLongOrNull()
+        return value.takeIf { start != null && start % roundSeconds(value) == 0L }
     }
+
+    private fun roundSeconds(slug: String): Long = if (slug.startsWith("btc-updown-15m-")) 900 else 300
 
     private fun price(value: Double?) = value?.takeIf { it.isFinite() && it in 0.0..1.0 }
     private fun fresh(wallet: FutureBtc5mWalletSnapshot): Boolean {

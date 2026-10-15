@@ -7,6 +7,7 @@ data class FutureBtc5mBridgeStatus(
     val effectiveEnabled: Boolean,
     val amountUsd: Int,
     val series: String,
+    val strategy: String? = null,
     val mode: String,
     val serverTime: Double,
     val periodStart: Long?,
@@ -53,7 +54,7 @@ data class FutureBtc5mPreparation(
     val mode: String, val noSubmission: Boolean, val operatorAuthorized: Boolean,
     val authorizationSource: String, val enabled: Boolean, val state: String,
     val intent: FutureBtc5mPreparationIntent?, val lastAttempt: FutureBtc5mPreparationRecord?,
-    val reasons: List<String>
+    val reasons: List<String>, val strategy: String? = null, val series: String? = null
 )
 
 data class FutureBtc5mPreparationIntent(

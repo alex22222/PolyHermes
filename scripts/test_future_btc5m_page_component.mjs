@@ -52,7 +52,7 @@ const mountPage = (initialTime) => {
     removeEventListener(type, callback) {listeners.get(type)?.delete(callback);},
   };
   const document = {visibilityState: 'visible', ...events};
-  const requests = {status: [], control: [], assets: []};
+  const requests = {status: [], control: [], assets: [], strategy: []};
   const sameDeps = (left, right) => left && right && left.length === right.length &&
     left.every((value, index) => Object.is(value, right[index]));
   const react = {
@@ -95,7 +95,7 @@ const mountPage = (initialTime) => {
     '@ant-design/icons': {ReloadOutlined: 'ReloadOutlined'},
     'react-responsive': {useMediaQuery: () => false},
     '../services/api': {apiService: {futureBtc5mBridge: {
-      status: pending('status'), control: pending('control'), assets: pending('assets'),
+      status: pending('status'), control: pending('control'), assets: pending('assets'), strategy: pending('strategy'),
       list: async () => ({data: {code: 0, data: {list: [], total: 0}}}),
     }}},
     '../utils/futureBtc5mPreflight': guards.exports,
@@ -387,7 +387,7 @@ test('wallet assets refresh independently from preparation and preserve genuine 
   await page.fail('status', 'Bridge 状态暂不可用');
   await page.reply('assets', walletAssets());
   assert.equal(page.field('钱包现金'), '$0.00');
-  assert.equal(page.field('BTC 5 分钟持仓市值'), '$1.20');
+  assert.equal(page.field('BTC 5/15 分钟持仓市值'), '$1.20');
   assert.equal(page.field('当前钱包'), `0x${'a'.repeat(40)}`);
   assert.equal(page.pendingCount('control'), 0);
   const tables = page.elements(node => node.type === 'Table');
@@ -403,7 +403,7 @@ test('stale cash and valuation disappear between polls and source failures never
   await page.reply('assets', walletAssets());
   page.tick(receipt + 15001);
   assert.equal(page.field('钱包现金'), '—');
-  assert.equal(page.field('BTC 5 分钟持仓市值'), '—');
+  assert.equal(page.field('BTC 5/15 分钟持仓市值'), '—');
   page.poll(receipt + 16000);
   await page.fail('assets', '钱包连接中断');
   assert.equal(page.field('钱包现金'), '—');
@@ -421,7 +421,7 @@ test('wallet change clears previous buys and polling resume does not duplicate r
     dataStatus: 'PARTIAL', positions: null, recentBuys: null, positionsValueUsd: null,
     reasons: ['当前 BTC 5 分钟持仓暂时无法完整核实']});
   assert.equal(page.field('当前钱包'), `0x${'b'.repeat(40)}`);
-  assert.equal(page.field('BTC 5 分钟持仓市值'), '—');
+  assert.equal(page.field('BTC 5/15 分钟持仓市值'), '—');
   assert.equal(page.elements(node => node.type === 'Table').some(node => node.props.dataSource?.[0]?.asset === 'up-token'), false);
   assert.equal(page.pendingCount('control'), 0);
   page.unmount();
@@ -666,4 +666,22 @@ test('READY requires the current read-only preflight result to have passed', asy
   await page.reply('status', value);
   assert.equal(page.field('准备阶段'), '等待有效信号');
   assert.equal(page.field('最近准备结果'), '票据已准备，交由扩展自动买入');
+});
+
+test('the page shows the confirmed strategy and switches it only through the bridge confirmation', async () => {
+  const page = mountPage(receipt);
+  await page.reply('status', {...healthyStatus(), series: '15m', strategy: 'btc15m_counter_1h'});
+  const select = () => page.elements((node) => node.type === 'Select' && node.props.placeholder === '策略未知')[0];
+  assert.equal(select().props.value, 'btc15m_counter_1h');
+  assert.equal(page.field('当前策略'), '15 分钟盘 · 反 1 小时方向（默认）');
+  assert.equal(JSON.stringify(select().props.options.map((option) => option.value)), '["btc15m_counter_1h","btc5m_favorite"]');
+  select().props.onChange('btc5m_favorite');
+  assert.equal(page.pendingCount('strategy'), 1);
+  await page.reply('strategy', {...healthyStatus(), strategy: 'btc5m_favorite'});
+  assert.equal(select().props.value, 'btc5m_favorite');
+  assert.equal(page.field('当前策略'), '5 分钟盘 · 买热门方向');
+  select().props.onChange('btc15m_counter_1h');
+  await page.reply('strategy', healthyStatus());
+  assert.equal(select().props.value, undefined, 'an unconfirmed switch leaves the strategy unknown');
+  assert.match(page.elements((node) => node.type === 'Alert' && node.props.message === 'Bridge 状态未知')[0].props.description, /策略状态未知/);
 });

@@ -1608,3 +1608,96 @@ test('Up confirmation uses the prepared Up side and preserves confirmed history 
   assert.equal(history.fill.shares, 1.14);
   assertUnchangedTicket(env.ticket, 1);
 });
+
+// ---- 15m counter-1h strategy (extension 0.7.0) ----
+// 1791650700 is also a 15m boundary: 12:45PM-1:00PM ET on October 10.
+const start15 = start;
+const now15 = start15 + 155;
+const marketUrl15 = `https://future.news/zh/event/btc-updown-15m-${start15}`;
+const title15 = 'Bitcoin Up or Down - October 10, 12:45PM-1:00PM ET';
+const ready15 = (at = now15, side = 'Down', preparationSeries = '15m') => {
+  const value = ready(at, side);
+  Object.assign(value.preparation.lastAttempt, {id: `future-btc15m-prepare:${start15}`, slug: `btc-updown-15m-${start15}`,
+    periodEnd: start15 + 900, expiresAt: start15 + 170,
+    openPriceSource: 'polymarket_crypto_price_fifteen_twap60_openPrice'});
+  value.preparation.lastAttempt.receipt.marketUrl = marketUrl15;
+  Object.assign(value, {series: preparationSeries, strategy: 'btc15m_counter_1h'});
+  Object.assign(value.preparation, {series: preparationSeries, strategy: 'btc15m_counter_1h'});
+  return value;
+};
+const seriesStorage = (values = new Map()) => ({values,
+  getItem(key) { assert.ok([storageKey, `${storageKey}.15m`].includes(key), key); return values.get(key) ?? null; },
+  setItem(key, value) { assert.ok([storageKey, `${storageKey}.15m`].includes(key), key); values.set(key, value); }});
+const mapStorage = () => {
+  const values = new Map();
+  return {values, getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value)};
+};
+const status15 = (at, series = '15m') => ({schema_version: 1, mode: 'ASSIST_ONLY', live_enabled: false, amount_usd: 1,
+  status: 'WAITING', server_time: at, period_start: series === '15m' ? start15 : Math.floor(at / 300) * 300,
+  series, round_series: series});
+
+test('15m rounds have their own path, id, navigation target and ticket title', () => {
+  assert.equal(JSON.stringify(core.pathRound(`/zh/event/btc-updown-15m-${start15}`)), JSON.stringify({series: '15m', start: start15}));
+  assert.equal(core.pathRound(`/zh/event/btc-updown-15m-${start15 + 300}`), null, 'not a 15m boundary');
+  assert.equal(JSON.stringify(core.idRound(`future-btc15m-prepare:${start15}`)), JSON.stringify({series: '15m', start: start15}));
+  assert.equal(core.navigationTarget(status15(start15 + 20), marketUrl, start15 + 20), marketUrl15,
+    'the 15m strategy leaves a 5m page for the current 15m round');
+  assert.equal(core.navigationTarget(status15(start15 + 20), marketUrl15, start15 + 20), marketUrl15);
+  assert.equal(core.navigationTarget({...status15(start15 + 20), round_series: '5m'}, marketUrl, start15 + 20), null,
+    'a status for another series cannot steer the page');
+  const page = ticketFixture({title: title15});
+  const report = core.readPreflight(page.doc, marketUrl15, now15);
+  assert.equal(`${report.navigation}/${report.ticketStatus}/${report.pagePeriodStart}`, `CURRENT/PASS/${start15}`);
+  const wrongTitle = core.readPreflight(ticketFixture().doc, marketUrl15, now15);
+  assert.equal(wrongTitle.navigation, 'MISMATCH', 'a 5-minute ticket title on a 15m URL is not the 15m round');
+});
+
+test('switching to 15m reloads the page before entry but never clicks another series\' live-market button', () => {
+  const navigated = [];
+  const storage = mapStorage();
+  const message = core.followCurrentMarket(status15(start15 + 20), marketUrl, ticketFixture().doc, storage, start15 + 20,
+    (target) => navigated.push(target));
+  assert.deepEqual(navigated, [marketUrl15]);
+  assert.match(message, /btc-updown-15m/);
+  assert.equal(core.followCurrentMarket(status15(start15 + 30), marketUrl, ticketFixture().doc, storage, start15 + 30,
+    (target) => navigated.push(target)).includes('不重复刷新'), true, 'one full reload per round');
+  const late = core.followCurrentMarket(status15(start15 + 150), marketUrl, ticketFixture().doc, mapStorage(), start15 + 150,
+    (target) => navigated.push(target));
+  assert.match(late, /等待切换/);
+  assert.equal(navigated.length, 1, 'no reload inside the entry window');
+});
+
+test('a 15m READY round is bought once on its page and keeps a once-per-round mark separate from 5m', async () => {
+  const storage = seriesStorage(new Map([[storageKey, JSON.stringify({schemaVersion: 1, periodStart: start15 + 600,
+    id: `future-btc5m-prepare:${start15 + 600}`, side: 'Up', amountUsd: 1, state: 'CLICK_ATTEMPTED'})]]));
+  const env = setup({ticket: ticketFixture({title: title15}), storage, read: () => ready15(), url: marketUrl15, time: now15});
+  env.watcher.start({live: true});
+  await env.watcher.poll();
+  assert.equal(env.watcher.status().state, 'CLICK_ATTEMPTED', 'a later 5m mark does not consume the 15m round');
+  assert.equal(env.watcher.status().series, '15m');
+  assertUnchangedTicket(env.ticket, 1);
+  assert.equal(JSON.parse(storage.values.get(`${storageKey}.15m`)).id, `future-btc15m-prepare:${start15}`);
+  assert.equal(JSON.parse(storage.values.get(storageKey)).periodStart, start15 + 600, 'the 5m mark is untouched');
+  const again = setup({ticket: ticketFixture({title: title15}), storage, read: () => ready15(), url: marketUrl15, time: now15});
+  again.watcher.start({live: true});
+  await again.watcher.poll();
+  assert.equal(again.watcher.status().reason, 'ALREADY_CONSUMED');
+  assertUnchangedTicket(again.ticket);
+});
+
+test('a READY round of the other strategy, outside its window or on the wrong page is never clicked', async () => {
+  const cases = [
+    ['15m record while the bridge runs 5m', {read: () => ready15(now15, 'Down', '5m'), url: marketUrl15, title: title15, time: now15}],
+    ['5m record while the bridge runs 15m', {read: () => {const v = ready(); v.preparation.series = '15m'; return v;},
+      url: marketUrl, time: now}],
+    ['15m record at the 5m entry time', {read: () => ready15(start15 + 65), url: marketUrl15, title: title15, time: start15 + 65}],
+    ['15m record on the 5m page', {read: () => ready15(), url: marketUrl, time: now15}],
+  ];
+  for (const [label, {read, url, title, time}] of cases) {
+    const env = setup({ticket: ticketFixture(title ? {title} : {}), storage: seriesStorage(), read, url, time});
+    env.watcher.start({live: true});
+    await env.watcher.poll();
+    assert.notEqual(env.watcher.status().state, 'CLICK_ATTEMPTED', label);
+    assertUnchangedTicket(env.ticket);
+  }
+});

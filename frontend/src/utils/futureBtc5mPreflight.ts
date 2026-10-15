@@ -1,20 +1,27 @@
 import type { FutureBtc5mBridgeStatus } from '../types'
 
+// Round series of the two strategies (same table as scripts/future_btc5m_series.py).
+export const FUTURE_SERIES = {
+  '5m': { period: 300, entry: [60, 80], slug: 'btc-updown-5m-', openSource: 'polymarket_crypto_price_fiveminute_twap60_openPrice' },
+  '15m': { period: 900, entry: [150, 170], slug: 'btc-updown-15m-', openSource: 'polymarket_crypto_price_fifteen_twap60_openPrice' },
+} as const
+
 export const referenceIsFresh = (runtime: FutureBtc5mBridgeStatus | null, receivedAt: number, now: number): boolean => {
   const signal = runtime?.signal
   const elapsed = (now - receivedAt) / 1000
   if (!runtime || !Number.isFinite(elapsed) || elapsed < 0 || elapsed > 15 ||
       !Number.isFinite(runtime.serverTime) || Math.abs(runtime.serverTime - receivedAt / 1000) > 3 ||
       !runtime.online || runtime.feedStatus !== 'CURRENT' || !signal) return false
+  const series = FUTURE_SERIES[runtime.series] ?? FUTURE_SERIES['5m']
   const serverNow = Math.max(runtime.serverTime + elapsed, now / 1000)
-  const start = Math.floor(serverNow / 300) * 300
+  const start = Math.floor(serverNow / series.period) * series.period
   const expected = signal.current_price > signal.open_price ? 'Up' : signal.current_price < signal.open_price ? 'Down' : null
-  return Number.isSafeInteger(signal.period_start) && signal.period_start >= 0 && signal.period_start % 300 === 0 &&
-    runtime.periodStart === start && signal.period_start === start && signal.period_end === start + 300 &&
-    signal.slug === `btc-updown-5m-${start}` && signal.price_source === 'chainlink' &&
-    signal.open_price_source === 'polymarket_crypto_price_fiveminute_twap60_openPrice' && signal.twap_lookback_seconds === 60 &&
+  return Number.isSafeInteger(signal.period_start) && signal.period_start >= 0 && signal.period_start % series.period === 0 &&
+    runtime.periodStart === start && signal.period_start === start && signal.period_end === start + series.period &&
+    signal.slug === `${series.slug}${start}` && signal.price_source === 'chainlink' &&
+    signal.open_price_source === series.openSource && signal.twap_lookback_seconds === 60 &&
     Number.isFinite(signal.open_price) && signal.open_price > 0 && Number.isFinite(signal.current_price) && signal.current_price > 0 &&
-    signal.side === expected && serverNow >= start + 60 && serverNow < start + 80 &&
+    signal.side === expected && serverNow >= start + series.entry[0] && serverNow < start + series.entry[1] &&
     Number.isFinite(signal.price_observed_at) && signal.price_observed_at <= runtime.serverTime &&
     serverNow >= signal.price_observed_at && serverNow - signal.price_observed_at <= 5
 }

@@ -38,6 +38,14 @@ class FutureBtc5mBridgeController(private val client: FutureBtc5mBridgeClient, p
         client.control(request.path("enabled").asBoolean())
     }
 
+    // The trading strategy: "btc15m_counter_1h" (default) or "btc5m_favorite".
+    @PostMapping("/strategy")
+    fun strategy(@RequestBody request: JsonNode): ResponseEntity<ApiResponse<FutureBtc5mBridgeStatus>> = respond {
+        require(request.isObject && request.size() == 1 && request.path("strategy").isTextual &&
+            request.path("strategy").asText() in FutureBtc5mBridgeClient.STRATEGIES) { "未知的 Future 策略" }
+        client.strategy(request.path("strategy").asText())
+    }
+
     @PostMapping("/orders/list")
     fun orders(@RequestBody request: FutureBtc5mOrderListRequest): ResponseEntity<ApiResponse<FutureBtc5mOrderListResponse>> =
         respond { client.orders(request) }

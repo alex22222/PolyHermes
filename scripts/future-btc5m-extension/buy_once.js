@@ -37,6 +37,24 @@
   // Quotes have at most two decimals; boundaries compare whole hundredths, never float sums.
   const hundredths = (value) => Math.round(value * 100);
   const sideCents = (record) => record.side === 'Up' ? record.upQuoteCents : record.downQuoteCents;
+  // Round series of the two strategies (same table as content.js and future_btc5m_series.py).
+  const SERIES = {
+    '5m': {period: 300, entry: [60, 80], slug: 'btc-updown-5m-', id: 'future-btc5m-prepare:',
+      openSource: 'polymarket_crypto_price_fiveminute_twap60_openPrice'},
+    '15m': {period: 900, entry: [150, 170], slug: 'btc-updown-15m-', id: 'future-btc15m-prepare:',
+      openSource: 'polymarket_crypto_price_fifteen_twap60_openPrice'},
+  };
+  function idRound(id) {
+    for (const [series, value] of Object.entries(SERIES)) {
+      const digits = typeof id === 'string' && id.startsWith(value.id) ? id.slice(value.id.length) : null;
+      if (digits !== null && /^(0|[1-9]\d*)$/.test(digits) && Number(digits) % value.period === 0) {
+        return {series, start: Number(digits)};
+      }
+    }
+    return null;
+  }
+  // A 15m start is also a 5m start, so each series keeps its own once-per-round mark.
+  const markerKey = (series) => series === '5m' ? KEY : `${KEY}.${series}`;
 
   function marketQuoteError(detail) {
     return Object.assign(new Error('MARKET_QUOTE_UNAVAILABLE'), {
@@ -46,8 +64,14 @@
   function readyRecord(wrapper, now, armedAt) {
     const preparation = wrapper?.preparation;
     const record = preparation?.lastAttempt;
-    const start = Math.floor(now / 300) * 300;
-    if (!Number.isFinite(now) || wrapper?.bridgeId !== 'future-btc5m' || !Number.isFinite(wrapper.serverTime) ||
+    const round = idRound(record?.id);
+    if (!round || !Number.isFinite(now)) return null;
+    const {series} = round;
+    const {period, entry: [first, last]} = SERIES[series];
+    const start = Math.floor(now / period) * period;
+    // The READY round must belong to the strategy the bridge currently runs.
+    if ((preparation.series ?? '5m') !== series ||
+        !Number.isFinite(now) || wrapper?.bridgeId !== 'future-btc5m' || !Number.isFinite(wrapper.serverTime) ||
         Math.abs(now - wrapper.serverTime) > 3 || preparation?.mode !== 'PREPARE_ONLY' ||
         preparation.enabled !== true || preparation.noSubmission !== true || preparation.operatorAuthorized !== true ||
         preparation.authorizationSource !== 'USER_REQUEST' || preparation.state !== 'READY' || preparation.intent !== null ||
@@ -55,15 +79,15 @@
         record.schemaVersion !== 2 || record.state !== 'READY' || record.reason !== null ||
         record.mode !== 'PREPARE_ONLY' || record.noSubmission !== true || record.operatorAuthorized !== true ||
         record.authorizationSource !== 'USER_REQUEST' || record.selectionSource !== 'HIGHER_BUTTON_PRICE' ||
-        record.periodStart !== start || record.periodEnd !== start + 300 || record.expiresAt !== start + 80 ||
-        record.id !== `future-btc5m-prepare:${start}` || record.slug !== `btc-updown-5m-${start}` || record.amountUsd !== 1 ||
+        record.periodStart !== start || record.periodEnd !== start + period || record.expiresAt !== start + last ||
+        round.start !== start || record.slug !== `${SERIES[series].slug}${start}` || record.amountUsd !== 1 ||
         !quote(record.upQuoteCents) || !quote(record.downQuoteCents) || record.upQuoteCents === record.downQuoteCents ||
         record.side !== (record.upQuoteCents > record.downQuoteCents ? 'Up' : 'Down') ||
-        record.priceSource !== 'chainlink' || record.openPriceSource !== 'polymarket_crypto_price_fiveminute_twap60_openPrice' ||
+        record.priceSource !== 'chainlink' || record.openPriceSource !== SERIES[series].openSource ||
         record.twapLookbackSeconds !== 60 || !Number.isFinite(record.openPrice) || record.openPrice <= 0 ||
         !Number.isFinite(record.currentPrice) || record.currentPrice <= 0 ||
-        !Number.isFinite(record.createdAt) || record.createdAt < armedAt || record.createdAt < start + 60 ||
-        record.createdAt > now || record.createdAt >= start + 80 || now < start + 60 || now >= record.expiresAt ||
+        !Number.isFinite(record.createdAt) || record.createdAt < armedAt || record.createdAt < start + first ||
+        record.createdAt > now || record.createdAt >= start + last || now < start + first || now >= record.expiresAt ||
         !fresh(record.priceObservedAt, now) || record.priceObservedAt > record.createdAt ||
         !fresh(record.quoteObservedAt, now) || record.quoteObservedAt > record.createdAt ||
         !Number.isFinite(record.claimedAt) || record.claimedAt < record.createdAt || record.claimedAt > record.updatedAt ||
@@ -75,7 +99,7 @@
         ![`https://future.news/zh/event/${record.slug}`, `https://future.news/zh/event/${record.slug}/`,
           `https://future.news/event/${record.slug}`, `https://future.news/event/${record.slug}/`].includes(record.receipt.marketUrl) ||
         record.receipt.amountUsd !== 1 || record.receipt.selectedSide !== record.side ||
-        !Number.isFinite(record.receipt.checkedAt) || record.receipt.checkedAt < start + 60 ||
+        !Number.isFinite(record.receipt.checkedAt) || record.receipt.checkedAt < start + first ||
         record.receipt.checkedAt >= record.expiresAt || Math.abs(now - record.receipt.checkedAt) > 5 ||
         record.receipt.checkedAt < record.claimedAt - 3 || Math.abs(record.receipt.checkedAt - record.updatedAt) > 3) return null;
     return record;
@@ -83,7 +107,7 @@
 
   function buyButton(core, document, url, record, now) {
     const report = core.readPreflight(document, url, now);
-    const ticket = core.readPreparationTicket(document, url, record.periodStart);
+    const ticket = core.readPreparationTicket(document, url, record.periodStart, idRound(record.id)?.series ?? '5m');
     if (report?.navigation !== 'CURRENT' || report.ticketStatus !== 'PASS' || report.pagePeriodStart !== record.periodStart ||
         report.amountUsd !== 1 || report.selectedSide !== record.side || !report.buyButtonEnabled ||
         ticket.input.value !== '1' || ticket.selectedSide !== record.side || ticket.preferredSide !== record.side) {
@@ -147,8 +171,9 @@
     try {
       const core = env.core ?? globalThis.FutureBtc5m;
       const url = env.readUrl ? env.readUrl() : globalThis.location.href;
-      if (!core.matchesMarket(url, {slug: `btc-updown-5m-${record.periodStart}`})) return null;
-      const value = core.readPositionSnapshot?.(env.document ?? globalThis.document, url, record.periodStart, record.side);
+      const series = idRound(record.id)?.series ?? record.series ?? '5m';
+      if (!core.matchesMarket(url, {slug: `${SERIES[series].slug}${record.periodStart}`})) return null;
+      const value = core.readPositionSnapshot?.(env.document ?? globalThis.document, url, record.periodStart, record.side, series);
       return value?.periodStart === record.periodStart && value.side === record.side && Array.isArray(value.positions) ? value : null;
     } catch { return null; }
   }
@@ -162,26 +187,33 @@
 
   function saveResult(env, value) {
     try {
-      const saved = {schemaVersion: 1, state: value.state, reason: value.reason, periodStart: value.periodStart,
-        side: value.side, amountUsd: 1, attemptedAt: value.attemptedAt, baselineEmpty: value.baselineEmpty, fill: value.fill};
+      const saved = {schemaVersion: 2, series: value.series ?? '5m', state: value.state, reason: value.reason,
+        periodStart: value.periodStart, side: value.side, amountUsd: 1, attemptedAt: value.attemptedAt,
+        baselineEmpty: value.baselineEmpty, fill: value.fill};
       (env.resultStorage ?? globalThis.localStorage).setItem(RESULT_KEY, JSON.stringify(saved));
     } catch { /* The click mark and in-memory readback remain intact if saving fails. */ }
   }
 
   function loadResult(env) {
     try {
-      const value = JSON.parse((env.resultStorage ?? globalThis.localStorage).getItem(RESULT_KEY) ?? 'null');
-      if (!exact(value, ['schemaVersion', 'state', 'reason', 'periodStart', 'side', 'amountUsd', 'attemptedAt', 'baselineEmpty', 'fill']) ||
-          value.schemaVersion !== 1 || value.state !== 'CLICK_ATTEMPTED' ||
+      const raw = JSON.parse((env.resultStorage ?? globalThis.localStorage).getItem(RESULT_KEY) ?? 'null');
+      const fields = ['state', 'reason', 'periodStart', 'side', 'amountUsd', 'attemptedAt', 'baselineEmpty', 'fill'];
+      // Schema 1 results were saved before the 15m strategy and are 5m rounds.
+      const value = exact(raw, ['schemaVersion', ...fields]) && raw.schemaVersion === 1 ? {...raw, schemaVersion: 2, series: '5m'} :
+        exact(raw, ['schemaVersion', 'series', ...fields]) && raw.schemaVersion === 2 ? raw : null;
+      const spec = SERIES[value?.series];
+      if (!value || !spec || !Object.hasOwn(SERIES, value.series) || value.state !== 'CLICK_ATTEMPTED' ||
           !['PLATFORM_RESULT_UNKNOWN', 'CLICK_THROWN_RESULT_UNKNOWN'].includes(value.reason) ||
-          !Number.isSafeInteger(value.periodStart) || value.periodStart < 0 || value.periodStart % 300 ||
+          !Number.isSafeInteger(value.periodStart) || value.periodStart < 0 || value.periodStart % spec.period ||
           !['Up', 'Down'].includes(value.side) || value.amountUsd !== 1 || typeof value.baselineEmpty !== 'boolean' ||
-          !Number.isFinite(value.attemptedAt) || value.attemptedAt < value.periodStart + 60 || value.attemptedAt >= value.periodStart + 80 ||
+          !Number.isFinite(value.attemptedAt) || value.attemptedAt < value.periodStart + spec.entry[0] ||
+          value.attemptedAt >= value.periodStart + spec.entry[1] ||
           value.fill !== null && (!value.baselineEmpty || value.reason !== 'PLATFORM_RESULT_UNKNOWN' || !validFill(value.fill, value.attemptedAt))) return null;
-      const marker = JSON.parse((env.storage ?? globalThis.localStorage).getItem(KEY) ?? 'null');
+      const marker = JSON.parse((env.storage ?? globalThis.localStorage).getItem(markerKey(value.series)) ?? 'null');
+      const markerRound = idRound(marker?.id);
       if (marker?.schemaVersion !== 1 || marker.state !== 'CLICK_ATTEMPTED' || marker.amountUsd !== 1 ||
-          !Number.isSafeInteger(marker.periodStart) || marker.periodStart < value.periodStart || marker.periodStart % 300 ||
-          marker.id !== `future-btc5m-prepare:${marker.periodStart}` || !['Up', 'Down'].includes(marker.side) ||
+          markerRound?.series !== value.series || markerRound.start !== marker.periodStart ||
+          marker.periodStart < value.periodStart || !['Up', 'Down'].includes(marker.side) ||
           marker.periodStart === value.periodStart && marker.side !== value.side) return null;
       return value;
     } catch { return null; }
@@ -235,15 +267,15 @@
     let auditStorage = env.auditStorage;
     let active = false, busy = false, generation = 0, timer = null, armedAt = null, live = false, consumed = false;
     let queuedReady = null;
-    let result = {state: 'IDLE', reason: null, detail: null, periodStart: null, side: null, amountUsd: null, audit: null};
+    let result = {state: 'IDLE', reason: null, detail: null, series: null, periodStart: null, side: null, amountUsd: null, audit: null};
     const current = (run) => active && generation === run;
     const finish = (state, reason, record, detail = null) => {
       active = false;
       if (timer !== null) unschedule(timer);
       timer = null;
       result = {state, reason, detail: reason === 'MARKET_QUOTE_UNAVAILABLE' ? marketQuoteError(detail).detail : null,
-        periodStart: record?.periodStart ?? null, side: record?.side ?? null,
-        amountUsd: record ? 1 : null, audit: null};
+        series: record ? idRound(record.id)?.series ?? null : null, periodStart: record?.periodStart ?? null,
+        side: record?.side ?? null, amountUsd: record ? 1 : null, audit: null};
     };
     // Live outcomes for a READY round only. The page facts come from the final DOM check, or
     // for a price-gate refusal from the DOM check it judged; without one, the canonical market
@@ -330,12 +362,14 @@
           const baseline = positionSnapshot(env, freshRecord);
           try {
             storage ??= globalThis.localStorage;
-            const raw = storage.getItem(KEY);
+            const series = idRound(freshRecord.id).series;
+            const raw = storage.getItem(markerKey(series));
             if (raw !== null) {
               const previous = JSON.parse(raw);
+              const previousRound = idRound(previous?.id);
               if (!exact(previous, ['schemaVersion', 'periodStart', 'id', 'side', 'amountUsd', 'state']) ||
                   previous.schemaVersion !== 1 || !Number.isSafeInteger(previous.periodStart) || previous.periodStart < 0 ||
-                  previous.periodStart % 300 || previous.id !== `future-btc5m-prepare:${previous.periodStart}` ||
+                  previousRound?.series !== series || previousRound.start !== previous.periodStart ||
                   !['Up', 'Down'].includes(previous.side) || previous.amountUsd !== 1 || previous.state !== 'CLICK_ATTEMPTED') {
                 throw new Error('STORAGE_FAILED');
               }
@@ -344,7 +378,7 @@
                 return audit(freshRecord, 'BLOCKED', 'ALREADY_CONSUMED', null, market, nowFn());
               }
             }
-            storage.setItem(KEY, JSON.stringify({schemaVersion: 1, periodStart: freshRecord.periodStart,
+            storage.setItem(markerKey(series), JSON.stringify({schemaVersion: 1, periodStart: freshRecord.periodStart,
               id: freshRecord.id, side: freshRecord.side, amountUsd: 1, state: 'CLICK_ATTEMPTED'}));
           } catch {
             throw new Error('STORAGE_FAILED');
@@ -416,7 +450,7 @@
         if (!Number.isFinite(armedAt)) throw new Error('INVALID_CLOCK');
         generation++;
         active = true;
-        result = {state: 'WATCHING', reason: null, detail: null, periodStart: null, side: null, amountUsd: null, audit: null};
+        result = {state: 'WATCHING', reason: null, detail: null, series: null, periodStart: null, side: null, amountUsd: null, audit: null};
         timer = schedule(() => { void poll(); }, 500);
         return {...result};
       },
@@ -462,7 +496,7 @@
     const noteworthy = (value) => value?.state === 'CLICK_ATTEMPTED' ||
       value?.state === 'BLOCKED' && value.reason !== 'READ_FAILED';
     const preserveAttempt = (value) => value?.reason === 'ALREADY_CONSUMED' && last?.state === 'CLICK_ATTEMPTED' &&
-      last.periodStart === value.periodStart;
+      last.periodStart === value.periodStart && (last.series ?? '5m') === (value.series ?? '5m');
     const confirmPosition = (value) => {
       const now = (env.nowFn ?? (() => Date.now() / 1000))();
       if (value?.state !== 'CLICK_ATTEMPTED' || value.fill || !value.baselineEmpty ||

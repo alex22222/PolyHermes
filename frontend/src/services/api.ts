@@ -13,6 +13,7 @@ import type {
   BridgeTradeStatistics,
   BridgeTradeStatisticsRequest,
   FutureBtc5mBridgeStatus,
+  FutureBtc5mStrategy,
   FutureBtc5mAssets,
   FutureBtc5mOrder,
   FutureBtc5mOrderListRequest,
@@ -1208,6 +1209,9 @@ export const apiService = {
 
     control: (data: { enabled: boolean }) =>
       apiClient.post<ApiResponse<FutureBtc5mBridgeStatus>>('/future-btc5m/control', data),
+
+    strategy: (data: { strategy: FutureBtc5mStrategy }) =>
+      apiClient.post<ApiResponse<FutureBtc5mBridgeStatus>>('/future-btc5m/strategy', data),
 
     list: (data: FutureBtc5mOrderListRequest) =>
       apiClient.post<ApiResponse<FutureBtc5mOrderListResponse>>('/future-btc5m/orders/list', data),

@@ -33,6 +33,7 @@ class FutureBtc5mBridgeControllerTest {
     private var responseCode = 200
     private var responseOverride: String? = null
     private var requestedEnabled = false
+    private var strategy: String? = null
     private val assetsService = Mockito.mock(FutureBtc5mAssetsService::class.java)
 
     private data class Request(val method: String, val path: String, val body: String, val authorization: String?)
@@ -45,7 +46,9 @@ class FutureBtc5mBridgeControllerTest {
             val path = exchange.requestURI.path
             requests.add(Request(exchange.requestMethod, path, body, exchange.requestHeaders.getFirst("Authorization")))
             if (path == "/bridge/control" && responseCode == 200 && responseOverride == null) {
-                requestedEnabled = mapper.readTree(body).path("enabled").asBoolean()
+                val request = mapper.readTree(body)
+                if (request.has("strategy")) strategy = request.path("strategy").asText()
+                else requestedEnabled = request.path("enabled").asBoolean()
             }
             val payload = responseOverride ?: when (path) {
                 "/bridge/orders" -> mapper.writeValueAsString(mapOf("list" to listOf(order()), "total" to 1, "page" to 1, "size" to 20))
@@ -92,6 +95,18 @@ class FutureBtc5mBridgeControllerTest {
         assertEquals("DISABLED", disabled.path("data").path("mode").asText())
         assertEquals(listOf(true, false), requests.map { mapper.readTree(it.body).path("enabled").asBoolean() })
         assertTrue(requests.all { it.method == "POST" && it.path == "/bridge/control" && it.authorization == null })
+    }
+
+    @Test
+    fun `strategy switch forwards only a known strategy and returns the bridge confirmation`() {
+        val switched = api("/strategy", """{"strategy":"btc5m_favorite"}""")
+        assertEquals(0, switched.path("code").asInt())
+        assertEquals("btc5m_favorite", switched.path("data").path("strategy").asText())
+        assertEquals(mapper.readTree("""{"strategy":"btc5m_favorite"}"""), mapper.readTree(requests.single().body))
+        assertEquals("/bridge/control", requests.single().path)
+        listOf("{}", """{"strategy":"btc1h"}""", """{"strategy":1}""", """{"strategy":"btc5m_favorite","enabled":true}""")
+            .forEach { body -> assertEquals(ErrorCode.PARAM_ERROR.code, api("/strategy", body).path("code").asInt(), body) }
+        assertEquals(1, requests.size)
     }
 
     @Test
@@ -212,7 +227,7 @@ class FutureBtc5mBridgeControllerTest {
         return mapper.readTree(response.contentAsByteArray)
     }
 
-    private fun status() = mapOf(
+    private fun status() = (strategy?.let { mapOf("strategy" to it) } ?: emptyMap()) + mapOf(
         "bridgeId" to "future-btc5m", "online" to true, "requestedEnabled" to requestedEnabled,
         "effectiveEnabled" to false, "amountUsd" to 1, "series" to "5m",
         "mode" to if (requestedEnabled) "BLOCKED" else "DISABLED", "serverTime" to 1791706265.0,

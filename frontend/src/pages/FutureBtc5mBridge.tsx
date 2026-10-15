@@ -5,7 +5,7 @@ import { ReloadOutlined } from '@ant-design/icons'
 import { useMediaQuery } from 'react-responsive'
 import { apiService } from '../services/api'
 import { higherButtonSide, preflightIsFresh, preflightReasonText, referenceIsFresh } from '../utils/futureBtc5mPreflight'
-import type { FutureBtc5mAssets, FutureBtc5mAssetBuy, FutureBtc5mAssetPosition, FutureBtc5mBridgeStatus, FutureBtc5mOrder, FutureBtc5mOrderStatus, FutureBtc5mPreparationState } from '../types'
+import type { FutureBtc5mAssets, FutureBtc5mAssetBuy, FutureBtc5mAssetPosition, FutureBtc5mBridgeStatus, FutureBtc5mOrder, FutureBtc5mOrderStatus, FutureBtc5mPreparationState, FutureBtc5mStrategy } from '../types'
 
 const preparationStateText: Record<FutureBtc5mPreparationState, string> = {
   DISABLED: '已关闭',
@@ -54,7 +54,19 @@ const formatCents = (value?: number | null): string => value == null || !Number.
 const errorText = (error: unknown, fallback: string): string =>
   error instanceof Error ? error.message : fallback
 
-const marketLink = (slug: string) => /^btc-updown-5m-\d+$/.test(slug)
+// Two strategies; the bridge confirms which one runs. 15m is the default since 2026-10-16.
+const strategyText: Record<FutureBtc5mStrategy, { label: string, rule: string }> = {
+  btc15m_counter_1h: {
+    label: '15 分钟盘 · 反 1 小时方向（默认）',
+    rule: '每轮第 150–170 秒读取 15 分钟盘按钮数字较大的一方；只有它与同一时刻 1 小时盘的热门方向相反时才准备 $1 并自动买入，方向相同则本轮跳过。',
+  },
+  btc5m_favorite: {
+    label: '5 分钟盘 · 买热门方向',
+    rule: '每轮第 60–80 秒按 Up / Down 按钮数字较高的一侧准备 $1 并自动买入。',
+  },
+}
+
+const marketLink = (slug: string) => /^btc-updown-(5m|15m)-\d+$/.test(slug)
   ? <Typography.Link href={`https://future.news/zh/event/${slug}`} target="_blank" rel="noopener noreferrer">{slug}</Typography.Link>
   : <Typography.Text>{slug}</Typography.Text>
 
@@ -69,6 +81,7 @@ const FutureBtc5mBridge: React.FC = () => {
   const [statusError, setStatusError] = useState<string | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
   const [controlLoading, setControlLoading] = useState(false)
+  const [strategyLoading, setStrategyLoading] = useState(false)
   const [assets, setAssets] = useState<FutureBtc5mAssets | null>(null)
   const [assetsError, setAssetsError] = useState<string | null>(null)
   const [assetsLoading, setAssetsLoading] = useState(false)
@@ -297,6 +310,35 @@ const FutureBtc5mBridge: React.FC = () => {
     }
   }
 
+  const handleStrategy = async (strategy: FutureBtc5mStrategy) => {
+    if (controlPending.current) return
+    controlPending.current = true
+    statusRequestSeq.current += 1
+    setStatusLoading(false)
+    setStrategyLoading(true)
+    try {
+      const response = await apiService.futureBtc5mBridge.strategy({ strategy })
+      if (!mounted.current) return
+      if (response.data.code !== 0 || !response.data.data || response.data.data.strategy !== strategy) {
+        throw new Error(response.data.msg || '切换策略未获确认')
+      }
+      const receivedAt = Date.now()
+      setRuntime(response.data.data)
+      setStatusReceivedAt(receivedAt)
+      setClock(receivedAt)
+      setStatusError(null)
+      message.success(`已切换为：${strategyText[strategy].label}`)
+    } catch (error: unknown) {
+      if (!mounted.current) return
+      setRuntime(null)
+      setStatusError(`策略状态未知：${errorText(error, '切换失败')}。请刷新核对当前策略。`)
+      message.error('切换失败，当前策略未知')
+    } finally {
+      controlPending.current = false
+      if (mounted.current) setStrategyLoading(false)
+    }
+  }
+
   const columns: ColumnsType<FutureBtc5mOrder> = [
     {
       title: 'BTC 5 分钟轮次', key: 'market', width: 275,
@@ -412,21 +454,23 @@ const FutureBtc5mBridge: React.FC = () => {
     : null
   const intent = intentFresh ? preparation?.intent : null
   const lastAttempt = preparation?.lastAttempt
+  const currentStrategy: FutureBtc5mStrategy | null = runtime
+    ? runtime.strategy ?? (runtime.series === '15m' ? 'btc15m_counter_1h' : 'btc5m_favorite') : null
   const actualState = runtime && !statusStale
     ? preparation?.enabled ? '自动准备与自动买入已开启' : '自动准备与自动买入已关闭'
     : '状态未知'
 
   return <Space direction="vertical" size="middle" style={{ width: '100%' }}>
     <div>
-      <Typography.Title level={3} style={{ marginBottom: 4 }}>Future BTC 5 分钟 Bridge</Typography.Title>
-      <Typography.Text type="secondary">按 Future 按钮报价较高的一侧自动准备 BTC 5 分钟 $1 票据，准备好后由浏览器扩展自动点击一次买入。每 5 秒更新准备状态与真实订单记录。</Typography.Text>
+      <Typography.Title level={3} style={{ marginBottom: 4 }}>Future BTC 自动策略 Bridge</Typography.Title>
+      <Typography.Text type="secondary">按所选策略在 Future 上自动准备 BTC $1 票据，准备好后由浏览器扩展自动点击一次买入。当前策略：{currentStrategy ? strategyText[currentStrategy].label : '未知'}。每 5 秒更新准备状态与真实订单记录。</Typography.Text>
     </div>
 
-    <Card title="我的资产 · BTC 5 分钟" extra={<Button icon={<ReloadOutlined />} loading={assetsLoading} onClick={fetchAssets}>刷新资产</Button>}>
+    <Card title="我的资产 · BTC 5/15 分钟" extra={<Button icon={<ReloadOutlined />} loading={assetsLoading} onClick={fetchAssets}>刷新资产</Button>}>
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Descriptions size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="钱包现金"><Typography.Text strong style={{ fontSize: 24 }}>{formatMoney(walletFresh ? wallet?.cashUsd : null)}</Typography.Text></Descriptions.Item>
-          <Descriptions.Item label="BTC 5 分钟持仓市值"><Typography.Text strong style={{ fontSize: 24 }}>{formatMoney(marketDataFresh ? assets?.positionsValueUsd : null)}</Typography.Text></Descriptions.Item>
+          <Descriptions.Item label="BTC 5/15 分钟持仓市值"><Typography.Text strong style={{ fontSize: 24 }}>{formatMoney(marketDataFresh ? assets?.positionsValueUsd : null)}</Typography.Text></Descriptions.Item>
           <Descriptions.Item label="数据状态"><Tag color={marketDataFresh && assets?.dataStatus === 'READY' ? 'success' : 'warning'}>
             {!assets ? assetsLoading ? '读取中' : '未连接' : !wallet ? '等待钱包' : !walletFresh ? '钱包数据已过期' :
               assets.dataStatus === 'PARTIAL' ? '部分数据不可用' : !marketDataFresh ? '持仓等待更新' : '已更新'}</Tag></Descriptions.Item>
@@ -443,7 +487,7 @@ const FutureBtc5mBridge: React.FC = () => {
         <Typography.Title level={5} style={{ margin: 0 }}>当前买入资产</Typography.Title>
         {marketDataFresh && assets?.positions != null
           ? <Table rowKey="asset" size="small" dataSource={assets.positions} columns={positionColumns} pagination={false} scroll={{ x: 1085 }}
-            locale={{ emptyText: '当前暂无 BTC 5 分钟持仓' }} />
+            locale={{ emptyText: '当前暂无 BTC 5/15 分钟持仓' }} />
           : <Typography.Text type="secondary">{assetsLoading ? '正在读取持仓…' : '持仓暂未核实'}</Typography.Text>}
         <Typography.Title level={5} style={{ margin: 0 }}>全部买入记录</Typography.Title>
         <Typography.Text type="secondary">赢 / 亏按市场最终结算方向标注，表示买入方向是否命中；不代表已领取，也不表示包含提前卖出和手续费的实际净盈亏。</Typography.Text>
@@ -479,7 +523,7 @@ const FutureBtc5mBridge: React.FC = () => {
               pagination={{ ...buyPagination, total: assets.recentBuys.length, showSizeChanger: true,
                 pageSizeOptions: ['10', '20', '50', '100'], showTotal: (total) => `已加载 ${total} 笔`,
                 onChange: (current, pageSize) => setBuyPagination({ current, pageSize }) }}
-              locale={{ emptyText: assets.buyHistoryComplete === true ? '暂无 BTC 5 分钟买入记录' : '当前尚未加载 BTC 5 分钟买入记录' }} />
+              locale={{ emptyText: assets.buyHistoryComplete === true ? '暂无 BTC 5/15 分钟买入记录' : '当前尚未加载 BTC 5/15 分钟买入记录' }} />
           </>
           : <Typography.Text type="secondary">{assetsLoading ? '正在读取买入记录…' : '买入历史暂未核实'}</Typography.Text>}
       </Space>
@@ -487,6 +531,13 @@ const FutureBtc5mBridge: React.FC = () => {
 
     <Card title="自动准备票据控制" extra={<Button icon={<ReloadOutlined />} loading={statusLoading} onClick={() => { fetchStatus(); fetchOrders() }}>刷新</Button>}>
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+        <Space wrap>
+          <Typography.Text strong>交易策略</Typography.Text>
+          <Select value={currentStrategy ?? undefined} placeholder="策略未知" style={{ minWidth: 260 }} loading={strategyLoading}
+            disabled={!runtime || statusStale || strategyLoading || controlLoading}
+            options={(Object.keys(strategyText) as FutureBtc5mStrategy[]).map((value) => ({ value, label: strategyText[value].label }))}
+            onChange={(value: FutureBtc5mStrategy) => { if (value !== currentStrategy) handleStrategy(value) }} />
+        </Space>
         <Space wrap>
           <Typography.Text strong>自动准备票据开关</Typography.Text>
           <Switch checked={runtime?.requestedEnabled ?? false} loading={controlLoading} disabled={!runtime || statusStale}
@@ -498,8 +549,9 @@ const FutureBtc5mBridge: React.FC = () => {
         {statusError && <Alert type="error" showIcon message="Bridge 状态未知" description={statusError} />}
         {statusStale && <Alert type="error" showIcon message="运行状态已过期，请刷新核对" description="当前状态时间已失效，开关与准备情况未知；仍可点击关闭自动准备票据。" />}
         {runtime && !runtime.executorReady && <Alert type="info" showIcon message="当前尚未接入 Future 交易执行器"
-          description="开启后会前往当前市场，按 Up / Down 按钮数字较高的一侧选择方向并填写 $1；报价缺失或相同则等待。Chainlink 价格仅作参考。票据准备好后，浏览器扩展会自动点击一次 Future 买入（每轮最多一次）；实际成交以 Future 订单为准。" />}
+          description={`开启后会前往当前策略的市场。${currentStrategy ? strategyText[currentStrategy].rule : ''}报价缺失或相同则等待。Chainlink 价格仅作参考。票据准备好后，浏览器扩展会自动点击一次 Future 买入（每轮最多一次）；实际成交以 Future 订单为准。`} />}
         <Descriptions size="small" column={isMobile ? 1 : 3}>
+          <Descriptions.Item label="当前策略">{currentStrategy ? strategyText[currentStrategy].label : '未知'}</Descriptions.Item>
           <Descriptions.Item label="Bridge 连接">{runtime ? runtime.online ? '在线' : '离线' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="执行器">{runtime ? '未接入' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="实际下单">{runtime && !statusStale ? '未运行' : '未知'}</Descriptions.Item>
@@ -558,7 +610,7 @@ const FutureBtc5mBridge: React.FC = () => {
         <Descriptions size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="项目接口">{runtime && !statusStale && runtime.online ? '已连接' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="Chrome 预检报告">{browserFresh ? '新鲜' : '未连接或已过期'}</Descriptions.Item>
-          <Descriptions.Item label="当前 BTC 5 分钟市场">{browserFresh && preflight?.navigation === 'CURRENT' && preflight.pagePeriodStart === runtime?.periodStart ? '已匹配' : '待匹配'}</Descriptions.Item>
+          <Descriptions.Item label="当前策略市场">{browserFresh && preflight?.navigation === 'CURRENT' && preflight.pagePeriodStart === runtime?.periodStart ? '已匹配' : '待匹配'}</Descriptions.Item>
           <Descriptions.Item label="Chainlink / TWAP 60 秒">{referenceFresh ? '参考已核对，采样新鲜' : '等待有效入场采样'}</Descriptions.Item>
           <Descriptions.Item label="美元市价买入栏">{browserFresh && preflight?.ticketStatus === 'PASS' ? '只读检查通过' : '待检查'}</Descriptions.Item>
           <Descriptions.Item label="页面现有金额">{browserFresh ? formatValue(preflight?.amountUsd, '$') : '—'}</Descriptions.Item>

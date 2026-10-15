@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 import websockets
 from future_btc5m_bridge import FutureBridge, PreparationConflict, strict_json_object
+from future_btc5m_series import HOUR, SERIES, entry_bounds, hourly_slug, round_start_of, slug_for
 from future_btc5m_runtime import start_runtime_server
 
 
@@ -74,8 +75,8 @@ def parse_time(value):
     return parsed.timestamp()
 
 
-def validate_market(events, start):
-    slug = f"btc-updown-5m-{start}"
+def validate_market(events, start, series="5m"):
+    slug = slug_for(start, series)
     if not isinstance(events, list) or len(events) != 1:
         raise ValueError("MARKET_NOT_UNIQUE")
     event = events[0]
@@ -89,15 +90,46 @@ def validate_market(events, start):
             or market.get("closed") is not False or market.get("acceptingOrders") is not True):
         raise ValueError("WRONG_OR_INACTIVE_MARKET")
     # Gamma startDate is the listing time. The exact slug identifies the period start.
-    if parse_time(market["endDate"]) != start + 300 or parse_time(event["endDate"]) != start + 300:
+    period = SERIES[series]["period"]
+    if parse_time(market["endDate"]) != start + period or parse_time(event["endDate"]) != start + period:
         raise ValueError("WRONG_MARKET_PERIOD")
     if market.get("eventStartTime") and parse_time(market["eventStartTime"]) != start:
         raise ValueError("WRONG_MARKET_PERIOD")
     price_config = market.get("cryptoMarketConfig")
     if (not isinstance(price_config, dict) or price_config.get("asset") != "btc"
-            or price_config.get("duration") != "5m" or price_config.get("twapEnabled") is not True
+            or price_config.get("duration") != series or price_config.get("twapEnabled") is not True
             or price_config.get("twapLookbackSeconds") != 60):
         raise ValueError("WRONG_MARKET_PRICE_CONFIG")
+    outcomes = market["outcomes"]
+    tokens = market["clobTokenIds"]
+    outcomes = json.loads(outcomes) if isinstance(outcomes, str) else outcomes
+    tokens = json.loads(tokens) if isinstance(tokens, str) else tokens
+    if (not isinstance(outcomes, list) or len(outcomes) != 2 or set(outcomes) != {"Up", "Down"}
+            or not isinstance(tokens, list) or len(tokens) != 2
+            or any(not isinstance(token, str) or not token.isdigit() for token in tokens)
+            or tokens[0] == tokens[1] or not market.get("conditionId")):
+        raise ValueError("INVALID_OUTCOME_TOKENS")
+    return {"slug": slug, "condition_id": market["conditionId"], "tokens": dict(zip(outcomes, tokens))}
+
+
+def validate_hourly_market(events, start):
+    """The ET-hour BTC market (Binance 1H candle) whose favorite filters the 15m strategy."""
+    slug = hourly_slug(start)
+    if not isinstance(events, list) or len(events) != 1:
+        raise ValueError("MARKET_NOT_UNIQUE")
+    event = events[0]
+    if event.get("slug") != slug or event.get("active") is not True or event.get("closed") is not False:
+        raise ValueError("WRONG_OR_INACTIVE_EVENT")
+    markets = event.get("markets")
+    if not isinstance(markets, list) or len(markets) != 1:
+        raise ValueError("MARKET_NOT_UNIQUE")
+    market = markets[0]
+    if (market.get("slug") != slug or market.get("active") is not True
+            or market.get("closed") is not False or market.get("acceptingOrders") is not True):
+        raise ValueError("WRONG_OR_INACTIVE_MARKET")
+    if (parse_time(market["endDate"]) != start + HOUR or not market.get("eventStartTime")
+            or parse_time(market["eventStartTime"]) != start):
+        raise ValueError("WRONG_MARKET_PERIOD")
     outcomes = market["outcomes"]
     tokens = market["clobTokenIds"]
     outcomes = json.loads(outcomes) if isinstance(outcomes, str) else outcomes
@@ -259,54 +291,72 @@ def fill_ask_cents(levels, notional=1.0):
 
 
 class ClobMarketQuotes:
-    """Read-only Polymarket CLOB book snapshot for the extension's pre-click price check.
+    """Read-only Polymarket CLOB book snapshot of the current round of one series: the active
+    strategy's 5m/15m round for the extension's pre-click check, or the ET hour ("1h") whose
+    favorite filters the 15m strategy.
 
     It never places orders. Any source or shape failure raises, and the route answers 503.
     Network reads run outside the lock; the lock only guards the cached tokens and snapshot.
     """
 
-    def __init__(self, fetch_json, now_fn=time.time, ttl=0.8):
+    def __init__(self, fetch_json, now_fn=time.time, ttl=0.8, series_fn=lambda: "5m"):
         self.fetch_json = fetch_json
         self.now_fn = now_fn
         # A reply is served from a snapshot received at most ttl seconds ago.
         self.ttl = ttl
+        self.series_fn = series_fn
         self.lock = threading.Lock()
         self.read_lock = threading.Lock()
-        self.tokens = None
-        self.snapshot = None  # (received_at, snapshot)
+        self.tokens = None  # ((series, start), tokens)
+        self.snapshot = None  # ((series, start), received_at, snapshot)
         self.warming = False
         self.warm_attempted_at = -math.inf
         self.refreshing = False
 
-    def _round_tokens(self, start):
+    def _round(self, now):
+        series = self.series_fn()
+        period = HOUR if series == "1h" else SERIES[series]["period"]
+        return series, int(now // period) * period
+
+    def _slug(self, key):
+        series, start = key
+        return hourly_slug(start) if series == "1h" else slug_for(start, series)
+
+    def _round_tokens(self, key):
         with self.lock:
-            if self.tokens and self.tokens[0] == start:
+            if self.tokens and self.tokens[0] == key:
                 return self.tokens[1]
         # Gamma takes ~0.8 s through the operator proxy, so it is validated early by warm().
-        market = validate_market(self.fetch_json(f"{GAMMA}?slug=btc-updown-5m-{start}"), start)
+        series, start = key
+        events = self.fetch_json(f"{GAMMA}?slug={self._slug(key)}")
+        market = validate_hourly_market(events, start) if series == "1h" else validate_market(events, start, series)
         with self.lock:
-            if round_start(self.now_fn()) == start:
-                self.tokens = (start, market["tokens"])
+            if self._round(self.now_fn()) == key:
+                self.tokens = (key, market["tokens"])
         return market["tokens"]
 
     def prefetch_tokens(self):
-        self._round_tokens(round_start(self.now_fn()))
+        self._round_tokens(self._round(self.now_fn()))
 
-    def warm(self):
+    def warm(self, refresh=None):
         """Called from the main loop: prefetch the round's tokens (a failure retries after 10 s)
-        and, inside +55..+80 s, keep refreshing the books so the pre-click read is served from
-        a snapshot instead of waiting ~1 s for the CLOB."""
+        and, while `refresh` holds (by default just before and inside the series' entry window),
+        keep refreshing the books so a read is served from a snapshot instead of waiting ~1 s."""
         now = self.now_fn()
-        start = round_start(now)
+        key = self._round(now)
+        series, start = key
+        if refresh is None:
+            first, last = entry_bounds(start, series) if series != "1h" else (start, start)
+            refresh = first - 5 <= now < last
         started = False
-        if not (self.tokens and self.tokens[0] == start) and not self.warming and now - self.warm_attempted_at >= 10:
+        if not (self.tokens and self.tokens[0] == key) and not self.warming and now - self.warm_attempted_at >= 10:
             self.warming = True
             self.warm_attempted_at = now
             threading.Thread(target=self._background, args=("warming", self.prefetch_tokens), daemon=True).start()
             started = True
-        if start + 55 <= now < start + 80 and self.tokens and self.tokens[0] == start and not self.refreshing:
+        if refresh and self.tokens and self.tokens[0] == key and not self.refreshing:
             self.refreshing = True
-            threading.Thread(target=self._background, args=("refreshing", lambda: self._read(start)), daemon=True).start()
+            threading.Thread(target=self._background, args=("refreshing", lambda: self._read(key)), daemon=True).start()
             started = True
         return started
 
@@ -318,41 +368,50 @@ class ClobMarketQuotes:
         finally:
             setattr(self, flag, False)
 
-    def quote(self):
+    def latest(self, max_age=5):
+        """The cached snapshot of the current round if its book is at most max_age seconds old."""
         now = self.now_fn()
-        start = round_start(now)
         with self.lock:
             cached = self.snapshot
-        if cached and cached[1]["periodStart"] == start and 0 <= now - cached[0] <= self.ttl:
-            snapshot = cached[1]
+        if cached and cached[0] == self._round(now) and 0 <= now - cached[2]["observedAt"] <= max_age:
+            return copy.deepcopy(cached[2])
+        return None
+
+    def quote(self):
+        now = self.now_fn()
+        key = self._round(now)
+        with self.lock:
+            cached = self.snapshot
+        if cached and cached[0] == key and 0 <= now - cached[1] <= self.ttl:
+            snapshot = cached[2]
         else:
-            snapshot = self._read(start)
+            snapshot = self._read(key)
         replied = self.now_fn()
-        if round_start(replied) != start:
+        if self._round(replied) != key:
             raise ValueError("ROUND_CHANGED_DURING_READ")
         return {**snapshot, "serverTime": replied}
 
-    def _read(self, start):
+    def _read(self, key):
         # Reuse a background refresh already in flight instead of starting a second slow read.
         with self.read_lock:
             now = self.now_fn()
-            if round_start(now) != start:
+            if self._round(now) != key:
                 raise ValueError("ROUND_CHANGED_DURING_READ")
             with self.lock:
                 cached = self.snapshot
-            if cached and cached[1]["periodStart"] == start and 0 <= now - cached[0] <= self.ttl:
-                return cached[1]
-            return self._fetch_snapshot(start)
+            if cached and cached[0] == key and 0 <= now - cached[1] <= self.ttl:
+                return cached[2]
+            return self._fetch_snapshot(key)
 
-    def _fetch_snapshot(self, start):
-        tokens = self._round_tokens(start)
+    def _fetch_snapshot(self, key):
+        tokens = self._round_tokens(key)
         up, down = tokens["Up"], tokens["Down"]
         books = self.fetch_json(CLOB_BOOKS, [{"token_id": up}, {"token_id": down}])
         received = self.now_fn()
         if (not isinstance(books, list) or len(books) != 2 or any(not isinstance(book, dict) for book in books)
                 or {book.get("asset_id") for book in books} != {up, down}):
             raise ValueError("CLOB_BOOKS_MISMATCH")
-        if round_start(received) != start:
+        if self._round(received) != key:
             raise ValueError("ROUND_CHANGED_DURING_READ")
         # The book's own server timestamp (epoch ms) is its age; the extension's 2 s age gate
         # then bounds the market data, not the local transit.
@@ -362,8 +421,8 @@ class ClobMarketQuotes:
             raise ValueError("CLOB_BOOK_TIME_INVALID")
         by_token = {book["asset_id"]: book for book in books}
         snapshot = {
-            "schemaVersion": 1, "source": "polymarket_clob_book", "periodStart": start,
-            "slug": f"btc-updown-5m-{start}",
+            "schemaVersion": 1, "source": "polymarket_clob_book", "periodStart": key[1],
+            "slug": self._slug(key),
             "upAskCents": fill_ask_cents(by_token[up].get("asks")),
             "downAskCents": fill_ask_cents(by_token[down].get("asks")),
             "upBidCents": best_book_cents(by_token[up].get("bids"), max),
@@ -371,8 +430,8 @@ class ClobMarketQuotes:
             "observedAt": observed,
         }
         with self.lock:
-            if not self.snapshot or self.snapshot[0] <= received:
-                self.snapshot = (received, snapshot)
+            if not self.snapshot or self.snapshot[1] <= received:
+                self.snapshot = (key, received, snapshot)
         return snapshot
 
 
@@ -439,13 +498,19 @@ class Assistant:
         self.boot_time = now_fn()
         self.lock = threading.RLock()
         self.state = empty_status(self.boot_time)
+        # The active strategy's series ("5m" or "15m") and, for 15m, the latest fresh 1h CLOB
+        # snapshot; the bridge sets both once it exists.
+        self.series_fn = lambda: "5m"
+        self.hour_quote_fn = lambda: None
         self.seen = set()
         # Every start is weekend-only again, as every start turns the auto-ticket switch off.
         self.weekend_only = True
         ledger = self.state_dir / "rounds.jsonl"
         if ledger.exists():
             for line in ledger.read_text(encoding="utf-8").splitlines():
-                self.seen.add(json.loads(line)["period_start"])
+                claim = json.loads(line)
+                # Lines written before the 15m strategy carry no series and are 5m rounds.
+                self.seen.add((claim.get("series", "5m"), claim["period_start"]))
 
     def schedule(self):
         with self.lock:
@@ -478,7 +543,7 @@ class Assistant:
                 if eligibility_reason:
                     result.update(status="OBSERVING", reason=eligibility_reason, draft=None)
                     self.state = copy.deepcopy(result)
-                elif now >= draft["expires_at"] or round_start(now) != draft["period_start"]:
+                elif now >= draft["expires_at"] or round_start_of(now, draft["series"]) != draft["period_start"]:
                     result.update(status="EXPIRED", reason="DRAFT_EXPIRED", draft=None)
                     self.state = copy.deepcopy(result)
                 elif not 0 <= now - draft["price_observed_at"] <= 5:
@@ -487,7 +552,9 @@ class Assistant:
                 elif result["feed_status"] != "CURRENT":
                     result.update(status="EXPIRED", reason="CHAINLINK_FEED_UNAVAILABLE", draft=None)
                     self.state = copy.deepcopy(result)
-            result.update(server_time=now, updated_at=iso(now))
+            result.update(server_time=now, updated_at=iso(now), series=self.series_fn())
+            hour_quote = self.hour_quote_fn()
+            result["hour_quote"] = copy.deepcopy(hour_quote) if isinstance(hour_quote, dict) else None
             return result
 
     def save_state(self):
@@ -498,69 +565,73 @@ class Assistant:
         temporary.write_text(json.dumps(self.status(), ensure_ascii=False) + "\n", encoding="utf-8")
         temporary.replace(self.state_dir / "status.json")
 
-    def claim_round(self, start):
-        self.seen.add(start)
+    def claim_round(self, start, series="5m"):
+        self.seen.add((series, start))
         if not self.observe_only:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             with (self.state_dir / "rounds.jsonl").open("a", encoding="utf-8") as ledger:
-                ledger.write(json.dumps({"period_start": start, "claimed_at": iso(self.now_fn())}) + "\n")
+                ledger.write(json.dumps({"period_start": start, "series": series, "claimed_at": iso(self.now_fn())}) + "\n")
                 ledger.flush()
                 # Claim before network I/O: a crash must never create a second draft.
                 os.fsync(ledger.fileno())
 
     async def poll(self, http_fn):
         now = self.now_fn()
-        start = round_start(now)
+        series = self.series_fn()
+        period = SERIES[series]["period"]
+        start = round_start_of(now, series)
+        first, last = entry_bounds(start, series)
         with self.lock:
             if (self.state_dir / "STOP").exists():
                 return self.status()
-            if start in self.seen:
-                if self.state.get("period_start") != start:
-                    self.state.update(status="SKIPPED", reason="ROUND_ALREADY_PROCESSED", draft=None)
+            if (series, start) in self.seen:
+                if self.state.get("period_start") != start or self.state.get("round_series") != series:
+                    self.state.update(status="SKIPPED", reason="ROUND_ALREADY_PROCESSED", draft=None,
+                                      period_start=start, round_series=series)
                 return self.status()
             self.state = empty_status(now)
-            self.state["period_start"] = start
+            self.state.update(period_start=start, round_series=series)
             if self.weekend_only and not is_et_weekend(start):
                 self.state.update(status="SKIPPED", reason="NOT_ET_WEEKEND")
                 return self.status()
-            if now < start + 60:
+            if now < first:
                 return self.status()
-            self.claim_round(start)
-            if now >= start + 80:
+            self.claim_round(start, series)
+            if now >= last:
                 self.state.update(status="SKIPPED", reason="ENTRY_WINDOW_MISSED")
                 return self.status()
-            if not self.observe_only and self.boot_time >= start + 60:
+            if not self.observe_only and self.boot_time >= first:
                 self.state.update(status="SKIPPED", reason="STARTED_AFTER_ENTRY")
                 return self.status()
         parameters = urllib.parse.urlencode({
-            "symbol": "BTC", "eventStartTime": iso(start), "variant": "fiveminute", "endDate": iso(start + 300),
-            "twapEnabled": "true", "twapLookbackSeconds": 60,
+            "symbol": "BTC", "eventStartTime": iso(start), "variant": SERIES[series]["variant"],
+            "endDate": iso(start + period), "twapEnabled": "true", "twapLookbackSeconds": 60,
         })
         try:
             values = await asyncio.gather(
-                http_fn(f"{GAMMA}?slug=btc-updown-5m-{start}"),
+                http_fn(f"{GAMMA}?slug={slug_for(start, series)}"),
                 http_fn(f"{CRYPTO_PRICE}?{parameters}"), http_fn(GEOBLOCK),
                 return_exceptions=True,
             )
-            now = self.now_fn()  # Network time is part of the +60..+80 window.
+            now = self.now_fn()  # Network time is part of the entry window.
             if (self.state_dir / "STOP").exists():
                 return self.status()
-            if round_start(now) != start or not start + 60 <= now < start + 80:
+            if round_start_of(now, series) != start or not first <= now < last or self.series_fn() != series:
                 raise ValueError("ENTRY_WINDOW_EXPIRED_DURING_READ")
             events, opening, geo = values
             if isinstance(events, Exception) or isinstance(opening, Exception):
                 raise ValueError("SOURCE_REQUEST_FAILED")
-            market = validate_market(events, start)
+            market = validate_market(events, start, series)
             opening_price = positive_number(opening["openPrice"])
             current_price, observed = validate_quote(self.quote_fn(), now)
             blocked = geo.get("blocked") if isinstance(geo, dict) else None
             blocked = blocked if isinstance(blocked, bool) else None
             side = "Up" if current_price > opening_price else "Down" if current_price < opening_price else None
             signal = {
-                "id": f"5m:{start}", "slug": market["slug"], "series": "5m",
-                "period_start": start, "period_end": start + 300, "side": side,
+                "id": f"{series}:{start}", "slug": market["slug"], "series": series,
+                "period_start": start, "period_end": start + period, "side": side,
                 "open_price": opening_price, "current_price": current_price,
-                "open_price_source": "polymarket_crypto_price_fiveminute_twap60_openPrice",
+                "open_price_source": SERIES[series]["open_source"],
                 "twap_lookback_seconds": 60,
                 "price_source": "chainlink", "price_observed_at": observed,
             }
@@ -580,7 +651,7 @@ class Assistant:
                 else:
                     self.state.update(status="READY", reason="MANUAL_REVIEW_REQUIRED", draft={
                         **signal, "condition_id": market["condition_id"], "token_id": market["tokens"][side],
-                        "amount_usd": 1, "created_at": now, "expires_at": start + 80,
+                        "amount_usd": 1, "created_at": now, "expires_at": last,
                         "trade_ready": True, "manual_submit_required": True,
                         "platform_amount_validation_required": True,
                     })
@@ -744,9 +815,12 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None, market_quote=None
                 elif preflight:
                     self.reply(bridge.report_preflight(payload))
                 else:
-                    if type(payload) is not dict or set(payload) != {"enabled"} or type(payload["enabled"]) is not bool:
-                        raise ValueError("ENABLED_MUST_BE_BOOLEAN")
-                    self.reply(bridge.control(payload["enabled"]))
+                    if type(payload) is dict and set(payload) == {"strategy"} and isinstance(payload["strategy"], str):
+                        self.reply(bridge.set_strategy(payload["strategy"]))
+                    else:
+                        if type(payload) is not dict or set(payload) != {"enabled"} or type(payload["enabled"]) is not bool:
+                            raise ValueError("ENABLED_MUST_BE_BOOLEAN")
+                        self.reply(bridge.control(payload["enabled"]))
             except PreparationConflict:
                 self.send_error(409)
             except (ValueError, UnicodeError):
@@ -792,13 +866,21 @@ async def run(args):
             print(json.dumps(snapshot, ensure_ascii=False))
             return
         bridge = FutureBridge(args.state_dir / "bridge", assistant.status)
-        market_quotes = ClobMarketQuotes(curl_json)
+        assistant.series_fn = lambda: bridge.series
+        market_quotes = ClobMarketQuotes(curl_json, series_fn=lambda: bridge.series)
+        # The 15m strategy trades only against the concurrent ET-hour favorite.
+        hour_quotes = ClobMarketQuotes(curl_json, series_fn=lambda: "1h")
+        assistant.hour_quote_fn = lambda: hour_quotes.latest(5) if bridge.series == "15m" else None
         server = make_server(assistant, bridge=bridge, market_quote=market_quotes.quote)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         runtime_server = await start_runtime_server()
         print("ASSIST_ONLY http://127.0.0.1:8766/status; no order submission. STOP: " + str(args.state_dir / "STOP"), flush=True)
         while True:
             market_quotes.warm()
+            if bridge.series == "15m":
+                now = time.time()
+                first, last = entry_bounds(round_start_of(now, "15m"), "15m")
+                hour_quotes.warm(refresh=first - 10 <= now < last)
             await assistant.poll(get_json)
             assistant.state["feed_reason"] = feed.error
             assistant.save_state()

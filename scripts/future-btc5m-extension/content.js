@@ -1,4 +1,31 @@
 (() => {
+  // Round series of the two strategies (same table as future_btc5m_series.py). The bridge
+  // reports which one is active; a page, ticket or record always carries its own series.
+  const SERIES = {
+    '5m': {period: 300, entry: [60, 80], slug: 'btc-updown-5m-', id: 'future-btc5m-prepare:',
+      openSource: 'polymarket_crypto_price_fiveminute_twap60_openPrice', label: 'BTC 5 分钟'},
+    '15m': {period: 900, entry: [150, 170], slug: 'btc-updown-15m-', id: 'future-btc15m-prepare:',
+      openSource: 'polymarket_crypto_price_fifteen_twap60_openPrice', label: 'BTC 15 分钟（反 1 小时方向）'},
+  };
+  const seriesOf = (value) => (typeof value === 'string' && Object.hasOwn(SERIES, value) ? value : null);
+  const roundStart = (now, series) => Math.floor(now / SERIES[series].period) * SERIES[series].period;
+  const roundUrl = (start, series) => `https://future.news/zh/event/${SERIES[series].slug}${start}`;
+  // {series, start} of a Future BTC round path, else null.
+  function pathRound(pathname) {
+    const match = typeof pathname === 'string' && pathname.match(/^\/(?:zh\/)?event\/btc-updown-(5m|15m)-(0|[1-9]\d*)\/?$/);
+    const start = match && Number(match[2]);
+    return match && Number.isSafeInteger(start) && start % SERIES[match[1]].period === 0 ? {series: match[1], start} : null;
+  }
+  function idRound(id) {
+    for (const [series, value] of Object.entries(SERIES)) {
+      const digits = typeof id === 'string' && id.startsWith(value.id) ? id.slice(value.id.length) : null;
+      if (digits !== null && /^(0|[1-9]\d*)$/.test(digits) && Number(digits) % value.period === 0) {
+        return {series, start: Number(digits)};
+      }
+    }
+    return null;
+  }
+
   function verifiedEligibility(status) {
     const eligibility = status?.future_eligibility;
     if (eligibility?.status !== 'VERIFIED' || eligibility.venue !== 'future.news' ||
@@ -47,15 +74,16 @@
         status.live_enabled !== false || status.amount_usd !== 1 ||
         !['WAITING', 'OBSERVING', 'READY', 'EXPIRED', 'SKIPPED'].includes(status.status) ||
         !Number.isFinite(status.server_time) || Math.abs(now - status.server_time) > 3) return null;
-    const start = Math.floor(now / 300) * 300;
-    if (status.period_start !== start) return null;
+    // The assistant polls the active strategy's series; its status names it.
+    const series = seriesOf(status.series) ?? '5m';
+    const start = roundStart(now, series);
+    if (status.period_start !== start || (status.round_series ?? '5m') !== series) return null;
     try {
       const parsed = new URL(url);
-      const match = parsed.pathname.match(/^\/(?:zh\/)?event\/btc-updown-5m-(\d+)\/?$/);
-      const pageStart = match && Number(match[1]);
-      if (parsed.origin !== 'https://future.news' || parsed.username || parsed.password || !match ||
-          !Number.isSafeInteger(pageStart) || pageStart % 300 !== 0 || pageStart > start) return null;
-      return `https://future.news/zh/event/btc-updown-5m-${start}`;
+      const page = pathRound(parsed.pathname);
+      if (parsed.origin !== 'https://future.news' || parsed.username || parsed.password || !page ||
+          page.series === series && page.start > start) return null;
+      return roundUrl(start, series);
     } catch {
       return null;
     }
@@ -72,18 +100,23 @@
     const slug = new URL(target).pathname.split('/').pop();
     // Full document navigation doesn't depend on Future's SPA rendering callbacks.
     // Recover before entry only; never reload a READY ticket or an uncertain Buy result.
-    const start = Math.floor(now / 300) * 300;
+    const series = pathRound(new URL(target).pathname).series;
+    const start = roundStart(now, series);
     const report = readPreflight(doc, url, now);
-    if (typeof navigate === 'function' && now >= start + 5 && now < start + 50 &&
+    // Before entry only: up to 10 s ahead of the series' entry window.
+    if (typeof navigate === 'function' && now >= start + 5 && now < start + SERIES[series].entry[0] - 10 &&
         (!matchesMarket(url, {slug}) || report?.navigation === 'MISMATCH')) {
       try {
         const key = 'polyhermes.future-btc5m.document-navigation';
         const previous = JSON.parse(storage.getItem(key) || 'null');
-        if (previous !== null && (!Number.isSafeInteger(previous.periodStart) || previous.periodStart % 300 !== 0 ||
-            previous.target !== `https://future.news/zh/event/btc-updown-5m-${previous.periodStart}`)) {
+        const previousRound = previous && typeof previous.target === 'string' ? pathRound(new URL(previous.target).pathname) : null;
+        if (previous !== null && (!previousRound || previous.periodStart !== previousRound.start ||
+            previous.target !== roundUrl(previousRound.start, previousRound.series))) {
           return '自动换轮：页面恢复记录无效，本轮不重试';
         }
-        if (previous?.periodStart >= start) return '自动换轮：已请求完整页面恢复，本轮不重复刷新';
+        if (previousRound?.series === series && previous.periodStart >= start) {
+          return '自动换轮：已请求完整页面恢复，本轮不重复刷新';
+        }
         storage.setItem(key, JSON.stringify({periodStart: start, target, attempted_at: now}));
         navigate(target);
         return `自动换轮：正在完整加载本轮 ${slug}`;
@@ -98,6 +131,8 @@
       const attempt = JSON.parse(storage.getItem(key) || 'null');
       if (attempt?.target === target) return now - attempt.attempted_at < 10 ?
         `自动换轮：正在前往 ${slug}` : '自动换轮：跳转未完成，请点击“前往本轮市场”检查';
+      // "前往实时市场" stays in the page's own series; another series waits for the full navigation.
+      if (pathRound(new URL(url).pathname)?.series !== series) return `自动换轮：等待切换到 ${SERIES[series].label}`;
       const buttons = endedMarketButtons(doc).filter((button) => !button.disabled);
       if (buttons.length !== 1) return '自动换轮：等待唯一可用的“前往实时市场”按钮';
       storage.setItem(key, JSON.stringify({target, source: url, attempted_at: now}));
@@ -117,25 +152,27 @@
     view.text += `\nFuture 金额准备依据：${verifiedEligibility(status) ? '已核实（仅金额准备）' :
       status.future_eligibility?.status === 'RESTRICTED' ? '受限' : '未核实'}`;
     const signal = status.signal || status.draft;
-    const start = Math.floor(now / 300) * 300;
-    if (status.period_start === start) view.marketUrl = `https://future.news/zh/event/btc-updown-5m-${start}`;
+    const series = seriesOf(status.series) ?? '5m';
+    const start = roundStart(now, series);
+    if (status.period_start === start && (status.round_series ?? '5m') === series) view.marketUrl = roundUrl(start, series);
     if (!signal) return view;
-    if (!Number.isInteger(signal.period_start) || signal.period_start % 300 !== 0 ||
-        signal.slug !== `btc-updown-5m-${signal.period_start}` || signal.series !== '5m' ||
-        signal.period_end !== signal.period_start + 300 || signal.price_source !== 'chainlink' ||
+    if (!seriesOf(signal.series) || !Number.isInteger(signal.period_start) || signal.series !== series ||
+        signal.period_start % SERIES[series].period !== 0 ||
+        signal.slug !== `${SERIES[series].slug}${signal.period_start}` ||
+        signal.period_end !== signal.period_start + SERIES[series].period || signal.price_source !== 'chainlink' ||
         !['Up', 'Down', null].includes(signal.side)) {
       view.text += ' · 信号元数据无效';
       return view;
     }
     if (signal.period_start === start) view.marketUrl = `https://future.news/zh/event/${signal.slug}`;
-    const verifiedOpening = signal.open_price_source === 'polymarket_crypto_price_fiveminute_twap60_openPrice' &&
+    const verifiedOpening = signal.open_price_source === SERIES[series].openSource &&
       signal.twap_lookback_seconds === 60;
     let unavailable;
     if (signal.period_start !== start) unavailable = '信号轮次已结束';
     else if (!matchesMarket(url, signal)) unavailable = '页面轮次不匹配';
     else if (!verifiedOpening) unavailable = '开盘参考价未核实';
     else if (!Number.isFinite(signal.price_observed_at) || signal.price_observed_at > now) unavailable = '采样时间无效';
-    else if (now >= start + 80) unavailable = '入场窗口已过期';
+    else if (now >= start + SERIES[series].entry[1]) unavailable = '入场窗口已过期';
     else if (now - signal.price_observed_at > 5) unavailable = '采样已陈旧';
     else if (status.feed_status !== 'CURRENT') unavailable = '实时行情不可用';
     else if (status.status === 'STOPPED') unavailable = '助手已停止';
@@ -179,13 +216,13 @@
     return inputs[0];
   }
 
-  function ticketMatchesPeriod(doc, ticket, start) {
+  function ticketMatchesPeriod(doc, ticket, start, period = 300) {
     const formatter = new Intl.DateTimeFormat('en-US', {timeZone: 'America/New_York', month: 'long',
       day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true});
     const values = (timestamp) => Object.fromEntries(formatter.formatToParts(new Date(timestamp * 1000))
       .filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
     const opening = values(start);
-    const ending = values(start + 300);
+    const ending = values(start + period);
     const timeText = (parts) => `${parts.hour}:${parts.minute}${parts.dayPeriod}`;
     const expected = `Bitcoin Up or Down - ${opening.month} ${opening.day}, ${timeText(opening)}-${timeText(ending)} ET`;
     const normalize = (value) => value.replace(/\s+/g, '').replace(/[–—]/g, '-');
@@ -212,16 +249,16 @@
     return true;
   }
 
-  function orderTypeTicket(doc, url, now) {
-    const start = Math.floor(now / 300) * 300;
-    if (!matchesMarket(url, {slug: `btc-updown-5m-${start}`}) || endedMarketButtons(doc).length) {
+  function orderTypeTicket(doc, url, now, series = pathRound(new URL(url).pathname)?.series ?? '5m') {
+    const start = roundStart(now, series);
+    if (!matchesMarket(url, {slug: `${SERIES[series].slug}${start}`}) || endedMarketButtons(doc).length) {
       throw preparationError('MARKET_NOT_CURRENT');
     }
     const inputs = [...doc.querySelectorAll('input[placeholder="订单大小"]')]
       .filter((input) => !input.disabled && !input.readOnly && input.getClientRects().length);
     if (inputs.length !== 1 || !buttonIsEnabled(inputs[0])) throw preparationError('TICKET_CHECK_FAILED');
     const ticket = findAmountTicket(doc, inputs[0], false);
-    if (!ticketMatchesPeriod(doc, ticket, start)) throw preparationError('MARKET_NOT_CURRENT');
+    if (!ticketMatchesPeriod(doc, ticket, start, SERIES[series].period)) throw preparationError('MARKET_NOT_CURRENT');
     const controls = [...ticket.querySelectorAll('button')].filter((button) => button.getClientRects().length);
     if (controls.filter((button) => /^买入\s+(涨|跌)$|^最低购买金额为\s*\$/.test(button.textContent.trim())).length !== 1) {
       throw preparationError('TICKET_CHECK_FAILED');
@@ -234,20 +271,22 @@
   // Normalize only the order type, ahead of the 60-second window. Each subsequent
   // menu/readback step requires another fresh, enabled, unclaimed preparation read.
   function restoreMarketOrder(wrapper, status, doc, url, attempt, now) {
-    const start = Math.floor(now / 300) * 300;
     const value = wrapper?.preparation;
+    const series = seriesOf(value?.series) ?? '5m';
+    const start = roundStart(now, series);
+    const lastRound = idRound(value?.lastAttempt?.id);
     if (wrapper?.bridgeId !== 'future-btc5m' || !Number.isFinite(wrapper.serverTime) ||
         Math.abs(now - wrapper.serverTime) > 3 || value?.mode !== 'PREPARE_ONLY' ||
         value.noSubmission !== true || value.operatorAuthorized !== true ||
         value.authorizationSource !== 'USER_REQUEST' || value.enabled !== true ||
         !['WAITING_SIGNAL', 'WAITING_BROWSER', 'BLOCKED'].includes(value.state) || value.intent ||
-        value.lastAttempt?.periodStart >= start || !Array.isArray(value.reasons) ||
+        lastRound?.series === series && lastRound.start >= start || !Array.isArray(value.reasons) ||
         value.reasons.some((reason) => !['WAITING_CURRENT_SIGNAL', 'BROWSER_NOT_CONNECTED', 'MARKET_NOT_CURRENT',
           'TICKET_CHECK_FAILED', 'BUTTON_QUOTES_UNAVAILABLE', 'BUTTON_QUOTES_TIED'].includes(reason)) ||
-        status?.reason === 'NOT_ET_WEEKEND' || !navigationTarget(status, url, now) || now >= start + 80) return;
+        status?.reason === 'NOT_ET_WEEKEND' || !navigationTarget(status, url, now) || now >= start + SERIES[series].entry[1]) return;
     if (attempt.phase === 'FAILED') return;
     try {
-      const {control, mode} = orderTypeTicket(doc, url, now);
+      const {control, mode} = orderTypeTicket(doc, url, now, series);
       if (mode === '市价单') {
         attempt.phase = 'READY';
         attempt.reason = null;
@@ -342,12 +381,12 @@
     } catch {
       return null;
     }
-    const match = parsed.pathname.match(/^\/(?:zh\/)?event\/btc-updown-5m-(0|[1-9]\d*)\/?$/);
-    const pagePeriodStart = match && Number(match[1]);
-    if (parsed.origin !== 'https://future.news' || parsed.username || parsed.password || !match ||
-        !Number.isSafeInteger(pagePeriodStart) || pagePeriodStart < 0 || pagePeriodStart % 300 !== 0 ||
+    const page = pathRound(parsed.pathname);
+    const pagePeriodStart = page && page.start;
+    if (parsed.origin !== 'https://future.news' || parsed.username || parsed.password || !page ||
         !Number.isFinite(now)) return null;
-    const start = Math.floor(now / 300) * 300;
+    // Current, ended or mismatched relative to the page's own series.
+    const start = roundStart(now, page.series);
     const navigation = pagePeriodStart < start ? 'ENDED' : pagePeriodStart !== start || endedMarketButtons(doc).length ? 'MISMATCH' : 'CURRENT';
     // Only origin/path leave the tab. Query parameters, DOM text and errors do not.
     const report = {schemaVersion: 2, marketUrl: parsed.origin + parsed.pathname, pagePeriodStart,
@@ -357,7 +396,7 @@
     try {
       const input = findAmountInput(doc);
       const ticket = findAmountTicket(doc, input);
-      if (!ticketMatchesPeriod(doc, ticket, pagePeriodStart)) {
+      if (!ticketMatchesPeriod(doc, ticket, pagePeriodStart, SERIES[page.series].period)) {
         report.navigation = 'MISMATCH';
         return report;
       }
@@ -407,11 +446,12 @@
   // This is the detailed position list, never the ticket's mark-to-market summary.
   // A missing list is unknown; only a distinct visible header and its row area can
   // establish an empty baseline. Inspection cannot open tabs or submit anything.
-  function readPositionSnapshot(doc, url, periodStart, side) {
+  function readPositionSnapshot(doc, url, periodStart, side, series = '5m') {
     try {
       const page = new URL(url);
-      const slug = `btc-updown-5m-${periodStart}`;
-      if (!Number.isSafeInteger(periodStart) || periodStart < 0 || periodStart % 300 ||
+      if (!seriesOf(series)) return null;
+      const slug = `${SERIES[series].slug}${periodStart}`;
+      if (!Number.isSafeInteger(periodStart) || periodStart < 0 || periodStart % SERIES[series].period ||
           !['Up', 'Down'].includes(side) || page.username || page.password || !matchesMarket(url, {slug})) return null;
       const headerPattern = /^市场结果份额均价\/现价投注额(?:预期获得)?(?:金额)?手续费(?:止盈\/止损)?(?:当前盈亏)?时间操作$/;
       const normalized = (element) => typeof element.textContent === 'string' ? element.textContent.replace(/\s+/g, '') : '';
@@ -520,18 +560,22 @@
         !validButtonQuote(intent.downQuoteCents) || intent.upQuoteCents === intent.downQuoteCents ||
         intent.side !== (intent.upQuoteCents > intent.downQuoteCents ? 'Up' : 'Down') ||
         !Number.isFinite(intent.quoteObservedAt) || intent.quoteObservedAt > now || now - intent.quoteObservedAt > 5) return null;
-    const start = Math.floor(now / 300) * 300;
-    if (!Number.isSafeInteger(intent.periodStart) || intent.periodStart !== start ||
-        intent.id !== `future-btc5m-prepare:${start}` || intent.slug !== `btc-updown-5m-${start}` ||
-        intent.periodEnd !== start + 300 || intent.amountUsd !== 1 || !['Up', 'Down'].includes(intent.side) ||
+    const round = idRound(intent.id);
+    if (!round) return null;
+    const {series} = round;
+    const [first, last] = SERIES[series].entry;
+    const start = roundStart(now, series);
+    if (!Number.isSafeInteger(intent.periodStart) || intent.periodStart !== start || round.start !== start ||
+        intent.slug !== `${SERIES[series].slug}${start}` ||
+        intent.periodEnd !== start + SERIES[series].period || intent.amountUsd !== 1 || !['Up', 'Down'].includes(intent.side) ||
         intent.priceSource !== 'chainlink' ||
-        intent.openPriceSource !== 'polymarket_crypto_price_fiveminute_twap60_openPrice' ||
+        intent.openPriceSource !== SERIES[series].openSource ||
         intent.twapLookbackSeconds !== 60 || !Number.isFinite(intent.openPrice) || intent.openPrice <= 0 ||
         !Number.isFinite(intent.currentPrice) || intent.currentPrice <= 0 ||
-        !Number.isFinite(intent.createdAt) || intent.createdAt < start + 60 || intent.createdAt >= start + 80 ||
-        intent.expiresAt !== start + 80 || now < intent.createdAt || now >= intent.expiresAt ||
+        !Number.isFinite(intent.createdAt) || intent.createdAt < start + first || intent.createdAt >= start + last ||
+        intent.expiresAt !== start + last || now < intent.createdAt || now >= intent.expiresAt ||
         !Number.isFinite(intent.priceObservedAt) || intent.priceObservedAt > intent.createdAt ||
-        now - intent.priceObservedAt > 5 || now < start + 60 ||
+        now - intent.priceObservedAt > 5 || now < start + first ||
         !(intent.claimToken === null || typeof intent.claimToken === 'string' && /^[a-f0-9]{32}$/.test(intent.claimToken))) return null;
     return intent;
   }
@@ -542,11 +586,15 @@
     return error;
   }
 
-  function readPreparationTicket(doc, url, start) {
+  function readPreparationTicket(doc, url, start, series = '5m') {
     // Freshness is checked against the bridge before every stage; this read binds the
-    // DOM title and URL to that already checked round.
-    const report = readPreflight(doc, url, start + 60);
-    if (report?.navigation !== 'CURRENT' || report.pagePeriodStart !== start) throw preparationError('MARKET_MISMATCH');
+    // DOM title and URL to that already checked round of that series.
+    const report = readPreflight(doc, url, start + SERIES[series].entry[0]);
+    let page = null;
+    try { page = pathRound(new URL(url).pathname); } catch {}
+    if (report?.navigation !== 'CURRENT' || report.pagePeriodStart !== start || page?.series !== series) {
+      throw preparationError('MARKET_MISMATCH');
+    }
     if (report.ticketStatus !== 'PASS') throw preparationError('TICKET_CHANGED');
     const input = findAmountInput(doc);
     if (!buttonIsEnabled(input)) throw preparationError('TICKET_CHANGED');
@@ -591,7 +639,9 @@
     if (!intent || wrapper.preparation.state !== 'PENDING' || intent.claimToken !== null) return null;
     let claimed = null;
     let result = null;
-    const key = 'polyhermes.future-btc5m.preparation';
+    const {series} = idRound(intent.id);
+    // One once-per-round key per series: a 15m start is also a 5m start.
+    const key = series === '5m' ? 'polyhermes.future-btc5m.preparation' : `polyhermes.future-btc5m.preparation.${series}`;
     const check = async () => {
       const current = await transport.readPreparation();
       const now = nowFn();
@@ -604,16 +654,16 @@
           !Object.keys(intent).every((field) => field === 'claimToken' || value[field] === intent[field])) {
         throw preparationError('PREPARATION_REVOKED');
       }
-      const ticket = readPreparationTicket(doc, readUrl(), intent.periodStart);
+      const ticket = readPreparationTicket(doc, readUrl(), intent.periodStart, series);
       if (ticket.preferredSide !== intent.side) throw preparationError('HIGHER_BUTTON_SIDE_CHANGED');
       return ticket;
     };
     try {
-      const initial = readPreparationTicket(doc, readUrl(), intent.periodStart);
+      const initial = readPreparationTicket(doc, readUrl(), intent.periodStart, series);
       if (initial.preferredSide !== intent.side) throw preparationError('HIGHER_BUTTON_SIDE_CHANGED');
       const previous = JSON.parse(storage.getItem(key) || 'null');
       if (previous !== null && (!Number.isSafeInteger(previous.periodStart) ||
-          previous.id !== `future-btc5m-prepare:${previous.periodStart}`)) throw preparationError('PREPARATION_FAILED');
+          previous.id !== `${SERIES[series].id}${previous.periodStart}`)) throw preparationError('PREPARATION_FAILED');
       if (previous?.periodStart >= intent.periodStart) return null;
       // Persist before claiming. An uncertain claim response, reload or failure never retries this round.
       storage.setItem(key, JSON.stringify({periodStart: intent.periodStart, id: intent.id}));
@@ -674,7 +724,7 @@
   }
 
   // Export pure guards for the local fixture tests; this is an isolated extension world.
-  globalThis.FutureBtc5m = {usableDraft, matchesMarket, observationView, findAmountInput, findAmountTicket, buttonIsEnabled, prepareAmount,
+  globalThis.FutureBtc5m = {SERIES, seriesOf, roundStart, pathRound, idRound, usableDraft, matchesMarket, observationView, findAmountInput, findAmountTicket, buttonIsEnabled, prepareAmount,
     navigationTarget, followCurrentMarket, readPreflight, usablePreparation, readPreparationTicket, prepareOnlyOnce, parseButtonQuote, readPositionSnapshot, readWalletSnapshot};
   if (typeof document === 'undefined') return;
 
@@ -727,10 +777,15 @@
   const preflightReport = document.createElement('p');
   const preparationReport = document.createElement('p');
   const note = document.createElement('p');
-  const preparationNote = '开启自动票据后，仅在每轮第 60–80 秒、行情有效时选择按钮数字较大的一方并填入 $1，准备好后自动点击一次 Future 买入。' +
-    '每轮准备前自动切回市价单并核对。自动买入仅在热门方向 ≥60¢、页面与 Polymarket 盘口价差不超过 3¢，且两者均在准备价 ±5¢ 内、最高不超过 97¢ 时进行，否则本轮不点击。$1 为订单本金，费用以平台为准。';
+  const preparationNoteFor = (series) => {
+    const [first, last] = SERIES[series].entry;
+    const rule = series === '15m' ?
+      `当前策略：${SERIES[series].label}。开启自动票据后，每轮第 ${first}–${last} 秒读取 15 分钟盘按钮数字较大的一方；只有它与同一时刻 1 小时盘的热门方向相反时才填入 $1，准备好后自动点击一次 Future 买入，方向相同则本轮跳过。` :
+      `当前策略：${SERIES[series].label}。开启自动票据后，仅在每轮第 ${first}–${last} 秒、行情有效时选择按钮数字较大的一方并填入 $1，准备好后自动点击一次 Future 买入。`;
+    return rule + '每轮准备前自动切回市价单并核对。自动买入仅在热门方向 ≥60¢、页面与 Polymarket 盘口价差不超过 3¢，且两者均在准备价 ±5¢ 内、最高不超过 97¢ 时进行，否则本轮不点击。$1 为订单本金，费用以平台为准。';
+  };
   note.style.whiteSpace = 'pre-line';
-  note.textContent = preparationNote;
+  note.textContent = preparationNoteFor('5m');
   const autoBuyReport = document.createElement('p');
   autoBuyReport.style.whiteSpace = 'pre-line';
   // Weekend-only is held by the local assistant and resets to on whenever it restarts.
@@ -762,6 +817,9 @@
   let windowBlockerOutcomes = [];
   let preparationView = null;
   preparationReport.style.whiteSpace = 'pre-line';
+  // The strategy series the bridge reports (preparation first, then the assistant status).
+  const activeSeries = () => seriesOf(preparationView?.preparation?.series) ?? seriesOf(latest?.series) ?? '5m';
+  const recordSeries = (last) => seriesOf(last?.series) ?? '5m';
 
   async function reportPage() {
     if (reporting) return;
@@ -834,7 +892,11 @@
     PREPARATION_REVOKED: ['准备失效', '行情过期或准备许可已失效'],
     PREPARATION_REVOKED_BY_USER: ['已停止', '自动准备已被关闭'],
     PREPARATION_RECEIPT_UNKNOWN: ['回执未知', '票据准备回执未确认'],
-    INTENT_EXPIRED: ['时间安排', '已过第 80 秒入场截止时间'],
+    INTENT_EXPIRED: ['时间安排', '已过本轮入场截止时间'],
+    SAME_AS_1H_FAVORITE: ['策略过滤', '15 分钟热门方向与 1 小时热门方向相同，本轮跳过'],
+    HOUR_QUOTE_UNAVAILABLE: ['行情异常', '1 小时盘口不可用，无法判断方向'],
+    DECISION_LEDGER_INVALID: ['本地异常', '策略决策账本无法读取'],
+    DECISION_LEDGER_WRITE_FAILED: ['本地异常', '策略决策账本写入失败'],
     ALREADY_CONSUMED: ['防重复保护', '本轮已记录买入尝试，不再点击'],
     STOP_FILE_PRESENT: ['已停止', '助手已停止'],
     AUTO_PREPARATION_DISABLED: ['自动功能关闭', '自动准备票据已关闭'],
@@ -855,7 +917,7 @@
       return ['运行安排', '当前不是美东周末'];
     }
     if (code === 'WAITING_CURRENT_SIGNAL' && (latest?.reason === 'CHAINLINK_PRICE_STALE_OR_FUTURE' ||
-        latest?.signal?.period_start === Math.floor(Date.now() / 1000 / 300) * 300 &&
+        latest?.signal?.period_start === roundStart(Date.now() / 1000, activeSeries()) &&
         Number.isFinite(latest.signal.price_observed_at) && (latest.signal.price_observed_at > Date.now() / 1000 ||
           Date.now() / 1000 - latest.signal.price_observed_at > 5))) {
       return ['行情异常', '行情采样已过期或时间无效'];
@@ -863,17 +925,19 @@
     return Object.hasOwn(outcomeReasons, code) ? outcomeReasons[code] : ['原因待核实', `未识别的状态代码：${code || '未提供'}`];
   }
 
-  function roundLabel(start) {
-    if (!Number.isSafeInteger(start) || start < 0 || start % 300 !== 0) return '轮次未记录';
+  function roundLabel(start, series = activeSeries()) {
+    const period = SERIES[series].period;
+    if (!Number.isSafeInteger(start) || start < 0 || start % period !== 0) return '轮次未记录';
     const date = new Intl.DateTimeFormat('zh-CN', {timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit'});
     const time = new Intl.DateTimeFormat('zh-CN', {timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
-    return `${date.format(start * 1000)} ${time.format(start * 1000)}–${time.format((start + 300) * 1000)}（北京时间）`;
+    return `${date.format(start * 1000)} ${time.format(start * 1000)}–${time.format((start + period) * 1000)}（北京时间）`;
   }
 
   function confirmedPositionFill(last) {
     const fill = last.fill;
     return last.state === 'CLICK_ATTEMPTED' && last.reason === 'PLATFORM_RESULT_UNKNOWN' && last.amountUsd === 1 &&
-      ['Up', 'Down'].includes(last.side) && Number.isSafeInteger(last.periodStart) && last.periodStart >= 0 && last.periodStart % 300 === 0 &&
+      ['Up', 'Down'].includes(last.side) && Number.isSafeInteger(last.periodStart) && last.periodStart >= 0 &&
+      last.periodStart % SERIES[recordSeries(last)].period === 0 &&
       fill?.source === 'FUTURE_POSITION_PAGE' && Number.isFinite(fill.shares) && fill.shares > 0 &&
       validButtonQuote(fill.avgPriceCents) && fill.avgPriceCents > 0 && Number.isFinite(fill.confirmedAt) &&
       fill.confirmedAt >= last.periodStart && fill.confirmedAt <= Date.now() / 1000 ? fill : null;
@@ -903,15 +967,18 @@
 
   function showOutcomeSummary(view) {
     const now = Date.now() / 1000;
-    const start = Math.floor(now / 300) * 300;
+    const series = activeSeries();
+    const [first, last80] = SERIES[series].entry;
+    const start = roundStart(now, series);
     const elapsed = now - start;
     const last = view?.last;
-    recentSummary.textContent = last ? `最近买入检查\n${buyOutcome(last).join('\n')}\n${last.periodStart === start ? '本轮' : '历史轮次'} · ${roundLabel(last.periodStart)}` :
+    const lastIsCurrent = last && last.periodStart === start && recordSeries(last) === series;
+    recentSummary.textContent = last ? `最近买入检查\n${buyOutcome(last).join('\n')}\n${lastIsCurrent ? '本轮' : '历史轮次'} · ${roundLabel(last.periodStart, recordSeries(last))}` :
       '最近买入检查\n本页尚无买入检查记录\n刷新前的操作请查看本机账本或 Future 订单';
     const value = preparationView?.preparation;
     const freshPreparation = value && Number.isFinite(preparationView.serverTime) && Math.abs(now - preparationView.serverTime) <= 3;
     let outcome;
-    if (last?.periodStart === start) outcome = buyOutcome(last);
+    if (lastIsCurrent) outcome = buyOutcome(last);
     else if (view?.state === 'BLOCKED' && view.reason) {
       const [category, message] = outcomeReason(view.reason);
       outcome = [`未点击 · ${category}`, message];
@@ -919,17 +986,18 @@
       outcome = ['状态未知 · 服务异常', '本地准备服务未连接或状态已过期；无法确认本轮操作'];
     } else if (value.reasons?.includes('STOP_FILE_PRESENT')) outcome = ['未点击 · 已停止', '助手已停止'];
     else if (!value.enabled) outcome = ['未点击 · 自动功能关闭', '在 PolyHermes 开启“自动准备票据”后才会自动买入'];
-    else if (elapsed >= 80) {
+    else if (elapsed >= last80) {
       // Only observations made inside this round's entry window can explain a missed entry.
       const observed = orderTypeAttempt.periodStart === start ? [...windowBlockerOutcomes] : [];
       const record = value.lastAttempt;
-      if (!observed.length && record?.periodStart === start && ['FAILED', 'REVOKED', 'EXPIRED'].includes(record.state) &&
+      if (!observed.length && idRound(record?.id)?.series === series && record.periodStart === start &&
+          ['FAILED', 'REVOKED', 'EXPIRED'].includes(record.state) &&
           record.reason && record.reason !== 'INTENT_EXPIRED') observed.push(outcomeReason(record.reason));
       outcome = observed.length ? [`未点击 · ${observed[0][0]}`,
-        `窗口内记录：${observed.map((item) => item[1]).join('；')}\n已过第 80 秒，等待下一轮`] :
+        `窗口内记录：${observed.map((item) => item[1]).join('；')}\n已过第 ${last80} 秒，等待下一轮`] :
         ['已过入场窗口 · 本轮无点击记录', '窗口内原因未记录，无法判断是否触发风控\n等待下一轮，不补买'];
-    } else if (elapsed < 60 && !['BLOCKED', 'FAILED', 'REVOKED', 'RECEIPT_UNKNOWN'].includes(value.state)) {
-      outcome = ['等待入场 · 时间安排', `距第 60 秒还有 ${Math.ceil(60 - elapsed)} 秒；入场窗口为第 60–80 秒`];
+    } else if (elapsed < first && !['BLOCKED', 'FAILED', 'REVOKED', 'RECEIPT_UNKNOWN'].includes(value.state)) {
+      outcome = ['等待入场 · 时间安排', `距第 ${first} 秒还有 ${Math.ceil(first - elapsed)} 秒；入场窗口为第 ${first}–${last80} 秒`];
     } else if (value.state === 'READY') outcome = ['已准备 · 等待买入检查', '已准备 $1 票据；通过价格与页面检查后才会点击'];
     else if (['PENDING', 'CLAIMED'].includes(value.state)) outcome = ['准备中 · 尚未点击', '正在核对方向与 $1 金额'];
     else {
@@ -939,7 +1007,7 @@
       outcome = [`未点击 · ${category}`, codes.map((code) => outcomeReason(code)[1]).join('；') || '尚未取得有效准备许可'];
     }
     const enabled = freshPreparation ? value.enabled ? '自动买入已开启' : '自动买入已关闭' : '开关未核实';
-    currentSummary.textContent = `本轮状态 · ${enabled}\n${outcome.join('\n')}\n${roundLabel(start)}`;
+    currentSummary.textContent = `本轮状态 · ${enabled} · ${SERIES[series].label}\n${outcome.join('\n')}\n${roundLabel(start, series)}`;
   }
 
   async function preparationRequest(type, payload) {
@@ -980,15 +1048,18 @@
       BLOCKED: `无法启动（${reasons[view.reason] || view.reason}），不会点击`};
     let report = `自动买入：${states[view.state]}`;
     if (view.last?.state === 'CLICK_ATTEMPTED') {
-      report += confirmedPositionFill(view.last) ? `\n最近：${buyOutcome(view.last).join('；')}（btc-updown-5m-${view.last.periodStart}）` :
+      const slug = `${SERIES[recordSeries(view.last)].slug}${view.last.periodStart}`;
+      report += confirmedPositionFill(view.last) ? `\n最近：${buyOutcome(view.last).join('；')}（${slug}）` :
         view.last.reason === 'CLICK_THROWN_RESULT_UNKNOWN' ?
-        `\n最近：点击异常，平台结果未知（btc-updown-5m-${view.last.periodStart}），本轮不重试` :
-        `\n最近：已点击“买入 ${view.last.side === 'Up' ? '涨' : '跌'}” $1（btc-updown-5m-${view.last.periodStart}），成交以 Future 订单为准`;
+        `\n最近：点击异常，平台结果未知（${slug}），本轮不重试` :
+        `\n最近：已点击“买入 ${view.last.side === 'Up' ? '涨' : '跌'}” $1（${slug}），成交以 Future 订单为准`;
     } else if (view.last) {
       report += `\n最近：未点击（${reasons[view.last.reason] || view.last.reason}）`;
-      if (Number.isSafeInteger(view.last.periodStart) && view.last.periodStart >= 0 && view.last.periodStart % 300 === 0) {
-        report += `\n拒绝轮次：btc-updown-5m-${view.last.periodStart}（${view.last.periodStart ===
-          Math.floor(Date.now() / 1000 / 300) * 300 ? '本轮' : '历史轮次'}）`;
+      const lastSeries = recordSeries(view.last);
+      if (Number.isSafeInteger(view.last.periodStart) && view.last.periodStart >= 0 &&
+          view.last.periodStart % SERIES[lastSeries].period === 0) {
+        report += `\n拒绝轮次：${SERIES[lastSeries].slug}${view.last.periodStart}（${view.last.periodStart ===
+          roundStart(Date.now() / 1000, lastSeries) && lastSeries === activeSeries() ? '本轮' : '历史轮次'}）`;
       }
       const prices = view.last.priceCheck;
       if (validButtonQuote(prices?.upQuoteCents) && validButtonQuote(prices?.downQuoteCents)) {
@@ -1026,13 +1097,14 @@
     const now = Date.now() / 1000;
     const report = readPreflight(document, location.href, now);
     const sideText = (side) => side === 'Up' ? '涨 Up' : side === 'Down' ? '跌 Down' : '未核对';
-    note.textContent = preparationNote;
+    note.textContent = preparationNoteFor(activeSeries());
     if (report?.navigation === 'CURRENT' && report.ticketStatus === 'PASS' &&
         validButtonQuote(report.upQuoteCents) && validButtonQuote(report.downQuoteCents)) {
       const higherSide = report.upQuoteCents === report.downQuoteCents ? null :
         report.upQuoteCents > report.downQuoteCents ? 'Up' : 'Down';
       note.textContent += `\n报价观察：涨 ${report.upQuoteCents}¢ / 跌 ${report.downQuoteCents}¢；数字较大：${higherSide ? sideText(higherSide) : '同价，暂停准备'}；当前选中：${sideText(report.selectedSide)}。`;
-      if (now >= report.pagePeriodStart + 80) {
+      const pageSeries = pathRound(new URL(location.href).pathname)?.series ?? '5m';
+      if (now >= report.pagePeriodStart + SERIES[pageSeries].entry[1]) {
         note.textContent += '\n入场窗口已过期，保留先前选边，本轮不再切换或买入。';
       }
     } else note.textContent += '\n报价观察不可用：当前票据未核对或报价缺失。';
@@ -1107,15 +1179,18 @@
           value.authorizationSource !== 'USER_REQUEST' || typeof value.enabled !== 'boolean' ||
           !Object.hasOwn(labels, value.state)) throw preparationError('PREPARATION_FAILED');
       preparationView = wrapper;
+      title.textContent = `PolyHermes · ${SERIES[activeSeries()].label} · $1`;
       // Arm before this poll can prepare a ticket, so the new READY is created after arming.
       showAutoBuy(value.enabled);
       text.textContent = text.textContent.replace('本轮采样方向：', 'BTC参考价差（不决定票据方向）：');
       const state = value.state;
       const now = Date.now() / 1000;
-      const start = Math.floor(now / 300) * 300;
+      const series = activeSeries();
+      const [first, last] = SERIES[series].entry;
+      const start = roundStart(now, series);
       const elapsed = now - start;
-      if (orderTypeAttempt.periodStart !== start) {
-        orderTypeAttempt = {periodStart: start, phase: null, reason: null};
+      if (orderTypeAttempt.periodStart !== start || orderTypeAttempt.series !== series) {
+        orderTypeAttempt = {periodStart: start, series, phase: null, reason: null};
         lastBlockers = [];
         windowBlockerOutcomes = [];
       }
@@ -1123,8 +1198,8 @@
       // Inspection describes the present DOM, not a passed check left over from
       // before an order-type change or a fill cleared the amount.
       const pagePassed = inspectPage();
-      if (state === 'WAITING_SIGNAL') labels.WAITING_SIGNAL = elapsed < 60 ? '等待本轮第 60 秒；本次检查未切换方向或填写金额' :
-        elapsed >= 80 ? '本轮已超过第 80 秒，等待下一轮；本次检查未切换方向或填写金额' :
+      if (state === 'WAITING_SIGNAL') labels.WAITING_SIGNAL = elapsed < first ? `等待本轮第 ${first} 秒；本次检查未切换方向或填写金额` :
+        elapsed >= last ? `本轮已超过第 ${last} 秒，等待下一轮；本次检查未切换方向或填写金额` :
         latest?.reason === 'CHAINLINK_PRICE_STALE_OR_FUTURE' ? '行情过期或采样时间无效，等待有效行情；本次检查未切换方向或填写金额' :
         labels.WAITING_SIGNAL;
       const reasons = {BROWSER_NOT_CONNECTED: '浏览器报告过期', MARKET_NOT_CURRENT: '页面不是本轮市场',
@@ -1145,27 +1220,28 @@
           '行情采样已过期或时间无效' : '本轮行情尚未满足准备条件',
         SOURCE_STATE_UNAVAILABLE: '行情服务状态不可用', AUTO_PREPARATION_DISABLED: '自动准备已关闭',
         PREPARATION_LEDGER_WRITE_FAILED: '准备账本写入失败（PREPARATION_LEDGER_WRITE_FAILED）',
-        PREFLIGHT_LEDGER_WRITE_FAILED: '预检账本写入失败（PREFLIGHT_LEDGER_WRITE_FAILED）'};
+        PREFLIGHT_LEDGER_WRITE_FAILED: '预检账本写入失败（PREFLIGHT_LEDGER_WRITE_FAILED）',
+        SAME_AS_1H_FAVORITE: '15 分钟热门方向与 1 小时相同，本轮跳过', HOUR_QUOTE_UNAVAILABLE: '1 小时盘口不可用'};
       const blockers = ticketBlockers(document, location.href, now);
       const codes = [...new Set([...(Array.isArray(value.reasons) ? value.reasons.filter((reason) => typeof reason === 'string') : []),
         ...blockers, ...(orderTypeAttempt.reason ? [orderTypeAttempt.reason] : [])])];
       const details = codes.map((reason) => reasons[reason] || reason).join('、');
       preparationReport.textContent = `自动票据：${labels[state]}${details ? ` · ${details}` : ''}（未提交订单）`;
-      if (value.enabled && elapsed < 80 && (orderTypeAttempt.phase === 'OPENED' || orderTypeAttempt.phase === 'SELECTED')) {
+      if (value.enabled && elapsed < last && (orderTypeAttempt.phase === 'OPENED' || orderTypeAttempt.phase === 'SELECTED')) {
         preparationReport.textContent += '\n订单类型：正在切回市价单，等待回读';
       } else if (orderTypeAttempt.phase === 'READY' && pagePassed) preparationReport.textContent += '\n订单类型：市价单已核对';
-      if (value.enabled && ((elapsed >= 60 && elapsed < 80 &&
+      if (value.enabled && ((elapsed >= first && elapsed < last &&
           ['WAITING_SIGNAL', 'WAITING_BROWSER', 'BLOCKED'].includes(state)) || orderTypeAttempt.phase === 'FAILED')) {
         if (codes.length) {
           lastBlockers = codes;
-          if (elapsed >= 60 && elapsed < 80) windowBlockerOutcomes = codes.filter((code) => code !== 'INTENT_EXPIRED').map(outcomeReason);
+          if (elapsed >= first && elapsed < last) windowBlockerOutcomes = codes.filter((code) => code !== 'INTENT_EXPIRED').map(outcomeReason);
         }
       }
       if (state === 'READY') {
         lastBlockers = [];
         windowBlockerOutcomes = [];
       }
-      if (lastBlockers.length && (elapsed >= 80 || orderTypeAttempt.phase === 'FAILED')) {
+      if (lastBlockers.length && (elapsed >= last || orderTypeAttempt.phase === 'FAILED')) {
         preparationReport.textContent += `\n本轮阻断：${lastBlockers.map((reason) => reasons[reason] || reason).join('、')}`;
       }
       if (reportPromise) await reportPromise.catch(() => {});
@@ -1293,7 +1369,7 @@
             Number.isFinite(tick.checkedAt) && Math.abs(Date.now() / 1000 - tick.checkedAt) <= 3) {
           const page = new URL(location.href);
           if (page.origin === 'https://future.news' &&
-              /^\/(?:zh\/)?event\/btc-updown-5m-(0|[1-9]\d*)\/?$/.test(page.pathname)) {
+              pathRound(page.pathname)) {
             port.postMessage({type: 'FUTURE_BTC5M_RENDERER_PAGE', checkedAt: tick.checkedAt,
               marketUrl: page.origin + page.pathname});
           }

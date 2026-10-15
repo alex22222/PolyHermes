@@ -3091,13 +3091,16 @@ export interface FutureBtc5mPreflight {
   } | null
 }
 
+export type FutureBtc5mStrategy = 'btc15m_counter_1h' | 'btc5m_favorite'
+
 export interface FutureBtc5mBridgeStatus {
   bridgeId: 'future-btc5m'
   online: boolean
   requestedEnabled: boolean
   effectiveEnabled: false
   amountUsd: 1
-  series: '5m'
+  series: '5m' | '15m'
+  strategy?: FutureBtc5mStrategy
   mode: 'DISABLED' | 'BLOCKED'
   serverTime: number
   periodStart: number | null
@@ -3182,6 +3185,8 @@ export interface FutureBtc5mPreparation {
   intent: FutureBtc5mPreparationIntent | null
   lastAttempt: FutureBtc5mPreparationRecord | null
   reasons: string[]
+  strategy?: FutureBtc5mStrategy
+  series?: '5m' | '15m'
 }
 
 export interface FutureBtc5mOrder {

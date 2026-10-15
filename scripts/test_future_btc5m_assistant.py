@@ -712,12 +712,12 @@ class ClobMarketQuotesTest(unittest.TestCase):
         self.clob.events = round_market
         self.clock = START + 12
         self.assertTrue(self.quotes.warm())
-        self.assertEqual(START, self.quotes.tokens[0])
+        self.assertEqual(("5m", START), self.quotes.tokens[0])
         self.clock = START + 40
         self.assertFalse(self.quotes.warm(), "the round's tokens are already cached")
         self.clock = START + 300 + 1
         self.assertTrue(self.quotes.warm(), "a new round prefetches its own tokens")
-        self.assertEqual(START + 300, self.quotes.tokens[0])
+        self.assertEqual(("5m", START + 300), self.quotes.tokens[0])
         self.assertEqual([True, True, True], started)
         self.assertNotIn(CLOB_BOOKS, self.clob.urls(), "warming never reads books")
 
@@ -846,7 +846,7 @@ class ClobMarketQuotesTest(unittest.TestCase):
         self.assertAlmostEqual(self.clock, quote["observedAt"], places=3)
         self.assertEqual([(f"{GAMMA}?slug=btc-updown-5m-{START + 300}", None),
                           (CLOB_BOOKS, [{"token_id": up}, {"token_id": down}])], self.clob.calls[2:])
-        self.assertEqual(START + 300, self.quotes.tokens[0])
+        self.assertEqual(("5m", START + 300), self.quotes.tokens[0])
 
     def test_a_read_that_crosses_the_round_boundary_fails(self):
         self.clock = START + 299.8

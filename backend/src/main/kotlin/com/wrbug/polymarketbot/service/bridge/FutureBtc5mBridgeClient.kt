@@ -100,6 +100,14 @@ class FutureBtc5mBridgeClient(
         check(boolean(it, "requestedEnabled") == enabled) { "Future Bridge 未确认请求的开关状态" }
     }
 
+    fun strategy(strategy: String): FutureBtc5mBridgeStatus {
+        require(strategy in STRATEGIES) { "未知的 Future 策略" }
+        return request("/bridge/control", FutureBtc5mBridgeStatus::class.java, gson.toJson(mapOf("strategy" to strategy))) {
+            validateStatus(it)
+            check(string(it, "strategy") == strategy) { "Future Bridge 未确认请求的策略" }
+        }
+    }
+
     fun orders(request: FutureBtc5mOrderListRequest): FutureBtc5mOrderListResponse {
         require(request.page >= 1 && request.size in 1..100) { "page 必须大于0，size 必须在1-100之间" }
         require(request.status == null || request.status in ORDER_STATUSES) { "订单状态无效" }
@@ -179,8 +187,12 @@ class FutureBtc5mBridgeClient(
     }
 
     private fun validateStatus(status: JsonObject) {
-        check(string(status, "bridgeId") == "future-btc5m" && string(status, "series") == "5m" && integer(status, "amountUsd") == 1L) {
+        check(string(status, "bridgeId") == "future-btc5m" && string(status, "series") in SERIES && integer(status, "amountUsd") == 1L) {
             "Future Bridge 身份或固定金额无效"
+        }
+        val series = activeSeries(status)
+        if (status.has("strategy")) check(STRATEGIES[string(status, "strategy")] == string(status, "series")) {
+            "Future Bridge 策略与轮次周期不一致"
         }
         val requested = boolean(status, "requestedEnabled")
         check(boolean(status, "online") && !boolean(status, "effectiveEnabled") && !boolean(status, "executorReady")) {
@@ -191,7 +203,7 @@ class FutureBtc5mBridgeClient(
         check(serverTime >= 0) { "Future Bridge 服务器时间无效" }
         val period = field(status, "periodStart")
         val start = if (period.isJsonNull) null else integer(status, "periodStart")
-        check(start == null || start >= 0 && start % 300 == 0L) { "Future Bridge 轮次无效" }
+        check(start == null || start >= 0 && start % series.period == 0L) { "Future Bridge 轮次无效" }
         string(status, "feedStatus")
         nullableString(status, "reason")
         val reasons = array(status, "blockReasons")
@@ -208,7 +220,7 @@ class FutureBtc5mBridgeClient(
         if (!signalValue.isJsonNull) {
             val signal = objectValue(signalValue)
             val signalStart = integer(signal, "period_start")
-            check(start == signalStart && string(signal, "slug") == "btc-updown-5m-$signalStart") { "Future Bridge 信号轮次不匹配" }
+            check(start == signalStart && string(signal, "slug") == series.slug + signalStart) { "Future Bridge 信号轮次不匹配" }
             val observed = number(signal, "price_observed_at")
             val opening = number(signal, "open_price")
             val current = number(signal, "current_price")
@@ -216,9 +228,9 @@ class FutureBtc5mBridgeClient(
             val side = nullableString(signal, "side")
             val expected = if (current > opening) "Up" else if (current < opening) "Down" else null
             check(side == expected) { "Future Bridge 信号方向和价格不一致" }
-            if (signal.has("period_end")) check(integer(signal, "period_end") == signalStart + 300) { "Future Bridge 信号结束时间无效" }
+            if (signal.has("period_end")) check(integer(signal, "period_end") == signalStart + series.period) { "Future Bridge 信号结束时间无效" }
             if (signal.has("price_source")) check(string(signal, "price_source") == "chainlink") { "Future Bridge 信号来源无效" }
-            if (signal.has("open_price_source")) check(string(signal, "open_price_source") == OPEN_PRICE_SOURCE) { "Future Bridge 开盘价来源无效" }
+            if (signal.has("open_price_source")) check(string(signal, "open_price_source") == series.openPriceSource) { "Future Bridge 开盘价来源无效" }
             if (signal.has("twap_lookback_seconds")) check(integer(signal, "twap_lookback_seconds") == 60L) { "Future Bridge TWAP时长无效" }
         }
         if (status.has("preflight") && !status.get("preflight").isJsonNull) validatePreflight(objectValue(status.get("preflight")), status)
@@ -275,12 +287,13 @@ class FutureBtc5mBridgeClient(
         val now = number(status, "serverTime")
         val start = integer(record, "periodStart")
         val signal = objectValue(field(status, "signal"))
-        check(integer(status, "periodStart") == start && string(status, "feedStatus") == "CURRENT" &&
-            integer(record, "schemaVersion") == 2L && now >= start + 60 && now < number(record, "expiresAt") &&
+        val series = activeSeries(status)
+        check(preparationSeries(record) == series && integer(status, "periodStart") == start && string(status, "feedStatus") == "CURRENT" &&
+            integer(record, "schemaVersion") == 2L && now >= start + series.entryStart && now < number(record, "expiresAt") &&
             preparationSamplesFresh(record, now) &&
-            integer(signal, "period_start") == start && integer(signal, "period_end") == start + 300 &&
+            integer(signal, "period_start") == start && integer(signal, "period_end") == start + series.period &&
             now - number(signal, "price_observed_at") in 0.0..5.0 &&
-            string(signal, "price_source") == "chainlink" && string(signal, "open_price_source") == OPEN_PRICE_SOURCE &&
+            string(signal, "price_source") == "chainlink" && string(signal, "open_price_source") == series.openPriceSource &&
             integer(signal, "twap_lookback_seconds") == 60L) { "Future 当前准备状态与新鲜的原信号不一致" }
         val preflight = objectValue(field(status, "preflight"))
         check(boolean(preflight, "browserConnected") && string(preflight, "navigation") == "CURRENT" &&
@@ -310,15 +323,17 @@ class FutureBtc5mBridgeClient(
         validatePreparationScope(intent)
         val start = integer(intent, "periodStart")
         val version = integer(intent, "schemaVersion")
-        check(version in 1L..2L && start >= 0 && start % 300 == 0L &&
-            integer(intent, "periodEnd") == start + 300 && string(intent, "id") == "future-btc5m-prepare:$start" &&
-            string(intent, "slug") == "btc-updown-5m-$start" && integer(intent, "amountUsd") == 1L) {
+        // The intent's own id names its series; a historical 5m record may follow a switch to 15m.
+        val series = preparationSeries(intent)
+        check(version in 1L..2L && (version == 2L || series == SERIES.getValue("5m")) && start >= 0 && start % series.period == 0L &&
+            integer(intent, "periodEnd") == start + series.period &&
+            string(intent, "slug") == series.slug + start && integer(intent, "amountUsd") == 1L) {
             "Future 准备意图的市场或固定金额无效"
         }
         val created = number(intent, "createdAt")
         val observed = number(intent, "priceObservedAt")
-        check(created >= start + 60 && created < start + 80 && created <= serverTime &&
-            number(intent, "expiresAt") == (start + 80).toDouble() && observed >= 0 && created - observed in 0.0..5.0) {
+        check(created >= start + series.entryStart && created < start + series.entryEnd && created <= serverTime &&
+            number(intent, "expiresAt") == (start + series.entryEnd).toDouble() && observed >= 0 && created - observed in 0.0..5.0) {
             "Future 准备意图的信号采样或入场窗口无效"
         }
         val opening = number(intent, "openPrice")
@@ -329,7 +344,7 @@ class FutureBtc5mBridgeClient(
         else check(string(intent, "selectionSource") == "HIGHER_BUTTON_PRICE" && higherButtonSide(intent) != null &&
             string(intent, "side") == higherButtonSide(intent) && number(intent, "quoteObservedAt") >= 0 &&
             preparationSamplesFresh(intent, created)) { "Future 准备方向或原按钮报价快照无效" }
-        check(string(intent, "priceSource") == "chainlink" && string(intent, "openPriceSource") == OPEN_PRICE_SOURCE &&
+        check(string(intent, "priceSource") == "chainlink" && string(intent, "openPriceSource") == series.openPriceSource &&
             integer(intent, "twapLookbackSeconds") == 60L) { "Future 准备意图的价格来源无效" }
         val token = nullableString(intent, "claimToken")
         check(token == null || Regex("[0-9a-f]{32}").matches(token)) { "Future 准备意图的领取凭证无效" }
@@ -368,12 +383,15 @@ class FutureBtc5mBridgeClient(
             check(receipt.keySet() == setOf("checkedAt", "marketUrl", "amountUsd", "selectedSide")) { "Future 准备回执字段无效" }
             val checked = number(receipt, "checkedAt")
             check(checked >= 0 && kotlin.math.abs(checked - updated) <= 3 && checked >= claimed - 3 &&
-                marketUrlStart(string(receipt, "marketUrl")) == integer(record, "periodStart")) { "Future 准备回执的市场或浏览器时间无效" }
+                marketUrlRound(string(receipt, "marketUrl"))?.let { SERIES[it.first] to it.second } ==
+                    preparationSeries(record) to integer(record, "periodStart")) { "Future 准备回执的市场或浏览器时间无效" }
             val amount = if (field(receipt, "amountUsd").isJsonNull) null else number(receipt, "amountUsd")
             val side = nullableString(receipt, "selectedSide")
             check((amount == null || amount >= 0) && side in setOf(null, "Up", "Down")) { "Future 准备回执金额或方向无效" }
             if (state == "READY") check(amount == 1.0 && side == string(record, "side") &&
-                checked >= integer(record, "periodStart") + 60 && checked < expires) { "Future 票据准备成功缺少实际金额和方向核对" }
+                checked >= integer(record, "periodStart") + preparationSeries(record).entryStart && checked < expires) {
+                "Future 票据准备成功缺少实际金额和方向核对"
+            }
         }
     }
 
@@ -421,18 +439,23 @@ class FutureBtc5mBridgeClient(
             check(connected && fresh && matching && selectionSource == "HIGHER_BUTTON_PRICE" && preferredSide != null && enabled && navigation == "CURRENT" && ticket == "PASS" && amount == 1.0 && reasons.isEmpty) { "Future 预检通过所需条件缺失" }
             val signal = objectValue(field(status, "signal"))
             val period = integer(signal, "period_start")
-            check(start == period && integer(status, "periodStart") == period && string(status, "feedStatus") == "CURRENT" &&
-                serverTime >= period + 60 && serverTime < period + 80 && checked != null && checked >= period + 60 && checked < period + 80 &&
+            val series = activeSeries(status)
+            check(start == period && marketUrlRound(url!!)?.first == string(status, "series") &&
+                integer(status, "periodStart") == period && string(status, "feedStatus") == "CURRENT" &&
+                serverTime >= period + series.entryStart && serverTime < period + series.entryEnd && checked != null &&
+                checked >= period + series.entryStart && checked < period + series.entryEnd &&
                 serverTime - number(signal, "price_observed_at") in 0.0..5.0 && nullableString(signal, "side") == signalSide &&
-                integer(signal, "period_end") == period + 300 && string(signal, "price_source") == "chainlink" &&
-                string(signal, "open_price_source") == OPEN_PRICE_SOURCE && integer(signal, "twap_lookback_seconds") == 60L) { "Future 预检通过与实时信号不一致" }
+                integer(signal, "period_end") == period + series.period && string(signal, "price_source") == "chainlink" &&
+                string(signal, "open_price_source") == series.openPriceSource && integer(signal, "twap_lookback_seconds") == 60L) { "Future 预检通过与实时信号不一致" }
         } else check(reasons.size() > 0) { "Future 预检阻断原因缺失" }
         val history = field(preflight, "lastPassed")
         if (!history.isJsonNull) {
             val passed = objectValue(history)
             val period = integer(passed, "periodStart")
             val at = number(passed, "checkedAt")
-            check(marketUrlStart(string(passed, "marketUrl")) == period && at >= period + 60 && at < period + 80 && at <= serverTime + 3 &&
+            val passedSeries = marketUrlRound(string(passed, "marketUrl"))?.first?.let { SERIES[it] }
+            check(passedSeries != null && marketUrlStart(string(passed, "marketUrl")) == period &&
+                at >= period + passedSeries.entryStart && at < period + passedSeries.entryEnd && at <= serverTime + 3 &&
                 integer(passed, "amountUsd") == 1L && boolean(passed, "noSubmission")) { "Future 历史预检记录无效" }
             val legacyFields = setOf("periodStart", "checkedAt", "marketUrl", "signalSide", "amountUsd", "noSubmission")
             if (passed.keySet() == legacyFields) check(string(passed, "signalSide") in setOf("Up", "Down"))
@@ -457,10 +480,24 @@ class FutureBtc5mBridgeClient(
         at - number(value, "priceObservedAt") in 0.0..5.0 &&
             (integer(value, "schemaVersion") == 1L || at - number(value, "quoteObservedAt") in 0.0..5.0)
 
-    private fun marketUrlStart(url: String): Long? {
-        val digits = Regex("https://future\\.news/(?:zh/)?event/btc-updown-5m-([0-9]{1,15})/?").matchEntire(url)?.groupValues?.get(1) ?: return null
+    // (series, start) of a canonical Future BTC round page, else null.
+    private fun marketUrlRound(url: String): Pair<String, Long>? {
+        val match = Regex("https://future\\.news/(?:zh/)?event/btc-updown-(5m|15m)-([0-9]{1,15})/?").matchEntire(url) ?: return null
+        val (name, digits) = match.destructured
         val start = digits.toLongOrNull() ?: return null
-        return start.takeIf { it >= 0 && it % 300 == 0L && it.toString() == digits }
+        return (name to start).takeIf { start >= 0 && start % SERIES.getValue(name).period == 0L && start.toString() == digits }
+    }
+
+    private fun marketUrlStart(url: String): Long? = marketUrlRound(url)?.second
+
+    private fun activeSeries(status: JsonObject): RoundSeries =
+        SERIES[string(status, "series")] ?: throw IllegalStateException("Future Bridge 轮次周期无效")
+
+    private fun preparationSeries(value: JsonObject): RoundSeries {
+        val id = string(value, "id")
+        val start = integer(value, "periodStart")
+        return SERIES.values.firstOrNull { id == it.preparationId + start }
+            ?: throw IllegalStateException("Future 准备意图的市场或固定金额无效")
     }
 
     private fun validateOrder(order: JsonObject) {
@@ -536,6 +573,16 @@ class FutureBtc5mBridgeClient(
 
     companion object {
         private const val OPEN_PRICE_SOURCE = "polymarket_crypto_price_fiveminute_twap60_openPrice"
+
+        // Round series of the two strategies (same table as scripts/future_btc5m_series.py).
+        private data class RoundSeries(val period: Long, val entryStart: Long, val entryEnd: Long, val slug: String,
+                                       val preparationId: String, val openPriceSource: String)
+        private val SERIES = mapOf(
+            "5m" to RoundSeries(300, 60, 80, "btc-updown-5m-", "future-btc5m-prepare:", OPEN_PRICE_SOURCE),
+            "15m" to RoundSeries(900, 150, 170, "btc-updown-15m-", "future-btc15m-prepare:",
+                "polymarket_crypto_price_fifteen_twap60_openPrice"),
+        )
+        val STRATEGIES = mapOf("btc5m_favorite" to "5m", "btc15m_counter_1h" to "15m")
         private val PREPARATION_INTENT_FIELDS = setOf("schemaVersion", "id", "slug", "periodStart", "periodEnd", "side", "amountUsd",
             "createdAt", "expiresAt", "priceObservedAt", "openPrice", "currentPrice", "priceSource", "openPriceSource", "twapLookbackSeconds",
             "mode", "noSubmission", "operatorAuthorized", "authorizationSource", "claimToken")
@@ -550,7 +597,8 @@ class FutureBtc5mBridgeClient(
             "PREPARATION_RECEIPT_UNKNOWN", "PREPARATION_REVOKED", "PROCESS_RESTARTED", "PREPARATION_LEDGER_INVALID",
             "PREPARATION_LEDGER_WRITE_FAILED", "ORDER_LEDGER_INVALID", "ORDER_LEDGER_WRITE_FAILED", "CONTROL_STATE_WRITE_FAILED",
             "SIGNAL_SOURCE_UNAVAILABLE", "SIGNAL_SOURCE_INVALID", "STOP_FILE_PRESENT", "PREFLIGHT_LEDGER_INVALID", "PREFLIGHT_LEDGER_WRITE_FAILED", "BUTTON_QUOTES_UNAVAILABLE",
-            "BUTTON_QUOTES_TIED", "BUTTON_QUOTES_NOT_FRESH", "HIGHER_BUTTON_SIDE_CHANGED")
+            "BUTTON_QUOTES_TIED", "BUTTON_QUOTES_NOT_FRESH", "HIGHER_BUTTON_SIDE_CHANGED",
+            "SAME_AS_1H_FAVORITE", "HOUR_QUOTE_UNAVAILABLE", "DECISION_LEDGER_INVALID", "DECISION_LEDGER_WRITE_FAILED")
         val ORDER_STATUSES = setOf("PENDING", "SKIPPED", "FAILED", "SUBMITTED_UNVERIFIED", "FILLED")
     }
 }

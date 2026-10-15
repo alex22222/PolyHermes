@@ -9,6 +9,10 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent))
 
 from future_btc5m_bridge import FutureBridge
+import future_btc5m_bridge
+
+# These suites cover the original 5m strategy; the 15m default is tested separately.
+future_btc5m_bridge.DEFAULT_STRATEGY = "btc5m_favorite"
 
 
 START = 1791706800

@@ -2328,7 +2328,9 @@ test('the worker reads the Polymarket CLOB quote with a body-less GET on the fix
   }
   for (const change of [{frameId: 1}, {frameId: undefined}, {tab: undefined}, {url: 'https://evil.test/'},
     {url: marketUrl.replace('https:', 'http:')}, {url: 'https://future.news/zh/updown'},
-    {url: `https://future.news/zh/event/btc-updown-15m-${start}`},
+    // 15m pages are valid since 0.7.0; a non-boundary 15m start or another series is not.
+    {url: `https://future.news/zh/event/btc-updown-15m-${start + 300}`},
+    {url: `https://future.news/zh/event/btc-updown-1h-${start}`},
     {tab: {id: 1, url: 'https://future.news/zh/updown'}}, {tab: {id: 1, url: 'https://evil.test/'}},
     {url: marketUrl.replace('future.news', 'user:pass@future.news')}]) {
     assert.equal(worker.handler(message, {...sender, ...change}, () => assert.fail()), undefined, JSON.stringify(change));
@@ -2516,12 +2518,13 @@ test('the panel preserves safe quote diagnostics and shows Chinese causes withou
   assert.equal(fixture.writes(), 0);
 });
 
-test('the 0.6.6 manifest keeps price gates and the approved power and debugger permissions', () => {
+test('the 0.7.0 manifest names both strategies, keeps price gates and the approved permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('./future-btc5m-extension/manifest.json', import.meta.url), 'utf8'));
-  assert.equal(manifest.version, '0.6.6');
+  assert.equal(manifest.version, '0.7.0');
   assert.equal(manifest.minimum_chrome_version, '116');
   assert.ok([...manifest.description].length < 132, `${[...manifest.description].length} characters`);
   assert.match(manifest.description, /60¢.*Polymarket 盘口价差 ≤3¢.*准备价 ±5¢/);
+  assert.match(manifest.description, /5 分钟或 15 分钟（反 1 小时）/);
   assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*']);
   assert.deepEqual(manifest.permissions, ['power', 'debugger']);
   assert.deepEqual(manifest.content_scripts, [{matches: ['https://future.news/*'], js: ['content.js', 'buy_once.js'],
@@ -2603,4 +2606,22 @@ test('the panel shows weekend-only and turning it off needs a confirmation befor
   await change();
   assert.equal(weekendOnly, true, 'turning weekend-only back on needs no confirmation');
   assert.equal(checkbox.checked, true);
+});
+
+test('the worker routes 15m claims and preflights by the 15m page round only', async () => {
+  const worker = workerHandler(async () => ({ok: true, json: async () => ({bridgeId: 'future-btc5m'})}));
+  const url15 = `https://future.news/zh/event/btc-updown-15m-${start}`;
+  const sender = {url: url15, frameId: 0, tab: {id: 1, url: url15}};
+  await worker.send({type: 'FUTURE_BTC5M_PREPARATION_CLAIM', payload: {schemaVersion: 1, id: `future-btc15m-prepare:${start}`}}, sender);
+  assert.equal(worker.requests.at(-1).url, 'http://127.0.0.1:8766/bridge/preparation/claim');
+  for (const id of [`future-btc5m-prepare:${start}`, `future-btc15m-prepare:${start + 900}`]) {
+    assert.equal(worker.handler({type: 'FUTURE_BTC5M_PREPARATION_CLAIM', payload: {schemaVersion: 1, id}}, sender, () => {}), undefined, id);
+  }
+  const payload = {schemaVersion: 2, marketUrl: url15, pagePeriodStart: start, checkedAt: now, navigation: 'CURRENT',
+    ticketStatus: 'PASS', amountUsd: 1, selectedSide: 'Down', buyButtonEnabled: true, upQuoteCents: 35, downQuoteCents: 66};
+  await worker.send({type: 'FUTURE_BTC5M_PREFLIGHT', payload}, sender);
+  assert.equal(worker.requests.at(-1).url, 'http://127.0.0.1:8766/bridge/preflight');
+  assert.equal(worker.handler({type: 'FUTURE_BTC5M_PREFLIGHT', payload: {...payload, pagePeriodStart: start - 900}}, sender, () => {}),
+    undefined, 'the payload round must be the page round');
+  assert.equal(worker.requests.length, 2);
 });

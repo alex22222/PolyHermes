@@ -4,13 +4,23 @@ const MARKET_QUOTE_ERROR_CODES = ['HTTP_SOURCE_TIMEOUT', 'HTTP_SOURCE_UNAVAILABL
   'WRONG_MARKET_PRICE_CONFIG', 'MARKET_NOT_UNIQUE', 'WRONG_OR_INACTIVE_EVENT', 'WRONG_OR_INACTIVE_MARKET',
   'WRONG_MARKET_PERIOD', 'INVALID_OUTCOME_TOKENS', 'LOCAL_QUOTE_TIMEOUT', 'LOCAL_QUOTE_NOT_FOUND'];
 
+// Round series of the two strategies (same table as content.js and future_btc5m_series.py).
+const SERIES = {'5m': {period: 300, id: 'future-btc5m-prepare:'}, '15m': {period: 900, id: 'future-btc15m-prepare:'}};
+const PAGE_PATH = /^\/(?:zh\/)?event\/btc-updown-(5m|15m)-(0|[1-9]\d*)\/?$/;
+
+// {series, start} of a canonical Future BTC round path, else null.
+function roundOf(pathname) {
+  const match = typeof pathname === 'string' && pathname.match(PAGE_PATH);
+  const start = match && Number(match[2]);
+  return match && Number.isSafeInteger(start) && start >= 0 && start % SERIES[match[1]].period === 0 ?
+    {series: match[1], start} : null;
+}
+
 function marketPage(value) {
   try {
     const parsed = new URL(value);
-    const match = parsed.pathname.match(/^\/(?:zh\/)?event\/btc-updown-5m-(0|[1-9]\d*)\/?$/);
-    const start = match && Number(match[1]);
-    return parsed.origin === 'https://future.news' && !parsed.username && !parsed.password && match &&
-      Number.isSafeInteger(start) && start >= 0 && start % 300 === 0 ? parsed : null;
+    return parsed.origin === 'https://future.news' && !parsed.username && !parsed.password &&
+      roundOf(parsed.pathname) ? parsed : null;
   } catch {
     return null;
   }
@@ -29,12 +39,13 @@ function validPreflight(message, sender) {
   // Chrome can retain the content script's original URL across an SPA navigation.
   // The trusted top-frame tab URL describes the currently displayed market.
   const page = marketPage(sender.tab.url ?? sender.url);
-  const match = typeof payload.marketUrl === 'string' && payload.marketUrl.match(/^https:\/\/future\.news\/(?:zh\/)?event\/btc-updown-5m-(0|[1-9]\d*)\/?$/);
+  const round = page && roundOf(page.pathname);
   const now = Date.now() / 1000;
-  const start = Math.floor(now / 300) * 300;
-  return Boolean(documentPage && page && match && payload.marketUrl === page.origin + page.pathname &&
-    [1, 2, 3].includes(payload.schemaVersion) && Number.isSafeInteger(payload.pagePeriodStart) && payload.pagePeriodStart >= 0 &&
-    payload.pagePeriodStart % 300 === 0 && payload.pagePeriodStart === Number(match[1]) &&
+  const period = round ? SERIES[round.series].period : 300;
+  const start = Math.floor(now / period) * period;
+  return Boolean(documentPage && page && round && payload.marketUrl === page.origin + page.pathname &&
+    [1, 2, 3].includes(payload.schemaVersion) && Number.isSafeInteger(payload.pagePeriodStart) &&
+    payload.pagePeriodStart === round.start &&
     Number.isFinite(payload.checkedAt) && Math.abs(now - payload.checkedAt) <= 3 &&
     ['CURRENT', 'ENDED', 'MISMATCH'].includes(payload.navigation) &&
     (payload.navigation !== 'CURRENT' || payload.pagePeriodStart === start) &&
@@ -67,15 +78,15 @@ function validBuyAudit(message) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length ||
       !keys.every((key) => Object.hasOwn(value, key))) return false;
   const page = marketPage(value.marketUrl);
+  const round = page && roundOf(page.pathname);
   return [1, 2].includes(value.schemaVersion) && Number.isSafeInteger(value.periodStart) && value.periodStart >= 0 &&
-    value.periodStart % 300 === 0 && value.id === `future-btc5m-prepare:${value.periodStart}` &&
+    Boolean(round) && round.start === value.periodStart && value.id === `${SERIES[round.series].id}${value.periodStart}` &&
     Number.isFinite(value.armedAt) && Number.isFinite(value.attemptedAt) && value.armedAt <= value.attemptedAt &&
     value.auditId === `${value.id}:${Math.floor(value.attemptedAt * 1000)}` &&
     typeof value.claimToken === 'string' && /^[a-f0-9]{32}$/.test(value.claimToken) &&
     ['Up', 'Down'].includes(value.side) && value.amountUsd === 1 &&
     Object.hasOwn(reasons, value.state) && reasons[value.state].includes(value.reason) &&
     Boolean(page) && value.marketUrl === page.origin + page.pathname &&
-    Number(page.pathname.match(/btc-updown-5m-(\d+)/)[1]) === value.periodStart &&
     quote(value.upQuoteCents) && quote(value.downQuoteCents) && ['Up', 'Down', null].includes(value.selectedSide) &&
     (value.ticketAmountUsd === null || Number.isFinite(value.ticketAmountUsd) && value.ticketAmountUsd >= 0) &&
     typeof value.extensionVersion === 'string' && /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(value.extensionVersion) &&
@@ -99,11 +110,13 @@ function preparationMessage(message, sender) {
   if (Object.keys(message).length !== 2 || !Object.hasOwn(message, 'payload')) return null;
   const payload = message.payload;
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
-  const start = Number(page.pathname.match(/btc-updown-5m-(\d+)/)[1]);
-  const id = `future-btc5m-prepare:${start}`;
+  // Claims and receipts name the round of the page that prepares it, in that page's series.
+  const {series, start} = roundOf(page.pathname);
+  const id = `${SERIES[series].id}${start}`;
   if (payload.schemaVersion !== 1 || payload.id !== id) return null;
   if (type === 'FUTURE_BTC5M_PREPARATION_CLAIM') {
-    return Object.keys(payload).length === 2 && start === Math.floor(Date.now() / 300000) * 300 ? '/claim' : null;
+    const period = SERIES[series].period;
+    return Object.keys(payload).length === 2 && start === Math.floor(Date.now() / 1000 / period) * period ? '/claim' : null;
   }
   const keys = ['schemaVersion', 'id', 'claimToken', 'checkedAt', 'status', 'marketUrl',
     'amountUsd', 'selectedSide', 'reason', 'noSubmission'];
