@@ -865,7 +865,7 @@ class PolymtradeExecutor:
             }
         except Exception as e:
             logger.exception(f"Failed to fetch portfolio positions: {e}")
-            return {"error": str(e)}
+            return self._defer_portfolio_read({"error": str(e), "positions": []})
 
     async def _scroll_portfolio_until_stable(
         self,

@@ -33,6 +33,9 @@ not an empty account.
 - Repeated render failures also enter the cooldown after one fresh-page retry.
   Do not overwrite login state based on a failed portfolio page, or navigate a
   second time merely to obtain the account's already-resolved wallet address.
+- Navigation and scrape exceptions also invalidate the old holdings snapshot
+  and enter the same cooldown. A forced execution read cannot bypass it or
+  reuse pre-failure holdings.
 
 ## Release gate
 

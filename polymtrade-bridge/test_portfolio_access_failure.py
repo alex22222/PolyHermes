@@ -78,6 +78,28 @@ async def test_access_failure_retries_only_after_cooldown_and_can_recover():
     page.close.assert_not_awaited()
 
 
+async def test_navigation_failure_invalidates_holdings_and_defers_forced_reads():
+    executor, page = blocked_executor()
+    page.goto.side_effect = RuntimeError("network unavailable")
+    executor._cache_portfolio_snapshot({"positions": [{"quantity": 8}], "portfolio_complete": True})
+
+    with patch("polymtrade_executor.time.monotonic", return_value=100):
+        first = await executor.fetch_portfolio_positions(force_refresh=True)
+    with patch("polymtrade_executor.time.monotonic", return_value=101):
+        forced = await executor.fetch_portfolio_positions(force_refresh=True)
+        normal = await executor.fetch_portfolio_positions()
+
+    assert first["portfolio_complete"] is False
+    assert first["empty_state_confirmed"] is False
+    assert "network unavailable" in first["error"]
+    assert first["positions"] == []
+    assert forced == normal == first
+    assert executor._portfolio_snapshot_cache is None
+    page.goto.assert_awaited_once()
+    page.close.assert_not_awaited()
+    assert executor._logged_in is True
+
+
 async def test_access_denial_cannot_be_interpreted_as_zero_live_quantity():
     executor, _ = blocked_executor()
     executor.is_ready = lambda: True
