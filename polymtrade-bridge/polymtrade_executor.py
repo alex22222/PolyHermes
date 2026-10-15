@@ -1477,6 +1477,7 @@ class PolymtradeExecutor:
         cached = self._gamma_query_cache.get(key)
         if cached and time.monotonic() < cached[0]:
             if cached[3]:
+                self._upstream_cooldown.check(url)
                 raise RuntimeError(f"Gamma query cooldown: {cached[3]}")
             return copy.deepcopy(cached[1])
 
@@ -1538,6 +1539,15 @@ class PolymtradeExecutor:
                     metrics.gamma_api_requests += 1
                     resp = await client.get(url, params=params, timeout=20.0)
                     self._upstream_cooldown.record(url, resp.status_code, resp.headers)
+                    if resp.status_code in (401, 403, 429):
+                        code = re.search(r"\berror code:\s*(\d{4})\b", resp.text[:512])
+                        logger.warning(
+                            "Metadata access denied: host=%s status=%s server=%s request_id=%s code=%s",
+                            urllib.parse.urlsplit(url).hostname, resp.status_code,
+                            resp.headers.get("server", "unknown"),
+                            resp.headers.get("cf-ray") or resp.headers.get("x-vercel-id") or "unknown",
+                            code.group(1) if code else "unknown",
+                        )
                 resp.raise_for_status()
                 return resp.json()
             except UpstreamAccessDeferred:
@@ -1720,6 +1730,8 @@ class PolymtradeExecutor:
                             )
                             return str(event["id"]), event["slug"]
                     except Exception as e:
+                        if self._is_metadata_access_denial(e):
+                            raise
                         logger.warning(
                             "Failed to resolve event via Gamma %s slug: %s",
                             endpoint,
@@ -1732,15 +1744,11 @@ class PolymtradeExecutor:
             # and then resolve the event from Gamma using that slug.
             if condition_id:
                 try:
-                    async with self._http_client_context() as metadata_client:
-                        resp = await metadata_client.get(
-                            f"https://clob.polymarket.com/markets/{condition_id}"
-                        )
-                        resp.raise_for_status()
-                        clob_data = resp.json()
-                    slug_to_use = clob_data.get("market_slug") or slug_to_use
+                    slug_to_use = await self._canonical_market_slug_for_condition(condition_id) or slug_to_use
                     logger.info(f"Resolved CLOB slug {slug_to_use} for condition {condition_id}")
                 except Exception as e:
+                    if self._is_metadata_access_denial(e):
+                        raise
                     logger.warning(f"Failed to resolve conditionId via CLOB: {e}")
 
             if slug_to_use:
@@ -1776,11 +1784,20 @@ class PolymtradeExecutor:
                             logger.info(f"Resolved event via {endpoint} fallback: {event['id']}")
                             return str(event["id"]), event["slug"]
                     except Exception as e:
+                        if self._is_metadata_access_denial(e):
+                            raise
                         logger.warning(f"Failed to resolve event via {endpoint} fallback: {e}")
 
             raise RuntimeError(
                 f"Could not resolve Polymtrade event for slug={market_slug}, condition_id={condition_id}"
             )
+
+    @staticmethod
+    def _is_metadata_access_denial(error: Exception) -> bool:
+        return isinstance(error, UpstreamAccessDeferred) or (
+            isinstance(error, httpx.HTTPStatusError)
+            and error.response.status_code in (401, 403, 429)
+        )
 
     async def _canonical_market_slug_for_condition(
         self,
@@ -1790,18 +1807,22 @@ class PolymtradeExecutor:
         if not condition_id:
             return None
         try:
-            async with self._http_client_context() as client:
-                response = await client.get(
-                    f"https://clob.polymarket.com/markets/{condition_id}"
-                )
-                response.raise_for_status()
-                market = response.json()
+            url = f"https://clob.polymarket.com/markets/{condition_id}"
+            async with self._gamma_request_lock:
+                self._upstream_cooldown.check(url)
+                async with self._http_client_context() as client:
+                    response = await client.get(url)
+                    self._upstream_cooldown.record(url, response.status_code, response.headers)
+                    response.raise_for_status()
+                    market = response.json()
             returned_condition_id = market.get("condition_id") or market.get("conditionId")
             if (returned_condition_id or "").lower() != condition_id.lower():
                 logger.warning("CLOB canonical slug condition mismatch for %s", condition_id)
                 return None
             return market.get("market_slug") or None
         except Exception as e:
+            if self._is_metadata_access_denial(e):
+                raise
             logger.warning("Failed to resolve canonical CLOB slug for %s: %s", condition_id, e)
             return None
 
@@ -2166,7 +2187,10 @@ class PolymtradeExecutor:
                         const currentUrl = new URL(window.location.href);
                         const eventIdMatches = !eventId || currentUrl.searchParams.get("eventId") === String(eventId);
                         const eventSlugMatches = !eventSlug || currentUrl.searchParams.get("eventSlug") === String(eventSlug);
-                        const exactEventRoute = !!(eventId || eventSlug) && eventIdMatches && eventSlugMatches;
+                        const nativeEventMatches = !!eventSlug
+                            && decodeURIComponent(currentUrl.pathname.replace(/\\/$/, "")) === "/event/" + eventSlug;
+                        const exactEventRoute = nativeEventMatches
+                            || (!!(eventId || eventSlug) && eventIdMatches && eventSlugMatches);
 
                         const keywordHits = keywords.filter(kw => bodyText.includes(kw.toLowerCase())).length;
                         const hasKeyword = keywords.length === 0 || keywordHits > 0;
@@ -2826,6 +2850,8 @@ class PolymtradeExecutor:
             if event_id
             else fallback_url
         )
+        if event_slug and not self._is_short_cycle_updown_market(market_slug):
+            market_url = f"{self.base_url}/event/{urllib.parse.quote(event_slug, safe='')}"
         logger.info(f"Navigating to {market_url}")
         stage_started_at = time.perf_counter()
         await self._goto_with_retry(
@@ -3123,6 +3149,8 @@ class PolymtradeExecutor:
             if event_id
             else f"{self.base_url}/portfolio?eventSlug={event_slug}&eventSource=polymarket"
         )
+        if event_slug and not self._is_short_cycle_updown_market(market_slug):
+            market_url = f"{self.base_url}/event/{urllib.parse.quote(event_slug, safe='')}"
         logger.info(f"Navigating to event page for SELL: {market_url}")
         stage_started_at = time.perf_counter()
         await self._goto_with_retry(
