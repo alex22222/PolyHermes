@@ -13,7 +13,7 @@ class FakePage:
         self.activated = True
 
     async def evaluate(self, _expression):
-        return []
+        return {"positions": [], "hasErrorBanner": False}
 
     def is_closed(self):
         return False

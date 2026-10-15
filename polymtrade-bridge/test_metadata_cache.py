@@ -21,6 +21,9 @@ class TestMetadataCache(unittest.IsolatedAsyncioTestCase):
         condition_id = "0x0d3ad3afe0e01075d00e6869a09f1982742fba950b4cae8fff452b282b5a80fc"
 
         class Response:
+            status_code = 200
+            headers = {}
+
             def __init__(self, payload):
                 self.payload = payload
 

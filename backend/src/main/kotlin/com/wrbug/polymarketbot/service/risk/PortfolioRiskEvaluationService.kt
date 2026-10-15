@@ -7,6 +7,7 @@ import com.wrbug.polymarketbot.repository.MarketRepository
 import com.wrbug.polymarketbot.repository.PortfolioRiskDecisionRepository
 import com.wrbug.polymarketbot.service.accounts.PortfolioExposureService
 import com.wrbug.polymarketbot.service.copytrading.research.LeaderResearchMarketCategoryPatterns
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.math.BigDecimal
@@ -27,6 +28,7 @@ class PortfolioRiskEvaluationService(
 ) {
     @Transactional
     fun evaluate(request: PortfolioRiskEvaluationRequest): PortfolioRiskEvaluationResponse {
+        val startedAt = System.nanoTime()
         val side = request.side.trim().uppercase()
         require(side == "BUY" || side == "SELL") { "side 必须是 BUY 或 SELL" }
         val amount = request.amount.toBigDecimalOrNull()
@@ -51,10 +53,13 @@ class PortfolioRiskEvaluationService(
                 category
             )
         } else PortfolioRiskReservationProjection(null)
+        val reservedAt = System.nanoTime()
         val exposure = if (side == "BUY") exposureService.getExposure(request.accountId) else null
+        val exposedAt = System.nanoTime()
         val relation = if (side == "BUY") {
             buildRelationInput(request, amount, category, eventSlug, evaluatedAt)
         } else null
+        val relatedAt = System.nanoTime()
         val totalAssets = exposure?.account?.totalAssets?.toBigDecimalOrNull()
         val daily = if (side == "BUY" && exposure != null && totalAssets != null && totalAssets > BigDecimal.ZERO &&
             exposure.account.availableBalance?.toBigDecimalOrNull() != null && exposure.account.valuationStatus == "COMPLETE"
@@ -104,6 +109,11 @@ class PortfolioRiskEvaluationService(
                 createdAt = evaluatedAt
             )
         )
+        logger.info(
+            "Portfolio risk evaluated: requestId={} stage={} side={} totalMs={} reservationMs={} exposureMs={} relationMs={}",
+            requestId, request.stage, side, (System.nanoTime() - startedAt) / 1_000_000,
+            (reservedAt - startedAt) / 1_000_000, (exposedAt - reservedAt) / 1_000_000, (relatedAt - exposedAt) / 1_000_000
+        )
         return response
     }
 
@@ -140,20 +150,7 @@ class PortfolioRiskEvaluationService(
             ?: return PortfolioRiskRelationInput(false, "请求缺少领域归因，无法识别跨市场相关仓位")
         val resolvedEventSlug = eventSlug?.takeIf { it.isNotBlank() }
             ?: return PortfolioRiskRelationInput(false, "请求缺少 eventSlug，无法识别事件内相关仓位")
-        val existing = relationService.getRelations(request.accountId, now).positions.map {
-            PortfolioRelationPosition(
-                positionKey = it.positionKey,
-                marketId = it.marketId,
-                eventSlug = it.eventSlug,
-                outcome = it.outcome,
-                category = it.category,
-                marketTitle = it.marketTitle,
-                currentValue = it.currentValue?.toBigDecimalOrNull(),
-                quantity = it.quantity.toBigDecimalOrNull() ?: BigDecimal.ZERO,
-                firstObservedAt = it.firstObservedAt,
-                marketEndAt = it.marketEndAt
-            )
-        }
+        val existing = relationService.getPositions(request.accountId)
         val candidateKey = "CANDIDATE_BUY|$marketId|${outcome.uppercase()}"
         val marketEndAt = request.marketId?.let { marketRepository.findByMarketId(it)?.endDate }
         val candidate = PortfolioRelationPosition(
@@ -168,8 +165,7 @@ class PortfolioRiskEvaluationService(
             firstObservedAt = now,
             marketEndAt = marketEndAt
         )
-        val relations = relationClassifier.classify(existing + candidate, now)
-            .filter { candidateKey in it.positionKeys }
+        val relations = relationClassifier.classifyCandidate(existing, candidate, now)
         val counts = relations.groupingBy { it.type }.eachCount().toSortedMap()
         val valueByType = relations.groupBy { it.type }.mapValues { (_, items) ->
             items.mapNotNull { it.relatedValue?.toBigDecimalOrNull() }.fold(BigDecimal.ZERO, BigDecimal::add).strip()
@@ -200,6 +196,7 @@ class PortfolioRiskEvaluationService(
     private fun BigDecimal.strip(): String = stripTrailingZeros().toPlainString()
 
     companion object {
+        private val logger = LoggerFactory.getLogger(PortfolioRiskEvaluationService::class.java)
         private const val MODE = "SHADOW"
         private val CATEGORIES = listOf("crypto", "sports", "finance", "politics")
         private val BLOCKING_RELATION_TYPES = listOf("DUPLICATE", "PSEUDO_HEDGE", "RELATED")

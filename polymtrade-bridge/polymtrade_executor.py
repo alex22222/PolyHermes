@@ -12,9 +12,10 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Optional, Tuple
 
 import httpx
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Response
 
 from bridge_metrics import metrics
+from upstream_cooldown import UpstreamAccessDeferred, UpstreamCooldown
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,8 @@ class PolymtradeExecutor:
         self._last_portfolio_synced_at: int = 0
         self._portfolio_snapshot_cache: Optional[dict] = None
         self._portfolio_snapshot_cached_at: float = 0.0
+        self._portfolio_access_error: Optional[dict] = None
+        self._portfolio_access_retry_at: float = 0.0
         # /portfolio is polled by both the backend synchronizer and the UI. Keep
         # one completed snapshot briefly so those readers do not repeatedly
         # reload the headed Polymtrade page.
@@ -84,6 +87,9 @@ class PolymtradeExecutor:
         self._http_client: Optional[httpx.AsyncClient] = None
         self._gamma_query_cache: dict[tuple, tuple] = {}
         self._gamma_query_inflight: dict[tuple, asyncio.Task] = {}
+        self._gamma_request_lock = asyncio.Lock()
+        self._gamma_next_request_at = 0.0
+        self._upstream_cooldown = UpstreamCooldown(os.path.join(self.profile_dir, ".polyhermes-upstream-cooldowns.json"))
         self._portfolio_page_idle_close_seconds = float(
             os.getenv("BRIDGE_PORTFOLIO_PAGE_IDLE_CLOSE_SECONDS", "120")
         )
@@ -639,6 +645,10 @@ class PolymtradeExecutor:
             self._schedule_portfolio_page_idle_close()
 
     async def fetch_portfolio_positions(self, *, force_refresh: bool = False) -> dict:
+        # Fresh execution reads must not bypass an upstream access-denial cooldown
+        # or fall back to an old, previously complete holdings snapshot.
+        if self._portfolio_access_error and time.monotonic() < self._portfolio_access_retry_at:
+            return copy.deepcopy(self._portfolio_access_error)
         cached_snapshot = None if force_refresh else self._cached_portfolio_snapshot()
         if cached_snapshot:
             return cached_snapshot
@@ -649,7 +659,7 @@ class PolymtradeExecutor:
         try:
             with self._page_scope(page):
                 result = await self._fetch_portfolio_positions_on_active_page()
-            if result.get("portfolio_complete") is not False:
+            if result.get("error") or result.get("portfolio_complete") is not False:
                 self._cache_portfolio_snapshot(result)
                 return result
 
@@ -666,8 +676,8 @@ class PolymtradeExecutor:
                 return result
             with self._page_scope(fresh_page):
                 result = await self._fetch_portfolio_positions_on_active_page()
-                if result.get("portfolio_complete") is False:
-                    await self.refresh_login_state()
+                if result.get("portfolio_complete") is False and not result.get("error"):
+                    result = self._defer_portfolio_read(result)
             self._cache_portfolio_snapshot(result)
             return result
         finally:
@@ -683,8 +693,19 @@ class PolymtradeExecutor:
     def _cache_portfolio_snapshot(self, result: dict) -> None:
         if result.get("portfolio_complete") is not True:
             return
+        self._portfolio_access_error = None
+        self._portfolio_access_retry_at = 0.0
         self._portfolio_snapshot_cache = copy.deepcopy(result)
         self._portfolio_snapshot_cached_at = time.monotonic()
+
+    def _defer_portfolio_read(self, result: dict) -> dict:
+        result = {**result, "portfolio_complete": False, "empty_state_confirmed": False}
+        result.setdefault("error", "Portfolio snapshot incomplete; holdings unknown; retry deferred for 300s")
+        self._portfolio_snapshot_cache = None
+        self._portfolio_access_error = copy.deepcopy(result)
+        self._portfolio_access_retry_at = time.monotonic() + 300.0
+        logger.warning(result["error"])
+        return result
 
     async def _fetch_portfolio_positions_on_active_page(self) -> dict:
         """Scrape current open positions from the Polymtrade portfolio page.
@@ -696,9 +717,21 @@ class PolymtradeExecutor:
         if not self.page:
             return {"error": "page not initialized"}
         try:
-            await self._goto_with_retry(f"{self.base_url}/portfolio", max_retries=6)
+            response = await self._goto_with_retry(f"{self.base_url}/portfolio", max_retries=6)
+            status = getattr(response, "status", None)
+            if status in (401, 403, 429):
+                # An HTTP rejection is not an empty/loading portfolio. Do not
+                # recreate pages, clear auth state, or hammer the denied route.
+                result = {
+                    "error": f"Portfolio upstream HTTP {status}; holdings unknown; retry deferred for 300s",
+                    "upstream_http_status": status,
+                    "positions": [],
+                    "portfolio_complete": False,
+                    "empty_state_confirmed": False,
+                }
+                self._record_portfolio_render_result(False)
+                return self._defer_portfolio_read(result)
             rendered = await self._wait_for_portfolio_rows(timeout=12.0)
-            self._record_portfolio_render_result(rendered)
             if not rendered:
                 logger.warning("Portfolio rows did not render before scrape; continuing with best effort")
 
@@ -779,12 +812,23 @@ class PolymtradeExecutor:
                         _rawLines: lines,
                     });
                 }
-                return positions;
+                return {
+                    positions,
+                    hasErrorBanner: !!document.querySelector('[data-test="portfolio-error-banner"]'),
+                };
             }
             """
-            positions = await self.page.evaluate(js)
+            snapshot = await self.page.evaluate(js)
+            positions = snapshot["positions"]
+            has_error_banner = snapshot.get("hasErrorBanner", False)
+            self._record_portfolio_render_result(rendered and not has_error_banner)
             for position in positions:
                 apply_portfolio_position_line_fallback(position)
+            if has_error_banner:
+                return self._defer_portfolio_read({
+                    "positions": [pos for pos in positions if validate_portfolio_position(pos)],
+                    "error": "Portfolio page reports a connection error; holdings unknown; retry deferred for 300s",
+                })
 
             # Enrich with Gamma API metadata so the backend can map titles to
             # market/condition IDs and slugs without relying on its local cache.
@@ -807,8 +851,11 @@ class PolymtradeExecutor:
             )
 
             synced_at = int(time.time() * 1000)
-            self._last_portfolio_synced_at = synced_at
-            wallet_address = await self.get_wallet_address()
+            if portfolio_complete:
+                self._last_portfolio_synced_at = synced_at
+            # /portfolio resolves the account address from the database. A
+            # second navigation just to extract it would discard this page.
+            wallet_address = self.cached_wallet_address
 
             return {
                 "positions": valid_positions,
@@ -820,9 +867,11 @@ class PolymtradeExecutor:
                 "redeemable_position_count": len(redeemable_positions) if portfolio_complete else None,
                 "redeem_valuation_status": "COMPLETE" if portfolio_complete else "UNKNOWN",
             }
+        except UpstreamAccessDeferred as e:
+            return self._defer_portfolio_read({"error": str(e), "upstream_http_status": e.status, "positions": []})
         except Exception as e:
             logger.exception(f"Failed to fetch portfolio positions: {e}")
-            return {"error": str(e)}
+            return self._defer_portfolio_read({"error": str(e), "positions": []})
 
     async def _scroll_portfolio_until_stable(
         self,
@@ -1258,7 +1307,7 @@ class PolymtradeExecutor:
         if not self.page:
             return {"error": "page not initialized"}
         try:
-            await self.page.goto(self.base_url, wait_until="load", timeout=60000)
+            await self._goto_with_retry(self.base_url, wait_until="load", timeout_ms=60000)
             await asyncio.sleep(2)
 
             search_input = None
@@ -1478,10 +1527,22 @@ class PolymtradeExecutor:
         for attempt in range(max_retries):
             resp = None
             try:
-                metrics.gamma_api_requests += 1
-                resp = await client.get(url, params=params, timeout=20.0)
+                # Serial, paced starts prevent a cold 84-position scrape from
+                # flooding the upstream. Recheck after queueing so one denial
+                # also stops different queries that have not started yet.
+                async with self._gamma_request_lock:
+                    self._upstream_cooldown.check(url)
+                    await asyncio.sleep(max(0.0, self._gamma_next_request_at - time.monotonic()))
+                    self._upstream_cooldown.check(url)
+                    self._gamma_next_request_at = time.monotonic() + 0.25
+                    metrics.gamma_api_requests += 1
+                    resp = await client.get(url, params=params, timeout=20.0)
+                    self._upstream_cooldown.record(url, resp.status_code, resp.headers)
                 resp.raise_for_status()
                 return resp.json()
+            except UpstreamAccessDeferred:
+                # No HTTP attempt was made; do not inflate upstream failures.
+                raise
             except Exception as e:
                 last_error = e
                 err = str(e)
@@ -2585,9 +2646,11 @@ class PolymtradeExecutor:
             return False
 
         recovery_url = self._cache_busted_url(url)
+        self._upstream_cooldown.check(recovery_url)
         logger.warning("Polymtrade app shell is stale; reloading with a cache-busting URL")
         await self._clear_stale_app_caches()
-        await self.page.goto(recovery_url, wait_until=wait_until, timeout=timeout_ms)
+        response = await self.page.goto(recovery_url, wait_until=wait_until, timeout=timeout_ms)
+        self._check_navigation_response(recovery_url, response)
         await asyncio.sleep(3)
         if await self._app_load_error_visible():
             raise RuntimeError("Polymtrade app still failed to load after cache-busting reload")
@@ -2609,6 +2672,13 @@ class PolymtradeExecutor:
             timeout_ms=timeout_ms,
         )
 
+    def _check_navigation_response(self, url, response):
+        status = getattr(response, "status", None)
+        if isinstance(status, int):
+            headers = getattr(response, "headers", {})
+            self._upstream_cooldown.record(url, status, headers if isinstance(headers, dict) else {})
+            self._upstream_cooldown.check(url)
+
     async def _goto_with_retry(
         self,
         url: str,
@@ -2617,18 +2687,20 @@ class PolymtradeExecutor:
         wait_until: str = "domcontentloaded",
         timeout_ms: int = 45000,
         fallback_wait_until: str = "commit",
-    ) -> None:
+    ) -> Optional[Response]:
         """Navigate to a URL, retrying on transient network/navigation errors."""
         last_error = None
         for attempt in range(max_retries):
             try:
-                await self.page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                self._upstream_cooldown.check(url)
+                response = await self.page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                self._check_navigation_response(url, response)
                 await self._recover_stale_app_shell(
                     url,
                     wait_until=wait_until,
                     timeout_ms=timeout_ms,
                 )
-                return
+                return response
             except Exception as e:
                 last_error = e
                 if self._is_transient_goto_error(e):
@@ -2651,15 +2723,17 @@ class PolymtradeExecutor:
 
         if fallback_wait_until and fallback_wait_until != wait_until:
             try:
+                self._upstream_cooldown.check(url)
                 logger.warning(
                     f"Navigation failed after {max_retries} {wait_until} attempts; "
                     f"trying {fallback_wait_until} fallback for {url}: {last_error}"
                 )
-                await self.page.goto(
+                response = await self.page.goto(
                     url,
                     wait_until=fallback_wait_until,
                     timeout=min(timeout_ms, 20000),
                 )
+                self._check_navigation_response(url, response)
                 try:
                     await self.page.wait_for_load_state(wait_until, timeout=10000)
                 except Exception as settle_error:
@@ -2672,7 +2746,7 @@ class PolymtradeExecutor:
                     wait_until=wait_until,
                     timeout_ms=timeout_ms,
                 )
-                return
+                return response
             except Exception as fallback_error:
                 last_error = fallback_error
                 if self._is_transient_goto_error(fallback_error) and self._navigation_target_reached(url):

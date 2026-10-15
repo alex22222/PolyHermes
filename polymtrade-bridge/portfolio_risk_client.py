@@ -1,3 +1,4 @@
+import asyncio
 import os
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -29,7 +30,7 @@ class PortfolioRiskClient:
         self,
         url: Optional[str] = None,
         secret: Optional[str] = None,
-        timeout_seconds: float = 2.0,
+        timeout_seconds: float = 5.0,
         client: Optional[httpx.AsyncClient] = None,
     ):
         self.url = url or os.getenv(
@@ -71,12 +72,15 @@ class PortfolioRiskClient:
         timeout = timeout_seconds if timeout_seconds is not None else self.timeout_seconds
         try:
             client = await self._get_client()
-            response = await client.post(
-                self.url,
-                json=payload,
-                headers={"X-Bridge-Risk-Secret": self.secret},
-                timeout=timeout,
-            )
+            # Account reservations serialize bursts; bound the whole request,
+            # not just each HTTP I/O phase. Never retry a timed-out evaluation.
+            async with asyncio.timeout(timeout):
+                response = await client.post(
+                    self.url,
+                    json=payload,
+                    headers={"X-Bridge-Risk-Secret": self.secret},
+                    timeout=timeout,
+                )
             response.raise_for_status()
             body = response.json()
             data = body.get("data") if isinstance(body, dict) and body.get("code") == 0 else None
@@ -99,12 +103,13 @@ class PortfolioRiskClient:
         try:
             payload = {"correlationId": correlation_id, "status": status}
             client = await self._get_client()
-            response = await client.post(
-                url,
-                json=payload,
-                headers={"X-Bridge-Risk-Secret": self.secret},
-                timeout=self.timeout_seconds,
-            )
+            async with asyncio.timeout(self.timeout_seconds):
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers={"X-Bridge-Risk-Secret": self.secret},
+                    timeout=self.timeout_seconds,
+                )
             response.raise_for_status()
             body = response.json()
             data = body.get("data") if isinstance(body, dict) and body.get("code") == 0 else None

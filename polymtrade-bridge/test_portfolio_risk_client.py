@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +10,22 @@ from portfolio_risk_client import PortfolioRiskClient
 
 
 class TestPortfolioRiskClient(unittest.IsolatedAsyncioTestCase):
+    async def test_enforced_total_deadline_blocks_without_retrying_late_risk_response(self):
+        calls = []
+
+        async def handler(request):
+            calls.append(request)
+            await asyncio.sleep(0.1)
+            return httpx.Response(200, json={"code": 0, "data": {"executionAllowed": True}})
+
+        with patch.dict("os.environ", {"PORTFOLIO_RISK_ENFORCEMENT_MODE": "ENFORCED"}):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                result = await PortfolioRiskClient(secret="secret", client=client).evaluate_buy({}, timeout_seconds=0.01)
+
+        self.assertFalse(result.available)
+        self.assertFalse(result.execution_allowed)
+        self.assertEqual(1, len(calls))
+
     async def test_shadow_would_block_still_allows_execution(self):
         seen_timeout = None
 
