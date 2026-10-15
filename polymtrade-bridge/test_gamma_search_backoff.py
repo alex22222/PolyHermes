@@ -91,3 +91,27 @@ async def test_empty_success_is_cached_and_caller_cannot_mutate_cache():
         second = await executor._gamma_request_with_retry(client, "https://gamma-api.polymarket.com/public-search", {"q": "missing"})
     assert second == {"events": []}
     assert count == 1
+
+
+async def test_local_deferral_does_not_extend_query_failure_past_host_deadline():
+    executor = PolymtradeExecutor()
+    now = [100.0]
+    calls = []
+    url = "https://gamma-api.polymarket.com/events"
+
+    async def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json=[])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with patch("polymtrade_executor.time.monotonic", side_effect=lambda: now[0]), patch("upstream_cooldown.time.time", side_effect=lambda: now[0]):
+            executor._upstream_cooldown.record(url, 403)
+            for moment in (100.0, 1890.0):
+                now[0] = moment
+                with pytest.raises(RuntimeError, match="cooldown"):
+                    await executor._gamma_request_with_retry(client, url, {"slug": "target"})
+                await asyncio.sleep(0)
+            assert not calls
+            now[0] = 1901.0
+            assert await executor._gamma_request_with_retry(client, url, {"slug": "target"}) == []
+    assert len(calls) == 1

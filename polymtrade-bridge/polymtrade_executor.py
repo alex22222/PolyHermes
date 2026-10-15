@@ -1486,6 +1486,8 @@ class PolymtradeExecutor:
             async def request_and_cache():
                 try:
                     result = await self._perform_gamma_request(client, url, params, max_retries, base_delay)
+                except UpstreamAccessDeferred:
+                    raise
                 except Exception as error:
                     failures = min((cached[2] if cached else 0) + 1, 8)
                     status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
