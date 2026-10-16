@@ -15,6 +15,7 @@ import httpx
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Response
 
 from bridge_metrics import metrics
+from gamma_search_denials import GammaSearchDenials
 from upstream_cooldown import UpstreamAccessDeferred, UpstreamCooldown
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,7 @@ class PolymtradeExecutor:
         self._gamma_request_lock = asyncio.Lock()
         self._gamma_next_request_at = 0.0
         self._upstream_cooldown = UpstreamCooldown(os.path.join(self.profile_dir, ".polyhermes-upstream-cooldowns.json"))
+        self._gamma_search_denials = GammaSearchDenials(os.path.join(self.profile_dir, ".polyhermes-gamma-search-denials.json"))
         self._portfolio_page_idle_close_seconds = float(
             os.getenv("BRIDGE_PORTFOLIO_PAGE_IDLE_CLOSE_SECONDS", "120")
         )
@@ -1473,6 +1475,7 @@ class PolymtradeExecutor:
         base_delay: float = 1.0,
     ):
         """Coalesce identical metadata queries and cool down failures across scrapes."""
+        self._gamma_search_denials.check(url, params)
         key = (url, tuple(sorted((str(k), str(v)) for k, v in params.items())))
         cached = self._gamma_query_cache.get(key)
         if cached and time.monotonic() < cached[0]:
@@ -1491,6 +1494,7 @@ class PolymtradeExecutor:
                 except Exception as error:
                     failures = min((cached[2] if cached else 0) + 1, 8)
                     status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+                    self._gamma_search_denials.record(url, params, status)
                     delay = min(1800 * 2 ** (failures - 1), 21600) if status == 403 else min(60 * 2 ** (failures - 1), 900)
                     if status == 429:
                         try:

@@ -55,7 +55,7 @@ async def test_forbidden_query_is_singleflight_cooled_down_and_backed_off():
     executor = PolymtradeExecutor()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         async def query(title="blocked"):
-            return await executor._gamma_request_with_retry(client, "https://gamma-api.polymarket.com/public-search", {"q": title})
+            return await executor._gamma_request_with_retry(client, "https://gamma-api.polymarket.com/events", {"slug": title})
 
         with patch("polymtrade_executor.time.monotonic", side_effect=lambda: now[0]), patch("upstream_cooldown.time.time", side_effect=lambda: now[0]):
             results = await asyncio.gather(query(), query(), return_exceptions=True)
