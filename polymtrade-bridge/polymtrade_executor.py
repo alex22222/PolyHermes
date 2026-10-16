@@ -4,6 +4,7 @@ import copy
 import contextvars
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -743,6 +744,7 @@ class PolymtradeExecutor:
                 }
                 self._record_portfolio_render_result(False)
                 return self._defer_portfolio_read(result)
+            await self._select_portfolio_positions()
             rendered = await self._wait_for_portfolio_rows(timeout=12.0)
             if not rendered:
                 logger.warning("Portfolio rows did not render before scrape; continuing with best effort")
@@ -886,7 +888,26 @@ class PolymtradeExecutor:
             )
         except Exception as e:
             logger.exception(f"Failed to fetch portfolio positions: {e}")
+            self._record_portfolio_render_result(False)
             return self._defer_portfolio_read({"error": str(e), "positions": []})
+
+    async def _select_portfolio_positions(self) -> None:
+        # New portfolio pages can default to History, whose rows share the
+        # holdings selector. Never interpret transaction history as positions.
+        tab = await self.page.wait_for_selector(
+            'div.cursor-pointer:text-is("Positions"), div.cursor-pointer:text-is("持仓")',
+            state="visible", timeout=30000,
+        )
+        if not tab:
+            raise RuntimeError("Portfolio positions tab missing; holdings unknown")
+        if "text-foreground" not in (await tab.get_attribute("class") or "").split():
+            await tab.click(timeout=3000)
+        await self.page.wait_for_function(
+            """() => Array.from(document.querySelectorAll('div.cursor-pointer'))
+                .some(el => ['Positions', '持仓'].includes(el.textContent.trim())
+                    && el.classList.contains('text-foreground'))""",
+            timeout=5000,
+        )
 
     async def _scroll_portfolio_until_stable(
         self,
@@ -2747,7 +2768,7 @@ class PolymtradeExecutor:
                 logger.info("Browser navigation paced for %.1fs", delay)
                 await asyncio.sleep(delay)
             self._upstream_cooldown.check(url)
-            self._next_navigation_at = time.monotonic() + 10.0
+            self._next_navigation_at = time.monotonic() + self._upstream_cooldown.navigation_interval(url)
 
     async def _goto_with_retry(
         self,
@@ -4249,18 +4270,22 @@ class PolymtradeExecutor:
             const balanceTexts = ['USDC', 'pUSD', 'USD Coin'];
             const all = Array.from(document.querySelectorAll('div, span, p, button, [data-testid]'));
             for (const el of all) {
-                const text = (el.innerText || el.textContent || '').trim();
+                if (!el.getClientRects().length) continue;
+                const text = (el.innerText || '').trim();
+                if (text.length > 160) continue;
                 if (!balanceTexts.some(bt => text.includes(bt))) continue;
-                const m = text.match(/([0-9,]+\\.?[0-9]*)\\s*(USDC|pUSD)/i);
+                const m = text.match(/([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*(USDC|pUSD)/i);
                 if (m) {
                     return {text: text, value: parseFloat(m[1].replace(/,/g, ''))};
                 }
             }
             // Broader regex for any balance-looking text near the element.
             for (const el of all) {
-                const text = (el.innerText || el.textContent || '').trim();
+                if (!el.getClientRects().length) continue;
+                const text = (el.innerText || '').trim();
+                if (text.length > 160) continue;
                 if (!/balance|余额|wallet|钱包/i.test(text) && !balanceTexts.some(bt => text.includes(bt))) continue;
-                const m = text.match(/\\$?\\s*([0-9,]+\\.?[0-9]*)/);
+                const m = text.match(/\\$?\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)/);
                 if (m) {
                     return {text: text, value: parseFloat(m[1].replace(/,/g, '')), approx: true};
                 }
@@ -4271,8 +4296,10 @@ class PolymtradeExecutor:
         try:
             result = await self.page.evaluate(js)
             if result and result.get("value") is not None:
-                logger.info(f"Detected balance: {result.get('value')} from '{result.get('text')}'")
-                return float(result.get("value"))
+                balance = float(result["value"])
+                if math.isfinite(balance) and balance >= 0:
+                    logger.info("Detected balance: %s", balance)
+                    return balance
         except Exception as e:
             logger.warning(f"Failed to read balance from page: {e}")
         return None

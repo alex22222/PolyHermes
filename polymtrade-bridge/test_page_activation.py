@@ -26,6 +26,9 @@ class PortfolioExecutor(PolymtradeExecutor):
     async def _wait_for_portfolio_rows(self, timeout=12.0):
         return True
 
+    async def _select_portfolio_positions(self):
+        assert self.page.activated is False
+
     async def _scroll_portfolio_until_stable(self):
         return None
 

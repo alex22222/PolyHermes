@@ -25,7 +25,8 @@ class UpstreamCooldown:
         try:
             saved = json.loads(self.path.read_text())
             self.entries = {
-                host: {"status": int(entry["status"]), "retry_at": float(entry["retry_at"]), "failures": int(entry["failures"])}
+                host: {"status": int(entry["status"]), "retry_at": float(entry["retry_at"]), "failures": int(entry["failures"]),
+                       **({"last_denied_at": float(entry.get("last_denied_at", entry["retry_at"]))} if entry["status"] == 429 else {})}
                 for host, entry in saved.items() if entry["status"] in (401, 403, 429)
             }
         except FileNotFoundError:
@@ -39,6 +40,12 @@ class UpstreamCooldown:
         if entry and time.time() < entry["retry_at"]:
             raise UpstreamAccessDeferred(host, entry["status"], entry["retry_at"])
 
+    def navigation_interval(self, url):
+        entry = self.entries.get(urlsplit(url).hostname, {})
+        if entry.get("status") == 429 and time.time() - entry.get("last_denied_at", entry["retry_at"]) < 3600:
+            return 30.0
+        return 10.0
+
     def record(self, url, status, headers=None):
         host = urlsplit(url).hostname
         if not host:
@@ -46,12 +53,17 @@ class UpstreamCooldown:
         if status not in (401, 403, 429):
             # A response already in flight before a denial cannot cancel it.
             if 200 <= status < 400 and host in self.entries and time.time() >= self.entries[host]["retry_at"]:
+                previous = self.entries[host]
+                if previous["status"] == 429 and time.time() - previous.get("last_denied_at", previous["retry_at"]) < 21600:
+                    return
                 self.entries.pop(host)
                 self._save()
             return
         now = time.time()
         previous = self.entries.get(host, {})
         active = now < previous.get("retry_at", 0)
+        if not active and previous.get("status") == 429 and now - previous.get("last_denied_at", previous["retry_at"]) >= 21600:
+            previous = {}
         failures = previous["failures"] if active else min(
             (previous.get("failures", 0) if previous.get("status") == status else 0) + 1, 8,
         )
@@ -78,6 +90,8 @@ class UpstreamCooldown:
         if math.isfinite(delay):
             retry_at = max(retry_at, now + delay)
         entry = {"status": status, "retry_at": retry_at, "failures": failures}
+        if status == 429:
+            entry["last_denied_at"] = previous.get("last_denied_at", previous.get("retry_at", now)) if active else now
         if entry == previous:
             return
         self.entries[host] = entry
