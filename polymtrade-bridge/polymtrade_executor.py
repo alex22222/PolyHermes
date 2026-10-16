@@ -90,6 +90,8 @@ class PolymtradeExecutor:
         self._gamma_query_inflight: dict[tuple, asyncio.Task] = {}
         self._gamma_request_lock = asyncio.Lock()
         self._gamma_next_request_at = 0.0
+        self._navigation_lock = asyncio.Lock()
+        self._next_navigation_at = 0.0
         self._upstream_cooldown = UpstreamCooldown(os.path.join(self.profile_dir, ".polyhermes-upstream-cooldowns.json"))
         self._gamma_search_denials = GammaSearchDenials(os.path.join(self.profile_dir, ".polyhermes-gamma-search-denials.json"))
         self._portfolio_page_idle_close_seconds = float(
@@ -649,6 +651,13 @@ class PolymtradeExecutor:
     async def fetch_portfolio_positions(self, *, force_refresh: bool = False) -> dict:
         # Fresh execution reads must not bypass an upstream access-denial cooldown
         # or fall back to an old, previously complete holdings snapshot.
+        try:
+            self._upstream_cooldown.check(f"{self.base_url}/portfolio")
+        except UpstreamAccessDeferred as e:
+            return self._defer_portfolio_read(
+                {"error": str(e), "upstream_http_status": e.status, "positions": []},
+                retry_at=e.retry_at,
+            )
         if self._portfolio_access_error and time.monotonic() < self._portfolio_access_retry_at:
             return copy.deepcopy(self._portfolio_access_error)
         cached_snapshot = None if force_refresh else self._cached_portfolio_snapshot()
@@ -700,12 +709,13 @@ class PolymtradeExecutor:
         self._portfolio_snapshot_cache = copy.deepcopy(result)
         self._portfolio_snapshot_cached_at = time.monotonic()
 
-    def _defer_portfolio_read(self, result: dict) -> dict:
+    def _defer_portfolio_read(self, result: dict, *, retry_at: Optional[float] = None) -> dict:
         result = {**result, "portfolio_complete": False, "empty_state_confirmed": False}
         result.setdefault("error", "Portfolio snapshot incomplete; holdings unknown; retry deferred for 300s")
         self._portfolio_snapshot_cache = None
         self._portfolio_access_error = copy.deepcopy(result)
-        self._portfolio_access_retry_at = time.monotonic() + 300.0
+        delay = 300.0 if retry_at is None else max(0.0, retry_at - time.time())
+        self._portfolio_access_retry_at = time.monotonic() + delay
         logger.warning(result["error"])
         return result
 
@@ -870,7 +880,10 @@ class PolymtradeExecutor:
                 "redeem_valuation_status": "COMPLETE" if portfolio_complete else "UNKNOWN",
             }
         except UpstreamAccessDeferred as e:
-            return self._defer_portfolio_read({"error": str(e), "upstream_http_status": e.status, "positions": []})
+            return self._defer_portfolio_read(
+                {"error": str(e), "upstream_http_status": e.status, "positions": []},
+                retry_at=e.retry_at,
+            )
         except Exception as e:
             logger.exception(f"Failed to fetch portfolio positions: {e}")
             return self._defer_portfolio_read({"error": str(e), "positions": []})
@@ -2678,6 +2691,7 @@ class PolymtradeExecutor:
         recovery_url = self._cache_busted_url(url)
         self._upstream_cooldown.check(recovery_url)
         logger.warning("Polymtrade app shell is stale; reloading with a cache-busting URL")
+        await self._pace_navigation(recovery_url)
         await self._clear_stale_app_caches()
         response = await self.page.goto(recovery_url, wait_until=wait_until, timeout=timeout_ms)
         self._check_navigation_response(recovery_url, response)
@@ -2706,8 +2720,34 @@ class PolymtradeExecutor:
         status = getattr(response, "status", None)
         if isinstance(status, int):
             headers = getattr(response, "headers", {})
+            if status == 429 and isinstance(headers, dict):
+                # Never log Cookies, authorization, query strings or bodies.
+                logger.warning(
+                    "Browser HTTP 429: host=%s path=%s server=%s retry_after=%s request_id=%s",
+                    urllib.parse.urlsplit(url).hostname, urllib.parse.urlsplit(url).path[:160],
+                    str(headers.get("server", ""))[:80], str(headers.get("retry-after", ""))[:80],
+                    str(headers.get("x-vercel-id", headers.get("cf-ray", "")))[:160],
+                )
             self._upstream_cooldown.record(url, status, headers if isinstance(headers, dict) else {})
             self._upstream_cooldown.check(url)
+
+    async def _pace_navigation(self, url: str) -> None:
+        """Share a conservative start cadence across portfolio/trade/retry pages.
+
+        This delays real fresh reads; it never substitutes cached DOM/holdings.
+        A denial from another page while waiting must stop this navigation too.
+        """
+        self._upstream_cooldown.check(url)
+        if urllib.parse.urlsplit(url).hostname != urllib.parse.urlsplit(self.base_url).hostname:
+            return
+        async with self._navigation_lock:
+            self._upstream_cooldown.check(url)
+            delay = self._next_navigation_at - time.monotonic()
+            if delay > 0:
+                logger.info("Browser navigation paced for %.1fs", delay)
+                await asyncio.sleep(delay)
+            self._upstream_cooldown.check(url)
+            self._next_navigation_at = time.monotonic() + 10.0
 
     async def _goto_with_retry(
         self,
@@ -2723,6 +2763,7 @@ class PolymtradeExecutor:
         for attempt in range(max_retries):
             try:
                 self._upstream_cooldown.check(url)
+                await self._pace_navigation(url)
                 response = await self.page.goto(url, wait_until=wait_until, timeout=timeout_ms)
                 self._check_navigation_response(url, response)
                 await self._recover_stale_app_shell(
@@ -2758,6 +2799,7 @@ class PolymtradeExecutor:
                     f"Navigation failed after {max_retries} {wait_until} attempts; "
                     f"trying {fallback_wait_until} fallback for {url}: {last_error}"
                 )
+                await self._pace_navigation(url)
                 response = await self.page.goto(
                     url,
                     wait_until=fallback_wait_until,
@@ -2777,6 +2819,8 @@ class PolymtradeExecutor:
                     timeout_ms=timeout_ms,
                 )
                 return response
+            except UpstreamAccessDeferred:
+                raise
             except Exception as fallback_error:
                 last_error = fallback_error
                 if self._is_transient_goto_error(fallback_error) and self._navigation_target_reached(url):

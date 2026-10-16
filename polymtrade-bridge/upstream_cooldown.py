@@ -1,7 +1,9 @@
 """Host-scoped denial cooldowns; persists only status and retry timestamps."""
 import json
 import logging
+import math
 import os
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
@@ -47,15 +49,40 @@ class UpstreamCooldown:
                 self.entries.pop(host)
                 self._save()
             return
-        failures = min(self.entries.get(host, {}).get("failures", 0) + 1, 8)
-        delay = min(1800 * 2 ** (failures - 1), 21600) if status == 403 else 300
+        now = time.time()
+        previous = self.entries.get(host, {})
+        active = now < previous.get("retry_at", 0)
+        failures = previous["failures"] if active else min(
+            (previous.get("failures", 0) if previous.get("status") == status else 0) + 1, 8,
+        )
+        if active:
+            retry_at = previous["retry_at"]
+            # Concurrent responses belong to the same denial, not new probes.
+            if status == 403 and previous["status"] != 403:
+                retry_at = max(retry_at, now + 1800)
+            if previous["status"] == 403:
+                status = 403
+        else:
+            delay = (min(1800 * 2 ** (failures - 1), 21600) if status == 403 else
+                     min(300 * 2 ** (failures - 1), 3600) if status == 429 else 300)
+            retry_at = now + delay
+        retry_after = next((value for key, value in (headers or {}).items()
+                            if str(key).lower() == "retry-after"), "0")
         try:
-            delay = max(delay, float((headers or {}).get("retry-after", "0")))
+            delay = float(retry_after)
         except (ValueError, TypeError):
-            pass
-        self.entries[host] = {"status": status, "retry_at": time.time() + delay, "failures": failures}
+            try:
+                delay = parsedate_to_datetime(retry_after).timestamp() - now
+            except (ValueError, TypeError, OverflowError, AttributeError):
+                delay = 0
+        if math.isfinite(delay):
+            retry_at = max(retry_at, now + delay)
+        entry = {"status": status, "retry_at": retry_at, "failures": failures}
+        if entry == previous:
+            return
+        self.entries[host] = entry
         self._save()
-        logger.warning("Upstream %s HTTP %s; all host requests deferred for %.0fs", host, status, delay)
+        logger.warning("Upstream %s HTTP %s; all host requests deferred for %.0fs", host, status, retry_at - now)
 
     def _save(self):
         try:
