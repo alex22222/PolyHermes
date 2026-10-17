@@ -1,5 +1,6 @@
 // Fixed local endpoints only. Preflight carries a whitelist of read-only ticket facts.
-const MARKET_QUOTE_ERROR_CODES = ['HTTP_SOURCE_TIMEOUT', 'HTTP_SOURCE_UNAVAILABLE', 'INVALID_MARKET_QUOTE',
+const MARKET_QUOTE_ERROR_CODES = ['HTTP_SOURCE_TIMEOUT', 'HTTP_SOURCE_UNAVAILABLE', 'HTTP_SOURCE_CONNECTION_RESET',
+  'HTTP_SOURCE_TLS_ERROR', 'INVALID_MARKET_QUOTE',
   'CLOB_BOOKS_MISMATCH', 'CLOB_BOOK_TIME_INVALID', 'ROUND_CHANGED_DURING_READ', 'INVALID_BOOK', 'INVALID_BOOK_LEVEL',
   'WRONG_MARKET_PRICE_CONFIG', 'MARKET_NOT_UNIQUE', 'WRONG_OR_INACTIVE_EVENT', 'WRONG_OR_INACTIVE_MARKET',
   'WRONG_MARKET_PERIOD', 'INVALID_OUTCOME_TOKENS', 'LOCAL_QUOTE_TIMEOUT', 'LOCAL_QUOTE_NOT_FOUND'];
@@ -21,6 +22,20 @@ function marketPage(value) {
     const parsed = new URL(value);
     return parsed.origin === 'https://future.news' && !parsed.username && !parsed.password &&
       roundOf(parsed.pathname) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// The account activity panel also displays global state and the weekend switch.
+// It gets no ticket, claim, quote, audit or renderer authority from this scope.
+function controlPage(value) {
+  const market = marketPage(value);
+  if (market) return market;
+  try {
+    const parsed = new URL(value);
+    return parsed.origin === 'https://future.news' && !parsed.username && !parsed.password &&
+      /^\/(?:zh\/)?address\/0x[0-9a-fA-F]{40}\/?$/.test(parsed.pathname) ? parsed : null;
   } catch {
     return null;
   }
@@ -96,17 +111,18 @@ function validBuyAudit(message) {
 
 function preparationMessage(message, sender) {
   const page = marketPage(sender.tab.url ?? sender.url);
-  if (!marketPage(sender.url) || !page) return null;
+  if (!controlPage(sender.url) || !controlPage(sender.tab.url ?? sender.url)) return null;
   const type = message.type;
   if (type === 'FUTURE_BTC5M_PREPARATION') return Object.keys(message).length === 1 ? '' : null;
-  if (type === 'FUTURE_BTC5M_MARKET_QUOTE') return Object.keys(message).length === 1 ? '/market-quote' : null;
-  if (type === 'FUTURE_BTC5M_BUY_AUDIT') return validBuyAudit(message) ? '/buy-audit' : null;
   if (type === 'FUTURE_BTC5M_SCHEDULE') return Object.keys(message).length === 1 ? '/schedule' : null;
   if (type === 'FUTURE_BTC5M_SCHEDULE_SET') {
     const payload = message.payload;
     return Object.keys(message).length === 2 && payload && typeof payload === 'object' && !Array.isArray(payload) &&
       Object.keys(payload).length === 1 && typeof payload.weekendOnly === 'boolean' ? '/schedule' : null;
   }
+  if (!marketPage(sender.url) || !page) return null;
+  if (type === 'FUTURE_BTC5M_MARKET_QUOTE') return Object.keys(message).length === 1 ? '/market-quote' : null;
+  if (type === 'FUTURE_BTC5M_BUY_AUDIT') return validBuyAudit(message) ? '/buy-audit' : null;
   if (Object.keys(message).length !== 2 || !Object.hasOwn(message, 'payload')) return null;
   const payload = message.payload;
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
@@ -139,7 +155,7 @@ function preparationMessage(message, sender) {
 // WebSocket messages wake the page even when Chrome suspends its hidden-page timers.
 // The clock is read-only; the existing preparation, STOP and Buy checks still decide actions.
 const runtimePorts = new Set();
-let runtimeSocket = null, runtimeRetry = null;
+let runtimeSocket = null, runtimeRetry = null, runtimeWatchdog = null;
 // A locked or dark screen stops Future rendering the next round's ticket even while this
 // clock keeps the page awake, so the display also stays on while the automatic-ticket
 // switch is on. Off or unknown, only the system stays awake.
@@ -155,28 +171,42 @@ function followAutoSwitch(status) {
   if (runtimePorts.size) chrome.power.requestKeepAwake(keepAwakeLevel());
 }
 
+function disconnectRuntimeClock(socket) {
+  if (runtimeSocket !== socket) return;
+  runtimeSocket = null;
+  if (runtimeWatchdog !== null) clearTimeout(runtimeWatchdog);
+  runtimeWatchdog = null;
+  socket.close();
+  if (runtimePorts.size) runtimeRetry = setTimeout(() => {
+    runtimeRetry = null;
+    connectRuntimeClock();
+  }, 1000);
+}
+
+function watchRuntimeClock(socket) {
+  if (runtimeWatchdog !== null) clearTimeout(runtimeWatchdog);
+  // A half-open socket may never emit onclose. Fresh valid ticks renew this lease.
+  runtimeWatchdog = setTimeout(() => disconnectRuntimeClock(socket), 5000);
+}
+
 function connectRuntimeClock() {
   if (!runtimePorts.size || runtimeSocket) return;
   const socket = new WebSocket('ws://127.0.0.1:8767/runtime');
   runtimeSocket = socket;
+  watchRuntimeClock(socket);
   socket.onmessage = ({data}) => {
+    if (runtimeSocket !== socket) return;
     let tick;
     try { tick = JSON.parse(data); } catch { return; }
     if (!tick || Object.keys(tick).length !== 2 || tick.type !== 'FUTURE_BTC5M_TICK' ||
         !Number.isFinite(tick.serverTime) || Math.abs(Date.now() / 1000 - tick.serverTime) > 3) return;
+    watchRuntimeClock(socket);
     for (const port of runtimePorts) {
       try { port.postMessage(tick); } catch { /* onDisconnect removes the closed port. */ }
     }
   };
-  socket.onclose = () => {
-    if (runtimeSocket !== socket) return;
-    runtimeSocket = null;
-    if (runtimePorts.size) runtimeRetry = setTimeout(() => {
-      runtimeRetry = null;
-      connectRuntimeClock();
-    }, 1000);
-  };
-  socket.onerror = () => socket.close();
+  socket.onclose = () => disconnectRuntimeClock(socket);
+  socket.onerror = () => disconnectRuntimeClock(socket);
 }
 
 chrome.runtime.onConnect?.addListener((port) => {
@@ -193,6 +223,8 @@ chrome.runtime.onConnect?.addListener((port) => {
     if (runtimePorts.size) return;
     if (runtimeRetry !== null) clearTimeout(runtimeRetry);
     runtimeRetry = null;
+    if (runtimeWatchdog !== null) clearTimeout(runtimeWatchdog);
+    runtimeWatchdog = null;
     const socket = runtimeSocket;
     runtimeSocket = null;
     socket?.close();

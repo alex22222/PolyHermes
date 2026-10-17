@@ -74,11 +74,15 @@ Chrome 登录会话和 Python 的公开行情连接相互独立。当前 Python 
 scripts/future-btc5m-runtime/.venv/bin/python scripts/future_btc5m_assistant.py --once
 ```
 
-历史行情连接修复已启动本地辅助服务，`--status` 当时实测返回 `feed_status=CURRENT`。以后服务退出时，在终端运行并保持终端打开：
+历史行情连接修复已启动本地辅助服务，`--status` 当时实测返回 `feed_status=CURRENT`。手动运行方式（不要与常驻服务同时启动）：
 
 ```bash
 scripts/future-btc5m-runtime/.venv/bin/python scripts/future_btc5m_assistant.py --watch
 ```
+
+2026-10-14 已补齐本机助手常驻依赖：`com.polyhermes.future-btc5m-assistant` 已安装到用户 `~/Library/LaunchAgents`，与既有 SSH 隧道分别由 launchd 管理，登录时启动、进程退出后自动恢复。配置为 `scripts/launchd/com.polyhermes.future-btc5m-assistant.plist`，沿用独立 virtualenv 和当前 `127.0.0.1:7890` HTTP/SOCKS 代理；日志为 `reports/future-btc5m-assistant/service/stdout.log`、`stderr.log`。状态使用 `launchctl print gui/$(id -u)/com.polyhermes.future-btc5m-assistant`；停止服务用 `launchctl bootout`，禁止下次登录启动另用 `launchctl disable`。单独杀进程会自动重启。
+
+重启保留既有安全逻辑：自动买入关闭、旧票据不恢复、仅周末模式恢复默认开启。真实强制退出验收中，助手和新鲜 Chrome 报告在 1.024 秒内恢复，VPS 四次状态/订单读取全部 200，买入审计未变，页面已恢复在线。详见 [助手常驻验收](../reports/future-btc5m-assistant/assistant-daemon-20261014/REVIEW.md)。退出登录、睡眠、代理或网络失效仍会断联；没有实际退出登录验收。
 
 扩展读取 `GET /status`，只读报告使用 `POST /bridge/preflight`；0.3.0 新增本机 `/bridge/preparation` 的读取、唯一认领和准备回执。0.6.6 的只读报告增加当前 Future 页面的钱包地址和显示现金，供项目页面展示资产；仍不读取或发送 Cookie、私钥、登录令牌及其它页面数据。项目控制页与准备/订单事实见 [Future BTC5m Bridge 控制页面](future-btc5m-bridge.md)，资产口径与更新步骤见 [我的资产](future-btc5m-assets.md)。`--watch` 不提交买入，`Ctrl+C` 退出服务并要求下次从新轮次开始。
 

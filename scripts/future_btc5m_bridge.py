@@ -324,6 +324,9 @@ class FutureBridge:
             return [error]
         if not self.requested_enabled:
             return ["AUTO_PREPARATION_DISABLED"]
+        # This round's persisted refusal remains the cause after its source sample expires.
+        if self.series == "15m" and self.decisions.get(("15m", self._start(now))) == "SKIP_SAME_AS_1H":
+            return ["SAME_AS_1H_FAVORITE"]
         if not self._current_signal(source, now, allow_flat=True):
             return ["WAITING_CURRENT_SIGNAL"]
         report = self.browser_report
@@ -340,8 +343,6 @@ class FutureBridge:
             return ["BUTTON_QUOTES_TIED"]
         if self.series == "15m":
             decision = self.decisions.get(("15m", self._start(now)))
-            if decision == "SKIP_SAME_AS_1H":
-                return ["SAME_AS_1H_FAVORITE"]
             if decision is None and self._hour_side(source, now) is None:
                 return ["HOUR_QUOTE_UNAVAILABLE"]
         return []

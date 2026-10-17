@@ -40,7 +40,8 @@ LOCAL_ADDRESS = ("127.0.0.1", 8766)
 MARKET_QUOTE_PATH = "/bridge/preparation/market-quote"
 MARKET_QUOTE_FIELDS = {"schemaVersion", "source", "periodStart", "slug", "upAskCents", "downAskCents",
                        "upBidCents", "downBidCents", "observedAt", "serverTime"}
-MARKET_QUOTE_ERRORS = {"HTTP_SOURCE_TIMEOUT", "HTTP_SOURCE_UNAVAILABLE", "INVALID_MARKET_QUOTE",
+MARKET_QUOTE_ERRORS = {"HTTP_SOURCE_TIMEOUT", "HTTP_SOURCE_UNAVAILABLE", "HTTP_SOURCE_CONNECTION_RESET",
+                       "HTTP_SOURCE_TLS_ERROR", "INVALID_MARKET_QUOTE",
                        "CLOB_BOOKS_MISMATCH", "CLOB_BOOK_TIME_INVALID", "ROUND_CHANGED_DURING_READ",
                        "INVALID_BOOK", "INVALID_BOOK_LEVEL", "WRONG_MARKET_PRICE_CONFIG", "MARKET_NOT_UNIQUE",
                        "WRONG_OR_INACTIVE_EVENT", "WRONG_OR_INACTIVE_MARKET", "WRONG_MARKET_PERIOD",
@@ -435,22 +436,53 @@ class ClobMarketQuotes:
         return snapshot
 
 
-def curl_json(url, body=None):
+def curl_json(url, body=None, *, timeout=4):
     """Synchronous JSON read for the market-quote route; a JSON body makes it a POST."""
     # Same route as the async get_json: inherit the configured proxy, never disable TLS.
-    command = ["curl", "--fail", "--silent", "--show-error", "--max-time", "4",
+    command = ["curl", "--fail", "--silent", "--show-error",
                "--max-filesize", "1000000", "--user-agent", "PolyHermes-BTC5m-Assistant/1.0",
                "--header", "Accept: application/json"]
     if body is not None:
         command += ["--header", "Content-Type: application/json",
                     "--data-binary", json.dumps(body, separators=(",", ":"), allow_nan=False)]
-    try:
-        process = subprocess.run(command + ["--url", url], capture_output=True, timeout=5, check=False)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("HTTP_SOURCE_TIMEOUT") from None
-    if process.returncode:
+    deadline = time.monotonic() + timeout
+    for attempt in range(2):
+        remaining = timeout if attempt == 0 else deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("HTTP_SOURCE_TIMEOUT")
+        try:
+            # The configured proxy intermittently resets the default TLS/ALPN handshake;
+            # its verified HTTP/1.1 handshake succeeds without changing TLS or the route.
+            protocol = ["--http1.1"] if attempt else []
+            process = subprocess.run(command + protocol + ["--max-time", f"{remaining:g}", "--url", url],
+                                     capture_output=True, timeout=remaining + 1, check=False)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("HTTP_SOURCE_TIMEOUT") from None
+        if not process.returncode:
+            return json.loads(process.stdout)
+        # These endpoints only read public data (including POST /books). Retry one
+        # interrupted transport within the original deadline, never HTTP denials or TLS validation.
+        if process.returncode in (35, 52, 55, 56):
+            if attempt == 0:
+                continue
+            raise RuntimeError("HTTP_SOURCE_CONNECTION_RESET")
+        if process.returncode == 60:
+            raise RuntimeError("HTTP_SOURCE_TLS_ERROR")
         raise RuntimeError("HTTP_SOURCE_TIMEOUT" if process.returncode == 28 else "HTTP_SOURCE_UNAVAILABLE")
-    return json.loads(process.stdout)
+
+
+async def get_json(url):
+    # Share transport recovery with the CLOB reader without blocking clock ticks or the feed.
+    return await asyncio.to_thread(curl_json, url, timeout=6)
+
+
+def source_error(error):
+    if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+        return "HTTP_SOURCE_TIMEOUT"
+    if isinstance(error, ConnectionResetError):
+        return "HTTP_SOURCE_CONNECTION_RESET"
+    code = str(error)
+    return code if code in MARKET_QUOTE_ERRORS else "HTTP_SOURCE_UNAVAILABLE"
 
 
 def future_eligibility():
@@ -485,7 +517,7 @@ def empty_status(now):
         "status": "WAITING", "reason": "WAITING_FOR_ENTRY", "updated_at": iso(now),
         "server_time": now, "geoblock": {"blocked": None, "source_url": GEOBLOCK},
         "future_eligibility": future_eligibility(), "feed_status": "UNAVAILABLE",
-        "signal": None, "draft": None,
+        "signal": None, "draft": None, "source_errors": {}, "source_reads": [],
     }
 
 
@@ -607,18 +639,57 @@ class Assistant:
             "symbol": "BTC", "eventStartTime": iso(start), "variant": SERIES[series]["variant"],
             "endDate": iso(start + period), "twapEnabled": "true", "twapLookbackSeconds": 60,
         })
+
+        async def read_source(name, url):
+            # Retry public reads inside this one durable claim, never a preparation or Buy.
+            for attempt in range(1, 4):
+                if (self.state_dir / "STOP").exists():
+                    raise ValueError("STOP_FILE_PRESENT")
+                now = self.now_fn()
+                if round_start_of(now, series) != start or not first <= now < last or self.series_fn() != series:
+                    raise ValueError("ENTRY_WINDOW_EXPIRED_DURING_READ")
+                try:
+                    value = await http_fn(url)
+                except Exception as error:
+                    value = error
+                code = source_error(value) if isinstance(value, Exception) else None
+                with self.lock:
+                    self.state["source_reads"].append({"source": name, "attempt": attempt,
+                                                       "checked_at": self.now_fn(), "error": code})
+                    if code:
+                        self.state["source_errors"][name] = code
+                    else:
+                        self.state["source_errors"].pop(name, None)
+                if not isinstance(value, Exception):
+                    return value
+                delay = 0.5 * attempt
+                if (attempt == 3 or name == "GEOBLOCK"
+                        or code not in {"HTTP_SOURCE_CONNECTION_RESET", "HTTP_SOURCE_TIMEOUT"}
+                        or self.now_fn() + delay >= last):
+                    return value
+                with self.lock:
+                    self.state.update(status="WAITING", reason="SOURCE_REQUEST_RETRYING")
+                await asyncio.sleep(delay)
+
         try:
-            values = await asyncio.gather(
-                http_fn(f"{GAMMA}?slug={slug_for(start, series)}"),
-                http_fn(f"{CRYPTO_PRICE}?{parameters}"), http_fn(GEOBLOCK),
-                return_exceptions=True,
-            )
+            try:
+                values = await asyncio.wait_for(asyncio.gather(
+                    read_source("GAMMA", f"{GAMMA}?slug={slug_for(start, series)}"),
+                    read_source("OPENING_PRICE", f"{CRYPTO_PRICE}?{parameters}"), read_source("GEOBLOCK", GEOBLOCK),
+                    return_exceptions=True,
+                ), timeout=last - self.now_fn())
+            except TimeoutError:
+                raise ValueError("ENTRY_WINDOW_EXPIRED_DURING_READ") from None
             now = self.now_fn()  # Network time is part of the entry window.
             if (self.state_dir / "STOP").exists():
                 return self.status()
             if round_start_of(now, series) != start or not first <= now < last or self.series_fn() != series:
                 raise ValueError("ENTRY_WINDOW_EXPIRED_DURING_READ")
             events, opening, geo = values
+            with self.lock:
+                self.state["source_errors"] = {name: source_error(value) for name, value in
+                                               zip(("GAMMA", "OPENING_PRICE", "GEOBLOCK"), values)
+                                               if isinstance(value, Exception)}
             if isinstance(events, Exception) or isinstance(opening, Exception):
                 raise ValueError("SOURCE_REQUEST_FAILED")
             market = validate_market(events, start, series)
@@ -837,20 +908,6 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None, market_quote=None
 async def run(args):
     feed = ChainlinkFeed()
     assistant = Assistant(args.state_dir, lambda: feed.quote, observe_only=args.once)
-
-    async def get_json(url):
-        # curl supports the existing macOS SOCKS proxy without new Python packages.
-        # Inherit the configured route; never disable TLS or override the proxy.
-        process = await asyncio.create_subprocess_exec(
-            "curl", "--fail", "--silent", "--show-error", "--max-time", "6",
-            "--max-filesize", "1000000", "--user-agent", "PolyHermes-BTC5m-Assistant/1.0",
-            "--header", "Accept: application/json", "--url", url,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        output, _ = await process.communicate()
-        if process.returncode:
-            raise RuntimeError("HTTP_SOURCE_UNAVAILABLE")
-        return json.loads(output)
 
     feed_task = asyncio.create_task(feed.run(single_attempt=args.once))
     server = None

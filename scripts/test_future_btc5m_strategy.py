@@ -124,6 +124,9 @@ class FifteenMinuteBridgeTest(unittest.TestCase):
         self.assertEqual("SKIP_SAME_AS_1H", self.decisions()[0]["decision"])
         status = self.at(155, up=30, down=71)
         self.assertEqual({}, self.bridge.preparations, "a later flip in the window does not reopen the round")
+        self.clock = S + 171
+        self.assertEqual(["SAME_AS_1H_FAVORITE"], self.bridge.observe()["preparation"]["reasons"],
+                         "the terminal strategy decision must not be overwritten by an expired signal or report")
         restarted = FutureBridge(self.dir, lambda: self.source, lambda: self.clock)
         self.assertEqual("SKIP_SAME_AS_1H", restarted.decisions[("15m", S)])
 

@@ -2,7 +2,7 @@
 # Foreground private SSH transport only; no trading controls or daemon setup.
 set -euo pipefail
 
-FUTURE_TUNNEL_HOST="root@66.135.16.16"
+FUTURE_TUNNEL_HOST="root@107.191.42.75"
 FUTURE_TUNNEL_KEY="$HOME/.ssh/polymtrade_vultr_ed25519"
 REMOVE_STALE_SOCKET=false
 SOCKS_PROXY=""

@@ -155,7 +155,7 @@ class FutureTunnelTest(unittest.TestCase):
                            "StreamLocalBindUnlink=no", "StreamLocalBindMask=0177"):
                 self.assertIn(option, args)
             self.assertEqual("/opt/polyhermes/future-btc5m/assistant.sock:127.0.0.1:8766", args[args.index("-R") + 1])
-            self.assertEqual("root@66.135.16.16", args[-1])
+            self.assertEqual("root@107.191.42.75", args[-1])
             self.assertNotIn("-f", args)
         for row in self.trace("check"):
             for option in ("ControlMaster=no", "ControlPath=none", "ServerAliveInterval=15", "ServerAliveCountMax=3"):
@@ -168,7 +168,7 @@ class FutureTunnelTest(unittest.TestCase):
         for kind in ("check", "forward"):
             for row in self.trace(kind):
                 self.assertEqual(proxy, row["args"][row["args"].index(proxy)])
-                self.assertIn("root@66.135.16.16", row["args"])
+                self.assertIn("root@107.191.42.75", row["args"])
         for value in ("10.0.0.1:7890", "127.0.0.1:0", "127.0.0.1:70000", "127.0.0.1", "localhost:7890",
                       "127.0.0.1:7890;id", ""):
             with self.subTest(value=value):

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polyhermes.future-btc5m-tunnel</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/henry/projects/polyhermes/scripts/start-future-btc5m-tunnel.sh</string>
+        <string>--remove-stale-socket</string>
+        <string>--socks-proxy</string>
+        <string>127.0.0.1:7890</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/henry/projects/polyhermes</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/henry/projects/polyhermes/reports/future-btc5m-assistant/tunnel/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/henry/projects/polyhermes/reports/future-btc5m-assistant/tunnel/stderr.log</string>
+
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>15</integer>
+    <key>AbandonProcessGroup</key>
+    <false/>
+</dict>
+</plist>

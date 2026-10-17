@@ -543,7 +543,7 @@ class FutureBtc5mAssistantTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(status["draft"])
         self.assertFalse((self.path / "rounds.jsonl").exists())
 
-    async def test_request_failure_is_recorded_without_retry_or_fabricated_signal(self):
+    async def test_request_failure_is_recorded_without_replaying_the_round_or_fabricating_signal(self):
         async def failing_http(url):
             self.calls.append(url)
             raise ConnectionResetError("connection reset")
@@ -554,7 +554,24 @@ class FutureBtc5mAssistantTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(status["draft"])
         self.assertIsNone(status["signal"])
         await self.assistant.poll(self.http)
-        self.assertEqual(3, len(self.calls))
+        self.assertEqual(7, len(self.calls), "critical reads retry twice; geoblock is read once")
+
+    async def test_request_failure_names_the_failed_sources_without_private_error_text(self):
+        async def failing_http(url):
+            if url.startswith(GAMMA):
+                raise RuntimeError("HTTP_SOURCE_CONNECTION_RESET")
+            if url == GEOBLOCK:
+                return self.geo
+            raise TimeoutError("private proxy detail")
+
+        self.clock = START + 60
+        status = await self.assistant.poll(failing_http)
+        self.assertEqual("SOURCE_REQUEST_FAILED", status["reason"])
+        self.assertEqual({"GAMMA": "HTTP_SOURCE_CONNECTION_RESET", "OPENING_PRICE": "HTTP_SOURCE_TIMEOUT"},
+                         status["source_errors"])
+        self.assertIsNone(status["signal"])
+        self.assertIsNone(status["draft"])
+        self.assertNotIn("private", json.dumps(status))
 
     async def test_server_only_exposes_get_and_stop_is_effective_on_next_read(self):
         await self.evaluate()
@@ -881,6 +898,40 @@ class ClobMarketQuotesTest(unittest.TestCase):
 
 
 class CurlJsonTest(unittest.TestCase):
+    def test_fast_connection_reset_retries_once_with_the_remaining_read_budget(self):
+        failed = Mock(returncode=35, stdout=b"", stderr=b"private proxy detail")
+        good = Mock(returncode=0, stdout=b'{"ok":true}')
+        with patch("future_btc5m_assistant.time.monotonic", side_effect=[100, 100.25]), \
+                patch("future_btc5m_assistant.subprocess.run", side_effect=[failed, good]) as run:
+            self.assertEqual({"ok": True}, curl_json(GAMMA))
+        self.assertEqual(2, run.call_count)
+        retry = run.call_args.args[0]
+        self.assertNotIn("--http1.1", run.call_args_list[0].args[0])
+        self.assertIn("--http1.1", retry, "retry the supported protocol that passed the live TLS handshake probe")
+        self.assertEqual("3.75", retry[retry.index("--max-time") + 1])
+        self.assertEqual(4.75, run.call_args.kwargs["timeout"])
+
+    def test_reset_budget_exhaustion_never_starts_a_second_request(self):
+        with patch("future_btc5m_assistant.time.monotonic", side_effect=[100, 104]), \
+                patch("future_btc5m_assistant.subprocess.run", return_value=Mock(returncode=56, stdout=b"")) as run:
+            with self.assertRaisesRegex(RuntimeError, "^HTTP_SOURCE_TIMEOUT$"):
+                curl_json(GAMMA)
+        self.assertEqual(1, run.call_count)
+
+    def test_repeated_resets_are_bounded_and_http_or_certificate_denials_are_not_retried(self):
+        for code, calls, reason in [(56, 2, "HTTP_SOURCE_CONNECTION_RESET"),
+                                    (22, 1, "HTTP_SOURCE_UNAVAILABLE"), (60, 1, "HTTP_SOURCE_TLS_ERROR")]:
+            with self.subTest(code=code), patch("future_btc5m_assistant.subprocess.run",
+                                               return_value=Mock(returncode=code, stdout=b"")) as run:
+                with self.assertRaisesRegex(RuntimeError, "^" + reason + "$"):
+                    curl_json(GAMMA)
+                self.assertEqual(calls, run.call_count)
+
+    def test_async_observation_uses_the_same_bounded_transport_with_its_six_second_budget(self):
+        with patch("future_btc5m_assistant.curl_json", return_value={"ok": True}) as read:
+            self.assertEqual({"ok": True}, asyncio.run(future_btc5m_assistant.get_json(GAMMA)))
+        read.assert_called_once_with(GAMMA, timeout=6)
+
     def test_quote_transport_allows_measured_three_second_source_latency(self):
         with patch("future_btc5m_assistant.subprocess.run", return_value=Mock(returncode=0, stdout=b'[]')) as run:
             curl_json(CLOB_BOOKS, [{"token_id": "1"}, {"token_id": "2"}])

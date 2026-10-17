@@ -37,7 +37,7 @@ bash scripts/start-future-btc5m-tunnel.sh --remove-stale-socket
 
 恢复仅针对 `/opt/polyhermes/future-btc5m/assistant.sock`，要求路径为 Unix socket、连接报 `ECONNREFUSED`，且检查期间 inode 未变。活动 socket、其他错误、普通文件及符号链接都会拒绝清理。
 
-脚本在前台监督 SSH，不设置 daemon、cron 或 LaunchAgent。首次本机助手不可用时立即退出；默认首次启动发现已有 socket 也会拒绝，只有上述显式选项允许首次清理。启动后 SSH 以 255 断线时，按 5、10、20、30 秒退避重连，之后等待上限保持 30 秒。每次重连前沿用相同固定路径、socket 类型、`ECONNREFUSED` 和 inode 校验，只清理确认失效的 socket；活动 socket 或远端校验的其他错误会立即停止。校验 SSH 自身连接失败也退避重试，不放宽首次清理规则。Ctrl-C 或 TERM 会结束当前子 SSH/等待进程并停止重连；SSH 正常退出或其他非 255 退出也会结束脚本。关闭这个前台进程仍会使生产接口返回 503。
+脚本本身在前台监督 SSH；下文的 LaunchAgent 可将它交给 macOS 常驻管理。首次本机助手不可用时立即退出；默认首次启动发现已有 socket 也会拒绝，只有上述显式选项允许首次清理。启动后 SSH 以 255 断线时，按 5、10、20、30 秒退避重连，之后等待上限保持 30 秒。每次重连前沿用相同固定路径、socket 类型、`ECONNREFUSED` 和 inode 校验，只清理确认失效的 socket；活动 socket 或远端校验的其他错误会立即停止。校验 SSH 自身连接失败也退避重试，不放宽首次清理规则。Ctrl-C 或 TERM 会结束当前子 SSH/等待进程并停止重连；SSH 正常退出或其他非 255 退出也会结束脚本。单独运行时，关闭这个前台进程仍会使生产接口返回 503。
 
 直连 22 端口不稳定时（2026-10-12 实测：直连握手卡在密钥交换后超时，而经本机代理 3 次均约 3 秒连上），让两条 SSH 都经本机 SOCKS5 代理：
 
@@ -46,6 +46,29 @@ bash scripts/start-future-btc5m-tunnel.sh --remove-stale-socket --socks-proxy 12
 ```
 
 参数只接受 `127.0.0.1:端口`，用 `nc -X 5` 作为 `ProxyCommand`，其余 SSH 选项与转发路径不变。隧道断线后，VPS 上旧的 sshd 会话可能仍占用 socket；此时项目页请求会卡住，脚本也会报 `tunnel socket is active`。只关闭 `ss -xlp` 显示持有该 socket 的那个 sshd 进程，再按上面的命令恢复。
+
+## macOS 常驻隧道
+
+专用配置为 `scripts/launchd/com.polyhermes.future-btc5m-tunnel.plist`，沿用项目 LaunchAgent 方式和当前用户的固定路径。`RunAtLoad=true` 在登录时启动，`KeepAlive=true` 在监督脚本任意退出后重新启动；`ThrottleInterval=15` 限制频繁重启。`AbandonProcessGroup=false` 让 launchd 在监督进程被强制结束时清理其 SSH 子进程，避免留下本机孤儿连接。脚本内部的 SSH 退避与 socket 校验保持原样。
+
+隧道配置只启动既有隧道，明确传入 `--remove-stale-socket --socks-proxy 127.0.0.1:7890`。自动恢复仍拒绝覆盖活动 socket、符号链接、普通文件、权限错误或检查期间变化的 inode。Mac 助手或本机代理暂未启动时，launchd 会限速重试，依赖恢复后重新连接；隧道本身不设置助手自启、下单重试或开关修改。
+
+安装前应关闭自动买入并正常结束已有前台隧道，避免两份进程竞争。安装命令：
+
+```bash
+mkdir -p reports/future-btc5m-assistant/tunnel ~/Library/LaunchAgents
+install -m 600 scripts/launchd/com.polyhermes.future-btc5m-tunnel.plist ~/Library/LaunchAgents/com.polyhermes.future-btc5m-tunnel.plist
+launchctl enable gui/$(id -u)/com.polyhermes.future-btc5m-tunnel
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.polyhermes.future-btc5m-tunnel.plist
+```
+
+状态：`launchctl print gui/$(id -u)/com.polyhermes.future-btc5m-tunnel`。输出日志为 `reports/future-btc5m-assistant/tunnel/stdout.log` 和 `stderr.log`，不记录账户令牌或行情载荷。暂停服务必须使用 `launchctl bootout gui/$(id -u)/com.polyhermes.future-btc5m-tunnel`，单独杀进程会自动恢复；如需禁止下次登录启动，另执行 `launchctl disable gui/$(id -u)/com.polyhermes.future-btc5m-tunnel`。文件保留用于再次启用。
+
+这是用户登录会话的常驻服务，退出登录、关机、睡眠、代理失效或远端网络异常仍会断联；网络故障恢复有退避时间，不能承诺零断联或绝不漏单。进程故障验收需分别验证 SSH 子进程结束和监督进程被强制结束后自动恢复，再核对生产状态/订单只读接口与正式鉴权页面。测试期间保持自动买入关闭，并核对控制文件和买入审计哈希不变。
+
+2026-10-14 已安装并完成真实故障验收：结束 SSH 子进程、强制结束监督进程后，生产状态与订单接口都从 503 自动恢复为 200，核对恢复时间上界分别为 13.950 秒和 12.663 秒；旧 SSH 子进程已清理，正式页面显示在线与保存开关关闭。41 项隔离测试通过，控制文件及买入审计哈希未变，自动买入保持关闭。登录自启已配置，但没有实际退出登录测试。详见 [常驻隧道验收](../reports/future-btc5m-assistant/tunnel-daemon-20261014/REVIEW.md)。
+
+随后出现隧道仍在线、Mac 助手退出导致 8766 拒绝连接的问题，已增加独立 `com.polyhermes.future-btc5m-assistant` LaunchAgent，补齐上游服务自启和退出恢复。它沿用既有重启关闭买入和撤销旧票据规则；真实退出后 HTTP 服务与浏览器报告在 1.024 秒内恢复。详见 [助手常驻说明](future-btc5m-assistant.md#安装与使用) 和 [验收记录](../reports/future-btc5m-assistant/assistant-daemon-20261014/REVIEW.md)。
 
 在 VPS 上启动独立 relay。目录和 Python 文件应先通过审阅的部署流程准备：
 
@@ -91,6 +114,7 @@ docker exec polyhermes python3 -c 'import urllib.request; print(urllib.request.u
 ```bash
 scripts/future-btc5m-runtime/.venv/bin/python -m unittest scripts/test_future_btc5m_relay.py -q
 scripts/future-btc5m-runtime/.venv/bin/python -m unittest scripts/test_future_btc5m_tunnel.py -q
+scripts/future-btc5m-runtime/.venv/bin/python -m unittest scripts/test_future_btc5m_launchd.py -q
 bash -n scripts/start-future-btc5m-tunnel.sh
 ```
 

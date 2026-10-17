@@ -809,6 +809,7 @@
   let reportPromise = null;
   let autoBuyer = null;
   let runtimePort = null, lastRuntimeTick = null;
+  let runtimeReconnectAllowed = true;
   let rendererState = 'UNAVAILABLE';
   let scheduleVersion = 0;
   let scheduleBusy = false;
@@ -849,6 +850,7 @@
   }
 
   const marketQuoteDetails = {HTTP_SOURCE_TIMEOUT: 'Polymarket 行情请求超时', HTTP_SOURCE_UNAVAILABLE: 'Polymarket 行情源不可用',
+    HTTP_SOURCE_CONNECTION_RESET: 'Polymarket 行情连接被重置', HTTP_SOURCE_TLS_ERROR: 'Polymarket 行情证书验证失败',
     INVALID_MARKET_QUOTE: '盘口响应格式或时间无效', CLOB_BOOKS_MISMATCH: '盘口代币与本轮不一致',
     CLOB_BOOK_TIME_INVALID: '盘口源时间无效', ROUND_CHANGED_DURING_READ: '读取时已切换到下一轮',
     INVALID_BOOK: '盘口结构无效', INVALID_BOOK_LEVEL: '盘口价量无效',
@@ -913,6 +915,14 @@
   };
 
   function outcomeReason(code) {
+    if (code === 'WAITING_CURRENT_SIGNAL' && latest?.reason === 'SOURCE_REQUEST_FAILED') {
+      const sources = {GAMMA: 'Gamma 市场信息', OPENING_PRICE: 'TWAP 开盘价', GEOBLOCK: '地域检查'};
+      const errors = {HTTP_SOURCE_CONNECTION_RESET: '连接被重置', HTTP_SOURCE_TIMEOUT: '请求超时',
+        HTTP_SOURCE_TLS_ERROR: '证书验证失败', HTTP_SOURCE_UNAVAILABLE: '接口不可用'};
+      const details = Object.entries(latest.source_errors ?? {}).filter(([name]) => Object.hasOwn(sources, name))
+        .map(([name, error]) => `${sources[name]}：${errors[error] || '响应无效'}`);
+      return ['行情异常', details.join('；') || '本轮行情请求失败'];
+    }
     if (code === 'WAITING_CURRENT_SIGNAL' && latest?.reason === 'NOT_ET_WEEKEND') {
       return ['运行安排', '当前不是美东周末'];
     }
@@ -986,7 +996,9 @@
       outcome = ['状态未知 · 服务异常', '本地准备服务未连接或状态已过期；无法确认本轮操作'];
     } else if (value.reasons?.includes('STOP_FILE_PRESENT')) outcome = ['未点击 · 已停止', '助手已停止'];
     else if (!value.enabled) outcome = ['未点击 · 自动功能关闭', '在 PolyHermes 开启“自动准备票据”后才会自动买入'];
-    else if (elapsed >= last80) {
+    else if (value.reasons?.includes('SAME_AS_1H_FAVORITE')) {
+      outcome = ['未点击 · 策略过滤', outcomeReason('SAME_AS_1H_FAVORITE')[1]];
+    } else if (elapsed >= last80) {
       // Only observations made inside this round's entry window can explain a missed entry.
       const observed = orderTypeAttempt.periodStart === start ? [...windowBlockerOutcomes] : [];
       const record = value.lastAttempt;
@@ -1385,6 +1397,7 @@
         if (!tick || Object.keys(tick).length !== 2 || tick.type !== 'FUTURE_BTC5M_TICK' ||
             !Number.isFinite(tick.serverTime) || Math.abs(now - tick.serverTime) > 3) return;
         lastRuntimeTick = now;
+        runtimeReconnectAllowed = true;
         runTick();
       });
       port.onDisconnect.addListener(() => {
@@ -1393,8 +1406,13 @@
         lastRuntimeTick = null;
         rendererState = 'UNAVAILABLE';
         refreshTicketView();
-        // Reading lastError handles a disconnected extension context without exposing it.
-        if (!chrome.runtime.lastError) connectRuntimeClock();
+        // A transient port error must not wait for a hidden page timer. Read lastError
+        // without exposing it, and bound recovery if the replacement is also rejected.
+        void chrome.runtime.lastError;
+        if (runtimeReconnectAllowed) {
+          runtimeReconnectAllowed = false;
+          connectRuntimeClock();
+        }
       });
     } catch {
       runtimePort = null;
@@ -1406,5 +1424,5 @@
   connectRuntimeClock();
   runTick();
   // Foreground/reconnect fallback only; the lock-screen critical path is the pushed clock.
-  setInterval(() => { connectRuntimeClock(); runTick(); }, 1000);
+  setInterval(() => { runtimeReconnectAllowed = true; connectRuntimeClock(); runTick(); }, 1000);
 })();

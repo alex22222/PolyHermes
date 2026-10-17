@@ -251,6 +251,70 @@ test('a disconnected renderer port cannot claim the replacement document is stil
   assert.match(children[7].textContent, /锁屏渲染：开启失败/);
 });
 
+test('a runtime port error reconnects a frozen BTC15m page and prepares only once in its original window', async () => {
+  const fixture = ticketFixture({title: 'Bitcoin Up or Down - October 10, 12:45PM-1:00PM ET'});
+  const url = `https://future.news/zh/event/btc-updown-15m-${start}`;
+  let time = start + 140, lastError, claimed = false;
+  const ports = [], messages = [];
+  const intent = {...preparationIntent, id: `future-btc15m-prepare:${start}`, slug: `btc-updown-15m-${start}`,
+    periodEnd: start + 900, createdAt: start + 150, expiresAt: start + 170,
+    priceObservedAt: start + 150, quoteObservedAt: start + 150,
+    openPriceSource: 'polymarket_crypto_price_fifteen_twap60_openPrice'};
+  const wrapper = () => ({...preparation, serverTime: time, preparation: {...preparation.preparation,
+    series: '15m', strategy: 'btc15m_counter_1h',
+    state: claimed ? 'CLAIMED' : time >= start + 150 && time < start + 170 ? 'PENDING' : 'WAITING_SIGNAL',
+    intent: time >= start + 150 && time < start + 170 ? {...intent, claimToken: claimed ? token : null} : null}});
+  const children = await renderedPanel(observing, url, time, fixture.doc, {now: () => time,
+    lastError: () => lastError, messages,
+    connect() {
+      const port = {onMessage: {addListener(fn) {port.receive = fn;}},
+        onDisconnect: {addListener(fn) {port.disconnected = fn;}}};
+      ports.push(port);
+      return port;
+    },
+    reply(message) {
+      if (message.type === 'FUTURE_BTC5M_PREFLIGHT') return {ok: true};
+      if (message.type === 'FUTURE_BTC5M_PREPARATION_CLAIM') claimed = true;
+      if (message.type === 'FUTURE_BTC5M_PREPARATION_ACK') return {ok: true, status: {...wrapper(),
+        preparation: {...wrapper().preparation, state: message.payload.status}}};
+      return {ok: true, status: message.type === 'FUTURE_BTC5M_STATUS' ? {...observing, series: '15m',
+        round_series: '15m', period_start: start, server_time: time, signal: null} : wrapper()};
+    }});
+  lastError = {message: 'The message port closed before a response was received.'};
+  ports[0].disconnected();
+  assert.equal(ports.length, 2, 'an error must not leave reconnection dependent on a frozen page timer');
+  lastError = undefined;
+  // No children.poll(): no page timer runs during the entire original +150..+170 window.
+  for (time = start + 150; time <= start + 171; time += .5) {
+    ports[1].receive({type: 'FUTURE_BTC5M_TICK', serverTime: time});
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(fixture.writes(), 1);
+  assert.equal(messages.filter(m => m.type === 'FUTURE_BTC5M_PREPARATION_CLAIM').length, 1);
+  assert.equal(fixture.buyClicks(), 0, 'reconnection itself has no Buy authority');
+  assert.match(children[7].textContent, /锁屏心跳：已连接/);
+});
+
+test('immediate runtime reconnection is bounded until a fresh clock tick or foreground timer recovers it', async () => {
+  const ports = [];
+  const children = await renderedPanel(observing, marketUrl, now, ticketFixture().doc, {
+    connect() {
+      const port = {onMessage: {addListener(fn) {port.receive = fn;}},
+        onDisconnect: {addListener(fn) {port.disconnected = fn;}}};
+      ports.push(port);
+      return port;
+    }});
+  ports[0].disconnected();
+  assert.equal(ports.length, 2);
+  ports[1].disconnected();
+  assert.equal(ports.length, 2, 'a rejected replacement port must not spin indefinitely');
+  await children.poll();
+  assert.equal(ports.length, 3, 'the existing foreground fallback still recovers');
+  ports[2].receive({type: 'FUTURE_BTC5M_TICK', serverTime: now});
+  ports[2].disconnected();
+  assert.equal(ports.length, 4, 'a healthy recovered clock restores one immediate recovery attempt');
+});
+
 async function renderedPanel(value, url, time, ticketDoc, runtime = {}) {
   const body = ticketDoc?.body || {};
   body.append = function(panel) { this.panel = panel; };
@@ -264,7 +328,8 @@ async function renderedPanel(value, url, time, ticketDoc, runtime = {}) {
   class Clock extends Date { static now() { return (runtime.now ? runtime.now() : time) * 1000; } }
   vm.runInNewContext(content, {URL, Event, Date: Clock, document, location: runtime.location || {href: url},
     sessionStorage: runtime.storage || navigationFixture().storage,
-    setInterval(listener) { interval = listener; }, chrome: {runtime: {connect: runtime.connect, sendMessage: async (message) => {
+    setInterval(listener) { interval = listener; }, chrome: {runtime: {connect: runtime.connect,
+      get lastError() { return runtime.lastError?.(); }, sendMessage: async (message) => {
       runtime.messages?.push(message);
       return runtime.reply ? runtime.reply(message) : ({ok: true, status: value});
     }}}, ...runtime.globals});
@@ -1771,6 +1836,41 @@ test('the panel reports current ticket and all bridge refusal codes instead of h
   assert.match(children[5].textContent, /页面检查失败/, 'a passed inspection must not survive a mode change');
 });
 
+test('the current round names a failed source and keeps its observed failure after the entry window', async () => {
+  const fixture = ticketFixture();
+  const flow = modePanelRuntime(fixture, {time: now, sourceChanges: {status: 'SKIPPED',
+    reason: 'SOURCE_REQUEST_FAILED', signal: null, source_errors: {GAMMA: 'HTTP_SOURCE_CONNECTION_RESET'}},
+    wrapperChanges: {state: 'WAITING_SIGNAL', intent: null, reasons: ['WAITING_CURRENT_SIGNAL']}});
+  flow.runtime.globals = {FutureBtc5mBuyOnce: {createAutoBuyer: () => ({sync: () => ({state: 'WATCHING'}),
+    status: () => ({state: 'WATCHING'})})}};
+  const children = await renderedPanel(observing, marketUrl, now, fixture.doc, flow.runtime);
+  assert.match(children.currentSummary.textContent, /行情异常.*Gamma 市场信息：连接被重置/s);
+  flow.setTime(start + 90);
+  await children.poll();
+  assert.match(children.currentSummary.textContent, /窗口内记录.*Gamma 市场信息：连接被重置/s);
+  assert.equal(fixture.buyClicks(), 0);
+});
+
+test('a persisted 15m strategy skip stays visible after the window and a page refresh', async () => {
+  const round = start - start % 900;
+  const time = round + 175;
+  const fixture = ticketFixture();
+  const waiting = {...preparation, serverTime: time, preparation: {...preparation.preparation,
+    state: 'WAITING_BROWSER', intent: null, series: '15m', strategy: 'btc15m_counter_1h',
+    reasons: ['SAME_AS_1H_FAVORITE']}};
+  const children = await renderedPanel(observing, 'https://future.news/zh/event/btc-updown-15m-' + round,
+    time, fixture.doc, {
+      globals: {FutureBtc5mBuyOnce: {createAutoBuyer: () => ({sync: () => ({state: 'WATCHING'}),
+        status: () => ({state: 'WATCHING'})})}},
+      reply(message) { return {ok: true, status: message.type === 'FUTURE_BTC5M_PREPARATION' ? waiting :
+        {...observing, series: '15m', round_series: '15m', period_start: round, server_time: time, signal: null}}; },
+    });
+  assert.match(children.currentSummary.textContent, /未点击.*策略过滤/);
+  assert.match(children.currentSummary.textContent, /15 分钟热门方向与 1 小时热门方向相同/);
+  assert.doesNotMatch(children.currentSummary.textContent, /行情异常|窗口内原因未记录/);
+  assert.equal(fixture.buyClicks(), 0);
+});
+
 test('the worker forwards strict Buy attempt audits from any BTC5m page and rejects unscoped audit data', async () => {
   let handler;
   const requests = [];
@@ -2138,7 +2238,7 @@ function workerHandler(fetchImpl, abortSignal = AbortSignal) {
 
 function clockWorker({preparationStatus} = {}) {
   let connected, message;
-  const sockets = [], retries = new Map(), power = [];
+  const sockets = [], retries = new Map(), watchdogs = new Map(), power = [];
   class Clock extends Date { static now() { return now * 1000; } }
   class Socket {
     constructor(url) { this.url = url; sockets.push(this); }
@@ -2146,8 +2246,13 @@ function clockWorker({preparationStatus} = {}) {
   }
   vm.runInNewContext(readFileSync(new URL('./future-btc5m-extension/background.js', import.meta.url), 'utf8'), {
     URL, AbortSignal, Date: Clock, WebSocket: Socket,
-    setTimeout(fn, delay) { assert.equal(delay, 1000); const id = Symbol(); retries.set(id, fn); return id; },
-    clearTimeout(id) { retries.delete(id); },
+    setTimeout(fn, delay) {
+      assert.ok([1000, 5000].includes(delay));
+      const id = Symbol();
+      (delay === 1000 ? retries : watchdogs).set(id, fn);
+      return id;
+    },
+    clearTimeout(id) { retries.delete(id); watchdogs.delete(id); },
     chrome: {power: {requestKeepAwake(level) {power.push(level);}, releaseKeepAwake() {power.push('release');}},
       runtime: {onMessage: {addListener(fn) {message = fn;}}, onConnect: {addListener(fn) {connected = fn;}}}},
     async fetch(url, options) {
@@ -2171,8 +2276,35 @@ function clockWorker({preparationStatus} = {}) {
     assert.equal(message({type: 'FUTURE_BTC5M_PREPARATION'}, {url: marketUrl, frameId: 0, tab: {id: 1, url: marketUrl}},
       resolve), true);
   });
-  return {port, sockets, retries, power, readPreparation};
+  return {port, sockets, retries, watchdogs, power, readPreparation};
 }
+
+test('a silent clock reconnects without waiting for a WebSocket close event and ignores the old socket', () => {
+  const worker = clockWorker();
+  const page = worker.port();
+  assert.equal(worker.watchdogs.size, 1);
+  const old = worker.sockets[0];
+  // Simulate a half-open connection whose close handshake never completes.
+  old.close = () => { old.closed = true; };
+  const [watchId, expired] = [...worker.watchdogs][0];
+  worker.watchdogs.delete(watchId);
+  expired();
+  assert.equal(old.closed, true);
+  assert.equal(worker.retries.size, 1);
+  const [retryId, retry] = [...worker.retries][0];
+  worker.retries.delete(retryId);
+  retry();
+  assert.equal(worker.sockets.length, 2);
+  const tick = {type: 'FUTURE_BTC5M_TICK', serverTime: now};
+  old.onmessage({data: JSON.stringify(tick)});
+  assert.deepEqual(page.messages, []);
+  worker.sockets[1].onmessage({data: JSON.stringify(tick)});
+  assert.deepEqual(page.messages, [tick]);
+  assert.equal(worker.watchdogs.size, 1);
+  page.value.disconnect();
+  assert.equal(worker.watchdogs.size, 0);
+  assert.equal(worker.retries.size, 0);
+});
 
 test('background pushes a validated clock to trusted pages and keeps only the system awake by default', () => {
   const worker = clockWorker();
@@ -2518,9 +2650,9 @@ test('the panel preserves safe quote diagnostics and shows Chinese causes withou
   assert.equal(fixture.writes(), 0);
 });
 
-test('the 0.7.0 manifest names both strategies, keeps price gates and the approved permissions', () => {
+test('the 0.7.3 manifest names both strategies, keeps price gates and the approved permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('./future-btc5m-extension/manifest.json', import.meta.url), 'utf8'));
-  assert.equal(manifest.version, '0.7.0');
+  assert.equal(manifest.version, '0.7.3');
   assert.equal(manifest.minimum_chrome_version, '116');
   assert.ok([...manifest.description].length < 132, `${[...manifest.description].length} characters`);
   assert.match(manifest.description, /60¢.*Polymarket 盘口价差 ≤3¢.*准备价 ±5¢/);
