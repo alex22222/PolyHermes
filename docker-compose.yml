@@ -21,8 +21,6 @@ services:
     environment:
       # 容器内部固定监听 8000，由 Nginx/入口脚本统一代理
       - SERVER_PORT=8000
-    volumes:
-      - /etc/localtime:/etc/localtime:ro
     depends_on:
       mysql:
         condition: service_healthy
@@ -43,7 +41,6 @@ services:
       - MYSQL_COLLATION_SERVER=utf8mb4_unicode_ci
     volumes:
       - mysql-data:/var/lib/mysql
-      - /etc/localtime:/etc/localtime:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD:-rootpassword}"]
       interval: 10s
@@ -59,4 +56,3 @@ volumes:
 networks:
   polyhermes-network:
     driver: bridge
-

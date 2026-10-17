@@ -153,6 +153,48 @@
 - 新增/更新候选：`0`；paper、score、trial-ready、copy config 的写入：`0`；真钱启用：`0`。
 - 先通过正常 `/api/auth/login` 获得有效会话或刷新用于脚本的 `POLYHERMES_TOKEN`，再重跑同一 dry-run；仅对其中的两个 would-create 钱包执行 live 导入和后续定向闭环。
 
+### Iteration 148 - 官方 top200 只读机制筛选（2026-08-19 CST）
+
+**范围与方法**：
+- 使用官方 `data-api.polymarket.com/v1/leaderboard`，对 finance/politics 的 `WEEK + MONTH + ALL`、每窗口 top200 做只读交叉筛选。
+- 仅保留同类别、三个窗口 PnL 均为正的钱包；再和本地候选池做钱包去重，不导入、不创建 paper session、不改 copy config。
+
+**筛选结果**：
+- `1,200` 条排行榜观测中有 `51` 个跨窗口正 PnL 钱包，`47` 个已在候选池；top30 的 `5` 个跨窗口钱包也全部为已知机制风险候选。
+- 新钱包 `0x13fa4ce1b8a27dd0b7a72db6205a50ee6ff0954c`：官方标为 finance，但近期成交以政治市场为主；300 笔全 SELL、safe price ratio `0.23`、tail price ratio `0.7133`。前 100 个仓位合计 cash PnL 约 `-708150.68`，`97` 个仓位亏损超过 `90%`。排除。
+- 新钱包 `0xe40aaa5ce1dac0b7dc24c9d0284f27e17c3fe4a2`：300 笔全 BUY、tail price ratio `0.7533`，近 100 仓位合计 cash PnL 约 `-182006.34`，`88` 个仓位亏损超过 `90%`。排除。
+- 新钱包 `0x9afda7ae5c6afadcb500ce0274312e0fe7ba574b`：仅 `26` 笔全 BUY、`8` 个市场、样本跨度约 `5` 天，没有 SELL/退出样本；即使当前仓位 PnL 为正，也不满足可复制性与观察期门槛。排除。
+- 新钱包 `0x83733b87090cf97aee473b1000beb9bfab7af0bc`：300 笔、`232` 个市场、tail price ratio `0.8467`，近 100 仓位合计 cash PnL 约 `-50069.90`，`96` 个仓位亏损超过 `90%`。排除。
+- 四个新钱包中前三个的 `MONTH` 与 `ALL` PnL 完全相同，也不能用该榜单字段证明半年盈利。
+
+**验证与状态**：
+- 数据库确认上述四钱包均未入库，关联 copy config 数为 `0`；backend health 为 `UP`。
+- 本地 API JWT 仍失效，Bridge 当前未监听 `8080`；两者没有被绕过或重启。
+- 本轮新增可试跟 leader：`0`；新增真钱启用：`0`。
+
+**下一步**：
+- 恢复正常登录并刷新 `POLYHERMES_TOKEN` 后，改从非排行榜来源补 wallet-level 半年盈利证据；官方 top200 已证明当前跨窗口正 PnL 样本没有通过机制风险门槛的新候选。
+
+### Iteration 149 - 服务依赖恢复与官方 top200 增量筛选（2026-08-30 CST）
+
+**运行态恢复**：
+- Docker daemon 停止导致 MySQL `3307` 不可达，backend 因 Flyway 无法连接而退出；未尝试重启 Bridge。
+- 根因是 Docker Desktop 拒绝挂载 `/etc/localtime` 解析出的 macOS 时区路径。移除了 `docker-compose.yml` 中 app/mysql 的冗余 `/etc/localtime` bind mount，保留既有 `TZ=Asia/Shanghai`。
+- 仅对 `mysql` 执行 force recreate，复用原 `polyhermes_mysql-data` 卷；容器恢复 healthy，backend watchdog 随后恢复 `/actuator/health=UP`。
+
+**候选筛选**：
+- 重新扫描 official finance/politics `WEEK + MONTH + ALL` 各 top200：`1,200` 条观测中有 `67` 个跨窗口正 PnL 项，去重后 `62` 个已在候选池。
+- 上轮已排除的 `0xe40a...e4a2`、`0x8373...f0bc`、`0x9afd...574b` 再次出现，不重复评估。
+- 唯一新钱包 `0xbf0fd14d47d8d785ac19f33aafa6985501f128ce`：近约半年共 `89` 笔、BUY/SELL `87/2`、`15` 个市场，最新活动已约 `8` 天前；没有足够退出样本。尽管 safe price ratio `0.7978`、仓位总 cash PnL 为正，仍因单边 BUY 与近期不活跃排除。
+
+**安全与验证**：
+- `0xbf0f...28ce` 数据库候选行数 `0`、关联 copy config `0`；没有候选、paper、trial-ready 或 copy config 写入。
+- `POLYHERMES_TOKEN` 仍过期，未绕过鉴权。Bridge 仍未监听 `8080`，未重启。
+- 新增可试跟 leader：`0`；新增真钱启用：`0`。
+
+**下一步**：
+- 先通过正常登录刷新 `POLYHERMES_TOKEN`，再从非排行榜钱包源引入带半年级表现证据的候选；连续两次官方 top200 筛选均没有满足可复制机制门槛的新钱包。
+
 **执行结果**：
 - 官方 `ALL + PNL` 扫描 `2000` 条观测，筛出 `500` 条，新增候选 `179` 个。
 - 其中 `228` 个候选完成 targeted activity score；`188` 个因无近期 activity sample 被阻断，未直接晋级 PAPER。
@@ -13554,3 +13596,229 @@
 - `backend ./gradlew bootJar --offline` passed.
 - New backend startup completed in `126.324` seconds and then started position polling.
 - Final probes: backend health `200`, frontend-proxied business endpoint `200`, Bridge health and status `200`, `ready=true`, `logged_in=true`, MySQL query returned `1`.
+
+## 2026-08-30 - Multi-source leader read-only rescore
+
+**Goal and scope**:
+- Pull the available public leader channels, then apply the same copyability gates before any state transition or copy configuration change.
+- Sources covered: Polyburg Telegram Web, Polymarket official finance/politics leaderboard, Polymarket public activity, and public positions. Falcon was attempted but its configured source token returned HTTP `401`; it contributed no evidence.
+
+**Screening result**:
+- Polyburg: `486` visible messages produced `31` distinct wallet addresses. Only `0x614dc8d3542c12103d2c6a3553fd761e391d1546` passed the transaction-structure and position-risk screen.
+- Official leaderboard: finance/politics `WEEK + MONTH + ALL` top `200` produced `67` cross-window positive rows for `65` unique wallets. Activity and position checks reduced this to two paper-review candidates:
+  - `0x614dc8d3542c12103d2c6a3553fd761e391d1546`: politics rank `13/10/60`, PnL `+22.4k/+114.5k/+669.3k`; `472` trades across `24` markets, BUY/SELL `191/281`, safe/tail ratio `0.610/0.123`, no position loss below `-90%`.
+  - `0xd44e974a3edb232aa4aedbdcc59792b76a5f67e2`: politics rank `60/72/175`, PnL `+7.7k/+31.5k/+303.2k`; `473` trades across `37` markets, BUY/SELL `339/134`, safe/tail ratio `0.700/0.038`, no position loss below `-90%`.
+- Most cross-window profitable wallets failed due to severe historical position losses (`58/65`), worst position loss at or below `-50%` (`59/65`), low safe-price ratio (`33/65`), long-tail pricing (`27/65`), insufficient exit sample (`26/65`), or position data truncated at the public `500`-row limit (`28/65`).
+
+**State-machine audit**:
+- Both wallets already exist in `COOLDOWN`; their recorded cooldown cause is `source_stale_over_72h`, and both cooldown deadlines have elapsed.
+- `0xd44e...67e2` has an existing active paper session with `30` trades, copyable PnL `+9.08975941`, and max drawdown `-0.51956526`; it should be refreshed and rechecked after normal authentication is restored.
+- `0x614d...1546` has stale historical sports-dominant activity evidence that conflicts with current politics activity. It needs targeted history/activity refresh before any paper promotion decision.
+
+**Safety and next step**:
+- Backend health remained `UP`; no candidate, research state, paper session, cooldown, copy config, or live-trading setting was changed in this pass.
+- The configured PolyHermes JWT is expired and no normal login username is configured locally. Restore a normal authenticated session, then refresh the two candidate IDs, run targeted activity-score and paper processing, and recheck them only for PAPER or disabled-trial eligibility.
+
+## 2026-09-07 - Leader screening refresh and targeted review
+
+**Done**:
+- Saved reproducible evidence in `reports/leader-screen-20260907/`.
+- Official politics/finance WEEK, MONTH, ALL top-200 queries returned 1,200 rows / 908 unique wallets. Reviewed 25 cross-window-positive wallets plus the two prior targets.
+- Two new research targets passed the initial structure screen: thanksforplayin (`0x38d812aff0b79f3bf5da2a477f780bcc163eea7c`) and EgoVolae (`0x1018fa33923d8b0f4b0f8a0822ee045d46027264`). Neither is approved for trial or live execution.
+- thanksforplayin: finance MONTH PnL +11,414.57; 4,880 sampled trades after 5,000 activity rows, still incomplete for 30 days. One Apple daily market accounts for 38.30% of sampled fills; prioritize independent-market and execution review.
+- EgoVolae: finance MONTH PnL +4,022.83; complete 30-day activity with 2,701 trades / 273 markets. Both outcomes bought in 143 markets; largest position is 22.69% of position value. Requires paired-execution review.
+- Prior targets mr.ozi and KrackenSruster now have negative politics MONTH PnL (-979.50 / -2,669.77). Do not carry forward the earlier positive-window conclusion.
+- Both new targets have truncated 200-row closed-position samples, not complete fee-adjusted or forward copy performance.
+- Corrected an audit-script classification bug: generic stock `Up or Down` titles must not be classified as crypto. Regression test failed before correction and both tests passed afterward; production logic unchanged.
+
+**Blocked / scope**:
+- Local research backend is not listening; local Docker daemon is unavailable; configured JWT remains expired without normal login credentials.
+- Server backend is healthy, but its research candidate table is empty, not the historical local research pool. No research database writes or state-machine promotions occurred.
+- Telegram browser read timed out; Falcon was not refreshed. Do not describe this pass as a completed all-channel sync.
+- No service restart, live config change, paper-session creation, trade, or capital increase.
+
+**Next**:
+- Restore the intended local research service and normal authentication, then import verified evidence through the existing API.
+- Complete thanksforplayin history and closed-market review first; assess EgoVolae bidirectional execution separately. Only then consider observation-only PAPER under existing gates.
+
+## 2026-09-09 - Leader screening refresh and execution review
+
+**Done**:
+- Saved the reproducible leaderboard, activity, position, closed-position, and execution evidence in `reports/leader-screen-20260909/`.
+- Refreshed POLITICS and FINANCE WEEK/MONTH/ALL top-200 boards: 1,200 rows, 796 unique wallets, 28 screened wallets, and zero direct trial passes.
+- Fixed the audit path so dated output directories can be selected without modifying source, and ensured priority-wallet position risk is fetched directly instead of inherited from a capped initial screen.
+- Added regression coverage for position-risk aggregation and a separate execution-structure review.
+- Production Bridge recovered to `ready=true` and `logged_in=true`; no restart or configuration change was needed.
+
+**Decision**:
+- GrandeFromage was added as a near-gate review because its only initial flag was capped position data. Its 4,114 sampled 30-day trades are diversified across 1,064 markets, but activity, closed history, and positions all remain truncated; keep it in HOLD as the second observation priority.
+- mr.ozi is the only observation-only PAPER recommendation. It remains blocked from trial by a 28.49% largest-position concentration and 79.51% same-market repeat-within-30m rate.
+- Do not expand KrackenSruster: its current POLITICS monthly PnL is -$2,038.02 and 44.70% of sampled fills are in one market.
+- HOLD thanksforplayin because 30-day activity and closed history remain incomplete and median fill spacing is one second.
+- HOLD EgoVolae because its paired-outcome execution is not one-sided-copyable and four current positions are at or below -90%.
+
+**Blocked / safety**:
+- The local research backend is unavailable, local Docker is unavailable, and the configured JWT is expired. Server research candidate and paper-session tables are empty.
+- No authentication bypass, direct research-table write, service restart, PAPER session creation, copy config change, trade, or capital increase occurred.
+
+**Next**:
+- Restore the intended research runtime and normal authentication, ingest this dated evidence through the API, and start only an observation-only PAPER session for mr.ozi.
+- Require forward executable copy evidence before any disabled-trial proposal; keep all live allocation unchanged.
+
+## 2026-09-12 - Leader screening refresh
+
+**Done**:
+- Saved reproducible evidence in `reports/leader-screen-20260912/`.
+- Refreshed six official POLITICS/FINANCE WEEK/MONTH/ALL top-200 boards: 1,200 rows, 795 unique wallets, and 45 screened wallets.
+- Retried the single temporary HTTP 429 successfully; final fetch-error count is zero.
+- Deep-reviewed six wallets with paginated activity, direct monthly PnL, closed positions, current positions, and execution timing.
+
+**Decision**:
+- No new PAPER or trial-ready leader.
+- Added Cyphercapital (`0xf8f51be8e6a748fbb63d308f4b588b8754743766`) to the watchlist only. Its 31-trade / 5-market sample is too small, completed closed-position PnL is -$1,899.12 with PF 0.55, and its top market accounts for 54.84% of fills.
+- Retained mr.ozi as observation-only PAPER, without a trial upgrade. Safe-price ratio is below 50%, largest position is 25.60%, and 79.22% of trades repeat the same market within 30 minutes.
+- Downgraded GrandeFromage from second observation priority to HOLD after its latest capped closed sample reported -$31,363.61 and PF 0.51.
+- Kept thanksforplayin, KrackenSruster, and EgoVolae in HOLD.
+
+**Safety**:
+- No state-machine write, PAPER-session creation, copy configuration change, service restart, trade, or capital increase occurred.
+
+**Next**:
+- Refresh Cyphercapital after it accumulates a materially larger completed sample.
+- Continue forward observation of mr.ozi and require executable copy results before any trial proposal.
+
+## 2026-09-15 - Leader screening refresh
+
+**Done**:
+- Saved reproducible evidence in `reports/leader-screen-20260915/`.
+- Refreshed six official POLITICS/FINANCE WEEK/MONTH/ALL top-200 boards: 1,200 rows, 901 unique wallets, and 34 screened wallets.
+- Expanded deep-review intake to include wallets with only a safe-price or exit-structure blocker, without changing promotion thresholds.
+- Deep-reviewed eight near-gate or tracked wallets with paginated activity, direct monthly PnL, closed positions, current positions, and execution timing.
+
+**Decision**:
+- No new PAPER or trial-ready leader.
+- Added qmarktea2 (`0xed107a85a4585a381e48c7f7ca4144909e7dd2e5`) to the low-priority watchlist only. Its completed closed sample is +$20,888.45 with PF 1.59, but tail-price ratio is 51.41%, largest position is 33.00%, and same-market repeat is 69.94%.
+- pennedreadful remains HOLD because its activity and closed history are incomplete and 210 of 413 markets contain both-outcome buys.
+- mr.ozi remains observation-only PAPER without a trial upgrade; it is no longer cross-window top 200 and remains below the safe-price gate with 24.66% largest-position concentration.
+- Cyphercapital showed no sample growth and retains negative completed closed-position PnL. GrandeFromage, KrackenSruster, thanksforplayin, and EgoVolae remain HOLD.
+
+**Safety**:
+- No state-machine write, PAPER-session creation, copy configuration change, service restart, trade, or capital increase occurred.
+
+**Next**:
+- Recheck qmarktea2 only after tail-price and concentration metrics improve materially.
+- Continue executable forward observation of mr.ozi; keep all live allocation unchanged.
+
+## 2026-09-19 - Leader screening refresh
+
+**Done**:
+- Saved reproducible evidence in `reports/leader-screen-20260919/`.
+- Refreshed six official POLITICS/FINANCE WEEK/MONTH/ALL top-200 boards: 1,200 rows, 795 unique wallets, and 42 screened wallets.
+- Worked around an unreachable local data-API route with a temporary read-only SSH SOCKS tunnel through the existing VPS; closed the tunnel after collection and changed no server service.
+- Deep-reviewed seven near-gate or tracked wallets with paginated activity, direct monthly PnL, closed positions, current positions, and execution timing.
+
+**Decision**:
+- No new PAPER or trial-ready leader.
+- Retained qmarktea2 on the low-priority watchlist. Its completed closed sample improved to +$82,105.34 with PF 3.43, but largest-position concentration worsened from about 33% to 55.77%, tail-price ratio remains 51.37%, and same-market repeat is 73.34%.
+- Retained mr.ozi as observation-only PAPER without a trial upgrade. Its safe-price ratio recovered above 50%, but it remains absent from the WEEK top 200, largest-position concentration is 30.49%, and same-market repeat is 78.05%.
+- Cyphercapital still has only 31 trades; one additional settlement turned its tiny closed sample positive but did not add forward trading evidence.
+- The wallet previously named GrandeFromage now appears as InterestingUser; its capped closed sample is negative again and all completeness blockers remain.
+- KrackenSruster, thanksforplayin, and EgoVolae remain HOLD.
+
+**Safety**:
+- No state-machine write, PAPER-session creation, copy configuration change, service restart, trade, or capital increase occurred.
+
+**Next**:
+- Require risk normalization for qmarktea2 and executable forward evidence for mr.ozi before any state promotion.
+- Keep all live allocation unchanged.
+
+## 2026-09-28 - Leader screening refresh
+
+**Done**:
+- Saved reproducible evidence in `reports/leader-screen-20260928/`.
+- Refreshed six official POLITICS/FINANCE WEEK/MONTH/ALL top-200 boards: 1,200 rows, 909 unique wallets, and 30 screened wallets.
+- Retried temporary HTTP 429 responses until initial and deep-review fetch-error counts were zero.
+- Deep-reviewed seven near-gate or tracked wallets with paginated activity, direct monthly PnL, closed positions, current positions, and execution timing.
+- Added and regression-tested the `closed_sample_unprofitable` blocker for complete non-empty closed samples with non-positive PnL or PF at or below 1.
+
+**Decision**:
+- No new PAPER or trial-ready leader.
+- mr.ozi re-entered positive WEEK/MONTH/ALL rankings and strengthened to month PnL +$73,245.90 with a complete closed sample of +$177,734.00 and PF 5.74. It remains observation-only PAPER because largest-position concentration is 26.18% and same-market repeat is 77.77%.
+- Removed qmarktea2 from the active watchlist after three severe position losses appeared; tail-price ratio remains 45.30% and largest-position concentration is 52.28%.
+- KrackenSruster now has a complete closed sample of -$2,980.60 and PF 0.72, so it remains HOLD despite improved trade-price structure.
+- Cyphercapital, GrandeFromage, thanksforplayin, and EgoVolae remain HOLD.
+
+**Safety**:
+- No state-machine write, PAPER-session creation, copy configuration change, service restart, trade, or capital increase occurred.
+
+**Next**:
+- Continue executable forward observation of mr.ozi and require largest-position concentration below 20% before any trial proposal.
+- Keep all live allocation unchanged.
+
+## 2026-10-07 - Leader screening refresh
+
+**Done**:
+- Saved reproducible evidence in `reports/leader-screen-20261007/`.
+- Refreshed six official POLITICS/FINANCE WEEK/MONTH/ALL top-200 boards: 1,200 rows, 867 unique wallets, and 37 screened wallets.
+- Used the existing local ClashX proxy after the direct route timed out; all six boards and eight deep reviews completed with final fetch-error count `0`.
+- Deep-reviewed eight near-gate or tracked wallets with paginated activity, direct monthly PnL, closed positions, current positions, and execution timing.
+
+**Decision**:
+- No new PAPER or trial-ready leader.
+- Retained mr.ozi as the top observation-only PAPER candidate. Its complete closed sample improved to +$199,977.19 with PF 5.60 and largest-position concentration fell to 20.03%, but it remains above the strict 20% gate and repeats the same market within 30 minutes for 78.21% of trades.
+- Added new wallet `0xc8b9a30184244d427169cf62485dde6041b2b836` to HOLD only. Its complete 30-day closed sample is -$7,423.23 with PF 0.84 despite positive WEEK/MONTH/ALL leaderboard PnL.
+- KrackenSruster's complete closed sample remains negative at -$4,205.47 / PF 0.67. qmarktea2 concentration worsened to 62.71%. GrandeFromage's direct monthly PnL turned negative at -$83,900.04.
+
+**Safety**:
+- No research-state write, PAPER-session creation, copy configuration change, service restart, trade, or capital increase occurred.
+
+**Next**:
+- Continue forward executable-copy observation for mr.ozi and require concentration below 20% before any trial proposal.
+- Do not promote the new wallet unless a later complete closed sample turns positive with PF above 1.
+- Keep all live allocation unchanged.
+
+## 2026-10-11 - Leader screening refresh
+
+**Done**:
+- Saved reproducible evidence in `reports/leader-screen-20261011/`.
+- Refreshed six official POLITICS/FINANCE WEEK/MONTH/ALL top-200 boards: 1,200 rows, 884 unique wallets, and 34 screened wallets.
+- All six boards and eight deep reviews completed with final fetch-error count `0` through the existing local ClashX proxy.
+- Deep-reviewed eight near-gate or tracked wallets with paginated activity, direct monthly PnL, closed positions, current positions, and execution timing.
+
+**Decision**:
+- No new PAPER or trial-ready leader.
+- Retained mr.ozi as the top observation-only PAPER candidate. Its largest-position concentration improved from 20.03% to 18.24%, clearing the strict static concentration gate, while its complete closed sample remained +$196,535.04 / PF 5.52.
+- Did not promote mr.ozi because same-market repeat remains 75.23% and attributable forward-copy costs, realized PnL, PF, drawdown, and tail loss are still unavailable.
+- Held wallet `0x448861155279dbf833d041b963e3ac854599e319` because activity and closed history are incomplete, largest-position concentration is 45.96%, and same-market repeat is 76.81%.
+- KrackenSruster remained unprofitable at -$3,683.42 / PF 0.71. GrandeFromage and thanksforplayin both produced negative capped closed samples.
+
+**Safety**:
+- No research-state write, PAPER-session creation, copy configuration change, service restart, trade, or capital increase occurred.
+
+**Next**:
+- Reconcile mr.ozi's actual forward-copy fills into attributable cost, realized-PnL, PF, drawdown, and tail-loss evidence before any trial proposal.
+- Require repeated-market execution to normalize materially even though concentration is now below 20%.
+- Keep all live allocation unchanged.
+
+## 2026-10-12 - Leader screening refresh
+
+**Done**:
+- Saved reproducible evidence in `reports/leader-screen-20261012/`.
+- Refreshed six official POLITICS/FINANCE WEEK/MONTH/ALL top-200 boards: 1,200 rows, 905 unique wallets, and 35 screened wallets.
+- All six boards and eight deep reviews completed with final fetch-error count `0` through the existing local ClashX proxy.
+- Deep-reviewed eight near-gate or tracked wallets with paginated activity, direct monthly PnL, closed positions, current positions, and execution timing.
+
+**Decision**:
+- No new PAPER or trial-ready leader.
+- Retained mr.ozi as the top observation-only PAPER candidate. Its complete closed sample increased to +$237,957.41 / PF 6.47 and largest-position concentration remained below the static gate at 18.70%.
+- Did not promote mr.ozi because same-market repeat worsened to 77.00% and attributable forward-copy costs, realized PnL, PF, drawdown, and tail loss remain unavailable.
+- Held wallet `0x448861155279dbf833d041b963e3ac854599e319` because closed history is incomplete, largest-position concentration is 48.17%, and same-market repeat is 76.30%.
+- KrackenSruster remained unprofitable at -$3,341.60 / PF 0.73. GrandeFromage and thanksforplayin retained negative capped closed samples.
+
+**Safety**:
+- No research-state write, PAPER-session creation, copy configuration change, service restart, trade, or capital increase occurred.
+
+**Next**:
+- Reconcile mr.ozi's actual forward-copy fills into attributable cost, realized-PnL, PF, drawdown, and tail-loss evidence before any trial proposal.
+- Require repeated-market execution to normalize materially before any trial proposal.
+- Keep all live allocation unchanged.
