@@ -8,6 +8,10 @@ import FutureStrategyPerformance from '../components/FutureStrategyPerformance'
 import { higherButtonSide, preflightIsFresh, preflightReasonText, referenceIsFresh } from '../utils/futureBtc5mPreflight'
 import type { FutureBtc5mAssets, FutureBtc5mAssetBuy, FutureBtc5mAssetPosition, FutureBtc5mBridgeStatus, FutureBtc5mOrder, FutureBtc5mOrderStatus, FutureBtc5mPreparationState, FutureBtc5mStrategy } from '../types'
 
+// 我的资产 refreshes once a minute; a response stays displayable until the next one is overdue.
+const ASSETS_REFRESH_MS = 60_000
+const ASSETS_FRESH_MS = 75_000
+
 const preparationStateText: Record<FutureBtc5mPreparationState, string> = {
   DISABLED: '已关闭',
   WAITING_SIGNAL: '等待有效信号',
@@ -86,6 +90,7 @@ const FutureBtc5mBridge: React.FC = () => {
   const [assets, setAssets] = useState<FutureBtc5mAssets | null>(null)
   const [assetsError, setAssetsError] = useState<string | null>(null)
   const [assetsLoading, setAssetsLoading] = useState(false)
+  const [assetsReceivedAt, setAssetsReceivedAt] = useState(0)
   const [buyPagination, setBuyPagination] = useState({ current: 1, pageSize: 20 })
   const [orders, setOrders] = useState<FutureBtc5mOrder[]>([])
   const [ordersLoading, setOrdersLoading] = useState(false)
@@ -106,6 +111,7 @@ const FutureBtc5mBridge: React.FC = () => {
   const ordersInFlight = useRef<number | null>(null)
   const detailInFlight = useRef<number | null>(null)
   const assetsInFlight = useRef<number | null>(null)
+  const assetsRequestedAt = useRef(0)
   const buyHistorySnapshot = useRef<{ walletAddress: string | null, count: number }>({ walletAddress: null, count: 0 })
 
   useEffect(() => {
@@ -125,6 +131,7 @@ const FutureBtc5mBridge: React.FC = () => {
     if (assetsInFlight.current === assetsRequestSeq.current) return
     const requestSeq = ++assetsRequestSeq.current
     assetsInFlight.current = requestSeq
+    assetsRequestedAt.current = Date.now()
     setAssetsLoading(true)
     try {
       const response = await apiService.futureBtc5mBridge.assets()
@@ -139,9 +146,11 @@ const FutureBtc5mBridge: React.FC = () => {
         setBuyPagination((prev) => ({ ...prev, current: 1 }))
       }
       buyHistorySnapshot.current = { walletAddress, count }
+      const receivedAt = Date.now()
       setAssets(nextAssets)
+      setAssetsReceivedAt(receivedAt)
       setAssetsError(null)
-      setClock(Date.now())
+      setClock(receivedAt)
     } catch (error: unknown) {
       if (!mounted.current || requestSeq !== assetsRequestSeq.current) return
       setAssets(null)
@@ -237,7 +246,7 @@ const FutureBtc5mBridge: React.FC = () => {
 
   useEffect(() => {
     fetchAssets()
-    const interval = window.setInterval(fetchAssets, 5000)
+    const interval = window.setInterval(fetchAssets, ASSETS_REFRESH_MS)
     return () => window.clearInterval(interval)
   }, [fetchAssets])
 
@@ -269,7 +278,7 @@ const FutureBtc5mBridge: React.FC = () => {
       fetchStatus()
       fetchOrders()
       fetchDetail()
-      fetchAssets()
+      if (Date.now() - assetsRequestedAt.current >= ASSETS_REFRESH_MS) fetchAssets()
     }
     window.addEventListener('focus', refreshConnection)
     window.addEventListener('online', refreshConnection)
@@ -402,10 +411,12 @@ const FutureBtc5mBridge: React.FC = () => {
   ]
 
   const wallet = assets?.wallet
-  const walletFresh = Boolean(wallet?.fresh && [wallet.observedAt, wallet.receivedAt].every(value =>
-    Number.isFinite(value) && clock / 1000 - value >= 0 && clock / 1000 - value <= 15))
-  const marketDataFresh = Boolean(walletFresh && assets?.marketDataObservedAt != null &&
-    clock / 1000 - assets.marketDataObservedAt >= 0 && clock / 1000 - assets.marketDataObservedAt <= 15)
+  // Assets refresh once a minute: values must have been fresh when they arrived, and that arrival must be recent.
+  const assetsAge = clock - assetsReceivedAt
+  const assetsRecent = assetsAge >= 0 && assetsAge <= ASSETS_FRESH_MS
+  const freshOnArrival = (value: number) => Number.isFinite(value) && assetsReceivedAt / 1000 - value >= 0 && assetsReceivedAt / 1000 - value <= 15
+  const walletFresh = Boolean(assetsRecent && wallet?.fresh && [wallet.observedAt, wallet.receivedAt].every(freshOnArrival))
+  const marketDataFresh = Boolean(walletFresh && assets?.marketDataObservedAt != null && freshOnArrival(assets.marketDataObservedAt))
   const buyResultCounts = { win: 0, loss: 0, pending: 0, unknown: 0 }
   for (const buy of assets?.recentBuys ?? []) {
     if (buy.result === 'WIN') buyResultCounts.win += 1

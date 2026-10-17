@@ -154,6 +154,10 @@ const mountPage = (initialTime) => {
       now = at;
       for (const interval of intervals.values()) if (interval.delay === 5000) interval.callback();
     },
+    pollAssets(at) {
+      now = at;
+      for (const interval of intervals.values()) if (interval.delay === 60000) interval.callback();
+    },
     async reply(kind, value) {
       assert.ok(requests[kind].length, `${kind} request must already be pending`);
       requests[kind].shift()({data: {code: 0, data: value}});
@@ -216,12 +220,14 @@ test('strategy performance follows live assets polling and clears on stale or fa
   await page.reply('assets', {...walletAssets(), performance: [point]});
   const card = () => page.elements(n => n.type === 'FutureStrategyPerformance');
   assert.equal(card()[0].props.performance[0].netPnlUsd, 1.692414);
-  page.poll(receipt + 5000);
-  await page.reply('assets', {...walletAssets(receipt + 5000), performance: [{...point, netPnlUsd: 2.03}]});
+  page.tick(receipt + 59000);
+  assert.equal(card()[0].props.performance[0].netPnlUsd, 1.692414, 'a minute-old response stays displayed until the next poll');
+  page.pollAssets(receipt + 60000);
+  await page.reply('assets', {...walletAssets(receipt + 60000), performance: [{...point, netPnlUsd: 2.03}]});
   assert.equal(card()[0].props.performance[0].netPnlUsd, 2.03);
-  page.tick(receipt + 21000);
+  page.tick(receipt + 135001);
   assert.equal(card().length, 0, 'expired wallet must not retain prior performance');
-  page.poll(receipt + 22000);
+  page.pollAssets(receipt + 136000);
   await page.fail('assets', 'unavailable');
   assert.equal(card().length, 0);
 });
@@ -298,15 +304,15 @@ test('expired, missing, or failed history clears the previously displayed ratio 
     await page.reply('assets', historyWithResults(['WIN', 'WIN', 'WIN', 'LOSS']));
     assert.equal(ratioProgress(page).props.percent, 75);
     if (scenario === 'expired') {
-      page.tick(receipt + 15001);
+      page.tick(receipt + 75001);
     } else {
-      page.poll(receipt + 5000);
+      page.pollAssets(receipt + 60000);
       if (scenario === 'failed') await page.fail('assets', '模拟历史接口不可用');
       else if (scenario === 'market-stale') await page.reply('assets', {
-        ...historyWithResults(['WIN', 'WIN', 'WIN', 'LOSS'], receipt + 5000), marketDataObservedAt: receipt / 1000 - 15,
+        ...historyWithResults(['WIN', 'WIN', 'WIN', 'LOSS'], receipt + 60000), marketDataObservedAt: receipt / 1000 + 44,
       });
-      else await page.reply('assets', {...walletAssets(receipt + 5000),
-        wallet: scenario === 'wallet-missing' ? null : walletAssets(receipt + 5000).wallet,
+      else await page.reply('assets', {...walletAssets(receipt + 60000),
+        wallet: scenario === 'wallet-missing' ? null : walletAssets(receipt + 60000).wallet,
         recentBuys: null, buyHistoryComplete: false, dataStatus: 'PARTIAL'});
     }
     assert.equal(page.elements(node => node.type === 'Progress').length, 0, `${scenario} must not retain the previous chart`);
@@ -368,18 +374,18 @@ test('buy pagination survives same-wallet polling and resets on wallet changes o
   await page.reply('assets', buyHistory(45));
   buyTable(page).props.pagination.onChange(3, 20);
   page.render();
-  page.poll(receipt + 5000);
-  await page.reply('assets', buyHistory(46, receipt + 5000));
+  page.pollAssets(receipt + 60000);
+  await page.reply('assets', buyHistory(46, receipt + 60000));
   assert.equal(buyTable(page).props.pagination.current, 3, 'normal refresh must preserve the selected history page');
-  page.poll(receipt + 10000);
-  await page.reply('assets', buyHistory(5, receipt + 10000));
+  page.pollAssets(receipt + 120000);
+  await page.reply('assets', buyHistory(5, receipt + 120000));
   assert.equal(buyTable(page).props.pagination.current, 1, 'a shorter history must not leave an empty page');
-  page.poll(receipt + 15000);
-  await page.reply('assets', buyHistory(45, receipt + 15000));
+  page.pollAssets(receipt + 180000);
+  await page.reply('assets', buyHistory(45, receipt + 180000));
   buyTable(page).props.pagination.onChange(2, 20);
   page.render();
-  page.poll(receipt + 20000);
-  await page.reply('assets', buyHistory(45, receipt + 20000, `0x${'b'.repeat(40)}`));
+  page.pollAssets(receipt + 240000);
+  await page.reply('assets', buyHistory(45, receipt + 240000, `0x${'b'.repeat(40)}`));
   assert.equal(buyTable(page).props.pagination.current, 1, 'a new wallet must start from its own first page');
 });
 
@@ -417,10 +423,12 @@ test('wallet assets refresh independently from preparation and preserve genuine 
 test('stale cash and valuation disappear between polls and source failures never become zero', async () => {
   const page = mountPage(receipt);
   await page.reply('assets', walletAssets());
-  page.tick(receipt + 15001);
+  page.tick(receipt + 59000);
+  assert.equal(page.field('钱包现金'), '$0.00', 'values fresh on arrival stay visible until the next minute poll');
+  page.tick(receipt + 75001);
   assert.equal(page.field('钱包现金'), '—');
   assert.equal(page.field('BTC 5/15 分钟持仓市值'), '—');
-  page.poll(receipt + 16000);
+  page.pollAssets(receipt + 76000);
   await page.fail('assets', '钱包连接中断');
   assert.equal(page.field('钱包现金'), '—');
   assert.equal(page.field('当前钱包'), '等待同步');
@@ -431,9 +439,12 @@ test('wallet change clears previous buys and polling resume does not duplicate r
   const page = mountPage(receipt);
   await page.reply('assets', walletAssets());
   page.emit('focus');
+  assert.equal(page.pendingCount('assets'), 0, 'focus within a minute of the last read must not refetch assets');
+  page.setTime(receipt + 60000);
+  page.emit('focus');
   page.emit('online');
   assert.equal(page.pendingCount('assets'), 1);
-  await page.reply('assets', {...walletAssets(receipt, `0x${'b'.repeat(40)}`),
+  await page.reply('assets', {...walletAssets(receipt + 60000, `0x${'b'.repeat(40)}`),
     dataStatus: 'PARTIAL', positions: null, recentBuys: null, positionsValueUsd: null,
     reasons: ['当前 BTC 5 分钟持仓暂时无法完整核实']});
   assert.equal(page.field('当前钱包'), `0x${'b'.repeat(40)}`);
