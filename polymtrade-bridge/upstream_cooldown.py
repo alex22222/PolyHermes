@@ -26,7 +26,8 @@ class UpstreamCooldown:
             saved = json.loads(self.path.read_text())
             self.entries = {
                 host: {"status": int(entry["status"]), "retry_at": float(entry["retry_at"]), "failures": int(entry["failures"]),
-                       **({"last_denied_at": float(entry.get("last_denied_at", entry["retry_at"]))} if entry["status"] == 429 else {})}
+                       **({"last_denied_at": float(entry.get("last_denied_at", entry["retry_at"]))} if entry["status"] == 429 else {}),
+                       **({"mitigation": entry["mitigation"]} if entry.get("mitigation") in ("challenge", "deny") else {})}
                 for host, entry in saved.items() if entry["status"] in (401, 403, 429)
             }
         except FileNotFoundError:
@@ -62,8 +63,8 @@ class UpstreamCooldown:
         now = time.time()
         previous = self.entries.get(host, {})
         active = now < previous.get("retry_at", 0)
-        if not active and previous.get("status") == 429 and now - previous.get("last_denied_at", previous["retry_at"]) >= 21600:
-            previous = {}
+        # Time spent blocked is not evidence of recovery. Only a successful
+        # response after the quiet period can retire persistent denial history.
         failures = previous["failures"] if active else min(
             (previous.get("failures", 0) if previous.get("status") == status else 0) + 1, 8,
         )
@@ -76,8 +77,12 @@ class UpstreamCooldown:
                 status = 403
         else:
             delay = (min(1800 * 2 ** (failures - 1), 21600) if status == 403 else
-                     min(300 * 2 ** (failures - 1), 3600) if status == 429 else 300)
+                     min(300 * 2 ** (failures - 1), 21600) if status == 429 else 300)
             retry_at = now + delay
+        mitigation = next((str(value).lower() for key, value in (headers or {}).items()
+                           if str(key).lower() == "x-vercel-mitigated"), "")
+        if mitigation in ("challenge", "deny"):
+            retry_at = max(retry_at, now + 21600)
         retry_after = next((value for key, value in (headers or {}).items()
                             if str(key).lower() == "retry-after"), "0")
         try:
@@ -92,6 +97,8 @@ class UpstreamCooldown:
         entry = {"status": status, "retry_at": retry_at, "failures": failures}
         if status == 429:
             entry["last_denied_at"] = previous.get("last_denied_at", previous.get("retry_at", now)) if active else now
+        if mitigation in ("challenge", "deny") or previous.get("mitigation") in ("challenge", "deny"):
+            entry["mitigation"] = mitigation if mitigation in ("challenge", "deny") else previous["mitigation"]
         if entry == previous:
             return
         self.entries[host] = entry

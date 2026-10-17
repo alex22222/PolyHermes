@@ -58,7 +58,7 @@ request_admission_drain() {
 }
 
 require_healthy() {
-    curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/health" >/dev/null
+    curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/live" >/dev/null
 }
 
 echo "Checking Bridge health on port ${PORT}..."

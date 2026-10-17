@@ -394,15 +394,24 @@ async def _stop_verification_tasks():
 
 
 def bridge_runtime_status() -> dict[str, Any]:
+    readiness = executor.trading_readiness() if executor else {
+        "trading_ready": False, "trading_block_reasons": ["executor_not_ready"],
+        "portfolio_age_seconds": None, "upstream_restrictions": [],
+    }
     return {
-        "ready": executor.is_ready() if executor else False,
+        "ready": readiness["trading_ready"],
+        "executor_ready": executor.is_ready() if executor else False,
         "logged_in": executor.is_logged_in() if executor else False,
-        "last_error": executor.last_error if executor else "executor not initialized",
+        "last_error": (executor.last_error or (
+            "Trading unavailable: " + ", ".join(readiness["trading_block_reasons"])
+            if not readiness["trading_ready"] else None
+        )) if executor else "executor not initialized",
         "copy_trading_account_id": rule_engine.active_account_id if rule_engine else None,
         "copy_trading_config_count": rule_engine.config_count if rule_engine else 0,
         "synced_at": executor.last_portfolio_synced_at if executor else None,
         "portfolio_risk_configured": bool(portfolio_risk_client.secret),
         "portfolio_risk_mode": portfolio_risk_client.enforcement_mode,
+        **readiness,
     }
 
 
@@ -541,8 +550,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="PolyHermes → Polymtrade Bridge", lifespan=lifespan)
 
 
-@app.get("/health")
-async def health():
+@app.get("/live")
+async def liveness():
     executor_ready = executor.is_ready() if executor else False
     if not executor_ready:
         raise HTTPException(
@@ -550,6 +559,17 @@ async def health():
             detail={"status": "degraded", "executor_ready": False},
         )
     return {"status": "ok", "executor_ready": True}
+
+
+@app.get("/health")
+async def health():
+    runtime = bridge_runtime_status()
+    payload = {"status": "ok" if runtime["trading_ready"] else "degraded",
+               **{key: runtime[key] for key in ("executor_ready", "logged_in", "trading_ready",
+                   "trading_block_reasons", "portfolio_age_seconds", "upstream_restrictions")}}
+    if not runtime["trading_ready"]:
+        raise HTTPException(status_code=503, detail=payload)
+    return payload
 
 
 @app.get("/status")

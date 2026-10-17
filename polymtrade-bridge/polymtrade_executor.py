@@ -344,6 +344,32 @@ class PolymtradeExecutor:
     def is_logged_in(self) -> bool:
         return self._logged_in
 
+    def trading_readiness(self) -> dict:
+        """Cheap local readiness; never navigate, clear auth or accept stale DOM."""
+        now = time.time()
+        reasons = []
+        if not self.is_ready():
+            reasons.append("executor_not_ready")
+        if not self.is_logged_in():
+            reasons.append("not_logged_in")
+        restrictions = []
+        for host in (urllib.parse.urlsplit(self.base_url).hostname, "gamma-api.polymarket.com"):
+            entry = self._upstream_cooldown.entries.get(host)
+            if entry and now < entry["retry_at"]:
+                reasons.append(f"upstream_http_{entry['status']}")
+                restrictions.append({"host": host, "status": entry["status"],
+                                     "retry_at": entry["retry_at"], "failures": entry["failures"],
+                                     "mitigation": entry.get("mitigation"),
+                                     "manual_action_required": entry.get("mitigation") in ("challenge", "deny") or entry["failures"] >= 5})
+        age = now * 1000 - self.last_portfolio_synced_at if self.last_portfolio_synced_at else None
+        if age is None:
+            reasons.append("portfolio_missing")
+        elif age < 0 or age > 300000:
+            reasons.append("portfolio_stale")
+        return {"trading_ready": not reasons, "trading_block_reasons": reasons,
+                "portfolio_age_seconds": round(age / 1000, 1) if age is not None else None,
+                "upstream_restrictions": restrictions}
+
     @property
     def last_portfolio_synced_at(self) -> int:
         return self._last_portfolio_synced_at
@@ -2744,10 +2770,15 @@ class PolymtradeExecutor:
             if status == 429 and isinstance(headers, dict):
                 # Never log Cookies, authorization, query strings or bodies.
                 logger.warning(
-                    "Browser HTTP 429: host=%s path=%s server=%s retry_after=%s request_id=%s",
+                    "Browser HTTP 429: host=%s path=%s server=%s retry_after=%s request_id=%s mitigation=%s content_type=%s cache=%s age=%s date=%s service_worker=%s",
                     urllib.parse.urlsplit(url).hostname, urllib.parse.urlsplit(url).path[:160],
                     str(headers.get("server", ""))[:80], str(headers.get("retry-after", ""))[:80],
                     str(headers.get("x-vercel-id", headers.get("cf-ray", "")))[:160],
+                    str(headers.get("x-vercel-mitigated", ""))[:40],
+                    str(headers.get("content-type", ""))[:80],
+                    str(headers.get("x-vercel-cache", ""))[:40],
+                    str(headers.get("age", ""))[:40], str(headers.get("date", ""))[:80],
+                    getattr(response, "from_service_worker", None),
                 )
             self._upstream_cooldown.record(url, status, headers if isinstance(headers, dict) else {})
             self._upstream_cooldown.check(url)
