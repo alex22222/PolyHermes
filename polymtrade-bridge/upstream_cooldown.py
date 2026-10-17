@@ -27,7 +27,8 @@ class UpstreamCooldown:
             self.entries = {
                 host: {"status": int(entry["status"]), "retry_at": float(entry["retry_at"]), "failures": int(entry["failures"]),
                        **({"last_denied_at": float(entry.get("last_denied_at", entry["retry_at"]))} if entry["status"] == 429 else {}),
-                       **({"denied_path": str(entry["denied_path"])[:160]} if entry.get("denied_path") else {}),
+                       **({"denied_path": str(entry["denied_path"])[:160] or "/"} if "denied_path" in entry else {}),
+                       **({key: float(entry[key]) for key in ("provider_retry_at", "challenge_completed_at") if key in entry}),
                        **({"mitigation": entry["mitigation"]} if entry.get("mitigation") in ("challenge", "deny") else {})}
                 for host, entry in saved.items() if entry["status"] in (401, 403, 429)
             }
@@ -44,9 +45,40 @@ class UpstreamCooldown:
 
     def navigation_interval(self, url):
         entry = self.entries.get(urlsplit(url).hostname, {})
+        if entry.get("challenge_completed_at", 0) >= entry.get("last_denied_at", 1):
+            return 10.0
         if entry.get("status") == 429 and time.time() - entry.get("last_denied_at", entry["retry_at"]) < 3600:
             return 30.0
         return 10.0
+
+    def complete_challenge(self, url, proof):
+        """Accept only a later official main-document success, never a bypass."""
+        host = urlsplit(url).hostname
+        entry = self.entries.get(host, {})
+        now = time.time()
+        if entry.get("status") != 429 or entry.get("mitigation") != "challenge":
+            return False
+        if ("provider_retry_at" not in entry or not math.isfinite(entry["provider_retry_at"])
+                or entry["provider_retry_at"] < 0 or now < entry["provider_retry_at"]):
+            return False
+        try:
+            target, received = urlsplit(url), urlsplit(proof["url"])
+            same_target = (target.scheme, target.netloc, target.path or "/", target.query) == (received.scheme, received.netloc, received.path or "/", received.query)
+            started = float(proof["started_at"])
+            valid = (same_target and entry.get("denied_path") == (target.path or "/")
+                     and proof.get("status") == 200 and proof.get("main_frame") is True
+                     and proof.get("from_service_worker") is False and proof.get("transfer_size", 0) > 0
+                     and proof.get("denied_at") == entry.get("last_denied_at")
+                     and math.isfinite(started) and entry["last_denied_at"] < started <= now
+                     and now - started < 3600)
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not valid:
+            return False
+        self.entries[host] = {**entry, "retry_at": now, "challenge_completed_at": started}
+        self._save()
+        logger.info("Official browser challenge completed for %s; later same-document network HTTP 200 verified", host)
+        return True
 
     def record(self, url, status, headers=None):
         host = urlsplit(url).hostname
@@ -100,8 +132,11 @@ class UpstreamCooldown:
         entry = {"status": status, "retry_at": retry_at, "failures": failures}
         if status == 429:
             entry["last_denied_at"] = previous.get("last_denied_at", previous.get("retry_at", now)) if active else now
-            entry["denied_path"] = previous.get("denied_path", urlsplit(url).path[:160]) if active else urlsplit(url).path[:160]
-        if mitigation in ("challenge", "deny") or previous.get("mitigation") in ("challenge", "deny"):
+            path = urlsplit(url).path[:160] or "/"
+            entry["denied_path"] = previous.get("denied_path", path) if active else path
+            entry["provider_retry_at"] = max(previous.get("provider_retry_at", 0) if active else 0,
+                                               now + delay if math.isfinite(delay) and delay > 0 else 0)
+        if mitigation in ("challenge", "deny") or (active and previous.get("mitigation") in ("challenge", "deny")):
             entry["mitigation"] = mitigation if mitigation in ("challenge", "deny") else previous["mitigation"]
         if entry == previous:
             return

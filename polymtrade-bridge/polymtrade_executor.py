@@ -2751,9 +2751,7 @@ class PolymtradeExecutor:
         logger.warning("Polymtrade app shell is stale; reloading with a cache-busting URL")
         await self._pace_navigation(recovery_url)
         await self._clear_stale_app_caches()
-        response = await self.page.goto(recovery_url, wait_until=wait_until, timeout=timeout_ms)
-        await self._record_navigation_denial_document(recovery_url, response)
-        self._check_navigation_response(recovery_url, response)
+        response = await self._navigate_once(recovery_url, wait_until=wait_until, timeout_ms=timeout_ms)
         await asyncio.sleep(3)
         if await self._app_load_error_visible():
             raise RuntimeError("Polymtrade app still failed to load after cache-busting reload")
@@ -2774,6 +2772,59 @@ class PolymtradeExecutor:
             wait_until=wait_until,
             timeout_ms=timeout_ms,
         )
+
+    async def _navigate_once(self, url: str, *, wait_until: str, timeout_ms: int):
+        """Observe normal browser verification; never solve, reload or fetch it."""
+        self._upstream_cooldown.check(url)
+        successes = []
+        page = self.page
+        watching = callable(getattr(page, "on", None))
+
+        def observe(response):
+            try:
+                request = response.request
+                if response.status == 200 and request.is_navigation_request() and request.frame == page.main_frame:
+                    successes.append(response)
+            except Exception:
+                pass
+
+        if watching:
+            page.on("response", observe)
+        try:
+            response = await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+            try:
+                self._check_navigation_response(url, response)
+            except UpstreamAccessDeferred:
+                await self._record_navigation_denial_document(url, response)
+                entry = self._upstream_cooldown.entries.get(urllib.parse.urlsplit(url).hostname, {})
+                if (not watching or entry.get("mitigation") != "challenge"
+                        or entry.get("provider_retry_at", float("inf")) > time.time()):
+                    raise
+                denied_at = entry.get("last_denied_at")
+                deadline = asyncio.get_running_loop().time() + 15.0
+                while asyncio.get_running_loop().time() < deadline:
+                    if successes:
+                        accepted = successes.pop(0)
+                        try:
+                            await asyncio.wait_for(accepted.finished(), timeout=2.0)
+                            navigation = await page.evaluate("""() => {
+                                const n = performance.getEntriesByType('navigation')[0];
+                                return n ? {url:n.name,status:n.responseStatus,started_at:performance.timeOrigin/1000,
+                                    transfer_size:n.transferSize} : null;
+                            }""")
+                            if navigation and accepted.url == page.url:
+                                proof = {**navigation, "denied_at": denied_at, "main_frame": True,
+                                         "from_service_worker": accepted.from_service_worker}
+                                if self._upstream_cooldown.complete_challenge(url, proof):
+                                    return accepted
+                        except Exception:
+                            pass
+                    await asyncio.sleep(0.1)
+                raise
+            return response
+        finally:
+            if watching:
+                page.remove_listener("response", observe)
 
     async def _record_navigation_denial_document(self, url, response) -> Optional[str]:
         """Classify an already received rejection; never fetch or log its body."""
@@ -2849,9 +2900,7 @@ class PolymtradeExecutor:
             try:
                 self._upstream_cooldown.check(url)
                 await self._pace_navigation(url)
-                response = await self.page.goto(url, wait_until=wait_until, timeout=timeout_ms)
-                await self._record_navigation_denial_document(url, response)
-                self._check_navigation_response(url, response)
+                response = await self._navigate_once(url, wait_until=wait_until, timeout_ms=timeout_ms)
                 await self._recover_stale_app_shell(
                     url,
                     wait_until=wait_until,
@@ -2886,13 +2935,11 @@ class PolymtradeExecutor:
                     f"trying {fallback_wait_until} fallback for {url}: {last_error}"
                 )
                 await self._pace_navigation(url)
-                response = await self.page.goto(
+                response = await self._navigate_once(
                     url,
                     wait_until=fallback_wait_until,
-                    timeout=min(timeout_ms, 20000),
+                    timeout_ms=min(timeout_ms, 20000),
                 )
-                await self._record_navigation_denial_document(url, response)
-                self._check_navigation_response(url, response)
                 try:
                     await self.page.wait_for_load_state(wait_until, timeout=10000)
                 except Exception as settle_error:
