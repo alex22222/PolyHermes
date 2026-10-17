@@ -111,6 +111,57 @@ class JevFactChainTest(unittest.TestCase):
         self.assertIn("multiple external full rules", result["reason"])
         self.assertNotIn("jev", result)
 
+    def test_unlabelled_external_rule_pdf_requires_review_before_jev(self):
+        url = "https://polymarket-upload.s3.us-east-2.amazonaws.com/market_products/terms.pdf"
+        rules = market()["description"] + f" Settlement terms: {url}"
+        document_text = "Additional condition: the decision must be announced publicly."
+        document = {"url": url, "raw_sha256": "a" * 64,
+                    "text_sha256": hashlib.sha256(document_text.encode()).hexdigest(),
+                    "page_count": 1, "text": document_text}
+        supplied = case()
+        supplied["rule_review"]["resolution_rules_sha256"] = hashlib.sha256(rules.encode()).hexdigest()
+        fetched = []
+
+        def http(target, body=None, api_key=None):
+            if "/markets/slug/" in target:
+                return {**market(), "description": rules}
+            self.fail(f"Jev or book called before external PDF review: {target}")
+
+        def rule_pdf(target):
+            fetched.append(target)
+            return document
+
+        result = run_review(supplied, NOW, lambda target: FEED if target.endswith(".xml") else ARTICLE,
+                            http, "secret", rule_document_fn=rule_pdf)
+
+        self.assertEqual([url], fetched)
+        self.assertEqual("RULE_REVIEW_REQUIRED", result["status"])
+        self.assertEqual(url, result["rule_document_url"])
+        self.assertNotIn("jev", result)
+
+    def test_angle_bracketed_external_rule_pdf_requires_review_before_jev(self):
+        url = "https://polymarket-upload.s3.us-east-2.amazonaws.com/market_products/terms.pdf"
+        rules = market()["description"] + f" Settlement terms: <{url}>"
+        supplied = case()
+        supplied["rule_review"]["resolution_rules_sha256"] = hashlib.sha256(rules.encode()).hexdigest()
+        fetched = []
+
+        def http(target, body=None, api_key=None):
+            if "/markets/slug/" in target:
+                return {**market(), "description": rules}
+            self.fail(f"Jev or book called before external PDF review: {target}")
+
+        def rule_pdf(target):
+            fetched.append(target)
+            raise ValueError("PDF unavailable")
+
+        result = run_review(supplied, NOW, lambda target: FEED if target.endswith(".xml") else ARTICLE,
+                            http, "secret", rule_document_fn=rule_pdf)
+
+        self.assertEqual([url], fetched)
+        self.assertEqual("RULE_REVIEW_REQUIRED", result["status"])
+        self.assertNotIn("jev", result)
+
     def test_official_feed_item_and_article_are_recorded(self):
         def fetch(url):
             return FEED if url.endswith("press_monetary.xml") else ARTICLE
@@ -549,7 +600,8 @@ class JevFactChainTest(unittest.TestCase):
 
         self.assertEqual(2, market_fetches)
         self.assertEqual("RULE_REVIEW_REQUIRED", result["status"])
-        self.assertEqual(changed_rules, result["resolution_rules"])
+        self.assertEqual(market()["description"], result["resolution_rules"])
+        self.assertEqual(changed_rules, result["current_resolution_rules"])
         self.assertNotIn("quote", result)
 
     def test_outcome_tokens_changed_after_jev_never_reaches_book(self):

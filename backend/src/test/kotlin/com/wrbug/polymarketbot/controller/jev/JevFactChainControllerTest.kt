@@ -11,16 +11,20 @@ import org.mockito.Mockito
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
 import org.springframework.test.web.servlet.setup.MockMvcBuilders
 import java.nio.file.Files
+import java.security.MessageDigest
 
 class JevFactChainControllerTest {
     @Test
     fun `list endpoint returns all four evidence stages without starting trading services`() {
         val path = Files.createTempFile("jev-fact-chain-http-test", ".jsonl")
+        val sourceHash = MessageDigest.getInstance("SHA-256").digest("Official sample statement".toByteArray()).joinToString("") { "%02x".format(it) }
+        val rulesHash = MessageDigest.getInstance("SHA-256").digest("Resolves Yes if X".toByteArray()).joinToString("") { "%02x".format(it) }
         try {
             Files.writeString(path, """
-                {"schema_version":1,"paper_only":true,"category":"finance","market_slug":"fed-test","market_tags":["fed","economy"],"status":"REVIEW_CANDIDATE","market_created_at":"2026-09-24T00:00:00Z","orderbook_enabled":true,"market_restricted":false,"fees_enabled":false,"fee_rate":"0","source":{"publisher":"federal_reserve_monetary","source_url":"https://www.federalreserve.gov/example","published_at":"2026-09-25T00:00:00Z","retrieved_at":"2026-09-25T00:01:00Z","content_sha256":"article-hash","text":"Official sample statement"},"source_rechecked_at":"2026-09-25T00:02:00Z","source_recheck_content_sha256":"article-hash","resolution_rules":"Resolves Yes if X","rule_review":{"resolution_rules_sha256":"rules-hash","source_content_sha256":"article-hash","complete":true,"evidence_verdict":"QUALIFIES"},"rule_checks":[{"criterion":"X","rule_quote":"Resolves Yes if X","evidence_quote":"Official sample statement","status":"CONFIRMED"}],"jev_evidence":[{"source_url":"https://www.federalreserve.gov/example","observed_at":"2026-09-25T00:01:00Z","text":"Official sample statement"}],"jev":{"model":"jev-test","scores":{"yes":0.99,"no":0.01,"ambiguous":0.0}},"evaluated_outcome":"Yes","quote":{"shares":"20","fee":"0.01","book_timestamp":"1","levels_used":[{"price":"0.6","shares":"20"}]}}
+                {"schema_version":1,"paper_only":true,"category":"finance","market_slug":"fed-test","market_tags":["fed","economy"],"status":"REVIEW_CANDIDATE","candidate_outcome":"Yes","market_created_at":"2026-09-24T00:00:00Z","orderbook_enabled":true,"market_restricted":false,"fees_enabled":false,"fee_rate":"0","source":{"publisher":"federal_reserve_monetary","source_url":"https://www.federalreserve.gov/example","published_at":"2026-09-25T00:00:00Z","retrieved_at":"2026-09-25T00:01:00Z","content_sha256":"article-hash","text":"Official sample statement"},"source_rechecked_at":"2026-09-25T00:02:00Z","source_recheck_content_sha256":"article-hash","resolution_rules":"Resolves Yes if X","rule_review":{"resolution_rules_sha256":"rules-hash","source_content_sha256":"article-hash","complete":true,"evidence_verdict":"QUALIFIES"},"rule_checks":[{"criterion":"X","rule_quote":"Resolves Yes if X","evidence_quote":"Official sample statement","status":"CONFIRMED"}],"jev_evidence":[{"source_url":"https://www.federalreserve.gov/example","observed_at":"2026-09-25T00:01:00Z","text":"Official sample statement"}],"jev":{"model":"jev-test","scores":{"yes":0.99,"no":0.01,"ambiguous":0.0}},"evaluated_outcome":"Yes","quote":{"shares":"20","vwap":"0.6","cost":"12","fee":"0.01","gap_per_share":"0.39","book_age_seconds":1,"book_timestamp":"1","levels_used":[{"price":"0.6","shares":"20"}]}}
                 {"schema_version":1,"paper_only":true,"category":"politics","market_slug":"white-house-test","market_tags":["politics"],"status":"EVIDENCE_NOT_QUALIFYING","source":{"publisher":"white_house_presidential","source_url":"https://www.whitehouse.gov/example","published_at":"2026-09-25T00:00:00Z","retrieved_at":"2026-09-25T00:01:00Z","content_sha256":"political-article-hash","text":"Official sample action"},"resolution_rules":"Only actions after market creation count","rule_review":{"resolution_rules_sha256":"political-rules-hash","source_content_sha256":"political-article-hash","complete":false,"evidence_verdict":"DOES_NOT_QUALIFY"},"rule_checks":[{"criterion":"time window","rule_quote":"after market creation","evidence_quote":"Official sample action","status":"EXCLUDED"}]}
-            """.trimIndent())
+            """.trimIndent().replace("article-hash", sourceHash)
+                .replace("\"resolution_rules_sha256\":\"rules-hash\"", "\"resolution_rules_sha256\":\"$rulesHash\""))
             val controller = JevFactChainController(JevFactChainSnapshotService(ObjectMapper(), path.toString()))
             val mvc = MockMvcBuilders.standaloneSetup(controller).build()
 
@@ -35,9 +39,9 @@ class JevFactChainControllerTest {
             assertEquals(true, records[0].path("jev").isMissingNode)
             assertEquals(true, records[0].path("quote").isMissingNode)
             assertEquals("fed-test", records[1].path("market_slug").asText())
-            assertEquals("article-hash", records[1].path("rule_review").path("source_content_sha256").asText())
+            assertEquals(sourceHash, records[1].path("rule_review").path("source_content_sha256").asText())
             assertEquals("2026-09-25T00:02:00Z", records[1].path("source_rechecked_at").asText())
-            assertEquals("article-hash", records[1].path("source_recheck_content_sha256").asText())
+            assertEquals(sourceHash, records[1].path("source_recheck_content_sha256").asText())
             assertEquals("CONFIRMED", records[1].path("rule_checks")[0].path("status").asText())
             assertEquals("jev-test", records[1].path("jev").path("model").asText())
             assertEquals("2026-09-25T00:01:00Z", records[1].path("jev_evidence")[0].path("observed_at").asText())

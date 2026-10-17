@@ -108,12 +108,13 @@ def fetch_text(url: str) -> str:
 
 def full_rules_url(rules: str) -> str | None:
     matches = list(FULL_RULES_LINK.finditer(rules))
-    if not matches:
-        return None
-    nearby = rules[matches[0].start():matches[0].end() + 120]
-    if len(matches) > 1 or len(re.findall(r"https?://[^\s)]+", nearby)) > 1:
+    links = [link.rstrip(".,;>") for link in re.findall(r"https?://[^\s)]+", rules, re.IGNORECASE)]
+    rule_links = {match.group(1).rstrip(".,;>") for match in matches}
+    rule_links.update(link for link in links if urllib.parse.urlparse(link).path.lower().endswith(".pdf"))
+    nearby = rules[matches[0].start():matches[0].end() + 120] if matches else ""
+    if len(rule_links) > 1 or (matches and len(re.findall(r"https?://[^\s)]+", nearby)) > 1):
         raise ValueError("multiple external full rules documents are unsupported")
-    return matches[0].group(1).rstrip(".,;")
+    return next(iter(rule_links), None)
 
 
 def collect_rule_document(url: str) -> dict[str, Any]:
@@ -520,7 +521,7 @@ def run_review(
     if (refreshed_market["question"] != market["question"]
             or refreshed_market["description"] != market["description"]):
         result.update(status="RULE_REVIEW_REQUIRED", reason="Gamma question or resolution rules changed after Jev; review and rerun",
-                      question=refreshed_market["question"], resolution_rules=refreshed_market["description"])
+                      current_question=refreshed_market["question"], current_resolution_rules=refreshed_market["description"])
         return result
     if rule_document:
         result["rule_document_rechecked_at"] = datetime.now(timezone.utc).isoformat()

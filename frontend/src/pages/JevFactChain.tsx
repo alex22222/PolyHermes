@@ -79,6 +79,8 @@ interface FactChainRecord {
   market_accepting_orders?: boolean | null
   question?: string
   resolution_rules?: string
+  current_question?: string
+  current_resolution_rules?: string
   gamma_resolution_rules?: string
   rule_document_url?: string
   rule_document?: RuleDocumentSnapshot
@@ -237,6 +239,9 @@ interface ReviewFormValues {
 const RuleReviewBuilder: React.FC<{ record: FactChainRecord }> = ({ record }) => {
   const [form] = Form.useForm<ReviewFormValues>()
   if (!record.source || !record.resolution_rules || !record.category) return null
+  if (record.current_resolution_rules) {
+    return <Alert type="warning" showIcon message="Gamma 规则已在 Jev 判读后变化" description="原审核版本已失效，请重新运行只读观察、阅读新规则并逐项核对；不能从本条旧快照导出审核输入。" />
+  }
   if (record.rule_document_url && !record.rule_document) {
     return <Alert type="warning" showIcon message="外部完整规则尚未取得，不能导出完整审核" />
   }
@@ -451,7 +456,8 @@ const JevFactChain: React.FC = () => {
 
           <Card size="small" title="2 · 结算规则逐项核对">
             <Paragraph><Text strong>Gamma 市场创建时间：</Text>{formatTime(selected.market_created_at)}</Paragraph>
-            <Paragraph><Text strong>Gamma 市场说明：</Text>{selected.gamma_resolution_rules || selected.resolution_rules || '未获取'}</Paragraph>
+            <Paragraph><Text strong>{selected.current_resolution_rules ? 'Jev 判读时的 Gamma 市场说明：' : 'Gamma 市场说明：'}</Text>{selected.gamma_resolution_rules || selected.resolution_rules || '未获取'}</Paragraph>
+            {selected.current_resolution_rules && <Alert type="warning" showIcon message="Jev 后 Gamma 规则发生变化，旧判读不可作为候选" description={<><Paragraph><Text strong>当前问题：</Text>{selected.current_question || selected.question}</Paragraph><Paragraph style={{ marginBottom: 0 }}><Text strong>当前市场说明：</Text>{selected.current_resolution_rules}</Paragraph></>} style={{ marginBottom: 8 }} />}
             {selected.rule_document ? <>
               <Descriptions column={1} size="small">
                 <Descriptions.Item label="外部完整规则 PDF">{ruleDocumentUrl(selected.rule_document.url) ? <Link href={selected.rule_document.url} target="_blank" rel="noopener noreferrer">打开原始规则文件</Link> : '链接未通过白名单'}</Descriptions.Item>
