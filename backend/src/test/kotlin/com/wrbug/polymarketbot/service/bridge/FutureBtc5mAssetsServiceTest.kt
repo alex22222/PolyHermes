@@ -287,7 +287,7 @@ class FutureBtc5mAssetsServiceTest {
         source.getPositions(user = address, sizeThreshold = 0.0, limit = 500, offset = 0)
 
     private suspend fun buys(source: PolymarketDataApi = api, cursor: String? = null) =
-        source.getActivityHistory(user = address, cursor = cursor, type = null, side = null)
+        source.getActivityHistory(user = address, cursor = cursor, type = "", side = "")
 
     private fun activity(rows: List<UserActivityResponse>, next: String? = null, more: Boolean = next != null) =
         Response.success(FutureBtc5mActivityPage(rows, FutureBtc5mActivityPagination(more, next)))

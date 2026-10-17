@@ -99,7 +99,8 @@ class FutureBtc5mAssetsService(
         runCatching {
             withTimeoutOrNull(6000) {
                 do {
-                    val response = withTimeout(3500) { api.getActivityHistory(user = wallet, cursor = cursor, type = null, side = null) }
+                    // Empty filters include BUY, SELL and REDEEM without changing the shared API contract.
+                    val response = withTimeout(3500) { api.getActivityHistory(user = wallet, cursor = cursor, type = "", side = "") }
                     check(response.isSuccessful)
                     val page = checkNotNull(response.body())
                     val pageRows = checkNotNull(page.data)
