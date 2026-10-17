@@ -27,6 +27,7 @@ class UpstreamCooldown:
             self.entries = {
                 host: {"status": int(entry["status"]), "retry_at": float(entry["retry_at"]), "failures": int(entry["failures"]),
                        **({"last_denied_at": float(entry.get("last_denied_at", entry["retry_at"]))} if entry["status"] == 429 else {}),
+                       **({"denied_path": str(entry["denied_path"])[:160]} if entry.get("denied_path") else {}),
                        **({"mitigation": entry["mitigation"]} if entry.get("mitigation") in ("challenge", "deny") else {})}
                 for host, entry in saved.items() if entry["status"] in (401, 403, 429)
             }
@@ -56,6 +57,8 @@ class UpstreamCooldown:
             if 200 <= status < 400 and host in self.entries and time.time() >= self.entries[host]["retry_at"]:
                 previous = self.entries[host]
                 if previous["status"] == 429 and time.time() - previous.get("last_denied_at", previous["retry_at"]) < 21600:
+                    return
+                if previous.get("denied_path") and previous["denied_path"] != urlsplit(url).path:
                     return
                 self.entries.pop(host)
                 self._save()
@@ -97,6 +100,7 @@ class UpstreamCooldown:
         entry = {"status": status, "retry_at": retry_at, "failures": failures}
         if status == 429:
             entry["last_denied_at"] = previous.get("last_denied_at", previous.get("retry_at", now)) if active else now
+            entry["denied_path"] = previous.get("denied_path", urlsplit(url).path[:160]) if active else urlsplit(url).path[:160]
         if mitigation in ("challenge", "deny") or previous.get("mitigation") in ("challenge", "deny"):
             entry["mitigation"] = mitigation if mitigation in ("challenge", "deny") else previous["mitigation"]
         if entry == previous:

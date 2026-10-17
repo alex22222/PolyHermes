@@ -239,6 +239,15 @@ class PolymtradeExecutor:
 
             self._ready = True
 
+        except UpstreamAccessDeferred as e:
+            # A provider rejection is not a dead browser. Keep the original
+            # profile and the visible page available; never restart to retry it.
+            self.last_error = str(e)
+            self._ready = self.context is not None and self.page is not None
+            if not self._ready:
+                raise
+            self._logged_in = await self._detect_login_state(timeout=500)
+            logger.warning("Startup deferred by upstream protection; browser/auth profile retained: %s", e)
         except Exception as e:
             self.last_error = str(e)
             logger.exception(f"Failed to start executor: {e}")
@@ -352,6 +361,8 @@ class PolymtradeExecutor:
             reasons.append("executor_not_ready")
         if not self.is_logged_in():
             reasons.append("not_logged_in")
+        if self._portfolio_access_error:
+            reasons.append("portfolio_unavailable")
         restrictions = []
         for host in (urllib.parse.urlsplit(self.base_url).hostname, "gamma-api.polymarket.com"):
             entry = self._upstream_cooldown.entries.get(host)
@@ -2741,6 +2752,7 @@ class PolymtradeExecutor:
         await self._pace_navigation(recovery_url)
         await self._clear_stale_app_caches()
         response = await self.page.goto(recovery_url, wait_until=wait_until, timeout=timeout_ms)
+        await self._record_navigation_denial_document(recovery_url, response)
         self._check_navigation_response(recovery_url, response)
         await asyncio.sleep(3)
         if await self._app_load_error_visible():
@@ -2762,6 +2774,27 @@ class PolymtradeExecutor:
             wait_until=wait_until,
             timeout_ms=timeout_ms,
         )
+
+    async def _record_navigation_denial_document(self, url, response) -> Optional[str]:
+        """Classify an already received rejection; never fetch or log its body."""
+        if getattr(response, "status", None) != 429 or not callable(getattr(response, "text", None)):
+            return None
+        kind = "unknown"
+        try:
+            body = (await asyncio.wait_for(response.text(), timeout=2.0))[:65536].lower()
+            if "vercel security checkpoint" in body or "failed to verify your browser" in body:
+                kind = "security_challenge"
+                # This is a stricter local pause, not a challenge solution.
+                self._upstream_cooldown.record(url, 429, {"x-vercel-mitigated": "challenge"})
+            elif "<html" in body and "polymtrade" in body:
+                kind = "application_html"
+            elif "too many requests" in body or "rate limit exceeded" in body:
+                kind = "rate_limit"
+        except Exception:
+            kind = "body_unavailable"
+        logger.warning("Browser denial document: path=%s classification=%s",
+                       urllib.parse.urlsplit(url).path[:160], kind)
+        return kind
 
     def _check_navigation_response(self, url, response):
         status = getattr(response, "status", None)
@@ -2817,6 +2850,7 @@ class PolymtradeExecutor:
                 self._upstream_cooldown.check(url)
                 await self._pace_navigation(url)
                 response = await self.page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                await self._record_navigation_denial_document(url, response)
                 self._check_navigation_response(url, response)
                 await self._recover_stale_app_shell(
                     url,
@@ -2857,6 +2891,7 @@ class PolymtradeExecutor:
                     wait_until=fallback_wait_until,
                     timeout=min(timeout_ms, 20000),
                 )
+                await self._record_navigation_denial_document(url, response)
                 self._check_navigation_response(url, response)
                 try:
                     await self.page.wait_for_load_state(wait_until, timeout=10000)
