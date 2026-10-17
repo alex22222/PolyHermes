@@ -47,8 +47,11 @@ class PortfolioRelationClassifier {
                 classifyPair(left, right)?.let(results::add)
             }
         }
-        return results.sortedWith(compareBy<PortfolioPositionRelation> { TYPE_ORDER.indexOf(it.type) }.thenBy { it.positionKeys.joinToString() })
+        return results.sortedWith(RELATION_ORDER)
     }
+
+    fun classifyCandidate(existing: List<PortfolioRelationPosition>, candidate: PortfolioRelationPosition, now: Long): List<PortfolioPositionRelation> =
+        (classify(listOf(candidate), now) + existing.mapNotNull { classifyPair(it, candidate) }).sortedWith(RELATION_ORDER)
 
     private fun classifyPair(left: PortfolioRelationPosition, right: PortfolioRelationPosition): PortfolioPositionRelation? {
         val sameMarket = !left.marketId.isNullOrBlank() && left.marketId.equals(right.marketId, true)
@@ -147,5 +150,6 @@ class PortfolioRelationClassifier {
         private const val DAY_MS = 24L * 60 * 60 * 1000
         private val BINARY_COMPLEMENTS = setOf(setOf("YES", "NO"), setOf("UP", "DOWN"))
         private val TYPE_ORDER = listOf("DUPLICATE", "TRUE_HEDGE", "PSEUDO_HEDGE", "RELATED", "LONG_OCCUPIED", "UNKNOWN")
+        private val RELATION_ORDER = compareBy<PortfolioPositionRelation> { TYPE_ORDER.indexOf(it.type) }.thenBy { it.positionKeys.joinToString() }
     }
 }

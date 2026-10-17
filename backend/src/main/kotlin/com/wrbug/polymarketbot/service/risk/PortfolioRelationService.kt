@@ -1,6 +1,7 @@
 package com.wrbug.polymarketbot.service.risk
 
 import com.wrbug.polymarketbot.dto.*
+import com.wrbug.polymarketbot.entity.BridgePositionSnapshot
 import com.wrbug.polymarketbot.repository.AccountRepository
 import com.wrbug.polymarketbot.repository.BridgePositionSnapshotRepository
 import com.wrbug.polymarketbot.repository.MarketRepository
@@ -16,25 +17,8 @@ class PortfolioRelationService(
     private val classifier: PortfolioRelationClassifier
 ) {
     fun getRelations(accountId: Long, now: Long = System.currentTimeMillis()): PortfolioRelationResponse {
-        val account = accountRepository.findById(accountId).orElse(null) ?: throw IllegalArgumentException("账户不存在")
-        val snapshots = snapshotRepository.findByBridgeIdAndWalletAddress(BRIDGE_ID, account.walletAddress.lowercase())
-        val positions = snapshots.map { snapshot ->
-            val market = snapshot.marketId?.let(marketRepository::findByMarketId)
-            val category = market?.category?.trim()?.lowercase()?.takeIf { it in CATEGORIES }
-                ?: inferCategory(snapshot.marketTitle)
-            PortfolioRelationPosition(
-                positionKey = "${snapshot.marketId ?: snapshot.marketTitle}|${snapshot.side.uppercase()}",
-                marketId = snapshot.marketId,
-                eventSlug = snapshot.eventSlug ?: market?.eventSlug,
-                outcome = snapshot.side,
-                category = category,
-                marketTitle = snapshot.marketTitle,
-                currentValue = snapshot.currentValue,
-                quantity = snapshot.quantity,
-                firstObservedAt = snapshot.createdAt,
-                marketEndAt = market?.endDate
-            )
-        }
+        val snapshots = getSnapshots(accountId)
+        val positions = snapshots.map { it.toPosition() }
         val relations = classifier.classify(positions, now)
         val relatedValueByType = relations.groupBy { it.type }.mapValues { (_, items) ->
             items.mapNotNull { it.relatedValue?.toBigDecimalOrNull() }.fold(BigDecimal.ZERO, BigDecimal::add).strip()
@@ -47,6 +31,31 @@ class PortfolioRelationService(
             countsByType = relations.groupingBy { it.type }.eachCount().toSortedMap(),
             relatedValueByType = relatedValueByType,
             generatedAt = now
+        )
+    }
+
+    fun getPositions(accountId: Long): List<PortfolioRelationPosition> = getSnapshots(accountId).map { it.toPosition() }
+
+    private fun getSnapshots(accountId: Long): List<BridgePositionSnapshot> {
+        val account = accountRepository.findById(accountId).orElse(null) ?: throw IllegalArgumentException("账户不存在")
+        return snapshotRepository.findByBridgeIdAndWalletAddress(BRIDGE_ID, account.walletAddress.lowercase())
+    }
+
+    private fun BridgePositionSnapshot.toPosition(): PortfolioRelationPosition {
+        val market = marketId?.let(marketRepository::findByMarketId)
+        val category = market?.category?.trim()?.lowercase()?.takeIf { it in CATEGORIES }
+            ?: inferCategory(marketTitle)
+        return PortfolioRelationPosition(
+            positionKey = "${marketId ?: marketTitle}|${side.uppercase()}",
+            marketId = marketId,
+            eventSlug = eventSlug ?: market?.eventSlug,
+            outcome = side,
+            category = category,
+            marketTitle = marketTitle,
+            currentValue = currentValue,
+            quantity = quantity,
+            firstObservedAt = createdAt,
+            marketEndAt = market?.endDate
         )
     }
 

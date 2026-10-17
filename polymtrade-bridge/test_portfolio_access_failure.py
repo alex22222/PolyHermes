@@ -9,6 +9,11 @@ import main
 from polymtrade_executor import PolymtradeExecutor
 
 
+@pytest.fixture(autouse=True)
+def isolated_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("BROWSER_PROFILE_DIR", str(tmp_path))
+
+
 def blocked_executor(status=403):
     executor = PolymtradeExecutor()
     executor._logged_in = True
@@ -65,12 +70,14 @@ async def test_forced_reads_cannot_bypass_access_failure_cooldown_or_use_stale_h
 
 async def test_access_failure_retries_only_after_cooldown_and_can_recover():
     executor, page = blocked_executor()
-    with patch("polymtrade_executor.time.monotonic", return_value=100):
+    with patch("polymtrade_executor.time.monotonic", return_value=100), \
+            patch("upstream_cooldown.time.time", return_value=1000):
         await executor.fetch_portfolio_positions(force_refresh=True)
     executor._fetch_portfolio_positions_on_active_page = AsyncMock(return_value={
         "positions": [{"marketTitle": "Recovered", "quantity": 2}], "portfolio_complete": True,
     })
-    with patch("polymtrade_executor.time.monotonic", return_value=401):
+    with patch("polymtrade_executor.time.monotonic", return_value=1901), \
+            patch("upstream_cooldown.time.time", return_value=2801):
         result = await executor.fetch_portfolio_positions(force_refresh=True)
 
     assert result["portfolio_complete"] is True

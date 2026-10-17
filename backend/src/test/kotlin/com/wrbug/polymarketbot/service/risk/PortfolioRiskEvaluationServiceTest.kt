@@ -27,7 +27,11 @@ class PortfolioRiskEvaluationServiceTest {
         if (invocation.method.name == "snapshot") PortfolioBuyControlSnapshot() else Mockito.RETURNS_DEFAULTS.answer(invocation)
     }
     private val relationService = Mockito.mock(PortfolioRelationService::class.java) { invocation ->
-        if (invocation.method.name == "getRelations") emptyRelations() else Mockito.RETURNS_DEFAULTS.answer(invocation)
+        when (invocation.method.name) {
+            "getRelations" -> emptyRelations()
+            "getPositions" -> emptyList<PortfolioRelationPosition>()
+            else -> Mockito.RETURNS_DEFAULTS.answer(invocation)
+        }
     }
     private val relationClassifier = PortfolioRelationClassifier()
     private val service = PortfolioRiskEvaluationService(
@@ -65,6 +69,7 @@ class PortfolioRiskEvaluationServiceTest {
         assertEquals("INSUFFICIENT_DATA", result.rules.first { it.code == "MAX_LEADER_EXPOSURE" }.status)
         assertEquals("WOULD_BLOCK", result.rules.first { it.code == "MAX_CATEGORY_EXPOSURE" }.status)
         assertEquals("PASS", result.rules.first { it.code == "POSITION_RELATIONSHIP" }.status)
+        Mockito.verify(relationService, Mockito.never()).getRelations(Mockito.anyLong(), Mockito.anyLong())
 
         val captor = ArgumentCaptor.forClass(com.wrbug.polymarketbot.entity.PortfolioRiskDecision::class.java)
         Mockito.verify(decisionRepository).save(captor.capture())
@@ -186,23 +191,21 @@ class PortfolioRiskEvaluationServiceTest {
     @Test
     fun `candidate duplicate position is shadow would-block but not execution denial`() {
         Mockito.`when`(exposureService.getExposure(2L)).thenReturn(exposure())
-        Mockito.`when`(relationService.getRelations(Mockito.eq(2L), Mockito.anyLong())).thenReturn(
-            emptyRelations().copy(
-                positions = listOf(
-                    PortfolioRelationPositionDto(
+        Mockito.`when`(relationService.getPositions(2L)).thenReturn(
+                listOf(
+                    PortfolioRelationPosition(
                         positionKey = "market-1|YES",
                         marketId = "market-1",
                         eventSlug = "event-1",
                         outcome = "YES",
                         category = "crypto",
                         marketTitle = "Bitcoin market",
-                        currentValue = "10",
-                        quantity = "2",
+                        currentValue = java.math.BigDecimal("10"),
+                        quantity = java.math.BigDecimal("2"),
                         firstObservedAt = 1L,
                         marketEndAt = null
                     )
                 )
-            )
         )
 
         val fixedNowService = PortfolioRiskEvaluationService(

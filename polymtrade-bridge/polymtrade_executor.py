@@ -4,6 +4,7 @@ import copy
 import contextvars
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -15,6 +16,8 @@ import httpx
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Response
 
 from bridge_metrics import metrics
+from gamma_search_denials import GammaSearchDenials
+from upstream_cooldown import UpstreamAccessDeferred, UpstreamCooldown
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +89,12 @@ class PolymtradeExecutor:
         self._http_client: Optional[httpx.AsyncClient] = None
         self._gamma_query_cache: dict[tuple, tuple] = {}
         self._gamma_query_inflight: dict[tuple, asyncio.Task] = {}
+        self._gamma_request_lock = asyncio.Lock()
+        self._gamma_next_request_at = 0.0
+        self._navigation_lock = asyncio.Lock()
+        self._next_navigation_at = 0.0
+        self._upstream_cooldown = UpstreamCooldown(os.path.join(self.profile_dir, ".polyhermes-upstream-cooldowns.json"))
+        self._gamma_search_denials = GammaSearchDenials(os.path.join(self.profile_dir, ".polyhermes-gamma-search-denials.json"))
         self._portfolio_page_idle_close_seconds = float(
             os.getenv("BRIDGE_PORTFOLIO_PAGE_IDLE_CLOSE_SECONDS", "120")
         )
@@ -643,6 +652,13 @@ class PolymtradeExecutor:
     async def fetch_portfolio_positions(self, *, force_refresh: bool = False) -> dict:
         # Fresh execution reads must not bypass an upstream access-denial cooldown
         # or fall back to an old, previously complete holdings snapshot.
+        try:
+            self._upstream_cooldown.check(f"{self.base_url}/portfolio")
+        except UpstreamAccessDeferred as e:
+            return self._defer_portfolio_read(
+                {"error": str(e), "upstream_http_status": e.status, "positions": []},
+                retry_at=e.retry_at,
+            )
         if self._portfolio_access_error and time.monotonic() < self._portfolio_access_retry_at:
             return copy.deepcopy(self._portfolio_access_error)
         cached_snapshot = None if force_refresh else self._cached_portfolio_snapshot()
@@ -694,12 +710,13 @@ class PolymtradeExecutor:
         self._portfolio_snapshot_cache = copy.deepcopy(result)
         self._portfolio_snapshot_cached_at = time.monotonic()
 
-    def _defer_portfolio_read(self, result: dict) -> dict:
+    def _defer_portfolio_read(self, result: dict, *, retry_at: Optional[float] = None) -> dict:
         result = {**result, "portfolio_complete": False, "empty_state_confirmed": False}
         result.setdefault("error", "Portfolio snapshot incomplete; holdings unknown; retry deferred for 300s")
         self._portfolio_snapshot_cache = None
         self._portfolio_access_error = copy.deepcopy(result)
-        self._portfolio_access_retry_at = time.monotonic() + 300.0
+        delay = 300.0 if retry_at is None else max(0.0, retry_at - time.time())
+        self._portfolio_access_retry_at = time.monotonic() + delay
         logger.warning(result["error"])
         return result
 
@@ -727,6 +744,7 @@ class PolymtradeExecutor:
                 }
                 self._record_portfolio_render_result(False)
                 return self._defer_portfolio_read(result)
+            await self._select_portfolio_positions()
             rendered = await self._wait_for_portfolio_rows(timeout=12.0)
             if not rendered:
                 logger.warning("Portfolio rows did not render before scrape; continuing with best effort")
@@ -863,9 +881,33 @@ class PolymtradeExecutor:
                 "redeemable_position_count": len(redeemable_positions) if portfolio_complete else None,
                 "redeem_valuation_status": "COMPLETE" if portfolio_complete else "UNKNOWN",
             }
+        except UpstreamAccessDeferred as e:
+            return self._defer_portfolio_read(
+                {"error": str(e), "upstream_http_status": e.status, "positions": []},
+                retry_at=e.retry_at,
+            )
         except Exception as e:
             logger.exception(f"Failed to fetch portfolio positions: {e}")
+            self._record_portfolio_render_result(False)
             return self._defer_portfolio_read({"error": str(e), "positions": []})
+
+    async def _select_portfolio_positions(self) -> None:
+        # New portfolio pages can default to History, whose rows share the
+        # holdings selector. Never interpret transaction history as positions.
+        tab = await self.page.wait_for_selector(
+            'div.cursor-pointer:text-is("Positions"), div.cursor-pointer:text-is("持仓")',
+            state="visible", timeout=30000,
+        )
+        if not tab:
+            raise RuntimeError("Portfolio positions tab missing; holdings unknown")
+        if "text-foreground" not in (await tab.get_attribute("class") or "").split():
+            await tab.click(timeout=3000)
+        await self.page.wait_for_function(
+            """() => Array.from(document.querySelectorAll('div.cursor-pointer'))
+                .some(el => ['Positions', '持仓'].includes(el.textContent.trim())
+                    && el.classList.contains('text-foreground'))""",
+            timeout=5000,
+        )
 
     async def _scroll_portfolio_until_stable(
         self,
@@ -1301,7 +1343,7 @@ class PolymtradeExecutor:
         if not self.page:
             return {"error": "page not initialized"}
         try:
-            await self.page.goto(self.base_url, wait_until="load", timeout=60000)
+            await self._goto_with_retry(self.base_url, wait_until="load", timeout_ms=60000)
             await asyncio.sleep(2)
 
             search_input = None
@@ -1467,10 +1509,12 @@ class PolymtradeExecutor:
         base_delay: float = 1.0,
     ):
         """Coalesce identical metadata queries and cool down failures across scrapes."""
+        self._gamma_search_denials.check(url, params)
         key = (url, tuple(sorted((str(k), str(v)) for k, v in params.items())))
         cached = self._gamma_query_cache.get(key)
         if cached and time.monotonic() < cached[0]:
             if cached[3]:
+                self._upstream_cooldown.check(url)
                 raise RuntimeError(f"Gamma query cooldown: {cached[3]}")
             return copy.deepcopy(cached[1])
 
@@ -1479,9 +1523,12 @@ class PolymtradeExecutor:
             async def request_and_cache():
                 try:
                     result = await self._perform_gamma_request(client, url, params, max_retries, base_delay)
+                except UpstreamAccessDeferred:
+                    raise
                 except Exception as error:
                     failures = min((cached[2] if cached else 0) + 1, 8)
                     status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+                    self._gamma_search_denials.record(url, params, status)
                     delay = min(1800 * 2 ** (failures - 1), 21600) if status == 403 else min(60 * 2 ** (failures - 1), 900)
                     if status == 429:
                         try:
@@ -1521,10 +1568,31 @@ class PolymtradeExecutor:
         for attempt in range(max_retries):
             resp = None
             try:
-                metrics.gamma_api_requests += 1
-                resp = await client.get(url, params=params, timeout=20.0)
+                # Serial, paced starts prevent a cold 84-position scrape from
+                # flooding the upstream. Recheck after queueing so one denial
+                # also stops different queries that have not started yet.
+                async with self._gamma_request_lock:
+                    self._upstream_cooldown.check(url)
+                    await asyncio.sleep(max(0.0, self._gamma_next_request_at - time.monotonic()))
+                    self._upstream_cooldown.check(url)
+                    self._gamma_next_request_at = time.monotonic() + 0.25
+                    metrics.gamma_api_requests += 1
+                    resp = await client.get(url, params=params, timeout=20.0)
+                    self._upstream_cooldown.record(url, resp.status_code, resp.headers)
+                    if resp.status_code in (401, 403, 429):
+                        code = re.search(r"\berror code:\s*(\d{4})\b", resp.text[:512])
+                        logger.warning(
+                            "Metadata access denied: host=%s status=%s server=%s request_id=%s code=%s",
+                            urllib.parse.urlsplit(url).hostname, resp.status_code,
+                            resp.headers.get("server", "unknown"),
+                            resp.headers.get("cf-ray") or resp.headers.get("x-vercel-id") or "unknown",
+                            code.group(1) if code else "unknown",
+                        )
                 resp.raise_for_status()
                 return resp.json()
+            except UpstreamAccessDeferred:
+                # No HTTP attempt was made; do not inflate upstream failures.
+                raise
             except Exception as e:
                 last_error = e
                 err = str(e)
@@ -1702,6 +1770,8 @@ class PolymtradeExecutor:
                             )
                             return str(event["id"]), event["slug"]
                     except Exception as e:
+                        if self._is_metadata_access_denial(e):
+                            raise
                         logger.warning(
                             "Failed to resolve event via Gamma %s slug: %s",
                             endpoint,
@@ -1714,15 +1784,11 @@ class PolymtradeExecutor:
             # and then resolve the event from Gamma using that slug.
             if condition_id:
                 try:
-                    async with self._http_client_context() as metadata_client:
-                        resp = await metadata_client.get(
-                            f"https://clob.polymarket.com/markets/{condition_id}"
-                        )
-                        resp.raise_for_status()
-                        clob_data = resp.json()
-                    slug_to_use = clob_data.get("market_slug") or slug_to_use
+                    slug_to_use = await self._canonical_market_slug_for_condition(condition_id) or slug_to_use
                     logger.info(f"Resolved CLOB slug {slug_to_use} for condition {condition_id}")
                 except Exception as e:
+                    if self._is_metadata_access_denial(e):
+                        raise
                     logger.warning(f"Failed to resolve conditionId via CLOB: {e}")
 
             if slug_to_use:
@@ -1758,11 +1824,20 @@ class PolymtradeExecutor:
                             logger.info(f"Resolved event via {endpoint} fallback: {event['id']}")
                             return str(event["id"]), event["slug"]
                     except Exception as e:
+                        if self._is_metadata_access_denial(e):
+                            raise
                         logger.warning(f"Failed to resolve event via {endpoint} fallback: {e}")
 
             raise RuntimeError(
                 f"Could not resolve Polymtrade event for slug={market_slug}, condition_id={condition_id}"
             )
+
+    @staticmethod
+    def _is_metadata_access_denial(error: Exception) -> bool:
+        return isinstance(error, UpstreamAccessDeferred) or (
+            isinstance(error, httpx.HTTPStatusError)
+            and error.response.status_code in (401, 403, 429)
+        )
 
     async def _canonical_market_slug_for_condition(
         self,
@@ -1772,18 +1847,22 @@ class PolymtradeExecutor:
         if not condition_id:
             return None
         try:
-            async with self._http_client_context() as client:
-                response = await client.get(
-                    f"https://clob.polymarket.com/markets/{condition_id}"
-                )
-                response.raise_for_status()
-                market = response.json()
+            url = f"https://clob.polymarket.com/markets/{condition_id}"
+            async with self._gamma_request_lock:
+                self._upstream_cooldown.check(url)
+                async with self._http_client_context() as client:
+                    response = await client.get(url)
+                    self._upstream_cooldown.record(url, response.status_code, response.headers)
+                    response.raise_for_status()
+                    market = response.json()
             returned_condition_id = market.get("condition_id") or market.get("conditionId")
             if (returned_condition_id or "").lower() != condition_id.lower():
                 logger.warning("CLOB canonical slug condition mismatch for %s", condition_id)
                 return None
             return market.get("market_slug") or None
         except Exception as e:
+            if self._is_metadata_access_denial(e):
+                raise
             logger.warning("Failed to resolve canonical CLOB slug for %s: %s", condition_id, e)
             return None
 
@@ -2148,7 +2227,10 @@ class PolymtradeExecutor:
                         const currentUrl = new URL(window.location.href);
                         const eventIdMatches = !eventId || currentUrl.searchParams.get("eventId") === String(eventId);
                         const eventSlugMatches = !eventSlug || currentUrl.searchParams.get("eventSlug") === String(eventSlug);
-                        const exactEventRoute = !!(eventId || eventSlug) && eventIdMatches && eventSlugMatches;
+                        const nativeEventMatches = !!eventSlug
+                            && decodeURIComponent(currentUrl.pathname.replace(/\\/$/, "")) === "/event/" + eventSlug;
+                        const exactEventRoute = nativeEventMatches
+                            || (!!(eventId || eventSlug) && eventIdMatches && eventSlugMatches);
 
                         const keywordHits = keywords.filter(kw => bodyText.includes(kw.toLowerCase())).length;
                         const hasKeyword = keywords.length === 0 || keywordHits > 0;
@@ -2628,9 +2710,12 @@ class PolymtradeExecutor:
             return False
 
         recovery_url = self._cache_busted_url(url)
+        self._upstream_cooldown.check(recovery_url)
         logger.warning("Polymtrade app shell is stale; reloading with a cache-busting URL")
+        await self._pace_navigation(recovery_url)
         await self._clear_stale_app_caches()
-        await self.page.goto(recovery_url, wait_until=wait_until, timeout=timeout_ms)
+        response = await self.page.goto(recovery_url, wait_until=wait_until, timeout=timeout_ms)
+        self._check_navigation_response(recovery_url, response)
         await asyncio.sleep(3)
         if await self._app_load_error_visible():
             raise RuntimeError("Polymtrade app still failed to load after cache-busting reload")
@@ -2652,6 +2737,39 @@ class PolymtradeExecutor:
             timeout_ms=timeout_ms,
         )
 
+    def _check_navigation_response(self, url, response):
+        status = getattr(response, "status", None)
+        if isinstance(status, int):
+            headers = getattr(response, "headers", {})
+            if status == 429 and isinstance(headers, dict):
+                # Never log Cookies, authorization, query strings or bodies.
+                logger.warning(
+                    "Browser HTTP 429: host=%s path=%s server=%s retry_after=%s request_id=%s",
+                    urllib.parse.urlsplit(url).hostname, urllib.parse.urlsplit(url).path[:160],
+                    str(headers.get("server", ""))[:80], str(headers.get("retry-after", ""))[:80],
+                    str(headers.get("x-vercel-id", headers.get("cf-ray", "")))[:160],
+                )
+            self._upstream_cooldown.record(url, status, headers if isinstance(headers, dict) else {})
+            self._upstream_cooldown.check(url)
+
+    async def _pace_navigation(self, url: str) -> None:
+        """Share a conservative start cadence across portfolio/trade/retry pages.
+
+        This delays real fresh reads; it never substitutes cached DOM/holdings.
+        A denial from another page while waiting must stop this navigation too.
+        """
+        self._upstream_cooldown.check(url)
+        if urllib.parse.urlsplit(url).hostname != urllib.parse.urlsplit(self.base_url).hostname:
+            return
+        async with self._navigation_lock:
+            self._upstream_cooldown.check(url)
+            delay = self._next_navigation_at - time.monotonic()
+            if delay > 0:
+                logger.info("Browser navigation paced for %.1fs", delay)
+                await asyncio.sleep(delay)
+            self._upstream_cooldown.check(url)
+            self._next_navigation_at = time.monotonic() + self._upstream_cooldown.navigation_interval(url)
+
     async def _goto_with_retry(
         self,
         url: str,
@@ -2665,7 +2783,10 @@ class PolymtradeExecutor:
         last_error = None
         for attempt in range(max_retries):
             try:
+                self._upstream_cooldown.check(url)
+                await self._pace_navigation(url)
                 response = await self.page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                self._check_navigation_response(url, response)
                 await self._recover_stale_app_shell(
                     url,
                     wait_until=wait_until,
@@ -2694,15 +2815,18 @@ class PolymtradeExecutor:
 
         if fallback_wait_until and fallback_wait_until != wait_until:
             try:
+                self._upstream_cooldown.check(url)
                 logger.warning(
                     f"Navigation failed after {max_retries} {wait_until} attempts; "
                     f"trying {fallback_wait_until} fallback for {url}: {last_error}"
                 )
+                await self._pace_navigation(url)
                 response = await self.page.goto(
                     url,
                     wait_until=fallback_wait_until,
                     timeout=min(timeout_ms, 20000),
                 )
+                self._check_navigation_response(url, response)
                 try:
                     await self.page.wait_for_load_state(wait_until, timeout=10000)
                 except Exception as settle_error:
@@ -2716,6 +2840,8 @@ class PolymtradeExecutor:
                     timeout_ms=timeout_ms,
                 )
                 return response
+            except UpstreamAccessDeferred:
+                raise
             except Exception as fallback_error:
                 last_error = fallback_error
                 if self._is_transient_goto_error(fallback_error) and self._navigation_target_reached(url):
@@ -2795,6 +2921,8 @@ class PolymtradeExecutor:
             if event_id
             else fallback_url
         )
+        if event_slug and not self._is_short_cycle_updown_market(market_slug):
+            market_url = f"{self.base_url}/event/{urllib.parse.quote(event_slug, safe='')}"
         logger.info(f"Navigating to {market_url}")
         stage_started_at = time.perf_counter()
         await self._goto_with_retry(
@@ -3092,6 +3220,8 @@ class PolymtradeExecutor:
             if event_id
             else f"{self.base_url}/portfolio?eventSlug={event_slug}&eventSource=polymarket"
         )
+        if event_slug and not self._is_short_cycle_updown_market(market_slug):
+            market_url = f"{self.base_url}/event/{urllib.parse.quote(event_slug, safe='')}"
         logger.info(f"Navigating to event page for SELL: {market_url}")
         stage_started_at = time.perf_counter()
         await self._goto_with_retry(
@@ -4140,18 +4270,22 @@ class PolymtradeExecutor:
             const balanceTexts = ['USDC', 'pUSD', 'USD Coin'];
             const all = Array.from(document.querySelectorAll('div, span, p, button, [data-testid]'));
             for (const el of all) {
-                const text = (el.innerText || el.textContent || '').trim();
+                if (!el.getClientRects().length) continue;
+                const text = (el.innerText || '').trim();
+                if (text.length > 160) continue;
                 if (!balanceTexts.some(bt => text.includes(bt))) continue;
-                const m = text.match(/([0-9,]+\\.?[0-9]*)\\s*(USDC|pUSD)/i);
+                const m = text.match(/([0-9][0-9,]*(?:\\.[0-9]+)?)\\s*(USDC|pUSD)/i);
                 if (m) {
                     return {text: text, value: parseFloat(m[1].replace(/,/g, ''))};
                 }
             }
             // Broader regex for any balance-looking text near the element.
             for (const el of all) {
-                const text = (el.innerText || el.textContent || '').trim();
+                if (!el.getClientRects().length) continue;
+                const text = (el.innerText || '').trim();
+                if (text.length > 160) continue;
                 if (!/balance|余额|wallet|钱包/i.test(text) && !balanceTexts.some(bt => text.includes(bt))) continue;
-                const m = text.match(/\\$?\\s*([0-9,]+\\.?[0-9]*)/);
+                const m = text.match(/\\$?\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)/);
                 if (m) {
                     return {text: text, value: parseFloat(m[1].replace(/,/g, '')), approx: true};
                 }
@@ -4162,8 +4296,10 @@ class PolymtradeExecutor:
         try:
             result = await self.page.evaluate(js)
             if result and result.get("value") is not None:
-                logger.info(f"Detected balance: {result.get('value')} from '{result.get('text')}'")
-                return float(result.get("value"))
+                balance = float(result["value"])
+                if math.isfinite(balance) and balance >= 0:
+                    logger.info("Detected balance: %s", balance)
+                    return balance
         except Exception as e:
             logger.warning(f"Failed to read balance from page: {e}")
         return None

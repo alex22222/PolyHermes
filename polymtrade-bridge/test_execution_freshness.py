@@ -74,6 +74,7 @@ async def test_partial_parse_is_not_a_complete_portfolio():
         {"marketTitle": "Not parsed", "side": "Yes", "quantity": None},
     ], "hasErrorBanner": False}))
     executor._goto_with_retry = AsyncMock()
+    executor._select_portfolio_positions = AsyncMock()
     executor._wait_for_portfolio_rows = AsyncMock(return_value=True)
     executor._scroll_portfolio_until_stable = AsyncMock()
     executor._enrich_position = AsyncMock(return_value={})

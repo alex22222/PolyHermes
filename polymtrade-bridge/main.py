@@ -2,6 +2,7 @@ import asyncio
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -781,6 +782,28 @@ async def select_account(request: AccountSelectRequest):
     }
 
 
+def _nonfinite_portfolio_field_paths(value: Any) -> list[str]:
+    """Identify JSON-invalid floats without logging payload values or dynamic keys."""
+    safe_fields = {
+        "positions", "quantity", "currentValue", "pnl", "percentPnl",
+        "available_balance", "pending_redeem_value", "crypto_exit_rule",
+    }
+    paths = []
+    pending = [(value, "response")]
+    while pending and len(paths) < 32:
+        item, path = pending.pop()
+        if isinstance(item, float) and not math.isfinite(item):
+            paths.append(path)
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                field = key if key in safe_fields else "<field>"
+                pending.append((child, f"{path}.{field}"))
+        elif isinstance(item, (list, tuple)):
+            for index, child in enumerate(item):
+                pending.append((child, f"{path}[{index}]"))
+    return paths
+
+
 @app.get("/portfolio")
 async def portfolio_positions():
     """Return the current open positions scraped from Polymtrade portfolio page.
@@ -815,6 +838,12 @@ async def portfolio_positions():
     result["crypto_exit_rule"] = _annotate_crypto_exit_shadow(result.get("positions") or [])
     result["wallet_address"] = wallet_address.lower() if wallet_address else None
     result["available_balance"] = available_balance
+    nonfinite_paths = _nonfinite_portfolio_field_paths(result)
+    if nonfinite_paths:
+        # Rendering happens after this function returns. Count this known JSON
+        # failure here while preserving the original payload and HTTP failure.
+        metrics.portfolio_errors += 1
+        logger.warning("Portfolio JSON response contains non-finite float at: %s", nonfinite_paths)
     return result
 
 

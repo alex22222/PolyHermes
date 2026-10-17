@@ -15,6 +15,7 @@ async def test_portfolio_completeness_requires_no_connection_error(has_error_ban
             page = await browser.new_page()
             error = '<div data-test="portfolio-error-banner">Check your connection and reload.</div>' if has_error_banner else ''
             await page.set_content(error + """
+                <div class="cursor-pointer text-foreground">Positions</div>
                 <ul><li class="flex px-4 py-2 border-b text-xs items-center cursor-pointer">
                   <div>Will the example market resolve Yes?</div>
                   <div>$1</div><div>Yes • 2 shares</div>

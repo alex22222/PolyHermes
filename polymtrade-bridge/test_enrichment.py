@@ -85,6 +85,8 @@ async def test_gamma_request_with_retry_success():
     executor = PolymtradeExecutor()
 
     mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
     mock_resp.json.return_value = {"result": "ok"}
     mock_resp.raise_for_status = MagicMock()
 
@@ -104,6 +106,8 @@ async def test_gamma_request_with_retry_transient():
 
     # First call fails with ConnectError, second succeeds.
     mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
     mock_resp.json.return_value = {"result": "ok"}
     mock_resp.raise_for_status = MagicMock()
 
@@ -127,6 +131,8 @@ async def test_gamma_request_with_retry_empty_timeout_message():
     executor = PolymtradeExecutor()
 
     mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
     mock_resp.json.return_value = {"result": "ok"}
     mock_resp.raise_for_status = MagicMock()
 

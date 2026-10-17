@@ -53,6 +53,53 @@ class PortfolioRelationClassifierTest {
         assertEquals(listOf("UNKNOWN"), result.map { it.type })
     }
 
+    @Test
+    fun `candidate calculation exactly matches full graph across all relationship types`() {
+        val now = 40L * 24 * 60 * 60 * 1000
+        val existing = listOf(
+            position("duplicate", "m1", "e1", "YES", "politics", "Democrats win Senate"),
+            position("true-hedge", "m1", "e1", "NO", "politics", "Democrats win Senate", "18"),
+            position("pseudo-hedge", "m1", "e1", "Other", "sports", "World Cup winner"),
+            position("same-event", "m2", "e1", "YES", "politics", "Other question"),
+            position("same-entity", "m3", "e3", "YES", "politics", "Democrats win House"),
+            position("unknown", null, null, "YES", null, "Unknown"),
+            position("finance", "m4", "e4", "YES", "finance", "Fed rate decision"),
+            position("crypto", "m5", "e5", "UP", "crypto", "Bitcoin Up or Down"),
+            position("sports", "m6", "e6", "Team A", "sports", "World Cup winner")
+        )
+        val candidates = existing.mapIndexed { index, it -> it.copy(positionKey = "candidate-$index") } +
+            existing.first().copy(positionKey = "unknown-candidate", marketId = null, eventSlug = null, category = null, currentValue = null)
+        candidates.forEach { candidate ->
+            assertEquals(
+                classifier.classify(existing + candidate, now).filter { candidate.positionKey in it.positionKeys },
+                classifier.classifyCandidate(existing, candidate, now)
+            )
+        }
+        assertEquals(emptyList<PortfolioPositionRelation>(), classifier.classifyCandidate(emptyList(), existing.first(), 100))
+    }
+
+    @Test
+    fun `report equivalent 84 position buy relationship cost`() {
+        val existing = (0 until 84).map { index ->
+            position("position-$index", "market-$index", "event-$index", "YES", "politics", "Will Democrats win election $index?")
+        }
+        val candidate = position("candidate", "market-0", "event-0", "YES", "politics", "Will Democrats win election 0?")
+        repeat(2) { classifier.classify(existing, 100) }
+        val started = System.nanoTime()
+        repeat(8) {
+            classifier.classify(existing, 100)
+            classifier.classify(existing + candidate, 100).filter { candidate.positionKey in it.positionKeys }
+        }
+        println("LEGACY_84_POSITIONS_8_BUYS_MS=${(System.nanoTime() - started) / 1_000_000.0}")
+        val optimizedStarted = System.nanoTime()
+        repeat(8) { classifier.classifyCandidate(existing, candidate, 100) }
+        println("CANDIDATE_84_POSITIONS_8_BUYS_MS=${(System.nanoTime() - optimizedStarted) / 1_000_000.0}")
+        assertEquals(
+            classifier.classify(existing + candidate, 100).filter { candidate.positionKey in it.positionKeys },
+            classifier.classifyCandidate(existing, candidate, 100)
+        )
+    }
+
     private fun position(key: String, market: String?, event: String?, outcome: String, category: String?, title: String, value: String = "10", createdAt: Long = 90) = PortfolioRelationPosition(
         key, market, event, outcome, category, title, BigDecimal(value), BigDecimal.ONE, createdAt, null
     )
