@@ -42,6 +42,20 @@ class FutureBtc5mAssetsServiceTest {
     }
 
     @Test
+    fun `full activity walk carries fee inclusive redemption into independent strategy performance`() = runBlocking {
+        Mockito.`when`(buys()).thenReturn(activity(listOf(buy().copy(usdcSize = 1.03),
+            buy().copy(type = "REDEEM", side = "", price = 0.0, usdcSize = 1.5))))
+        Mockito.`when`(clob.getSettlementMarket("condition")).thenReturn(Response.success(market().copy(closed = true,
+            tokens = market().tokens!!.map { it.copy(winner = it.outcome == "Up") })))
+        val result = service.assets()
+        assertEquals(1, result.recentBuys!!.size)
+        val performance = result.performance!!.single { it.series == "5m" }
+        assertEquals(1, performance.settledCount)
+        assertEquals(0.47, performance.netPnlUsd)
+        assertEquals(0, result.performance!!.single { it.series == "15m" }.settledCount)
+    }
+
+    @Test
     fun `queries same wallet and returns only BTC five minute positions and newest actual buys`() = runBlocking<Unit> {
         Mockito.`when`(positions()).thenReturn(Response.success(listOf(position(),
             position().copy(slug = "eth-updown-5m-$start"), position().copy(size = 0.0))))
@@ -273,7 +287,7 @@ class FutureBtc5mAssetsServiceTest {
         source.getPositions(user = address, sizeThreshold = 0.0, limit = 500, offset = 0)
 
     private suspend fun buys(source: PolymarketDataApi = api, cursor: String? = null) =
-        source.getActivityHistory(user = address, cursor = cursor)
+        source.getActivityHistory(user = address, cursor = cursor, type = null, side = null)
 
     private fun activity(rows: List<UserActivityResponse>, next: String? = null, more: Boolean = next != null) =
         Response.success(FutureBtc5mActivityPage(rows, FutureBtc5mActivityPagination(more, next)))

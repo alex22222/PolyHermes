@@ -99,6 +99,7 @@ const mountPage = (initialTime) => {
       list: async () => ({data: {code: 0, data: {list: [], total: 0}}}),
     }}},
     '../utils/futureBtc5mPreflight': guards.exports,
+    '../components/FutureStrategyPerformance': {default: 'FutureStrategyPerformance'},
   };
   const sandbox = {exports: {}, Date: class extends Date {static now() {return now;}},
     document,
@@ -209,6 +210,21 @@ const ratioProgress = (page) => {
   return charts[0];
 };
 const ratioDisplay = (progress) => nodeText(progress.props.format(progress.props.percent));
+test('strategy performance follows live assets polling and clears on stale or failed data', async () => {
+  const page = mountPage(receipt);
+  const point = {series: '15m', historyComplete: true, netPnlUsd: 1.692414};
+  await page.reply('assets', {...walletAssets(), performance: [point]});
+  const card = () => page.elements(n => n.type === 'FutureStrategyPerformance');
+  assert.equal(card()[0].props.performance[0].netPnlUsd, 1.692414);
+  page.poll(receipt + 5000);
+  await page.reply('assets', {...walletAssets(receipt + 5000), performance: [{...point, netPnlUsd: 2.03}]});
+  assert.equal(card()[0].props.performance[0].netPnlUsd, 2.03);
+  page.tick(receipt + 21000);
+  assert.equal(card().length, 0, 'expired wallet must not retain prior performance');
+  page.poll(receipt + 22000);
+  await page.fail('assets', 'unavailable');
+  assert.equal(card().length, 0);
+});
 const assertRatioLegend = (page, {win, loss, pending, unknown}) => {
   assert.match(page.text(), new RegExp(`赢\\s*${win}\\s*笔`));
   assert.match(page.text(), new RegExp(`亏\\s*${loss}\\s*笔`));

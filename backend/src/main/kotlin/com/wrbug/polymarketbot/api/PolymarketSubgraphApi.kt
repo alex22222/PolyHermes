@@ -16,8 +16,8 @@ interface PolymarketDataApi {
         @Query("user") user: String,
         @Query("limit") limit: Int = 500,
         @Query("cursor") cursor: String? = null,
-        @Query("type") type: String = "TRADE",
-        @Query("side") side: String = "BUY",
+        @Query("type") type: String? = "TRADE",
+        @Query("side") side: String? = "BUY",
         @Query("start") start: Long = 1,
         @Query("sort_direction") sortDirection: String = "DESC"
     ): Response<FutureBtc5mActivityPage>

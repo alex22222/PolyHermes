@@ -4,6 +4,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined } from '@ant-design/icons'
 import { useMediaQuery } from 'react-responsive'
 import { apiService } from '../services/api'
+import FutureStrategyPerformance from '../components/FutureStrategyPerformance'
 import { higherButtonSide, preflightIsFresh, preflightReasonText, referenceIsFresh } from '../utils/futureBtc5mPreflight'
 import type { FutureBtc5mAssets, FutureBtc5mAssetBuy, FutureBtc5mAssetPosition, FutureBtc5mBridgeStatus, FutureBtc5mOrder, FutureBtc5mOrderStatus, FutureBtc5mPreparationState, FutureBtc5mStrategy } from '../types'
 
@@ -489,6 +490,7 @@ const FutureBtc5mBridge: React.FC = () => {
           ? <Table rowKey="asset" size="small" dataSource={assets.positions} columns={positionColumns} pagination={false} scroll={{ x: 1085 }}
             locale={{ emptyText: '当前暂无 BTC 5/15 分钟持仓' }} />
           : <Typography.Text type="secondary">{assetsLoading ? '正在读取持仓…' : '持仓暂未核实'}</Typography.Text>}
+        {marketDataFresh && <FutureStrategyPerformance performance={assets?.performance} />}
         <Typography.Title level={5} style={{ margin: 0 }}>全部买入记录</Typography.Title>
         <Typography.Text type="secondary">赢 / 亏按市场最终结算方向标注，表示买入方向是否命中；不代表已领取，也不表示包含提前卖出和手续费的实际净盈亏。</Typography.Text>
         {marketDataFresh && assets?.recentBuys != null

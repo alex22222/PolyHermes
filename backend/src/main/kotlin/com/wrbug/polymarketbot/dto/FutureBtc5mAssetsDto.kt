@@ -48,5 +48,24 @@ data class FutureBtc5mAssets(
     val positionsValueUsd: Double?,
     val marketDataObservedAt: Double?,
     val reasons: List<String>,
-    val buyHistoryComplete: Boolean = false
+    val buyHistoryComplete: Boolean = false,
+    val performance: List<FutureBtcStrategyPerformance>? = null
+)
+
+data class FutureBtcPerformancePoint(val at: Long, val netPnlUsd: Double)
+
+data class FutureBtcStrategyPerformance(
+    val series: String,
+    val historyComplete: Boolean,
+    val settledCount: Int,
+    val wins: Int,
+    val losses: Int,
+    val excludedCount: Int,
+    val winRatePercent: Double?,
+    val buyCostUsd: Double?,
+    val payoutUsd: Double?,
+    val netPnlUsd: Double?,
+    val returnPercent: Double?,
+    val firstBoughtAt: Long?,
+    val curve: List<FutureBtcPerformancePoint>
 )

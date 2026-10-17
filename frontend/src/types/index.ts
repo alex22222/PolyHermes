@@ -3052,6 +3052,23 @@ export interface FutureBtc5mAssets {
   positionsValueUsd: number | null
   marketDataObservedAt: number | null
   reasons: string[]
+  performance?: FutureBtcStrategyPerformance[] | null
+}
+
+export interface FutureBtcStrategyPerformance {
+  series: '5m' | '15m'
+  historyComplete: boolean
+  settledCount: number
+  wins: number
+  losses: number
+  excludedCount: number
+  winRatePercent: number | null
+  buyCostUsd: number | null
+  payoutUsd: number | null
+  netPnlUsd: number | null
+  returnPercent: number | null
+  firstBoughtAt: number | null
+  curve: { at: number, netPnlUsd: number }[]
 }
 
 export interface FutureBtc5mPreflight {

@@ -7,6 +7,7 @@ import com.wrbug.polymarketbot.dto.FutureBtc5mAssetBuy
 import com.wrbug.polymarketbot.dto.FutureBtc5mAssetPosition
 import com.wrbug.polymarketbot.dto.FutureBtc5mAssets
 import com.wrbug.polymarketbot.dto.FutureBtc5mWalletSnapshot
+import com.wrbug.polymarketbot.dto.FutureBtcStrategyPerformance
 import com.wrbug.polymarketbot.util.RetrofitFactory
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -28,8 +29,11 @@ class FutureBtc5mAssetsService(
 ) {
     private data class MarketData(
         val wallet: String, val at: Double, val positions: List<FutureBtc5mAssetPosition>?,
-        val buys: List<FutureBtc5mAssetBuy>?, val reasons: List<String>, val historyComplete: Boolean
+        val buys: List<FutureBtc5mAssetBuy>?, val reasons: List<String>, val historyComplete: Boolean,
+        val performance: List<FutureBtcStrategyPerformance>
     )
+    private data class BuyHistory(val buys: List<FutureBtc5mAssetBuy>?, val complete: Boolean,
+                                  val reasons: List<String>, val performance: List<FutureBtcStrategyPerformance> = emptyList())
     private data class History(val rows: List<UserActivityResponse>, val cursor: String?, val seen: Set<String>)
     @Volatile private var cache: MarketData? = null
     private val historyProgress = Caffeine.newBuilder().maximumSize(5).build<String, History>()
@@ -51,7 +55,7 @@ class FutureBtc5mAssetsService(
         val total = data.positions?.takeIf { positions -> positions.all { it.currentValueUsd != null } }
             ?.sumOf { it.currentValueUsd!! }
         return FutureBtc5mAssets(current, if (data.reasons.isEmpty()) "READY" else "PARTIAL", data.positions,
-            data.buys, total, data.at, data.reasons, data.historyComplete)
+            data.buys, total, data.at, data.reasons, data.historyComplete, data.performance)
     }
 
     private suspend fun fetch(wallet: String): MarketData = coroutineScope {
@@ -81,11 +85,11 @@ class FutureBtc5mAssetsService(
         val buyResult = buys.await()
         val reasons = mutableListOf<String>()
         if (positionResult.isFailure) reasons += "当前 BTC 5 分钟持仓暂时无法完整核实"
-        reasons += buyResult.third
-        MarketData(wallet, System.currentTimeMillis() / 1000.0, positionResult.getOrNull(), buyResult.first, reasons, buyResult.second)
+        reasons += buyResult.reasons
+        MarketData(wallet, System.currentTimeMillis() / 1000.0, positionResult.getOrNull(), buyResult.buys, reasons, buyResult.complete, buyResult.performance)
     }
 
-    private suspend fun fetchBuys(wallet: String): Triple<List<FutureBtc5mAssetBuy>?, Boolean, List<String>> {
+    private suspend fun fetchBuys(wallet: String): BuyHistory {
         val api = retrofitFactory.createDataApi()
         val progress = historyProgress.getIfPresent(wallet)
         val rows = progress?.rows?.toMutableList() ?: mutableListOf()
@@ -95,7 +99,7 @@ class FutureBtc5mAssetsService(
         runCatching {
             withTimeoutOrNull(6000) {
                 do {
-                    val response = withTimeout(3500) { api.getActivityHistory(user = wallet, cursor = cursor) }
+                    val response = withTimeout(3500) { api.getActivityHistory(user = wallet, cursor = cursor, type = null, side = null) }
                     check(response.isSuccessful)
                     val page = checkNotNull(response.body())
                     val pageRows = checkNotNull(page.data)
@@ -115,7 +119,7 @@ class FutureBtc5mAssetsService(
         else historyProgress.invalidate(wallet)
         val reasons = mutableListOf<String>()
         if (!complete) reasons += "买入历史尚未完整读取，当前仅展示已核实记录，后续刷新继续同步"
-        if (rows.isEmpty() && !complete) return Triple(null, false, reasons)
+        if (rows.isEmpty() && !complete) return BuyHistory(null, false, reasons)
         val occurrences = mutableMapOf<String, Int>()
         val parsed = runCatching {
             rows.filter { it.type == "TRADE" && it.side == "BUY" }.sortedByDescending { it.timestamp }.mapNotNull { row ->
@@ -132,7 +136,7 @@ class FutureBtc5mAssetsService(
             }
         }.getOrElse {
             historyProgress.invalidate(wallet)
-            return Triple(null, false, listOf("买入历史包含身份或成交数据异常，暂时无法核实"))
+            return BuyHistory(null, false, listOf("买入历史包含身份或成交数据异常，暂时无法核实"))
         }
         val markets = settlementMarkets(parsed.map { it.first }.distinct())
         val buys = parsed.map { (condition, buy) ->
@@ -153,7 +157,7 @@ class FutureBtc5mAssetsService(
             }
         }
         if (buys.any { it.result == "UNKNOWN" }) reasons += "部分买入的结算结果暂未核实，刷新后继续查询"
-        return Triple(buys, complete, reasons)
+        return BuyHistory(buys, complete, reasons, FutureBtcPerformanceCalculator.calculate(rows, buys, complete))
     }
 
     private suspend fun settlementMarkets(conditions: List<String>): Map<String, FutureBtc5mSettlementMarket> = coroutineScope {
