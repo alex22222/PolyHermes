@@ -10,7 +10,9 @@ import threading
 import time
 from pathlib import Path
 
-from future_btc5m_series import (DEFAULT_STRATEGY, HOUR, SERIES, STRATEGIES, entry_bounds, market_url_round,
+from future_btc5m_fourhour import SOURCE as FOUR_HOUR_SOURCE, evaluate as evaluate_four_hour
+from future_btc5m_series import (CHECKPOINT_WINDOW, DEFAULT_STRATEGY, HOUR, SERIES, STRATEGIES, STRATEGY_SERIES,
+                                 checkpoint_window, entry_bounds, is_et_weekend, market_url_round,
                                  preparation_id, round_start_of, series_of_preparation_id, slug_for)
 
 
@@ -95,6 +97,10 @@ class FutureBridge:
             pass
         # 15m rounds decided against (or for) the concurrent 1h favorite; one decision per round.
         self.decisions = {}
+        # 4h rounds with a PREPARE decision: start -> (checkpoint, side). At most one per round;
+        # the 4h page takes over only during that checkpoint's 2-minute window.
+        self.four_hour = {}
+        self.four_hour_last = None
         self.records = []
         self.seen = set()
         self.storage_error = None
@@ -160,6 +166,8 @@ class FutureBridge:
                     for line in stream:
                         record = json.loads(line)
                         self.decisions[(record["series"], record["periodStart"])] = record["decision"]
+                        if record["series"] == "4h" and record["decision"] == "PREPARE":
+                            self.four_hour[record["periodStart"]] = (record["checkpointAt"], record["side"])
             except (OSError, ValueError, TypeError, KeyError):
                 self.preparation_error = self.preparation_error or "DECISION_LEDGER_INVALID"
         buy_audit_ledger = self.state_dir / "buy_attempts.jsonl"
@@ -183,12 +191,22 @@ class FutureBridge:
             self.storage_error = self.storage_error or "CONTROL_STATE_WRITE_FAILED"
         self._revoke_preparation(self.now_fn(), "PROCESS_RESTARTED")
 
+    def _series_at(self, now):
+        """The series whose page and tickets are current: the strategy's first series, except
+        inside the window of a decided 4h checkpoint."""
+        legs = STRATEGY_SERIES[self.strategy]
+        if "4h" in legs:
+            decided = self.four_hour.get(round_start_of(now, "4h"))
+            if decided and decided[0] <= now < decided[0] + CHECKPOINT_WINDOW:
+                return "4h"
+        return legs[0]
+
     @property
     def series(self):
-        return STRATEGIES[self.strategy]
+        return self._series_at(self.now_fn())
 
     def _start(self, now):
-        return round_start_of(now, self.series)
+        return round_start_of(now, self._series_at(now))
 
     @classmethod
     def _valid_preparation_record(cls, record, previous=None):
@@ -201,13 +219,14 @@ class FutureBridge:
         start, created, updated = record["periodStart"], record["createdAt"], record["updatedAt"]
         round_id = series_of_preparation_id(record["id"])
         series = round_id[0] if round_id else None
-        if (type(start) is not int or start < 0 or round_id != (series, start) or version == 1 and series != "5m"
+        window = entry_bounds(start, series, created) if round_id and type(start) is int and finite_number(created) else None
+        if (window is None or type(start) is not int or start < 0 or round_id != (series, start) or version == 1 and series != "5m"
                 or record["slug"] != slug_for(start, series) or record["periodEnd"] != start + SERIES[series]["period"]
                 or record["mode"] != "PREPARE_ONLY" or record["noSubmission"] is not True
                 or record["operatorAuthorized"] is not True or record["authorizationSource"] != "USER_REQUEST"
                 or not finite_number(record["amountUsd"]) or record["amountUsd"] != 1
-                or not finite_number(created) or not entry_bounds(start, series)[0] <= created < entry_bounds(start, series)[1]
-                or record["expiresAt"] != entry_bounds(start, series)[1] or not finite_number(updated) or updated < created
+                or not window[0] <= created < window[1]
+                or record["expiresAt"] != window[1] or not finite_number(updated) or updated < created
                 or record["priceSource"] != "chainlink" or record["openPriceSource"] != SERIES[series]["open_source"]
                 or record["twapLookbackSeconds"] != 60 or not finite_number(record["priceObservedAt"])
                 or not 0 <= created - record["priceObservedAt"] <= 5
@@ -248,7 +267,7 @@ class FutureBridge:
         elif state == "READY":
             valid = (token is not None and reason is None and receipt is not None
                      and receipt["amountUsd"] == 1 and receipt["selectedSide"] == record["side"]
-                     and entry_bounds(start, series)[0] <= receipt["checkedAt"] < record["expiresAt"]
+                     and window[0] <= receipt["checkedAt"] < record["expiresAt"]
                      and updated < record["expiresAt"]
                      and 0 <= updated - record["priceObservedAt"] <= 5
                      and (version == 1 or 0 <= updated - record["quoteObservedAt"] <= 5))
@@ -324,8 +343,9 @@ class FutureBridge:
             return [error]
         if not self.requested_enabled:
             return ["AUTO_PREPARATION_DISABLED"]
+        series = self._series_at(now)
         # This round's persisted refusal remains the cause after its source sample expires.
-        if self.series == "15m" and self.decisions.get(("15m", self._start(now))) == "SKIP_SAME_AS_1H":
+        if series == "15m" and self.decisions.get(("15m", self._start(now))) == "SKIP_SAME_AS_1H":
             return ["SAME_AS_1H_FAVORITE"]
         if not self._current_signal(source, now, allow_flat=True):
             return ["WAITING_CURRENT_SIGNAL"]
@@ -333,7 +353,7 @@ class FutureBridge:
         if (not report or self.browser_received_at is None or not 0 <= now - self.browser_received_at <= 5
                 or abs(now - report["checkedAt"]) > 5):
             return ["BROWSER_NOT_CONNECTED"]
-        if report["navigation"] != "CURRENT" or market_url_round(report["marketUrl"]) != (self.series, self._start(now)):
+        if report["navigation"] != "CURRENT" or market_url_round(report["marketUrl"]) != (series, self._start(now)):
             return ["MARKET_NOT_CURRENT"]
         if report["ticketStatus"] != "PASS":
             return ["TICKET_CHECK_FAILED"]
@@ -341,10 +361,13 @@ class FutureBridge:
             return ["BUTTON_QUOTES_UNAVAILABLE"]
         if report["upQuoteCents"] == report["downQuoteCents"]:
             return ["BUTTON_QUOTES_TIED"]
-        if self.series == "15m":
+        if series == "15m":
             decision = self.decisions.get(("15m", self._start(now)))
             if decision is None and self._hour_side(source, now) is None:
                 return ["HOUR_QUOTE_UNAVAILABLE"]
+        if series == "4h" and higher_button_side(report["upQuoteCents"], report["downQuoteCents"]) != \
+                self.four_hour[self._start(now)][1]:
+            return ["FOUR_HOUR_SIDE_MISMATCH"]
         return []
 
     def _hour_side(self, source, now):
@@ -376,6 +399,66 @@ class FutureBridge:
         self.decisions[("15m", start)] = decision
         return decision
 
+    def _four_hour_inputs(self, source, start, checkpoint, now):
+        """The assistant's model state for this checkpoint and a fresh 4h CLOB book, else (None, None)."""
+        model, quote = source.get("four_hour"), source.get("four_hour_quote")
+        if (not isinstance(model, dict) or model.get("source") != FOUR_HOUR_SOURCE
+                or model.get("periodStart") != start or model.get("checkpointAt") != checkpoint
+                or not finite_number(model.get("pUp")) or not 0 <= model["pUp"] <= 1
+                or not finite_number(model.get("observedAt")) or not checkpoint <= model["observedAt"] <= now
+                or not finite_number(model.get("openPrice")) or model["openPrice"] <= 0
+                or not finite_number(model.get("price")) or model["price"] <= 0):
+            return None, None
+        if (not isinstance(quote, dict) or quote.get("source") != "polymarket_clob_book"
+                or quote.get("periodStart") != start or not finite_number(quote.get("observedAt"))
+                or not -0.5 <= now - quote["observedAt"] <= 5
+                or any(quote.get(field) is not None and not valid_button_quote(quote.get(field))
+                       for field in ("upAskCents", "downAskCents"))):
+            return None, None
+        return model, quote
+
+    def _decide_four_hour(self, source, error, now):
+        """Evaluate the 4h rule once per weekend checkpoint (within 30 s of it); a PREPARE decision
+        is durable and hands the next 2 minutes to the 4h page. One PREPARE per round."""
+        if ("4h" not in STRATEGY_SERIES[self.strategy] or not self.requested_enabled or error
+                or self._stopped(source) or self.preparation_error or self.storage_error):
+            return
+        start = round_start_of(now, "4h")
+        window = checkpoint_window(start, now)
+        if (not window or not is_et_weekend(start) or start in self.four_hour or now >= window[0] + 30
+                or self.four_hour_last and self.four_hour_last["checkpointAt"] == window[0]):
+            return
+        model, quote = self._four_hour_inputs(source, start, window[0], now)
+        if model is None:
+            return
+        decision, side, reason = evaluate_four_hour(start, model, quote)
+        record = {"strategy": self.strategy, "series": "4h", "periodStart": start, "decidedAt": now,
+                  "checkpointAt": window[0], "minute": model["minute"], "side": side, "pUp": model["pUp"],
+                  "z": model["z"], "sigma": model["sigma"], "openPrice": model["openPrice"], "price": model["price"],
+                  "modelObservedAt": model["observedAt"], "upAskCents": quote["upAskCents"],
+                  "downAskCents": quote["downAskCents"], "quoteObservedAt": quote["observedAt"],
+                  "decision": decision, "reason": reason}
+        for name in (("four_hour_evaluations.jsonl", "strategy_decisions.jsonl") if decision == "PREPARE"
+                     else ("four_hour_evaluations.jsonl",)):
+            with (self.state_dir / name).open("a", encoding="utf-8") as ledger:
+                ledger.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+                ledger.flush()
+                os.fsync(ledger.fileno())
+        self.four_hour_last = record
+        if decision == "PREPARE":
+            self.decisions[("4h", start)] = decision
+            self.four_hour[start] = (window[0], side)
+
+    def _four_hour_view(self, now):
+        if "4h" not in STRATEGY_SERIES[self.strategy]:
+            return None
+        start = round_start_of(now, "4h")
+        decided = self.four_hour.get(start)
+        last = self.four_hour_last if self.four_hour_last and self.four_hour_last["periodStart"] == start else None
+        return {"periodStart": start, "weekend": is_et_weekend(start),
+                "decision": {"checkpointAt": decided[0], "side": decided[1]} if decided else None,
+                "lastEvaluation": copy.deepcopy(last)}
+
     def _preparation_intent_reasons(self, record, now):
         if record["schemaVersion"] != 2:
             return ["BUTTON_QUOTES_UNAVAILABLE"]
@@ -390,7 +473,8 @@ class FutureBridge:
     def _preparation_view(self, source, error, now):
         reasons = self._preparation_reasons(source, error, now)
         record = self.last_preparation
-        current = bool(record and series_of_preparation_id(record["id"]) == (self.series, self._start(now)))
+        series = self._series_at(now)
+        current = bool(record and series_of_preparation_id(record["id"]) == (series, self._start(now)))
         if (not reasons and current and record["state"] in ("PENDING", "CLAIMED", "READY")):
             reasons = self._preparation_intent_reasons(record, now)
         intent = None
@@ -424,7 +508,7 @@ class FutureBridge:
         return {"mode": "PREPARE_ONLY", "noSubmission": True, "operatorAuthorized": True,
                 "authorizationSource": "USER_REQUEST", "enabled": self.requested_enabled, "state": state,
                 "intent": intent, "lastAttempt": copy.deepcopy(record), "reasons": reasons,
-                "strategy": self.strategy, "series": self.series}
+                "strategy": self.strategy, "series": series}
 
     def preparation(self):
         with self.lock:
@@ -446,7 +530,7 @@ class FutureBridge:
             record = self.last_preparation
             if (self._preparation_reasons(source, error, now) or not record or record["id"] != payload["id"]
                     or record["state"] != "PENDING"
-                    or series_of_preparation_id(record["id"]) != (self.series, self._start(now))
+                    or series_of_preparation_id(record["id"]) != (self._series_at(now), self._start(now))
                     or self._preparation_intent_reasons(record, now)):
                 raise PreparationConflict("PREPARATION_NOT_CLAIMABLE")
             self._save_preparation({**record, "state": "CLAIMED", "updatedAt": now,
@@ -491,8 +575,8 @@ class FutureBridge:
                         or self._preflight(source, error, now)["result"] != "READ_ONLY_READY"
                         or self.browser_received_at < record["claimedAt"]
                         or payload["selectedSide"] != record["side"]
-                        or not entry_bounds(record["periodStart"], series_of_preparation_id(record["id"])[0])[0]
-                        <= payload["checkedAt"] < record["expiresAt"]
+                        or not entry_bounds(record["periodStart"], series_of_preparation_id(record["id"])[0],
+                                            record["createdAt"])[0] <= payload["checkedAt"] < record["expiresAt"]
                         or report["amountUsd"] != 1 or report["selectedSide"] != record["side"]
                         or not report["buyButtonEnabled"]):
                     raise ValueError("PREPARATION_READY_NOT_CONFIRMED")
@@ -612,10 +696,11 @@ class FutureBridge:
             return False
         start = record["periodStart"]
         round_ = market_url_round(record["marketUrl"])
+        window = (entry_bounds(start, round_[0], record["checkedAt"])
+                  if round_ is not None and type(start) is int and finite_number(record["checkedAt"]) else None)
         return (type(start) is int and start >= 0 and round_ is not None and round_[1] == start
                 and (legacy is False or round_[0] == "5m")
-                and finite_number(record["checkedAt"])
-                and entry_bounds(start, round_[0])[0] <= record["checkedAt"] < entry_bounds(start, round_[0])[1]
+                and window is not None and window[0] <= record["checkedAt"] < window[1]
                 and record["signalSide"] in (("Up", "Down") if legacy else ("Up", "Down", None))
                 and finite_number(record["amountUsd"]) and record["amountUsd"] == 1
                 and record["noSubmission"] is True)
@@ -664,6 +749,7 @@ class FutureBridge:
         connected = bool(report and self.browser_received_at is not None
                          and 0 <= now - self.browser_received_at <= 5 and abs(now - report["checkedAt"]) <= 5)
         signal = self._current_signal(source, now, require_enabled=False, allow_flat=True) if not source_error and not self._stopped(source) else None
+        series = self._series_at(now)
         up = report.get("upQuoteCents") if report else None
         down = report.get("downQuoteCents") if report else None
         preferred = higher_button_side(up, down)
@@ -676,7 +762,7 @@ class FutureBridge:
         if not connected:
             reasons.append("BROWSER_NOT_CONNECTED")
         else:
-            if report["navigation"] != "CURRENT" or market_url_round(report["marketUrl"]) != (self.series, self._start(now)):
+            if report["navigation"] != "CURRENT" or market_url_round(report["marketUrl"]) != (series, self._start(now)):
                 reasons.append("MARKET_NOT_CURRENT")
             if report["ticketStatus"] != "PASS":
                 reasons.append("TICKET_CHECK_FAILED")
@@ -690,12 +776,12 @@ class FutureBridge:
                 reasons.append("BUTTON_QUOTES_TIED")
             if not side_matches:
                 reasons.append("SIDE_MISMATCH")
-            if signal and not (entry_bounds(signal["period_start"], self.series)[0] <= report["checkedAt"]
-                               < entry_bounds(signal["period_start"], self.series)[1]):
+            window = entry_bounds(signal["period_start"], series, now) if signal else None
+            if signal and not (window and window[0] <= report["checkedAt"] < window[1]):
                 reasons.append("BROWSER_CHECK_OUTSIDE_ENTRY")
         if not signal:
             reasons.append("SIGNAL_NOT_FRESH")
-        if not reasons and persist and (self.series, signal["period_start"]) not in self.preflight_seen:
+        if not reasons and persist and (series, signal["period_start"]) not in self.preflight_seen:
             record = {"periodStart": signal["period_start"], "checkedAt": report["checkedAt"],
                       "marketUrl": report["marketUrl"], "signalSide": signal["side"],
                       "amountUsd": 1, "noSubmission": True, "schemaVersion": 2,
@@ -714,7 +800,7 @@ class FutureBridge:
                         os.fsync(descriptor)
                     finally:
                         os.close(descriptor)
-                self.preflight_seen.add((self.series, record["periodStart"]))
+                self.preflight_seen.add((series, record["periodStart"]))
                 self.last_preflight_pass = record
             except OSError:
                 self.preflight_error = "PREFLIGHT_LEDGER_WRITE_FAILED"
@@ -742,7 +828,7 @@ class FutureBridge:
         temporary = self.state_dir / "control.json.tmp"
         with temporary.open("w", encoding="utf-8") as stream:
             json.dump({"requestedEnabled": self.requested_enabled, "enabledAt": self.enabled_at,
-                       "amountUsd": 1, "series": self.series, "strategy": self.strategy,
+                       "amountUsd": 1, "series": STRATEGIES[self.strategy], "strategy": self.strategy,
                        "updatedAt": now}, stream, allow_nan=False)
             stream.write("\n")
             stream.flush()
@@ -796,13 +882,15 @@ class FutureBridge:
         reason = reasons[0] if self.storage_error or self._stopped(source) else (
             "EXECUTOR_NOT_CONNECTED" if self.requested_enabled else "AUTO_DISABLED"
         )
+        series = self._series_at(now)
         start = source.get("period_start")
-        if (type(start) is not int or start % SERIES[self.series]["period"] != 0
-                or source.get("round_series", "5m") != self.series):
+        if (type(start) is not int or start % SERIES[series]["period"] != 0
+                or source.get("round_series", "5m") != series):
             start = None
         return {
             "bridgeId": BRIDGE_ID, "online": True, "requestedEnabled": self.requested_enabled,
-            "effectiveEnabled": False, "amountUsd": 1, "series": self.series, "strategy": self.strategy,
+            "effectiveEnabled": False, "amountUsd": 1, "series": series, "strategy": self.strategy,
+            "strategySeries": list(STRATEGY_SERIES[self.strategy]), "fourHour": self._four_hour_view(now),
             "mode": "BLOCKED" if self.requested_enabled else "DISABLED", "serverTime": now,
             "periodStart": start, "feedStatus": source.get("feed_status", "UNAVAILABLE"),
             "reason": reason, "blockReasons": reasons, "executorReady": False,
@@ -891,9 +979,12 @@ class FutureBridge:
                 or source.get("feed_status") != "CURRENT" or not finite_number(source.get("server_time"))
                 or abs(now - source["server_time"]) > 3):
             return None
-        series = self.series
+        series = self._series_at(now)
         start = self._start(now)
-        first, last = entry_bounds(start, series)
+        bounds = entry_bounds(start, series, now)
+        if bounds is None:
+            return None
+        first, last = bounds
         signal = source.get("signal")
         if (not isinstance(signal, dict) or type(source.get("period_start")) is not int or source["period_start"] != start
                 or source.get("round_series", "5m") != series):
@@ -925,9 +1016,13 @@ class FutureBridge:
                 self._expire_preparation(now)
             except OSError:
                 pass
+            try:
+                self._decide_four_hour(source, error, now)
+            except OSError:
+                self.preparation_error = "DECISION_LEDGER_WRITE_FAILED"
             signal = self._current_signal(source, now, allow_flat=True) if not self._preparation_reasons(source, error, now) else None
             if signal:
-                series = self.series
+                series = self._series_at(now)
                 start = signal["period_start"]
                 id = preparation_id(start, series)
                 side = higher_button_side(self.browser_report["upQuoteCents"], self.browser_report["downQuoteCents"])
@@ -948,7 +1043,7 @@ class FutureBridge:
                         "side": side,
                         "upQuoteCents": self.browser_report["upQuoteCents"], "downQuoteCents": self.browser_report["downQuoteCents"],
                         "quoteObservedAt": self.browser_received_at, "selectionSource": "HIGHER_BUTTON_PRICE",
-                        "amountUsd": 1, "createdAt": now, "expiresAt": entry_bounds(start, series)[1],
+                        "amountUsd": 1, "createdAt": now, "expiresAt": entry_bounds(start, series, now)[1],
                         "priceObservedAt": signal["price_observed_at"], "openPrice": signal["open_price"],
                         "currentPrice": signal["current_price"], "priceSource": "chainlink",
                         "openPriceSource": SERIES[series]["open_source"],

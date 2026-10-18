@@ -6,7 +6,7 @@ import { useMediaQuery } from 'react-responsive'
 import { apiService } from '../services/api'
 import FutureStrategyPerformance from '../components/FutureStrategyPerformance'
 import { higherButtonSide, preflightIsFresh, preflightReasonText, referenceIsFresh } from '../utils/futureBtc5mPreflight'
-import type { FutureBtc5mAssets, FutureBtc5mAssetBuy, FutureBtc5mAssetPosition, FutureBtc5mBridgeStatus, FutureBtc5mOrder, FutureBtc5mOrderStatus, FutureBtc5mPreparationState, FutureBtc5mStrategy } from '../types'
+import type { FutureBtc5mAssets, FutureBtc5mAssetBuy, FutureBtc5mAssetPosition, FutureBtc5mBridgeStatus, FutureBtc5mFourHour, FutureBtc5mOrder, FutureBtc5mOrderStatus, FutureBtc5mPreparationState, FutureBtc5mStrategy } from '../types'
 
 // 我的资产 refreshes once a minute; a response stays displayable until the next one is overdue.
 const ASSETS_REFRESH_MS = 60_000
@@ -59,11 +59,15 @@ const formatCents = (value?: number | null): string => value == null || !Number.
 const errorText = (error: unknown, fallback: string): string =>
   error instanceof Error ? error.message : fallback
 
-// Two strategies; the bridge confirms which one runs. 15m is the default since 2026-10-16.
+// The bridge confirms which strategy runs. 15m is the default since 2026-10-16.
 const strategyText: Record<FutureBtc5mStrategy, { label: string, rule: string }> = {
   btc15m_counter_1h: {
     label: '15 分钟盘 · 反 1 小时方向（默认）',
     rule: '每轮第 150–170 秒读取 15 分钟盘按钮数字较大的一方；只有它与同一时刻 1 小时盘的热门方向相反时才准备 $1 并自动买入，方向相同则本轮跳过。',
+  },
+  btc15m_plus_4h: {
+    label: '15 分钟盘反 1 小时 + 周末 4 小时高把握',
+    rule: '15 分钟部分同上。周末 4 小时盘在每刻钟第 5、10 分钟按 Binance 价格模型判断：模型把握 ≥95% 且比 Polymarket 卖价高 ≥3¢ 时，接下来 2 分钟切到 4 小时盘准备 $1 并自动买入，每轮最多一次。',
   },
   btc5m_favorite: {
     label: '5 分钟盘 · 买热门方向',
@@ -71,7 +75,26 @@ const strategyText: Record<FutureBtc5mStrategy, { label: string, rule: string }>
   },
 }
 
-const marketLink = (slug: string) => /^btc-updown-(5m|15m)-\d+$/.test(slug)
+const fourHourReasons: Record<string, string> = {
+  MODEL_BELOW_THRESHOLD: '模型把握不足 95%', EDGE_TOO_SMALL: '比卖价高不足 3¢', MODEL_SIDE_NOT_FAVORITE: '模型方向不是盘口热门',
+  ASK_OUT_OF_RANGE: '卖价不在 60–97¢', ASK_UNAVAILABLE: '盘口卖价缺失', NOT_ET_WEEKEND: '非美东周末',
+}
+
+// One line for the weekend 4h leg: this round's decision, else its latest checkpoint evaluation.
+const fourHourText = (value: FutureBtc5mFourHour): string => {
+  const side = (s: string | null | undefined) => s === 'Up' ? '涨' : s === 'Down' ? '跌' : '—'
+  const cents = (v: number | null) => v == null ? '—' : `${v}¢`
+  if (!value.weekend) return `本轮 ${formatTime(value.periodStart)} 起：非美东周末，不运行`
+  if (value.decision) {
+    return `本轮已决定买${side(value.decision.side)}（${formatTime(value.decision.checkpointAt)} 起 2 分钟内准备，每轮一次）`
+  }
+  const last = value.lastEvaluation
+  if (!last) return `本轮 ${formatTime(value.periodStart)} 起：尚未到判断时点或数据未就绪`
+  const probability = last.side === 'Down' ? 1 - last.pUp : last.pUp
+  return `最近第 ${last.minute} 分钟：模型看${side(last.side)} ${(probability * 100).toFixed(1)}% · 卖价 涨 ${cents(last.upAskCents)} / 跌 ${cents(last.downAskCents)} · ${last.reason ? fourHourReasons[last.reason] ?? last.reason : '已决定买入'}`
+}
+
+const marketLink = (slug: string) => /^btc-updown-(5m|15m|4h)-\d+$/.test(slug)
   ? <Typography.Link href={`https://future.news/zh/event/${slug}`} target="_blank" rel="noopener noreferrer">{slug}</Typography.Link>
   : <Typography.Text>{slug}</Typography.Text>
 
@@ -565,6 +588,7 @@ const FutureBtc5mBridge: React.FC = () => {
           description={`开启后会前往当前策略的市场。${currentStrategy ? strategyText[currentStrategy].rule : ''}报价缺失或相同则等待。Chainlink 价格仅作参考。票据准备好后，浏览器扩展会自动点击一次 Future 买入（每轮最多一次）；实际成交以 Future 订单为准。`} />}
         <Descriptions size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="当前策略">{currentStrategy ? strategyText[currentStrategy].label : '未知'}</Descriptions.Item>
+          {runtime?.fourHour && <Descriptions.Item label="周末 4 小时判断" span={isMobile ? 1 : 3}>{fourHourText(runtime.fourHour)}</Descriptions.Item>}
           <Descriptions.Item label="Bridge 连接">{runtime ? runtime.online ? '在线' : '离线' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="执行器">{runtime ? '未接入' : '未知'}</Descriptions.Item>
           <Descriptions.Item label="实际下单">{runtime && !statusStale ? '未运行' : '未知'}</Descriptions.Item>

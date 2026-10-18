@@ -24,7 +24,9 @@ from zoneinfo import ZoneInfo
 
 import websockets
 from future_btc5m_bridge import FutureBridge, PreparationConflict, strict_json_object
-from future_btc5m_series import HOUR, SERIES, entry_bounds, hourly_slug, round_start_of, slug_for
+from future_btc5m_fourhour import kline_urls, model_state
+from future_btc5m_series import (CHECKPOINT_WINDOW, HOUR, SERIES, STRATEGY_SERIES, checkpoint_window, entry_bounds,
+                                 hourly_slug, round_start_of, slug_for)
 from future_btc5m_runtime import start_runtime_server
 
 
@@ -58,6 +60,60 @@ def round_start(timestamp):
 
 def is_et_weekend(timestamp):
     return datetime.fromtimestamp(timestamp, ZoneInfo("America/New_York")).weekday() >= 5
+
+
+class FourHourModel:
+    """The 4h price-model state at each weekend checkpoint, computed once from Binance 1m klines
+    just after the checkpoint's candle closes. Read-only public data; failures retry every 5 s
+    for the first 30 s of the window and otherwise leave the checkpoint undecided."""
+
+    def __init__(self, fetch_json, now_fn=time.time):
+        self.fetch_json = fetch_json
+        self.now_fn = now_fn
+        self.lock = threading.Lock()
+        self.state = None
+        self.error = None
+        self.busy = False
+        self.attempted = None
+
+    def warm(self):
+        now = self.now_fn()
+        start = round_start_of(now, "4h")
+        window = checkpoint_window(start, now)
+        if not window or not is_et_weekend(start) or not window[0] + 1 <= now < window[0] + 30:
+            return False
+        with self.lock:
+            attempt = (window[0], int(now // 5))
+            if self.busy or self.state and self.state["checkpointAt"] == window[0] or self.attempted == attempt:
+                return False
+            self.busy = True
+            self.attempted = attempt
+        threading.Thread(target=self._compute, args=(start, window[0]), daemon=True).start()
+        return True
+
+    def _compute(self, start, checkpoint):
+        try:
+            candles = [row for url in kline_urls(start, checkpoint) for row in self.fetch_json(url)]
+            state = model_state(start, checkpoint, candles)
+            state["observedAt"] = self.now_fn()
+            with self.lock:
+                self.state, self.error = state, None
+        except Exception as error:
+            with self.lock:
+                self.error = str(error) if str(error) in ("KLINES_INCOMPLETE", "INVALID_KLINE", "INVALID_MODEL_INPUT") \
+                    else "MODEL_SOURCE_UNAVAILABLE"
+        finally:
+            with self.lock:
+                self.busy = False
+
+    def latest(self):
+        """The current checkpoint's state, only inside its window."""
+        now = self.now_fn()
+        with self.lock:
+            state = copy.deepcopy(self.state)
+        if state and state["periodStart"] == round_start_of(now, "4h") and 0 <= now - state["checkpointAt"] < CHECKPOINT_WINDOW:
+            return state
+        return None
 
 
 def positive_number(value):
@@ -347,8 +403,8 @@ class ClobMarketQuotes:
         key = self._round(now)
         series, start = key
         if refresh is None:
-            first, last = entry_bounds(start, series) if series != "1h" else (start, start)
-            refresh = first - 5 <= now < last
+            bounds = entry_bounds(start, series, now + 5) if series != "1h" else None
+            refresh = bool(bounds) and bounds[0] - 5 <= now < bounds[1]
         started = False
         if not (self.tokens and self.tokens[0] == key) and not self.warming and now - self.warm_attempted_at >= 10:
             self.warming = True
@@ -534,6 +590,8 @@ class Assistant:
         # snapshot; the bridge sets both once it exists.
         self.series_fn = lambda: "5m"
         self.hour_quote_fn = lambda: None
+        # The 4h checkpoint model and 4h CLOB book, when the strategy includes the 4h series.
+        self.four_hour_fn = lambda: (None, None)
         self.seen = set()
         # Every start is weekend-only again, as every start turns the auto-ticket switch off.
         self.weekend_only = True
@@ -587,6 +645,9 @@ class Assistant:
             result.update(server_time=now, updated_at=iso(now), series=self.series_fn())
             hour_quote = self.hour_quote_fn()
             result["hour_quote"] = copy.deepcopy(hour_quote) if isinstance(hour_quote, dict) else None
+            model, quote = self.four_hour_fn()
+            result["four_hour"] = copy.deepcopy(model) if isinstance(model, dict) else None
+            result["four_hour_quote"] = copy.deepcopy(quote) if isinstance(quote, dict) else None
             return result
 
     def save_state(self):
@@ -612,10 +673,18 @@ class Assistant:
         series = self.series_fn()
         period = SERIES[series]["period"]
         start = round_start_of(now, series)
-        first, last = entry_bounds(start, series)
+        bounds = entry_bounds(start, series, now)
         with self.lock:
             if (self.state_dir / "STOP").exists():
                 return self.status()
+            if bounds is None:
+                if self.state.get("period_start") != start or self.state.get("round_series") != series:
+                    self.state = empty_status(now)
+                    self.state.update(period_start=start, round_series=series, status="WAITING",
+                                      reason="OUTSIDE_CHECKPOINT_WINDOW")
+                return self.status()
+        first, last = bounds
+        with self.lock:
             if (series, start) in self.seen:
                 if self.state.get("period_start") != start or self.state.get("round_series") != series:
                     self.state.update(status="SKIPPED", reason="ROUND_ALREADY_PROCESSED", draft=None,
@@ -924,20 +993,30 @@ async def run(args):
             return
         bridge = FutureBridge(args.state_dir / "bridge", assistant.status)
         assistant.series_fn = lambda: bridge.series
+        legs = lambda: STRATEGY_SERIES[bridge.strategy]
         market_quotes = ClobMarketQuotes(curl_json, series_fn=lambda: bridge.series)
         # The 15m strategy trades only against the concurrent ET-hour favorite.
         hour_quotes = ClobMarketQuotes(curl_json, series_fn=lambda: "1h")
         assistant.hour_quote_fn = lambda: hour_quotes.latest(5) if bridge.series == "15m" else None
+        # The 4h series decides from Binance klines and its own CLOB book, independent of the page.
+        four_hour_model = FourHourModel(curl_json)
+        four_hour_quotes = ClobMarketQuotes(curl_json, series_fn=lambda: "4h")
+        assistant.four_hour_fn = lambda: (four_hour_model.latest(), four_hour_quotes.latest(5)) if "4h" in legs() else (None, None)
         server = make_server(assistant, bridge=bridge, market_quote=market_quotes.quote)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         runtime_server = await start_runtime_server()
         print("ASSIST_ONLY http://127.0.0.1:8766/status; no order submission. STOP: " + str(args.state_dir / "STOP"), flush=True)
         while True:
             market_quotes.warm()
-            if bridge.series == "15m":
-                now = time.time()
+            now = time.time()
+            if "15m" in legs():
                 first, last = entry_bounds(round_start_of(now, "15m"), "15m")
                 hour_quotes.warm(refresh=first - 10 <= now < last)
+            if "4h" in legs():
+                start = round_start_of(now, "4h")
+                window = checkpoint_window(start, now + 5)
+                four_hour_quotes.warm(refresh=bool(window) and is_et_weekend(start) and now < window[0] + 30)
+                four_hour_model.warm()
             await assistant.poll(get_json)
             assistant.state["feed_reason"] = feed.error
             assistant.save_state()

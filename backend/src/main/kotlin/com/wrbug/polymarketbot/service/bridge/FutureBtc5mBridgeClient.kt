@@ -191,8 +191,11 @@ class FutureBtc5mBridgeClient(
             "Future Bridge 身份或固定金额无效"
         }
         val series = activeSeries(status)
-        if (status.has("strategy")) check(STRATEGIES[string(status, "strategy")] == string(status, "series")) {
+        if (status.has("strategy")) check(STRATEGIES[string(status, "strategy")]?.contains(string(status, "series")) == true) {
             "Future Bridge 策略与轮次周期不一致"
+        }
+        if (status.has("fourHour") && !status.get("fourHour").isJsonNull) check(status.get("fourHour").isJsonObject) {
+            "Future Bridge 4 小时策略状态无效"
         }
         val requested = boolean(status, "requestedEnabled")
         check(boolean(status, "online") && !boolean(status, "effectiveEnabled") && !boolean(status, "executorReady")) {
@@ -288,8 +291,9 @@ class FutureBtc5mBridgeClient(
         val start = integer(record, "periodStart")
         val signal = objectValue(field(status, "signal"))
         val series = activeSeries(status)
+        val window = series.window(start, number(record, "createdAt"))
         check(preparationSeries(record) == series && integer(status, "periodStart") == start && string(status, "feedStatus") == "CURRENT" &&
-            integer(record, "schemaVersion") == 2L && now >= start + series.entryStart && now < number(record, "expiresAt") &&
+            integer(record, "schemaVersion") == 2L && window != null && now >= window.first && now < number(record, "expiresAt") &&
             preparationSamplesFresh(record, now) &&
             integer(signal, "period_start") == start && integer(signal, "period_end") == start + series.period &&
             now - number(signal, "price_observed_at") in 0.0..5.0 &&
@@ -332,8 +336,9 @@ class FutureBtc5mBridgeClient(
         }
         val created = number(intent, "createdAt")
         val observed = number(intent, "priceObservedAt")
-        check(created >= start + series.entryStart && created < start + series.entryEnd && created <= serverTime &&
-            number(intent, "expiresAt") == (start + series.entryEnd).toDouble() && observed >= 0 && created - observed in 0.0..5.0) {
+        val window = series.window(start, created)
+        check(window != null && created >= window.first && created < window.second && created <= serverTime &&
+            number(intent, "expiresAt") == window.second && observed >= 0 && created - observed in 0.0..5.0) {
             "Future 准备意图的信号采样或入场窗口无效"
         }
         val opening = number(intent, "openPrice")
@@ -389,7 +394,8 @@ class FutureBtc5mBridgeClient(
             val side = nullableString(receipt, "selectedSide")
             check((amount == null || amount >= 0) && side in setOf(null, "Up", "Down")) { "Future 准备回执金额或方向无效" }
             if (state == "READY") check(amount == 1.0 && side == string(record, "side") &&
-                checked >= integer(record, "periodStart") + preparationSeries(record).entryStart && checked < expires) {
+                checked >= (preparationSeries(record).window(integer(record, "periodStart"), created)?.first ?: Double.MAX_VALUE) &&
+                checked < expires) {
                 "Future 票据准备成功缺少实际金额和方向核对"
             }
         }
@@ -440,10 +446,11 @@ class FutureBtc5mBridgeClient(
             val signal = objectValue(field(status, "signal"))
             val period = integer(signal, "period_start")
             val series = activeSeries(status)
+            val window = series.window(period, serverTime)
             check(start == period && marketUrlRound(url!!)?.first == string(status, "series") &&
-                integer(status, "periodStart") == period && string(status, "feedStatus") == "CURRENT" &&
-                serverTime >= period + series.entryStart && serverTime < period + series.entryEnd && checked != null &&
-                checked >= period + series.entryStart && checked < period + series.entryEnd &&
+                integer(status, "periodStart") == period && string(status, "feedStatus") == "CURRENT" && window != null &&
+                serverTime >= window.first && serverTime < window.second && checked != null &&
+                checked >= window.first && checked < window.second &&
                 serverTime - number(signal, "price_observed_at") in 0.0..5.0 && nullableString(signal, "side") == signalSide &&
                 integer(signal, "period_end") == period + series.period && string(signal, "price_source") == "chainlink" &&
                 string(signal, "open_price_source") == series.openPriceSource && integer(signal, "twap_lookback_seconds") == 60L) { "Future 预检通过与实时信号不一致" }
@@ -453,9 +460,9 @@ class FutureBtc5mBridgeClient(
             val passed = objectValue(history)
             val period = integer(passed, "periodStart")
             val at = number(passed, "checkedAt")
-            val passedSeries = marketUrlRound(string(passed, "marketUrl"))?.first?.let { SERIES[it] }
-            check(passedSeries != null && marketUrlStart(string(passed, "marketUrl")) == period &&
-                at >= period + passedSeries.entryStart && at < period + passedSeries.entryEnd && at <= serverTime + 3 &&
+            val passedWindow = marketUrlRound(string(passed, "marketUrl"))?.first?.let { SERIES[it] }?.window(period, at)
+            check(passedWindow != null && marketUrlStart(string(passed, "marketUrl")) == period &&
+                at >= passedWindow.first && at < passedWindow.second && at <= serverTime + 3 &&
                 integer(passed, "amountUsd") == 1L && boolean(passed, "noSubmission")) { "Future 历史预检记录无效" }
             val legacyFields = setOf("periodStart", "checkedAt", "marketUrl", "signalSide", "amountUsd", "noSubmission")
             if (passed.keySet() == legacyFields) check(string(passed, "signalSide") in setOf("Up", "Down"))
@@ -482,7 +489,7 @@ class FutureBtc5mBridgeClient(
 
     // (series, start) of a canonical Future BTC round page, else null.
     private fun marketUrlRound(url: String): Pair<String, Long>? {
-        val match = Regex("https://future\\.news/(?:zh/)?event/btc-updown-(5m|15m)-([0-9]{1,15})/?").matchEntire(url) ?: return null
+        val match = Regex("https://future\\.news/(?:zh/)?event/btc-updown-(5m|15m|4h)-([0-9]{1,15})/?").matchEntire(url) ?: return null
         val (name, digits) = match.destructured
         val start = digits.toLongOrNull() ?: return null
         return (name to start).takeIf { start >= 0 && start % SERIES.getValue(name).period == 0L && start.toString() == digits }
@@ -574,15 +581,30 @@ class FutureBtc5mBridgeClient(
     companion object {
         private const val OPEN_PRICE_SOURCE = "polymarket_crypto_price_fiveminute_twap60_openPrice"
 
-        // Round series of the two strategies (same table as scripts/future_btc5m_series.py).
-        private data class RoundSeries(val period: Long, val entryStart: Long, val entryEnd: Long, val slug: String,
-                                       val preparationId: String, val openPriceSource: String)
+        // Round series of the strategies (same table as scripts/future_btc5m_series.py).
+        private data class RoundSeries(val period: Long, val entryStart: Long?, val entryEnd: Long?, val slug: String,
+                                       val preparationId: String, val openPriceSource: String) {
+            // Absolute entry window containing `at`. A 4h window is the 2-minute window of a decision
+            // checkpoint at minute 5 or 10 of a quarter hour (future_btc5m_series.checkpoint_window).
+            fun window(start: Long, at: Double): Pair<Double, Double>? {
+                if (entryStart != null && entryEnd != null) return (start + entryStart).toDouble() to (start + entryEnd).toDouble()
+                val offset = at - start
+                if (!offset.isFinite()) return null
+                val minute = kotlin.math.floor(offset / 300).toLong() * 5
+                if (minute < 5 || minute > 235 || minute % 15 == 0L || offset - minute * 60 >= 120) return null
+                return (start + minute * 60).toDouble() to (start + minute * 60 + 120).toDouble()
+            }
+        }
         private val SERIES = mapOf(
             "5m" to RoundSeries(300, 60, 80, "btc-updown-5m-", "future-btc5m-prepare:", OPEN_PRICE_SOURCE),
             "15m" to RoundSeries(900, 150, 170, "btc-updown-15m-", "future-btc15m-prepare:",
                 "polymarket_crypto_price_fifteen_twap60_openPrice"),
+            "4h" to RoundSeries(14400, null, null, "btc-updown-4h-", "future-btc4h-prepare:",
+                "polymarket_crypto_price_fourhour_twap60_openPrice"),
         )
-        val STRATEGIES = mapOf("btc5m_favorite" to "5m", "btc15m_counter_1h" to "15m")
+        // Each strategy's series; the combined one is on 15m except inside a decided 4h window.
+        val STRATEGIES = mapOf("btc5m_favorite" to setOf("5m"), "btc15m_counter_1h" to setOf("15m"),
+            "btc15m_plus_4h" to setOf("15m", "4h"))
         private val PREPARATION_INTENT_FIELDS = setOf("schemaVersion", "id", "slug", "periodStart", "periodEnd", "side", "amountUsd",
             "createdAt", "expiresAt", "priceObservedAt", "openPrice", "currentPrice", "priceSource", "openPriceSource", "twapLookbackSeconds",
             "mode", "noSubmission", "operatorAuthorized", "authorizationSource", "claimToken")
@@ -598,7 +620,8 @@ class FutureBtc5mBridgeClient(
             "PREPARATION_LEDGER_WRITE_FAILED", "ORDER_LEDGER_INVALID", "ORDER_LEDGER_WRITE_FAILED", "CONTROL_STATE_WRITE_FAILED",
             "SIGNAL_SOURCE_UNAVAILABLE", "SIGNAL_SOURCE_INVALID", "STOP_FILE_PRESENT", "PREFLIGHT_LEDGER_INVALID", "PREFLIGHT_LEDGER_WRITE_FAILED", "BUTTON_QUOTES_UNAVAILABLE",
             "BUTTON_QUOTES_TIED", "BUTTON_QUOTES_NOT_FRESH", "HIGHER_BUTTON_SIDE_CHANGED",
-            "SAME_AS_1H_FAVORITE", "HOUR_QUOTE_UNAVAILABLE", "DECISION_LEDGER_INVALID", "DECISION_LEDGER_WRITE_FAILED")
+            "SAME_AS_1H_FAVORITE", "HOUR_QUOTE_UNAVAILABLE", "DECISION_LEDGER_INVALID", "DECISION_LEDGER_WRITE_FAILED",
+            "FOUR_HOUR_SIDE_MISMATCH")
         val ORDER_STATUSES = setOf("PENDING", "SKIPPED", "FAILED", "SUBMITTED_UNVERIFIED", "FILLED")
     }
 }

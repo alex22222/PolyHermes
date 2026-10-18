@@ -6,8 +6,9 @@ const MARKET_QUOTE_ERROR_CODES = ['HTTP_SOURCE_TIMEOUT', 'HTTP_SOURCE_UNAVAILABL
   'WRONG_MARKET_PERIOD', 'INVALID_OUTCOME_TOKENS', 'LOCAL_QUOTE_TIMEOUT', 'LOCAL_QUOTE_NOT_FOUND'];
 
 // Round series of the two strategies (same table as content.js and future_btc5m_series.py).
-const SERIES = {'5m': {period: 300, id: 'future-btc5m-prepare:'}, '15m': {period: 900, id: 'future-btc15m-prepare:'}};
-const PAGE_PATH = /^\/(?:zh\/)?event\/btc-updown-(5m|15m)-(0|[1-9]\d*)\/?$/;
+const SERIES = {'5m': {period: 300, id: 'future-btc5m-prepare:'}, '15m': {period: 900, id: 'future-btc15m-prepare:'},
+  '4h': {period: 14400, id: 'future-btc4h-prepare:'}};
+const PAGE_PATH = /^\/(?:zh\/)?event\/btc-updown-(5m|15m|4h)-(0|[1-9]\d*)\/?$/;
 
 // {series, start} of a canonical Future BTC round path, else null.
 function roundOf(pathname) {

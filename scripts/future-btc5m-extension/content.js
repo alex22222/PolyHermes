@@ -1,18 +1,35 @@
 (() => {
-  // Round series of the two strategies (same table as future_btc5m_series.py). The bridge
+  // Round series of the strategies (same table as future_btc5m_series.py). The bridge
   // reports which one is active; a page, ticket or record always carries its own series.
   const SERIES = {
     '5m': {period: 300, entry: [60, 80], slug: 'btc-updown-5m-', id: 'future-btc5m-prepare:',
       openSource: 'polymarket_crypto_price_fiveminute_twap60_openPrice', label: 'BTC 5 分钟'},
     '15m': {period: 900, entry: [150, 170], slug: 'btc-updown-15m-', id: 'future-btc15m-prepare:',
       openSource: 'polymarket_crypto_price_fifteen_twap60_openPrice', label: 'BTC 15 分钟（反 1 小时方向）'},
+    // Runs alongside 15m; its entry is a 2-minute window at a decision checkpoint (entryWindow).
+    '4h': {period: 14400, entry: null, slug: 'btc-updown-4h-', id: 'future-btc4h-prepare:',
+      openSource: 'polymarket_crypto_price_fourhour_twap60_openPrice', label: 'BTC 4 小时（周末高把握）'},
+  };
+  // Absolute entry window of a round containing `at`. 4h decisions happen at minutes 5 and 10 of
+  // each quarter hour, each with a 2-minute window (future_btc5m_series.checkpoint_window).
+  function entryWindow(series, start, at) {
+    if (series !== '4h') return [start + SERIES[series].entry[0], start + SERIES[series].entry[1]];
+    const offset = at - start;
+    const minute = Math.floor(offset / 300) * 5;
+    if (!Number.isFinite(offset) || minute < 5 || minute > 235 || minute % 15 === 0 || offset - minute * 60 >= 120) return null;
+    return [start + minute * 60, start + minute * 60 + 120];
+  }
+  // Seconds into the round; outside a 4h window this is an empty window at the round start.
+  const relativeWindow = (series, start, at) => {
+    const window = entryWindow(series, start, at);
+    return window ? [window[0] - start, window[1] - start] : [0, 0];
   };
   const seriesOf = (value) => (typeof value === 'string' && Object.hasOwn(SERIES, value) ? value : null);
   const roundStart = (now, series) => Math.floor(now / SERIES[series].period) * SERIES[series].period;
   const roundUrl = (start, series) => `https://future.news/zh/event/${SERIES[series].slug}${start}`;
   // {series, start} of a Future BTC round path, else null.
   function pathRound(pathname) {
-    const match = typeof pathname === 'string' && pathname.match(/^\/(?:zh\/)?event\/btc-updown-(5m|15m)-(0|[1-9]\d*)\/?$/);
+    const match = typeof pathname === 'string' && pathname.match(/^\/(?:zh\/)?event\/btc-updown-(5m|15m|4h)-(0|[1-9]\d*)\/?$/);
     const start = match && Number(match[2]);
     return match && Number.isSafeInteger(start) && start % SERIES[match[1]].period === 0 ? {series: match[1], start} : null;
   }
@@ -24,6 +41,34 @@
       }
     }
     return null;
+  }
+
+  // Presentation only: a disconnected service is not a switch back to BTC5m.
+  // Page context can explain a market/round, but cannot prove the active strategy.
+  function strategyPresentation(preparation, status, remembered, url, now) {
+    const fresh = (stamp) => Number.isFinite(stamp) && Math.abs(now - stamp) <= 3;
+    const prepared = preparation?.bridgeId === 'future-btc5m' && fresh(preparation.serverTime) &&
+      preparation.preparation?.mode === 'PREPARE_ONLY' && preparation.preparation.noSubmission === true ?
+      seriesOf(preparation.preparation.series) : null;
+    const observed = status?.schema_version === 1 && status.mode === 'ASSIST_ONLY' &&
+      status.live_enabled === false && fresh(status.server_time) ? seriesOf(status.series) : null;
+    if (prepared && observed && prepared !== observed) {
+      return {series: null, source: 'conflict', label: '策略状态冲突，待核实'};
+    }
+    const series = prepared ?? observed;
+    // The combined strategy names the series whose page is current (4h only in its window).
+    if (series) return {series, source: 'confirmed', combined: preparation?.preparation?.strategy === 'btc15m_plus_4h',
+      label: preparation?.preparation?.strategy === 'btc15m_plus_4h' ? `15 分钟 + 4 小时 · 当前 ${SERIES[series].label}` :
+        SERIES[series].label};
+    if (seriesOf(remembered)) return {series: remembered, source: 'remembered',
+      label: `${SERIES[remembered].label}（上次确认，当前未核实）`};
+    try {
+      const page = new URL(url);
+      const context = page.origin === 'https://future.news' && !page.username && !page.password && pathRound(page.pathname);
+      if (context) return {series: context.series, source: 'page',
+        label: `策略未核实 · 页面市场：${SERIES[context.series].label}`};
+    } catch {}
+    return {series: null, source: 'unknown', label: '策略未核实'};
   }
 
   function verifiedEligibility(status) {
@@ -103,8 +148,12 @@
     const series = pathRound(new URL(target).pathname).series;
     const start = roundStart(now, series);
     const report = readPreflight(doc, url, now);
-    // Before entry only: up to 10 s ahead of the series' entry window.
-    if (typeof navigate === 'function' && now >= start + 5 && now < start + SERIES[series].entry[0] - 10 &&
+    // Before entry only: up to 10 s ahead of the series' entry window. A 4h window is already open
+    // when the bridge hands the page to it, so that page loads within the window's first 100 s.
+    const window = entryWindow(series, start, now);
+    const navigable = series === '4h' ? Boolean(window) && now < window[0] + 100 :
+      now >= start + 5 && now < start + SERIES[series].entry[0] - 10;
+    if (typeof navigate === 'function' && navigable &&
         (!matchesMarket(url, {slug}) || report?.navigation === 'MISMATCH')) {
       try {
         const key = 'polyhermes.future-btc5m.document-navigation';
@@ -172,7 +221,7 @@
     else if (!matchesMarket(url, signal)) unavailable = '页面轮次不匹配';
     else if (!verifiedOpening) unavailable = '开盘参考价未核实';
     else if (!Number.isFinite(signal.price_observed_at) || signal.price_observed_at > now) unavailable = '采样时间无效';
-    else if (now >= start + SERIES[series].entry[1]) unavailable = '入场窗口已过期';
+    else if (!entryWindow(series, start, now) || now >= entryWindow(series, start, now)[1]) unavailable = '入场窗口已过期';
     else if (now - signal.price_observed_at > 5) unavailable = '采样已陈旧';
     else if (status.feed_status !== 'CURRENT') unavailable = '实时行情不可用';
     else if (status.status === 'STOPPED') unavailable = '助手已停止';
@@ -283,7 +332,8 @@
         lastRound?.series === series && lastRound.start >= start || !Array.isArray(value.reasons) ||
         value.reasons.some((reason) => !['WAITING_CURRENT_SIGNAL', 'BROWSER_NOT_CONNECTED', 'MARKET_NOT_CURRENT',
           'TICKET_CHECK_FAILED', 'BUTTON_QUOTES_UNAVAILABLE', 'BUTTON_QUOTES_TIED'].includes(reason)) ||
-        status?.reason === 'NOT_ET_WEEKEND' || !navigationTarget(status, url, now) || now >= start + SERIES[series].entry[1]) return;
+        status?.reason === 'NOT_ET_WEEKEND' || !navigationTarget(status, url, now) ||
+        !(entryWindow(series, start, now)?.[1] > now)) return;
     if (attempt.phase === 'FAILED') return;
     try {
       const {control, mode} = orderTypeTicket(doc, url, now, series);
@@ -563,8 +613,11 @@
     const round = idRound(intent.id);
     if (!round) return null;
     const {series} = round;
-    const [first, last] = SERIES[series].entry;
     const start = roundStart(now, series);
+    // Absolute window; a 4h window is the checkpoint window the intent was created in.
+    const window = Number.isFinite(intent.createdAt) ? entryWindow(series, start, intent.createdAt) : null;
+    if (!window) return null;
+    const [first, last] = window;
     if (!Number.isSafeInteger(intent.periodStart) || intent.periodStart !== start || round.start !== start ||
         intent.slug !== `${SERIES[series].slug}${start}` ||
         intent.periodEnd !== start + SERIES[series].period || intent.amountUsd !== 1 || !['Up', 'Down'].includes(intent.side) ||
@@ -572,10 +625,10 @@
         intent.openPriceSource !== SERIES[series].openSource ||
         intent.twapLookbackSeconds !== 60 || !Number.isFinite(intent.openPrice) || intent.openPrice <= 0 ||
         !Number.isFinite(intent.currentPrice) || intent.currentPrice <= 0 ||
-        !Number.isFinite(intent.createdAt) || intent.createdAt < start + first || intent.createdAt >= start + last ||
-        intent.expiresAt !== start + last || now < intent.createdAt || now >= intent.expiresAt ||
+        !Number.isFinite(intent.createdAt) || intent.createdAt < first || intent.createdAt >= last ||
+        intent.expiresAt !== last || now < intent.createdAt || now >= intent.expiresAt ||
         !Number.isFinite(intent.priceObservedAt) || intent.priceObservedAt > intent.createdAt ||
-        now - intent.priceObservedAt > 5 || now < start + first ||
+        now - intent.priceObservedAt > 5 || now < first ||
         !(intent.claimToken === null || typeof intent.claimToken === 'string' && /^[a-f0-9]{32}$/.test(intent.claimToken))) return null;
     return intent;
   }
@@ -589,7 +642,7 @@
   function readPreparationTicket(doc, url, start, series = '5m') {
     // Freshness is checked against the bridge before every stage; this read binds the
     // DOM title and URL to that already checked round of that series.
-    const report = readPreflight(doc, url, start + SERIES[series].entry[0]);
+    const report = readPreflight(doc, url, start + (SERIES[series].entry?.[0] ?? 1));
     let page = null;
     try { page = pathRound(new URL(url).pathname); } catch {}
     if (report?.navigation !== 'CURRENT' || report.pagePeriodStart !== start || page?.series !== series) {
@@ -724,7 +777,7 @@
   }
 
   // Export pure guards for the local fixture tests; this is an isolated extension world.
-  globalThis.FutureBtc5m = {SERIES, seriesOf, roundStart, pathRound, idRound, usableDraft, matchesMarket, observationView, findAmountInput, findAmountTicket, buttonIsEnabled, prepareAmount,
+  globalThis.FutureBtc5m = {SERIES, seriesOf, roundStart, pathRound, idRound, entryWindow, usableDraft, matchesMarket, observationView, findAmountInput, findAmountTicket, buttonIsEnabled, prepareAmount,
     navigationTarget, followCurrentMarket, readPreflight, usablePreparation, readPreparationTicket, prepareOnlyOnce, parseButtonQuote, readPositionSnapshot, readWalletSnapshot};
   if (typeof document === 'undefined') return;
 
@@ -733,7 +786,7 @@
   const header = document.createElement('div');
   header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;position:sticky;top:0;background:#171b22;z-index:1';
   const title = document.createElement('strong');
-  title.textContent = 'PolyHermes · BTC 5m · $1';
+  title.textContent = 'PolyHermes · 策略未核实 · $1';
   const panelBody = document.createElement('div');
   panelBody.id = 'polyhermes-btc5m-body';
   panelBody.hidden = false;
@@ -777,15 +830,17 @@
   const preflightReport = document.createElement('p');
   const preparationReport = document.createElement('p');
   const note = document.createElement('p');
-  const preparationNoteFor = (series) => {
-    const [first, last] = SERIES[series].entry;
-    const rule = series === '15m' ?
-      `当前策略：${SERIES[series].label}。开启自动票据后，每轮第 ${first}–${last} 秒读取 15 分钟盘按钮数字较大的一方；只有它与同一时刻 1 小时盘的热门方向相反时才填入 $1，准备好后自动点击一次 Future 买入，方向相同则本轮跳过。` :
-      `当前策略：${SERIES[series].label}。开启自动票据后，仅在每轮第 ${first}–${last} 秒、行情有效时选择按钮数字较大的一方并填入 $1，准备好后自动点击一次 Future 买入。`;
+  const preparationNoteFor = (series, heading = `当前策略：${SERIES[series].label}`) => {
+    const [first, last] = SERIES[series].entry ?? [null, null];
+    const rule = series === '4h' ?
+      `${heading}。与 15 分钟策略同时运行：周末 4 小时盘在每刻钟第 5、10 分钟按 Binance 价格模型判断，模型把握 ≥95% 且比 Polymarket 卖价高 ≥3¢ 时，接下来 2 分钟切到 4 小时盘填入 $1，准备好后自动点击一次 Future 买入；每轮最多一次，其余时间回到 15 分钟盘。` :
+      series === '15m' ?
+      `${heading}。开启自动票据后，每轮第 ${first}–${last} 秒读取 15 分钟盘按钮数字较大的一方；只有它与同一时刻 1 小时盘的热门方向相反时才填入 $1，准备好后自动点击一次 Future 买入，方向相同则本轮跳过。` :
+      `${heading}。开启自动票据后，仅在每轮第 ${first}–${last} 秒、行情有效时选择按钮数字较大的一方并填入 $1，准备好后自动点击一次 Future 买入。`;
     return rule + '每轮准备前自动切回市价单并核对。自动买入仅在热门方向 ≥60¢、页面与 Polymarket 盘口价差不超过 3¢，且两者均在准备价 ±5¢ 内、最高不超过 97¢ 时进行，否则本轮不点击。$1 为订单本金，费用以平台为准。';
   };
   note.style.whiteSpace = 'pre-line';
-  note.textContent = preparationNoteFor('5m');
+  note.textContent = '当前策略：未核实，等待本地助手报告。';
   const autoBuyReport = document.createElement('p');
   autoBuyReport.style.whiteSpace = 'pre-line';
   // Weekend-only is held by the local assistant and resets to on whenever it restarts.
@@ -817,17 +872,25 @@
   let lastBlockers = [];
   let windowBlockerOutcomes = [];
   let preparationView = null;
+  let lastConfirmedSeries = null;
+  let extensionContextInvalidated = false;
   preparationReport.style.whiteSpace = 'pre-line';
   // The strategy series the bridge reports (preparation first, then the assistant status).
   const activeSeries = () => seriesOf(preparationView?.preparation?.series) ?? seriesOf(latest?.series) ?? '5m';
   const recordSeries = (last) => seriesOf(last?.series) ?? '5m';
+
+  const displayStrategy = (now = Date.now() / 1000) => {
+    const value = strategyPresentation(preparationView, latest, lastConfirmedSeries, location.href, now);
+    if (value.source === 'confirmed') lastConfirmedSeries = value.series;
+    return value;
+  };
 
   async function reportPage() {
     if (reporting) return;
     const report = readPreflight(document, location.href);
     const payload = report && {...report, schemaVersion: 3, ...readWalletSnapshot(document, location.href)};
     if (!payload) {
-      preflightReport.textContent = '只读预检：等待 BTC 5 分钟市场页面';
+      preflightReport.textContent = '只读预检：等待 BTC 5/15 分钟市场页面';
       return;
     }
     reporting = true;
@@ -897,6 +960,7 @@
     INTENT_EXPIRED: ['时间安排', '已过本轮入场截止时间'],
     SAME_AS_1H_FAVORITE: ['策略过滤', '15 分钟热门方向与 1 小时热门方向相同，本轮跳过'],
     HOUR_QUOTE_UNAVAILABLE: ['行情异常', '1 小时盘口不可用，无法判断方向'],
+    FOUR_HOUR_SIDE_MISMATCH: ['策略过滤', '4 小时页面热门方向与模型方向不一致，本轮不买'],
     DECISION_LEDGER_INVALID: ['本地异常', '策略决策账本无法读取'],
     DECISION_LEDGER_WRITE_FAILED: ['本地异常', '策略决策账本写入失败'],
     ALREADY_CONSUMED: ['防重复保护', '本轮已记录买入尝试，不再点击'],
@@ -977,14 +1041,19 @@
 
   function showOutcomeSummary(view) {
     const now = Date.now() / 1000;
-    const series = activeSeries();
-    const [first, last80] = SERIES[series].entry;
-    const start = roundStart(now, series);
+    const strategy = displayStrategy(now);
+    const series = strategy.series;
+    const start = series ? roundStart(now, series) : null;
+    const [first, last80] = series ? relativeWindow(series, start, now) : [null, null];
     const elapsed = now - start;
     const last = view?.last;
     const lastIsCurrent = last && last.periodStart === start && recordSeries(last) === series;
     recentSummary.textContent = last ? `最近买入检查\n${buyOutcome(last).join('\n')}\n${lastIsCurrent ? '本轮' : '历史轮次'} · ${roundLabel(last.periodStart, recordSeries(last))}` :
       '最近买入检查\n本页尚无买入检查记录\n刷新前的操作请查看本机账本或 Future 订单';
+    if (!series) {
+      currentSummary.textContent = `本轮状态 · 开关未核实 · ${strategy.label}\n状态未知 · 无法确认本轮操作\n轮次未核实`;
+      return;
+    }
     const value = preparationView?.preparation;
     const freshPreparation = value && Number.isFinite(preparationView.serverTime) && Math.abs(now - preparationView.serverTime) <= 3;
     let outcome;
@@ -993,7 +1062,9 @@
       const [category, message] = outcomeReason(view.reason);
       outcome = [`未点击 · ${category}`, message];
     } else if (!freshPreparation) {
-      outcome = ['状态未知 · 服务异常', '本地准备服务未连接或状态已过期；无法确认本轮操作'];
+      outcome = ['状态未知 · 服务异常', extensionContextInvalidated ?
+        '扩展上下文已失效，请刷新此页面恢复连接；无法确认本轮操作' :
+        '本地准备服务未连接或状态已过期；无法确认本轮操作'];
     } else if (value.reasons?.includes('STOP_FILE_PRESENT')) outcome = ['未点击 · 已停止', '助手已停止'];
     else if (!value.enabled) outcome = ['未点击 · 自动功能关闭', '在 PolyHermes 开启“自动准备票据”后才会自动买入'];
     else if (value.reasons?.includes('SAME_AS_1H_FAVORITE')) {
@@ -1019,7 +1090,7 @@
       outcome = [`未点击 · ${category}`, codes.map((code) => outcomeReason(code)[1]).join('；') || '尚未取得有效准备许可'];
     }
     const enabled = freshPreparation ? value.enabled ? '自动买入已开启' : '自动买入已关闭' : '开关未核实';
-    currentSummary.textContent = `本轮状态 · ${enabled} · ${SERIES[series].label}\n${outcome.join('\n')}\n${roundLabel(start, series)}`;
+    currentSummary.textContent = `本轮状态 · ${enabled} · ${strategy.label}\n${outcome.join('\n')}\n${roundLabel(start, series)}`;
   }
 
   async function preparationRequest(type, payload) {
@@ -1107,16 +1178,27 @@
   // It reads the current ticket only; it cannot change selection, amount or Buy state.
   function refreshTicketView() {
     const now = Date.now() / 1000;
+    const strategy = displayStrategy(now);
     const report = readPreflight(document, location.href, now);
     const sideText = (side) => side === 'Up' ? '涨 Up' : side === 'Down' ? '跌 Down' : '未核对';
-    note.textContent = preparationNoteFor(activeSeries());
+    title.textContent = `PolyHermes · ${strategy.label} · $1`;
+    note.textContent = strategy.source === 'confirmed' ? (strategy.combined ?
+      `${preparationNoteFor('15m', '当前策略：15 分钟 + 4 小时周末（15 分钟部分）')}\n${preparationNoteFor('4h', '4 小时部分')}` :
+      preparationNoteFor(strategy.series)) :
+      strategy.source === 'remembered' ? preparationNoteFor(strategy.series,
+        `上次确认策略：${SERIES[strategy.series].label}（当前连接未核实，以下仅为规则说明）`) :
+      `当前策略：未核实。${strategy.series ? `页面市场为${SERIES[strategy.series].label}，但页面周期不代表已选择或正在运行的策略。` :
+        '等待本地助手返回一致的策略状态后再展示规则。'}`;
+    if (strategy.source === 'page') note.textContent += '\n' + preparationNoteFor(strategy.series,
+      '仅供对照的页面周期规则（不是运行确认）');
     if (report?.navigation === 'CURRENT' && report.ticketStatus === 'PASS' &&
         validButtonQuote(report.upQuoteCents) && validButtonQuote(report.downQuoteCents)) {
       const higherSide = report.upQuoteCents === report.downQuoteCents ? null :
         report.upQuoteCents > report.downQuoteCents ? 'Up' : 'Down';
       note.textContent += `\n报价观察：涨 ${report.upQuoteCents}¢ / 跌 ${report.downQuoteCents}¢；数字较大：${higherSide ? sideText(higherSide) : '同价，暂停准备'}；当前选中：${sideText(report.selectedSide)}。`;
       const pageSeries = pathRound(new URL(location.href).pathname)?.series ?? '5m';
-      if (now >= report.pagePeriodStart + SERIES[pageSeries].entry[1]) {
+      const pageWindow = entryWindow(pageSeries, report.pagePeriodStart, now);
+      if (!pageWindow || now >= pageWindow[1]) {
         note.textContent += '\n入场窗口已过期，保留先前选边，本轮不再切换或买入。';
       }
     } else note.textContent += '\n报价观察不可用：当前票据未核对或报价缺失。';
@@ -1191,15 +1273,14 @@
           value.authorizationSource !== 'USER_REQUEST' || typeof value.enabled !== 'boolean' ||
           !Object.hasOwn(labels, value.state)) throw preparationError('PREPARATION_FAILED');
       preparationView = wrapper;
-      title.textContent = `PolyHermes · ${SERIES[activeSeries()].label} · $1`;
       // Arm before this poll can prepare a ticket, so the new READY is created after arming.
       showAutoBuy(value.enabled);
       text.textContent = text.textContent.replace('本轮采样方向：', 'BTC参考价差（不决定票据方向）：');
       const state = value.state;
       const now = Date.now() / 1000;
       const series = activeSeries();
-      const [first, last] = SERIES[series].entry;
       const start = roundStart(now, series);
+      const [first, last] = relativeWindow(series, start, now);
       const elapsed = now - start;
       if (orderTypeAttempt.periodStart !== start || orderTypeAttempt.series !== series) {
         orderTypeAttempt = {periodStart: start, series, phase: null, reason: null};
@@ -1233,7 +1314,8 @@
         SOURCE_STATE_UNAVAILABLE: '行情服务状态不可用', AUTO_PREPARATION_DISABLED: '自动准备已关闭',
         PREPARATION_LEDGER_WRITE_FAILED: '准备账本写入失败（PREPARATION_LEDGER_WRITE_FAILED）',
         PREFLIGHT_LEDGER_WRITE_FAILED: '预检账本写入失败（PREFLIGHT_LEDGER_WRITE_FAILED）',
-        SAME_AS_1H_FAVORITE: '15 分钟热门方向与 1 小时相同，本轮跳过', HOUR_QUOTE_UNAVAILABLE: '1 小时盘口不可用'};
+        SAME_AS_1H_FAVORITE: '15 分钟热门方向与 1 小时相同，本轮跳过', HOUR_QUOTE_UNAVAILABLE: '1 小时盘口不可用',
+        FOUR_HOUR_SIDE_MISMATCH: '4 小时页面热门方向与模型方向不一致'};
       const blockers = ticketBlockers(document, location.href, now);
       const codes = [...new Set([...(Array.isArray(value.reasons) ? value.reasons.filter((reason) => typeof reason === 'string') : []),
         ...blockers, ...(orderTypeAttempt.reason ? [orderTypeAttempt.reason] : [])])];
@@ -1288,6 +1370,7 @@
     link.style.display = 'none';
     try {
       latest = await readStatus();
+      extensionContextInvalidated = false;
       const now = Date.now() / 1000;
       if (inspectedUrl !== location.href) {
         inspection.textContent = '';
@@ -1321,10 +1404,12 @@
       await pollPreparation();
       await refreshSchedule();
     } catch (error) {
+      if (/extension context invalidated/i.test(error.message)) extensionContextInvalidated = true;
       latest = null;
       preparationView = null;
       refreshTicketView();
-      text.textContent = error.message;
+      text.textContent = extensionContextInvalidated ?
+        '扩展上下文已失效：扩展更新或重载后，此页面仍在使用旧脚本。请刷新此页面恢复连接；当前开关与执行状态未核实，不补买。' : error.message;
       inspection.textContent = '';
       autoCheckedUrl = null;
       navigation.textContent = '自动换轮：暂停（本地助手未连接）';

@@ -641,6 +641,84 @@ class FutureBtc5mBridgeClientTest {
         assertThrows(IllegalStateException::class.java) { client.strategy("btc15m_counter_1h") }
     }
 
+    @Test
+    fun `combined strategy passes 4h rounds inside a checkpoint window and 15m rounds otherwise`() {
+        listOf("PENDING", "CLAIMED", "READY").forEach { state ->
+            val record = record4(state)
+            responseBody = mapper.writeValueAsString(status4(state, if (state == "READY") null else record.filterKeys { it in intent4().keys }, record))
+            val value = client.status()
+            assertEquals(state, value.preparation.state)
+            assertEquals(listOf("btc15m_plus_4h", "4h", "4h"), listOf(value.strategy, value.series, value.preparation.series))
+            assertEquals(listOf("15m", "4h"), value.strategySeries)
+            assertEquals("Up", value.fourHour?.decision?.side)
+            assertEquals(0.99, value.fourHour?.lastEvaluation?.pUp)
+        }
+        val fifteen = status15(true, "READY", null, record15("READY"))
+        responseBody = mapper.writeValueAsString(fifteen + ("strategy" to "btc15m_plus_4h") +
+            ("preparation" to (fifteen["preparation"] as Map<*, *>) + ("strategy" to "btc15m_plus_4h")))
+        assertEquals("15m", client.status().series)
+        responseBody = mapper.writeValueAsString(status15(true, "WAITING_BROWSER", null, null, listOf("FOUR_HOUR_SIDE_MISMATCH")))
+        assertEquals(listOf("FOUR_HOUR_SIDE_MISMATCH"), client.status().preparation.reasons)
+    }
+
+    @Test
+    fun `4h records must sit in a checkpoint window and only the combined strategy runs 4h`() {
+        val ready = record4("READY")
+        for (bad in listOf(
+            status4("READY", null, ready + ("expiresAt" to s4 + 170.0)),
+            status4("READY", null, ready + mapOf("createdAt" to s4 + 155.0, "priceObservedAt" to s4 + 155.0, "quoteObservedAt" to s4 + 155.0)),
+            status4("READY", null, ready + mapOf("createdAt" to s4 + 905.0, "expiresAt" to s4 + 1025.0)),
+            status4("READY", null, ready) + ("strategy" to "btc15m_counter_1h"),
+            status4("READY", null, ready + ("openPriceSource" to "polymarket_crypto_price_fifteen_twap60_openPrice")),
+            status4("READY", null, ready) + ("fourHour" to "PREPARE"),
+        )) {
+            responseBody = mapper.writeValueAsString(bad)
+            assertThrows(IllegalStateException::class.java) { client.status() }
+        }
+        // Back on 15m, an earlier round's 4h READY is history, never the current READY.
+        val earlier = s4 - 14400
+        val old4h = ready + mapOf("id" to "future-btc4h-prepare:$earlier", "slug" to "btc-updown-4h-$earlier",
+            "periodStart" to earlier, "periodEnd" to s4, "createdAt" to earlier + 305.0, "expiresAt" to earlier + 420.0,
+            "priceObservedAt" to earlier + 305.0, "quoteObservedAt" to earlier + 305.0, "updatedAt" to earlier + 305.0,
+            "claimedAt" to earlier + 305.0, "receipt" to mapOf("checkedAt" to earlier + 305.0,
+                "marketUrl" to "https://future.news/zh/event/btc-updown-4h-$earlier", "amountUsd" to 1, "selectedSide" to "Up"))
+        responseBody = mapper.writeValueAsString(status15(true, "WAITING_BROWSER", null, old4h, listOf("MARKET_NOT_CURRENT")) +
+            ("strategy" to "btc15m_plus_4h"))
+        assertEquals("future-btc4h-prepare:$earlier", client.status().preparation.lastAttempt?.id)
+        responseBody = mapper.writeValueAsString(status15(true, "READY", null, old4h) + ("strategy" to "btc15m_plus_4h"))
+        assertThrows(IllegalStateException::class.java) { client.status() }
+    }
+
+    private val s4 = 1791705600L  // also a 15m boundary
+
+    private fun intent4() = preparationIntent() + mapOf(
+        "id" to "future-btc4h-prepare:$s4", "slug" to "btc-updown-4h-$s4", "periodStart" to s4, "periodEnd" to s4 + 14400,
+        "createdAt" to s4 + 305.0, "expiresAt" to s4 + 420.0, "priceObservedAt" to s4 + 305.0, "quoteObservedAt" to s4 + 305.0,
+        "openPriceSource" to "polymarket_crypto_price_fourhour_twap60_openPrice")
+
+    private fun record4(state: String) = intent4() + mapOf(
+        "state" to state, "updatedAt" to s4 + 305.0, "claimedAt" to if (state == "PENDING") null else s4 + 305.0,
+        "claimToken" to if (state == "PENDING") null else "a".repeat(32), "reason" to null,
+        "receipt" to if (state == "READY") mapOf("checkedAt" to s4 + 305.0,
+            "marketUrl" to "https://future.news/zh/event/btc-updown-4h-$s4", "amountUsd" to 1, "selectedSide" to "Up") else null)
+
+    private fun status4(state: String, intent: Map<String, Any?>?, record: Map<String, Any?>?): Map<String, Any?> {
+        val url = "https://future.news/zh/event/btc-updown-4h-$s4"
+        return status(true) + mapOf(
+            "series" to "4h", "strategy" to "btc15m_plus_4h", "strategySeries" to listOf("15m", "4h"),
+            "serverTime" to s4 + 305.0, "periodStart" to s4,
+            "fourHour" to mapOf("periodStart" to s4, "weekend" to true, "decision" to mapOf("checkpointAt" to s4 + 300, "side" to "Up"),
+                "lastEvaluation" to mapOf("checkpointAt" to s4 + 300, "minute" to 5, "side" to "Up", "pUp" to 0.99,
+                    "upAskCents" to 90.0, "downAskCents" to 11.0, "decision" to "PREPARE", "reason" to null)),
+            "signal" to freshSignal() + mapOf("slug" to "btc-updown-4h-$s4", "period_start" to s4, "period_end" to s4 + 14400,
+                "price_observed_at" to s4 + 305.0, "open_price_source" to "polymarket_crypto_price_fourhour_twap60_openPrice"),
+            "preflight" to preflight() + mapOf("checkedAt" to s4 + 305.0, "receivedAt" to s4 + 305.0, "marketUrl" to url,
+                "pagePeriodStart" to s4, "lastPassed" to mapOf("periodStart" to s4, "checkedAt" to s4 + 305.0, "marketUrl" to url,
+                    "signalSide" to "Up", "amountUsd" to 1, "noSubmission" to true)),
+            "preparation" to preparation(true, state, intent, record) + mapOf("reasons" to emptyList<String>(),
+                "strategy" to "btc15m_plus_4h", "series" to "4h"))
+    }
+
     private val s15 = 1791705600L
 
     private fun intent15() = preparationIntent() + mapOf(

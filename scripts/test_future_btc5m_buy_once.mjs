@@ -1701,3 +1701,82 @@ test('a READY round of the other strategy, outside its window or on the wrong pa
     assertUnchangedTicket(env.ticket);
   }
 });
+
+// ---- 4h weekend leg of the combined strategy (extension 0.8.0) ----
+// 1791648000 is a 4h boundary (12:00PM-4:00PM ET on October 10); minute 5 opens the window +300..420.
+const start4 = 1791648000;
+const now4 = start4 + 305;
+const marketUrl4 = `https://future.news/zh/event/btc-updown-4h-${start4}`;
+const marketUrl15at4 = `https://future.news/zh/event/btc-updown-15m-${start4}`;
+const title4 = 'Bitcoin Up or Down - October 10, 12:00PM-4:00PM ET';
+const ready4 = (at = now4, side = 'Down', preparationSeries = '4h') => {
+  const value = ready(at, side, start4);
+  Object.assign(value.preparation.lastAttempt, {id: `future-btc4h-prepare:${start4}`, slug: `btc-updown-4h-${start4}`,
+    periodEnd: start4 + 14400, expiresAt: start4 + 420, openPriceSource: 'polymarket_crypto_price_fourhour_twap60_openPrice'});
+  value.preparation.lastAttempt.receipt.marketUrl = marketUrl4;
+  Object.assign(value, {series: preparationSeries, strategy: 'btc15m_plus_4h'});
+  Object.assign(value.preparation, {series: preparationSeries, strategy: 'btc15m_plus_4h'});
+  return value;
+};
+const status4 = (at) => ({schema_version: 1, mode: 'ASSIST_ONLY', live_enabled: false, amount_usd: 1,
+  status: 'WAITING', server_time: at, period_start: start4, series: '4h', round_series: '4h'});
+
+test('4h rounds have their own path, id, checkpoint windows and ticket title', () => {
+  assert.equal(JSON.stringify(core.pathRound(`/zh/event/btc-updown-4h-${start4}`)), JSON.stringify({series: '4h', start: start4}));
+  assert.equal(core.pathRound(`/zh/event/btc-updown-4h-${start4 + 900}`), null, 'not a 4h boundary');
+  assert.equal(JSON.stringify(core.idRound(`future-btc4h-prepare:${start4}`)), JSON.stringify({series: '4h', start: start4}));
+  assert.equal(JSON.stringify(core.entryWindow('4h', start4, start4 + 305)), JSON.stringify([start4 + 300, start4 + 420]));
+  assert.equal(JSON.stringify(core.entryWindow('4h', start4, start4 + 1250)), JSON.stringify([start4 + 1200, start4 + 1320]), 'minute 20');
+  for (const offset of [0, 150, 299, 420, 900, 1060, 14399]) assert.equal(core.entryWindow('4h', start4, start4 + offset), null, offset);
+  assert.equal(JSON.stringify(core.entryWindow('15m', start4, start4 + 305)), JSON.stringify([start4 + 150, start4 + 170]));
+  const report = core.readPreflight(ticketFixture({title: title4}).doc, marketUrl4, now4);
+  assert.equal(`${report.navigation}/${report.ticketStatus}/${report.pagePeriodStart}`, `CURRENT/PASS/${start4}`);
+  assert.equal(core.readPreflight(ticketFixture({title: title15}).doc, marketUrl4, now4).navigation, 'MISMATCH',
+    'a 15-minute ticket title on a 4h URL is not the 4h round');
+});
+
+test('the 4h page is loaded within its window and never outside it', () => {
+  const navigated = [];
+  const storage = mapStorage();
+  const go = (at, url = marketUrl15at4, store = storage) => core.followCurrentMarket(status4(at), url, ticketFixture().doc, store, at,
+    (target) => navigated.push(target));
+  assert.match(go(start4 + 302), /btc-updown-4h/);
+  assert.deepEqual(navigated, [marketUrl4]);
+  assert.match(go(start4 + 310), /不重复刷新/, 'one full reload per round');
+  go(start4 + 401, marketUrl15at4, mapStorage());
+  go(start4 + 430, marketUrl15at4, mapStorage());
+  assert.equal(navigated.length, 1, 'no reload late in or after the window');
+});
+
+test('a 4h READY round is bought once on its page and keeps its own once-per-round mark', async () => {
+  const storage = mapStorage();
+  storage.setItem(`${storageKey}.15m`, JSON.stringify({schemaVersion: 1, periodStart: start4 + 900,
+    id: `future-btc15m-prepare:${start4 + 900}`, side: 'Up', amountUsd: 1, state: 'CLICK_ATTEMPTED'}));
+  const env = setup({ticket: ticketFixture({title: title4}), storage, read: () => ready4(), url: marketUrl4, time: now4});
+  env.watcher.start({live: true});
+  await env.watcher.poll();
+  assert.equal(env.watcher.status().state, 'CLICK_ATTEMPTED', 'a later 15m mark does not consume the 4h round');
+  assert.equal(env.watcher.status().series, '4h');
+  assertUnchangedTicket(env.ticket, 1);
+  assert.equal(JSON.parse(storage.values.get(`${storageKey}.4h`)).id, `future-btc4h-prepare:${start4}`);
+  const again = setup({ticket: ticketFixture({title: title4}), storage, read: () => ready4(), url: marketUrl4, time: now4});
+  again.watcher.start({live: true});
+  await again.watcher.poll();
+  assert.equal(again.watcher.status().reason, 'ALREADY_CONSUMED');
+  assertUnchangedTicket(again.ticket);
+});
+
+test('a 4h READY while the bridge is on 15m, outside its window or on another page is never clicked', async () => {
+  const cases = [
+    ['4h record while the bridge is on 15m', {read: () => ready4(now4, 'Down', '15m'), url: marketUrl4, title: title4, time: now4}],
+    ['4h record created after its window', {read: () => ready4(start4 + 425), url: marketUrl4, title: title4, time: start4 + 425}],
+    ['4h record on the 15m page', {read: () => ready4(), url: marketUrl15at4, title: 'Bitcoin Up or Down - October 10, 12:00PM-12:15PM ET', time: now4}],
+  ];
+  for (const [label, {read, url, title, time}] of cases) {
+    const env = setup({ticket: ticketFixture({title}), storage: mapStorage(), read, url, time});
+    env.watcher.start({live: true});
+    await env.watcher.poll();
+    assert.notEqual(env.watcher.status().state, 'CLICK_ATTEMPTED', label);
+    assertUnchangedTicket(env.ticket);
+  }
+});

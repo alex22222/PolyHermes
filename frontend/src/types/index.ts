@@ -3108,7 +3108,24 @@ export interface FutureBtc5mPreflight {
   } | null
 }
 
-export type FutureBtc5mStrategy = 'btc15m_counter_1h' | 'btc5m_favorite'
+export type FutureBtc5mStrategy = 'btc15m_counter_1h' | 'btc15m_plus_4h' | 'btc5m_favorite'
+
+// The weekend 4h leg of the combined strategy: this round's decision and latest checkpoint evaluation.
+export interface FutureBtc5mFourHour {
+  periodStart: number
+  weekend: boolean
+  decision: { checkpointAt: number, side: 'Up' | 'Down' } | null
+  lastEvaluation: {
+    checkpointAt: number
+    minute: number
+    side: 'Up' | 'Down' | null
+    pUp: number
+    upAskCents: number | null
+    downAskCents: number | null
+    decision: 'PREPARE' | 'SKIP'
+    reason: string | null
+  } | null
+}
 
 export interface FutureBtc5mBridgeStatus {
   bridgeId: 'future-btc5m'
@@ -3116,8 +3133,10 @@ export interface FutureBtc5mBridgeStatus {
   requestedEnabled: boolean
   effectiveEnabled: false
   amountUsd: 1
-  series: '5m' | '15m'
+  series: '5m' | '15m' | '4h'
   strategy?: FutureBtc5mStrategy
+  strategySeries?: Array<'5m' | '15m' | '4h'>
+  fourHour?: FutureBtc5mFourHour | null
   mode: 'DISABLED' | 'BLOCKED'
   serverTime: number
   periodStart: number | null
@@ -3203,7 +3222,7 @@ export interface FutureBtc5mPreparation {
   lastAttempt: FutureBtc5mPreparationRecord | null
   reasons: string[]
   strategy?: FutureBtc5mStrategy
-  series?: '5m' | '15m'
+  series?: '5m' | '15m' | '4h'
 }
 
 export interface FutureBtc5mOrder {

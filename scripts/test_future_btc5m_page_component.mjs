@@ -701,7 +701,8 @@ test('the page shows the confirmed strategy and switches it only through the bri
   const select = () => page.elements((node) => node.type === 'Select' && node.props.placeholder === '策略未知')[0];
   assert.equal(select().props.value, 'btc15m_counter_1h');
   assert.equal(page.field('当前策略'), '15 分钟盘 · 反 1 小时方向（默认）');
-  assert.equal(JSON.stringify(select().props.options.map((option) => option.value)), '["btc15m_counter_1h","btc5m_favorite"]');
+  assert.equal(JSON.stringify(select().props.options.map((option) => option.value)),
+    '["btc15m_counter_1h","btc15m_plus_4h","btc5m_favorite"]');
   select().props.onChange('btc5m_favorite');
   assert.equal(page.pendingCount('strategy'), 1);
   await page.reply('strategy', {...healthyStatus(), strategy: 'btc5m_favorite'});
@@ -711,4 +712,22 @@ test('the page shows the confirmed strategy and switches it only through the bri
   await page.reply('strategy', healthyStatus());
   assert.equal(select().props.value, undefined, 'an unconfirmed switch leaves the strategy unknown');
   assert.match(page.elements((node) => node.type === 'Alert' && node.props.message === 'Bridge 状态未知')[0].props.description, /策略状态未知/);
+});
+
+test('the combined strategy shows the weekend 4h decision or its latest checkpoint evaluation', async () => {
+  const page = mountPage(receipt);
+  const start = Math.floor(receipt / 1000 / 14400) * 14400;
+  const evaluation = {checkpointAt: start + 300, minute: 5, side: 'Down', pUp: 0.03, upAskCents: 8, downAskCents: 93,
+    decision: 'SKIP', reason: 'EDGE_TOO_SMALL'};
+  await page.reply('status', {...healthyStatus(), series: '15m', strategy: 'btc15m_plus_4h', strategySeries: ['15m', '4h'],
+    fourHour: {periodStart: start, weekend: true, decision: null, lastEvaluation: evaluation}});
+  assert.equal(page.field('当前策略'), '15 分钟盘反 1 小时 + 周末 4 小时高把握');
+  assert.equal(page.field('周末 4 小时判断'), '最近第 5 分钟：模型看跌 97.0% · 卖价 涨 8¢ / 跌 93¢ · 比卖价高不足 3¢');
+  page.poll(receipt + 5000);
+  await page.reply('status', {...healthyStatus(receipt + 5000), series: '15m', strategy: 'btc15m_plus_4h',
+    fourHour: {periodStart: start, weekend: true, decision: {checkpointAt: start + 600, side: 'Up'}, lastEvaluation: null}});
+  assert.match(page.field('周末 4 小时判断'), /^本轮已决定买涨（.+ 起 2 分钟内准备，每轮一次）$/);
+  page.poll(receipt + 10000);
+  await page.reply('status', {...healthyStatus(receipt + 10000), series: '15m', strategy: 'btc15m_counter_1h', fourHour: null});
+  assert.equal(page.elements((node) => node.type === 'Descriptions.Item' && node.props.label === '周末 4 小时判断').length, 0);
 });

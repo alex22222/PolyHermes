@@ -8,6 +8,8 @@ data class FutureBtc5mBridgeStatus(
     val amountUsd: Int,
     val series: String,
     val strategy: String? = null,
+    val strategySeries: List<String>? = null,
+    val fourHour: FutureBtc5mFourHour? = null,
     val mode: String,
     val serverTime: Double,
     val periodStart: Long?,
@@ -19,6 +21,27 @@ data class FutureBtc5mBridgeStatus(
     val orderCounts: FutureBtc5mOrderCounts,
     val preflight: FutureBtc5mPreflight? = null,
     val preparation: FutureBtc5mPreparation
+)
+
+// The 4h weekend leg of the combined strategy: this round's decision and latest checkpoint evaluation.
+data class FutureBtc5mFourHour(
+    val periodStart: Long,
+    val weekend: Boolean,
+    val decision: FutureBtc5mFourHourDecision?,
+    val lastEvaluation: FutureBtc5mFourHourEvaluation?
+)
+
+data class FutureBtc5mFourHourDecision(val checkpointAt: Long, val side: String)
+
+data class FutureBtc5mFourHourEvaluation(
+    val checkpointAt: Long,
+    val minute: Int,
+    val side: String?,
+    val pUp: Double,
+    val upAskCents: Double?,
+    val downAskCents: Double?,
+    val decision: String,
+    val reason: String?
 )
 
 data class FutureBtc5mSignal(

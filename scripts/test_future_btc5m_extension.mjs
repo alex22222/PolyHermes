@@ -2650,13 +2650,13 @@ test('the panel preserves safe quote diagnostics and shows Chinese causes withou
   assert.equal(fixture.writes(), 0);
 });
 
-test('the 0.7.3 manifest names both strategies, keeps price gates and the approved permissions', () => {
+test('the 0.8.0 manifest names all strategies, keeps price gates and the approved permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('./future-btc5m-extension/manifest.json', import.meta.url), 'utf8'));
-  assert.equal(manifest.version, '0.7.3');
+  assert.equal(manifest.version, '0.8.0');
   assert.equal(manifest.minimum_chrome_version, '116');
   assert.ok([...manifest.description].length < 132, `${[...manifest.description].length} characters`);
   assert.match(manifest.description, /60¢.*Polymarket 盘口价差 ≤3¢.*准备价 ±5¢/);
-  assert.match(manifest.description, /5 分钟或 15 分钟（反 1 小时）/);
+  assert.match(manifest.description, /5 分钟、15 分钟（反 1 小时）或周末 4 小时（高把握）/);
   assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*']);
   assert.deepEqual(manifest.permissions, ['power', 'debugger']);
   assert.deepEqual(manifest.content_scripts, [{matches: ['https://future.news/*'], js: ['content.js', 'buy_once.js'],
@@ -2755,5 +2755,22 @@ test('the worker routes 15m claims and preflights by the 15m page round only', a
   assert.equal(worker.requests.at(-1).url, 'http://127.0.0.1:8766/bridge/preflight');
   assert.equal(worker.handler({type: 'FUTURE_BTC5M_PREFLIGHT', payload: {...payload, pagePeriodStart: start - 900}}, sender, () => {}),
     undefined, 'the payload round must be the page round');
+  assert.equal(worker.requests.length, 2);
+});
+
+test('the worker routes 4h claims and preflights by the 4h page round only', async () => {
+  const worker = workerHandler(async () => ({ok: true, json: async () => ({bridgeId: 'future-btc5m'})}));
+  const start4 = Math.floor(now / 14400) * 14400;
+  const url4 = `https://future.news/zh/event/btc-updown-4h-${start4}`;
+  const sender = {url: url4, frameId: 0, tab: {id: 1, url: url4}};
+  await worker.send({type: 'FUTURE_BTC5M_PREPARATION_CLAIM', payload: {schemaVersion: 1, id: `future-btc4h-prepare:${start4}`}}, sender);
+  assert.equal(worker.requests.at(-1).url, 'http://127.0.0.1:8766/bridge/preparation/claim');
+  for (const id of [`future-btc15m-prepare:${start4}`, `future-btc4h-prepare:${start4 - 14400}`]) {
+    assert.equal(worker.handler({type: 'FUTURE_BTC5M_PREPARATION_CLAIM', payload: {schemaVersion: 1, id}}, sender, () => {}), undefined, id);
+  }
+  const payload = {schemaVersion: 2, marketUrl: url4, pagePeriodStart: start4, checkedAt: now, navigation: 'CURRENT',
+    ticketStatus: 'PASS', amountUsd: 1, selectedSide: 'Down', buyButtonEnabled: true, upQuoteCents: 10, downQuoteCents: 91};
+  await worker.send({type: 'FUTURE_BTC5M_PREFLIGHT', payload}, sender);
+  assert.equal(worker.requests.at(-1).url, 'http://127.0.0.1:8766/bridge/preflight');
   assert.equal(worker.requests.length, 2);
 });

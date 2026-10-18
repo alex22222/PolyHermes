@@ -191,14 +191,18 @@ class FutureBtc5mAssetsService(
         results
     }
 
-    // BTC 5-minute and 15-minute rounds (both strategies trade one of them).
+    // BTC 5-minute, 15-minute and 4-hour rounds (the strategies trade these).
     private fun btcSlug(value: String?): String? {
-        val match = value?.let { Regex("btc-updown-(5m|15m)-(0|[1-9][0-9]{0,14})").matchEntire(it) } ?: return null
+        val match = value?.let { Regex("btc-updown-(5m|15m|4h)-(0|[1-9][0-9]{0,14})").matchEntire(it) } ?: return null
         val start = match.groupValues[2].toLongOrNull()
         return value.takeIf { start != null && start % roundSeconds(value) == 0L }
     }
 
-    private fun roundSeconds(slug: String): Long = if (slug.startsWith("btc-updown-15m-")) 900 else 300
+    private fun roundSeconds(slug: String): Long = when {
+        slug.startsWith("btc-updown-15m-") -> 900
+        slug.startsWith("btc-updown-4h-") -> 14400
+        else -> 300
+    }
 
     private fun price(value: Double?) = value?.takeIf { it.isFinite() && it in 0.0..1.0 }
     private fun fresh(wallet: FutureBtc5mWalletSnapshot): Boolean {

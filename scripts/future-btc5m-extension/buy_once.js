@@ -37,13 +37,24 @@
   // Quotes have at most two decimals; boundaries compare whole hundredths, never float sums.
   const hundredths = (value) => Math.round(value * 100);
   const sideCents = (record) => record.side === 'Up' ? record.upQuoteCents : record.downQuoteCents;
-  // Round series of the two strategies (same table as content.js and future_btc5m_series.py).
+  // Round series of the strategies (same table as content.js and future_btc5m_series.py).
   const SERIES = {
     '5m': {period: 300, entry: [60, 80], slug: 'btc-updown-5m-', id: 'future-btc5m-prepare:',
       openSource: 'polymarket_crypto_price_fiveminute_twap60_openPrice'},
     '15m': {period: 900, entry: [150, 170], slug: 'btc-updown-15m-', id: 'future-btc15m-prepare:',
       openSource: 'polymarket_crypto_price_fifteen_twap60_openPrice'},
+    '4h': {period: 14400, entry: null, slug: 'btc-updown-4h-', id: 'future-btc4h-prepare:',
+      openSource: 'polymarket_crypto_price_fourhour_twap60_openPrice'},
   };
+  // Absolute entry window containing `at`; a 4h window is the 2-minute window of a decision
+  // checkpoint at minute 5 or 10 of a quarter hour (same rule as content.js).
+  function entryWindow(series, start, at) {
+    if (series !== '4h') return [start + SERIES[series].entry[0], start + SERIES[series].entry[1]];
+    const offset = at - start;
+    const minute = Math.floor(offset / 300) * 5;
+    if (!Number.isFinite(offset) || minute < 5 || minute > 235 || minute % 15 === 0 || offset - minute * 60 >= 120) return null;
+    return [start + minute * 60, start + minute * 60 + 120];
+  }
   function idRound(id) {
     for (const [series, value] of Object.entries(SERIES)) {
       const digits = typeof id === 'string' && id.startsWith(value.id) ? id.slice(value.id.length) : null;
@@ -67,8 +78,12 @@
     const round = idRound(record?.id);
     if (!round || !Number.isFinite(now)) return null;
     const {series} = round;
-    const {period, entry: [first, last]} = SERIES[series];
+    const {period} = SERIES[series];
     const start = Math.floor(now / period) * period;
+    // Absolute window; a 4h READY belongs to the checkpoint window it was created in.
+    const window = Number.isFinite(record?.createdAt) ? entryWindow(series, start, record.createdAt) : null;
+    if (!window) return null;
+    const [first, last] = window;
     // The READY round must belong to the strategy the bridge currently runs.
     if ((preparation.series ?? '5m') !== series ||
         !Number.isFinite(now) || wrapper?.bridgeId !== 'future-btc5m' || !Number.isFinite(wrapper.serverTime) ||
@@ -79,15 +94,15 @@
         record.schemaVersion !== 2 || record.state !== 'READY' || record.reason !== null ||
         record.mode !== 'PREPARE_ONLY' || record.noSubmission !== true || record.operatorAuthorized !== true ||
         record.authorizationSource !== 'USER_REQUEST' || record.selectionSource !== 'HIGHER_BUTTON_PRICE' ||
-        record.periodStart !== start || record.periodEnd !== start + period || record.expiresAt !== start + last ||
+        record.periodStart !== start || record.periodEnd !== start + period || record.expiresAt !== last ||
         round.start !== start || record.slug !== `${SERIES[series].slug}${start}` || record.amountUsd !== 1 ||
         !quote(record.upQuoteCents) || !quote(record.downQuoteCents) || record.upQuoteCents === record.downQuoteCents ||
         record.side !== (record.upQuoteCents > record.downQuoteCents ? 'Up' : 'Down') ||
         record.priceSource !== 'chainlink' || record.openPriceSource !== SERIES[series].openSource ||
         record.twapLookbackSeconds !== 60 || !Number.isFinite(record.openPrice) || record.openPrice <= 0 ||
         !Number.isFinite(record.currentPrice) || record.currentPrice <= 0 ||
-        !Number.isFinite(record.createdAt) || record.createdAt < armedAt || record.createdAt < start + first ||
-        record.createdAt > now || record.createdAt >= start + last || now < start + first || now >= record.expiresAt ||
+        !Number.isFinite(record.createdAt) || record.createdAt < armedAt || record.createdAt < first ||
+        record.createdAt > now || record.createdAt >= last || now < first || now >= record.expiresAt ||
         !fresh(record.priceObservedAt, now) || record.priceObservedAt > record.createdAt ||
         !fresh(record.quoteObservedAt, now) || record.quoteObservedAt > record.createdAt ||
         !Number.isFinite(record.claimedAt) || record.claimedAt < record.createdAt || record.claimedAt > record.updatedAt ||
@@ -99,7 +114,7 @@
         ![`https://future.news/zh/event/${record.slug}`, `https://future.news/zh/event/${record.slug}/`,
           `https://future.news/event/${record.slug}`, `https://future.news/event/${record.slug}/`].includes(record.receipt.marketUrl) ||
         record.receipt.amountUsd !== 1 || record.receipt.selectedSide !== record.side ||
-        !Number.isFinite(record.receipt.checkedAt) || record.receipt.checkedAt < start + first ||
+        !Number.isFinite(record.receipt.checkedAt) || record.receipt.checkedAt < first ||
         record.receipt.checkedAt >= record.expiresAt || Math.abs(now - record.receipt.checkedAt) > 5 ||
         record.receipt.checkedAt < record.claimedAt - 3 || Math.abs(record.receipt.checkedAt - record.updatedAt) > 3) return null;
     return record;
@@ -206,8 +221,9 @@
           !['PLATFORM_RESULT_UNKNOWN', 'CLICK_THROWN_RESULT_UNKNOWN'].includes(value.reason) ||
           !Number.isSafeInteger(value.periodStart) || value.periodStart < 0 || value.periodStart % spec.period ||
           !['Up', 'Down'].includes(value.side) || value.amountUsd !== 1 || typeof value.baselineEmpty !== 'boolean' ||
-          !Number.isFinite(value.attemptedAt) || value.attemptedAt < value.periodStart + spec.entry[0] ||
-          value.attemptedAt >= value.periodStart + spec.entry[1] ||
+          !Number.isFinite(value.attemptedAt) ||
+          !(entryWindow(value.series, value.periodStart, value.attemptedAt)?.[0] <= value.attemptedAt) ||
+          !(value.attemptedAt < entryWindow(value.series, value.periodStart, value.attemptedAt)?.[1]) ||
           value.fill !== null && (!value.baselineEmpty || value.reason !== 'PLATFORM_RESULT_UNKNOWN' || !validFill(value.fill, value.attemptedAt))) return null;
       const marker = JSON.parse((env.storage ?? globalThis.localStorage).getItem(markerKey(value.series)) ?? 'null');
       const markerRound = idRound(marker?.id);
