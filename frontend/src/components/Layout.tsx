@@ -191,7 +191,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     {
       key: '/future-btc5m-bridge',
       icon: <SwapOutlined />,
-      label: 'Future BTC 5 分钟'
+      label: 'Future BTC 策略'
     },
     {
       key: '/statistics',
