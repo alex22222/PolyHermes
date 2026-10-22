@@ -1871,6 +1871,26 @@ test('a persisted 15m strategy skip stays visible after the window and a page re
   assert.equal(fixture.buyClicks(), 0);
 });
 
+test('a high-volatility 15m skip is shown as a strategy filter, not a market error', async () => {
+  const round = start - start % 900;
+  const time = round + 175;
+  const fixture = ticketFixture();
+  const waiting = {...preparation, serverTime: time, preparation: {...preparation.preparation,
+    state: 'WAITING_BROWSER', intent: null, series: '15m', strategy: 'btc15m_counter_1h',
+    reasons: ['HIGH_VOLATILITY']}};
+  const children = await renderedPanel(observing, 'https://future.news/zh/event/btc-updown-15m-' + round,
+    time, fixture.doc, {
+      globals: {FutureBtc5mBuyOnce: {createAutoBuyer: () => ({sync: () => ({state: 'WATCHING'}),
+        status: () => ({state: 'WATCHING'})})}},
+      reply(message) { return {ok: true, status: message.type === 'FUTURE_BTC5M_PREPARATION' ? waiting :
+        {...observing, series: '15m', round_series: '15m', period_start: round, server_time: time, signal: null}}; },
+    });
+  assert.match(children.currentSummary.textContent, /未点击.*策略过滤/);
+  assert.match(children.currentSummary.textContent, /波动过大/);
+  assert.doesNotMatch(children.currentSummary.textContent, /行情异常|窗口内原因未记录/);
+  assert.equal(fixture.buyClicks(), 0);
+});
+
 test('the worker forwards strict Buy attempt audits from any BTC5m page and rejects unscoped audit data', async () => {
   let handler;
   const requests = [];
@@ -2650,9 +2670,9 @@ test('the panel preserves safe quote diagnostics and shows Chinese causes withou
   assert.equal(fixture.writes(), 0);
 });
 
-test('the 0.8.0 manifest names all strategies, keeps price gates and the approved permissions', () => {
+test('the 0.8.1 manifest names all strategies, keeps price gates and the approved permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('./future-btc5m-extension/manifest.json', import.meta.url), 'utf8'));
-  assert.equal(manifest.version, '0.8.0');
+  assert.equal(manifest.version, '0.8.1');
   assert.equal(manifest.minimum_chrome_version, '116');
   assert.ok([...manifest.description].length < 132, `${[...manifest.description].length} characters`);
   assert.match(manifest.description, /60¢.*Polymarket 盘口价差 ≤3¢.*准备价 ±5¢/);

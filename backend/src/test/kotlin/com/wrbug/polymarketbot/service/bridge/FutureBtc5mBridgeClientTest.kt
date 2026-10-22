@@ -601,6 +601,10 @@ class FutureBtc5mBridgeClientTest {
         assertEquals(listOf("SAME_AS_1H_FAVORITE"), client.status().preparation.reasons)
         responseBody = mapper.writeValueAsString(status15(true, "WAITING_BROWSER", null, null, listOf("HOUR_QUOTE_UNAVAILABLE")))
         assertEquals(listOf("HOUR_QUOTE_UNAVAILABLE"), client.status().preparation.reasons)
+        listOf("HIGH_VOLATILITY", "BTC_VOLATILITY_UNAVAILABLE").forEach { reason ->
+            responseBody = mapper.writeValueAsString(status15(true, "WAITING_BROWSER", null, null, listOf(reason)))
+            assertEquals(listOf(reason), client.status().preparation.reasons)
+        }
     }
 
     @Test

@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 import websockets
 from future_btc5m_bridge import FutureBridge, PreparationConflict, strict_json_object
+from future_btc5m_conditions import FIRST_FETCH_OFFSET, kline_url as condition_kline_url, round_conditions
 from future_btc5m_fourhour import kline_urls, model_state
 from future_btc5m_series import (CHECKPOINT_WINDOW, HOUR, SERIES, STRATEGY_SERIES, checkpoint_window, entry_bounds,
                                  hourly_slug, round_start_of, slug_for)
@@ -114,6 +115,54 @@ class FourHourModel:
         if state and state["periodStart"] == round_start_of(now, "4h") and 0 <= now - state["checkpointAt"] < CHECKPOINT_WINDOW:
             return state
         return None
+
+
+class RoundConditions:
+    """BTC conditions for the current 15m round (future_btc5m_conditions), fetched once from Binance
+    1m klines after the candle opening at start + 60 closes. Failures retry every 5 s until the entry
+    window ends; without a result the bridge waits and does not buy."""
+
+    def __init__(self, fetch_json, now_fn=time.time):
+        self.fetch_json = fetch_json
+        self.now_fn = now_fn
+        self.lock = threading.Lock()
+        self.state = None
+        self.error = None
+        self.busy = False
+        self.attempted = None
+
+    def warm(self):
+        now = self.now_fn()
+        start = round_start_of(now, "15m")
+        if not start + FIRST_FETCH_OFFSET <= now < entry_bounds(start, "15m")[1]:
+            return False
+        with self.lock:
+            attempt = (start, int(now // 5))
+            if self.busy or self.state and self.state["periodStart"] == start or self.attempted == attempt:
+                return False
+            self.busy = True
+            self.attempted = attempt
+        threading.Thread(target=self._compute, args=(start,), daemon=True).start()
+        return True
+
+    def _compute(self, start):
+        try:
+            fetched_at = self.now_fn()
+            state = round_conditions(start, self.fetch_json(condition_kline_url(start)), fetched_at)
+            with self.lock:
+                self.state, self.error = state, None
+        except Exception as error:
+            with self.lock:
+                self.error = str(error) if str(error) in ("KLINES_INCOMPLETE", "INVALID_KLINE") else "CONDITIONS_SOURCE_UNAVAILABLE"
+        finally:
+            with self.lock:
+                self.busy = False
+
+    def latest(self):
+        """The current 15m round's conditions, if fetched."""
+        with self.lock:
+            state = copy.deepcopy(self.state)
+        return state if state and state["periodStart"] == round_start_of(self.now_fn(), "15m") else None
 
 
 def positive_number(value):
@@ -592,6 +641,8 @@ class Assistant:
         self.hour_quote_fn = lambda: None
         # The 4h checkpoint model and 4h CLOB book, when the strategy includes the 4h series.
         self.four_hour_fn = lambda: (None, None)
+        # The current 15m round's BTC conditions (volatility rule), when the strategy includes 15m.
+        self.conditions_fn = lambda: None
         self.seen = set()
         # Every start is weekend-only again, as every start turns the auto-ticket switch off.
         self.weekend_only = True
@@ -648,6 +699,8 @@ class Assistant:
             model, quote = self.four_hour_fn()
             result["four_hour"] = copy.deepcopy(model) if isinstance(model, dict) else None
             result["four_hour_quote"] = copy.deepcopy(quote) if isinstance(quote, dict) else None
+            conditions = self.conditions_fn()
+            result["round_conditions"] = copy.deepcopy(conditions) if isinstance(conditions, dict) else None
             return result
 
     def save_state(self):
@@ -1002,6 +1055,9 @@ async def run(args):
         four_hour_model = FourHourModel(curl_json)
         four_hour_quotes = ClobMarketQuotes(curl_json, series_fn=lambda: "4h")
         assistant.four_hour_fn = lambda: (four_hour_model.latest(), four_hour_quotes.latest(5)) if "4h" in legs() else (None, None)
+        # The 15m decision skips high-volatility rounds (rule R1), from Binance 1m klines.
+        conditions = RoundConditions(curl_json)
+        assistant.conditions_fn = lambda: conditions.latest() if "15m" in legs() else None
         server = make_server(assistant, bridge=bridge, market_quote=market_quotes.quote)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         runtime_server = await start_runtime_server()
@@ -1012,6 +1068,7 @@ async def run(args):
             if "15m" in legs():
                 first, last = entry_bounds(round_start_of(now, "15m"), "15m")
                 hour_quotes.warm(refresh=first - 10 <= now < last)
+                conditions.warm()
             if "4h" in legs():
                 start = round_start_of(now, "4h")
                 window = checkpoint_window(start, now + 5)

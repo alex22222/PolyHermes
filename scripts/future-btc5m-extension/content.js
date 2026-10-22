@@ -960,6 +960,8 @@
     INTENT_EXPIRED: ['时间安排', '已过本轮入场截止时间'],
     SAME_AS_1H_FAVORITE: ['策略过滤', '15 分钟热门方向与 1 小时热门方向相同，本轮跳过'],
     HOUR_QUOTE_UNAVAILABLE: ['行情异常', '1 小时盘口不可用，无法判断方向'],
+    HIGH_VOLATILITY: ['策略过滤', 'BTC 过去 60 分钟波动过大（高于 4.16 基点/分钟），本轮跳过'],
+    BTC_VOLATILITY_UNAVAILABLE: ['行情异常', 'BTC 波动数据不可用，无法判断是否跳过'],
     FOUR_HOUR_SIDE_MISMATCH: ['策略过滤', '4 小时页面热门方向与模型方向不一致，本轮不买'],
     DECISION_LEDGER_INVALID: ['本地异常', '策略决策账本无法读取'],
     DECISION_LEDGER_WRITE_FAILED: ['本地异常', '策略决策账本写入失败'],
@@ -1067,8 +1069,9 @@
         '本地准备服务未连接或状态已过期；无法确认本轮操作'];
     } else if (value.reasons?.includes('STOP_FILE_PRESENT')) outcome = ['未点击 · 已停止', '助手已停止'];
     else if (!value.enabled) outcome = ['未点击 · 自动功能关闭', '在 PolyHermes 开启“自动准备票据”后才会自动买入'];
-    else if (value.reasons?.includes('SAME_AS_1H_FAVORITE')) {
-      outcome = ['未点击 · 策略过滤', outcomeReason('SAME_AS_1H_FAVORITE')[1]];
+    else if (value.reasons?.includes('SAME_AS_1H_FAVORITE') || value.reasons?.includes('HIGH_VOLATILITY')) {
+      const reason = value.reasons.includes('SAME_AS_1H_FAVORITE') ? 'SAME_AS_1H_FAVORITE' : 'HIGH_VOLATILITY';
+      outcome = ['未点击 · 策略过滤', outcomeReason(reason)[1]];
     } else if (elapsed >= last80) {
       // Only observations made inside this round's entry window can explain a missed entry.
       const observed = orderTypeAttempt.periodStart === start ? [...windowBlockerOutcomes] : [];
@@ -1315,6 +1318,7 @@
         PREPARATION_LEDGER_WRITE_FAILED: '准备账本写入失败（PREPARATION_LEDGER_WRITE_FAILED）',
         PREFLIGHT_LEDGER_WRITE_FAILED: '预检账本写入失败（PREFLIGHT_LEDGER_WRITE_FAILED）',
         SAME_AS_1H_FAVORITE: '15 分钟热门方向与 1 小时相同，本轮跳过', HOUR_QUOTE_UNAVAILABLE: '1 小时盘口不可用',
+        HIGH_VOLATILITY: 'BTC 过去 60 分钟波动过大，本轮跳过', BTC_VOLATILITY_UNAVAILABLE: 'BTC 波动数据不可用',
         FOUR_HOUR_SIDE_MISMATCH: '4 小时页面热门方向与模型方向不一致'};
       const blockers = ticketBlockers(document, location.href, now);
       const codes = [...new Set([...(Array.isArray(value.reasons) ? value.reasons.filter((reason) => typeof reason === 'string') : []),

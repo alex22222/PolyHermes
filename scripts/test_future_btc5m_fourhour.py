@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from future_btc5m_assistant import Assistant, ClobMarketQuotes, FourHourModel, GAMMA, iso, validate_market
 from future_btc5m_bridge import FutureBridge, PreparationConflict
 from future_btc5m_fourhour import MODEL, evaluate, kline_urls, model_state, up_probability
+from test_future_btc5m_strategy import conditions15
 from future_btc5m_series import (CHECKPOINT_MINUTES, STRATEGY_SERIES, checkpoint_window, entry_bounds,
                                  market_url_round, series_of_preparation_id)
 
@@ -289,7 +290,7 @@ class CombinedBridgeTest(unittest.TestCase):
         self.clock = S4 + 900 + 151
         hour = {"schemaVersion": 1, "source": "polymarket_clob_book", "periodStart": S4, "slug": "x",
                 "upAskCents": 40, "downAskCents": 61, "upBidCents": None, "downBidCents": None, "observedAt": self.clock}
-        self.source = {**source(self.clock, four=False), "hour_quote": hour,
+        self.source = {**source(self.clock, four=False), "hour_quote": hour, "round_conditions": conditions15(start=S4 + 900),
                        "signal": {"id": f"15m:{S4 + 900}", "slug": f"btc-updown-15m-{S4 + 900}", "series": "15m",
                                   "period_start": S4 + 900, "period_end": S4 + 1800, "side": "Up", "open_price": 83000,
                                   "current_price": 83001, "open_price_source": "polymarket_crypto_price_fifteen_twap60_openPrice",

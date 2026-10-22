@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from future_btc5m_assistant import Assistant, GAMMA, GEOBLOCK
 from future_btc5m_bridge import FutureBridge
-from test_future_btc5m_strategy import S, browser15, gamma15, hour_quote
+from test_future_btc5m_strategy import S, browser15, conditions15, gamma15, hour_quote
 
 
 class SourceRetryTest(unittest.IsolatedAsyncioTestCase):
@@ -25,6 +25,7 @@ class SourceRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assistant.series_fn = lambda: "15m"
         self.assistant.weekend_only = False
         self.assistant.hour_quote_fn = lambda: hour_quote(self.clock)
+        self.assistant.conditions_fn = lambda: conditions15()
         self.real_sleep = asyncio.sleep
         self.sleep_patch = patch("future_btc5m_assistant.asyncio.sleep", new=self.delay)
         self.sleep_patch.start()

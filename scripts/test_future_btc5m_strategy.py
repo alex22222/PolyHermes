@@ -30,11 +30,17 @@ def hour_quote(at, up=40, down=61, start=S):
             "upAskCents": up, "downAskCents": down, "upBidCents": None, "downBidCents": None, "observedAt": at}
 
 
-def source15(at, hour=True, **hour_changes):
+def conditions15(volatility=3.0, start=S):
+    return {"source": "binance_btcusdt_1m", "periodStart": start, "lastCandleOpen": start + 60, "observedAt": start + 121,
+            "volatilityBp": volatility, "volatilityMaxBp": 4.16, "trend15Bp": -6.5, "trend60Bp": 12.0, "takerFlow": -0.1}
+
+
+def source15(at, hour=True, conditions=..., **hour_changes):
     return {"schema_version": 1, "mode": "ASSIST_ONLY", "live_enabled": False, "amount_usd": 1,
             "server_time": at, "period_start": S, "round_series": "15m", "series": "15m",
             "status": "OBSERVING", "feed_status": "CURRENT", "future_eligibility": {"status": "UNKNOWN"},
-            "signal": signal15(at), "hour_quote": hour_quote(at, **hour_changes) if hour else None}
+            "signal": signal15(at), "hour_quote": hour_quote(at, **hour_changes) if hour else None,
+            "round_conditions": conditions15() if conditions is ... else conditions}
 
 
 def browser15(at, **changes):
@@ -142,6 +148,47 @@ class FifteenMinuteBridgeTest(unittest.TestCase):
         self.assertEqual(["HOUR_QUOTE_UNAVAILABLE"], self.bridge.observe()["preparation"]["reasons"], "stale")
         self.assertEqual([], self.decisions())
         self.assertEqual({}, self.bridge.preparations)
+
+    def test_a_high_volatility_round_is_skipped_for_good_even_against_the_1h_favorite(self):
+        status = self.at(151, conditions=conditions15(4.5))
+        self.assertEqual({}, self.bridge.preparations)
+        self.assertEqual(["HIGH_VOLATILITY"], status["preparation"]["reasons"])
+        [decision] = self.decisions()
+        self.assertEqual(("SKIP_HIGH_VOLATILITY", "Down"), (decision["decision"], decision["hourSide"]))
+        self.assertEqual((4.5, 4.16, -6.5, 12.0, -0.1, S + 121), tuple(decision["conditions"][key] for key in (
+            "volatilityBp", "volatilityMaxBp", "trend15Bp", "trend60Bp", "takerFlow", "observedAt")))
+        self.at(155, conditions=conditions15(2.0))
+        self.assertEqual({}, self.bridge.preparations, "calmer data later in the window does not reopen the round")
+        self.clock = S + 171
+        self.assertEqual(["HIGH_VOLATILITY"], self.bridge.observe()["preparation"]["reasons"])
+        restarted = FutureBridge(self.dir, lambda: self.source, lambda: self.clock)
+        self.assertEqual("SKIP_HIGH_VOLATILITY", restarted.decisions[("15m", S)])
+
+    def test_volatility_at_the_threshold_is_bought_and_the_1h_rule_is_checked_first(self):
+        self.at(151, conditions=conditions15(4.16))
+        self.assertEqual("PREPARE", self.decisions()[0]["decision"])
+        self.assertIn(f"future-btc15m-prepare:{S}", self.bridge.preparations)
+        other = FutureBridge(self.dir / "other", lambda: self.source, lambda: self.clock)
+        other.set_strategy("btc15m_counter_1h")
+        other.control(True)
+        self.source = source15(S + 151, conditions=conditions15(9.0), up=70, down=31)
+        other.report_preflight(browser15(S + 151))
+        self.assertEqual(["SAME_AS_1H_FAVORITE"], other.observe()["preparation"]["reasons"])
+        [decision] = [json.loads(line) for line in (self.dir / "other/strategy_decisions.jsonl").read_text().splitlines()]
+        self.assertEqual(("SKIP_SAME_AS_1H", 9.0), (decision["decision"], decision["conditions"]["volatilityBp"]))
+
+    def test_missing_or_wrong_round_volatility_waits_without_deciding(self):
+        for conditions, label in [(None, "missing"), (conditions15(start=S - 900), "previous round"),
+                                  ({**conditions15(), "source": "other"}, "other source"),
+                                  ({**conditions15(), "volatilityBp": "3.0"}, "not a number"),
+                                  ({**conditions15(), "volatilityBp": -1}, "negative")]:
+            with self.subTest(label):
+                status = self.at(151, conditions=conditions)
+                self.assertEqual(["BTC_VOLATILITY_UNAVAILABLE"], status["preparation"]["reasons"])
+        self.assertEqual([], self.decisions())
+        self.assertEqual({}, self.bridge.preparations)
+        self.at(158)
+        self.assertEqual("PREPARE", self.decisions()[0]["decision"], "a late result inside the window still decides")
 
     def test_a_5m_page_or_a_5m_signal_is_not_current_for_the_15m_strategy(self):
         self.clock = S + 151

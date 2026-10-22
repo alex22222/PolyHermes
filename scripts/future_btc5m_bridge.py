@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 
+from future_btc5m_conditions import SOURCE as CONDITIONS_SOURCE, VOLATILITY_MAX_BP
 from future_btc5m_fourhour import SOURCE as FOUR_HOUR_SOURCE, evaluate as evaluate_four_hour
 from future_btc5m_series import (CHECKPOINT_WINDOW, DEFAULT_STRATEGY, HOUR, SERIES, STRATEGIES, STRATEGY_SERIES,
                                  checkpoint_window, entry_bounds, is_et_weekend, market_url_round,
@@ -18,6 +19,8 @@ from future_btc5m_series import (CHECKPOINT_WINDOW, DEFAULT_STRATEGY, HOUR, SERI
 
 BRIDGE_ID = "future-btc5m"
 OPEN_PRICE_SOURCE = "polymarket_crypto_price_fiveminute_twap60_openPrice"
+# A 15m round skipped by its once-per-round decision, and the reason shown for it.
+SKIP_REASONS = {"SKIP_SAME_AS_1H": "SAME_AS_1H_FAVORITE", "SKIP_HIGH_VOLATILITY": "HIGH_VOLATILITY"}
 FILL_FIELDS = ("submittedAt", "filledAt", "platformOrderId", "filledQuantity", "avgFilledPrice", "feeUsd")
 PREFLIGHT_FIELDS = {"schemaVersion", "marketUrl", "pagePeriodStart", "checkedAt", "navigation",
                     "ticketStatus", "amountUsd", "selectedSide", "buyButtonEnabled"}
@@ -345,8 +348,8 @@ class FutureBridge:
             return ["AUTO_PREPARATION_DISABLED"]
         series = self._series_at(now)
         # This round's persisted refusal remains the cause after its source sample expires.
-        if series == "15m" and self.decisions.get(("15m", self._start(now))) == "SKIP_SAME_AS_1H":
-            return ["SAME_AS_1H_FAVORITE"]
+        if series == "15m" and self.decisions.get(("15m", self._start(now))) in SKIP_REASONS:
+            return [SKIP_REASONS[self.decisions[("15m", self._start(now))]]]
         if not self._current_signal(source, now, allow_flat=True):
             return ["WAITING_CURRENT_SIGNAL"]
         report = self.browser_report
@@ -365,6 +368,8 @@ class FutureBridge:
             decision = self.decisions.get(("15m", self._start(now)))
             if decision is None and self._hour_side(source, now) is None:
                 return ["HOUR_QUOTE_UNAVAILABLE"]
+            if decision is None and self._conditions(source, now) is None:
+                return ["BTC_VOLATILITY_UNAVAILABLE"]
         if series == "4h" and higher_button_side(report["upQuoteCents"], report["downQuoteCents"]) != \
                 self.four_hour[self._start(now)][1]:
             return ["FOUR_HOUR_SIDE_MISMATCH"]
@@ -382,15 +387,30 @@ class FutureBridge:
             return None
         return "Up" if up > down else "Down"
 
+    def _conditions(self, source, now):
+        """The current 15m round's BTC conditions from the assistant (Binance 1m klines)."""
+        value = source.get("round_conditions")
+        if (not isinstance(value, dict) or value.get("source") != CONDITIONS_SOURCE
+                or value.get("periodStart") != self._start(now) or not finite_number(value.get("volatilityBp"))
+                or value["volatilityBp"] < 0):
+            return None
+        return value
+
     def _record_decision(self, start, now, side, source):
         quote = source["hour_quote"]
         hour_side = self._hour_side(source, now)
-        decision = "PREPARE" if hour_side != side else "SKIP_SAME_AS_1H"
+        conditions = self._conditions(source, now)
+        # Rule R1: a high-volatility round is skipped even when it is opposite the 1h favorite.
+        decision = ("SKIP_SAME_AS_1H" if hour_side == side
+                    else "SKIP_HIGH_VOLATILITY" if conditions["volatilityBp"] > VOLATILITY_MAX_BP else "PREPARE")
         record = {"strategy": self.strategy, "series": "15m", "periodStart": start, "decidedAt": now,
                   "buttonSide": side, "upQuoteCents": self.browser_report["upQuoteCents"],
                   "downQuoteCents": self.browser_report["downQuoteCents"], "hourStart": quote["periodStart"],
                   "hourUpAskCents": quote["upAskCents"], "hourDownAskCents": quote["downAskCents"],
-                  "hourObservedAt": quote["observedAt"], "hourSide": hour_side, "decision": decision}
+                  "hourObservedAt": quote["observedAt"], "hourSide": hour_side,
+                  "conditions": {key: conditions[key] for key in ("volatilityBp", "volatilityMaxBp", "trend15Bp",
+                                                                   "trend60Bp", "takerFlow", "observedAt")},
+                  "decision": decision}
         ledger_path = self.state_dir / "strategy_decisions.jsonl"
         with ledger_path.open("a", encoding="utf-8") as ledger:
             ledger.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
