@@ -2670,9 +2670,9 @@ test('the panel preserves safe quote diagnostics and shows Chinese causes withou
   assert.equal(fixture.writes(), 0);
 });
 
-test('the 0.8.1 manifest names all strategies, keeps price gates and the approved permissions', () => {
+test('the 0.8.2 manifest names all strategies, keeps price gates and the approved permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('./future-btc5m-extension/manifest.json', import.meta.url), 'utf8'));
-  assert.equal(manifest.version, '0.8.1');
+  assert.equal(manifest.version, '0.8.2');
   assert.equal(manifest.minimum_chrome_version, '116');
   assert.ok([...manifest.description].length < 132, `${[...manifest.description].length} characters`);
   assert.match(manifest.description, /60¢.*Polymarket 盘口价差 ≤3¢.*准备价 ±5¢/);

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PolyHermes Future BTC 5m 助手",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "minimum_chrome_version": "116",
   "description": "按项目策略进入 BTC 5 分钟、15 分钟（反 1 小时）或周末 4 小时（高把握）市场填 $1；热门价 ≥60¢、页面与 Polymarket 盘口价差 ≤3¢ 且在准备价 ±5¢ 内时自动点击一次买入。",
   "host_permissions": ["http://127.0.0.1/*"],

@@ -701,6 +701,8 @@ test('the page shows the confirmed strategy and switches it only through the bri
   const select = () => page.elements((node) => node.type === 'Select' && node.props.placeholder === '策略未知')[0];
   assert.equal(select().props.value, 'btc15m_counter_1h');
   assert.equal(page.field('当前策略'), '15 分钟盘 · 反 1 小时方向（默认）');
+  const rule = page.elements((node) => node.type === 'Alert' && /开启后会前往当前策略的市场/.test(node.props.description ?? ''))[0];
+  assert.match(rule.props.description, /波动不高于 4\.16 基点\/分钟（R1 高波动过滤）/, 'the 15m rule must state the R1 skip');
   assert.equal(JSON.stringify(select().props.options.map((option) => option.value)),
     '["btc15m_counter_1h","btc15m_plus_4h","btc5m_favorite"]');
   select().props.onChange('btc5m_favorite');

@@ -59,6 +59,7 @@ test('confirmed BTC15m presentation stays consistent after extension invalidatio
   }
   assert.match(panel.note.textContent, /上次确认|未核实/);
   assert.match(panel.note.textContent, /150–170/);
+  assert.match(panel.note.textContent, /4\.16 基点\/分钟（R1 高波动过滤）/, 'the 15m note must state the R1 skip');
   assert.match(panel.current.textContent, /19:15–19:30/);
   assert.match(panel.current.textContent, /开关未核实/);
   assert.match(panel.diagnostic.textContent, /扩展.*失效.*刷新/);

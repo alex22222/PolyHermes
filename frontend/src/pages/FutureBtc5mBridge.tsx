@@ -63,11 +63,11 @@ const errorText = (error: unknown, fallback: string): string =>
 const strategyText: Record<FutureBtc5mStrategy, { label: string, rule: string }> = {
   btc15m_counter_1h: {
     label: '15 分钟盘 · 反 1 小时方向（默认）',
-    rule: '每轮第 150–170 秒读取 15 分钟盘按钮数字较大的一方；只有它与同一时刻 1 小时盘的热门方向相反时才准备 $1 并自动买入，方向相同则本轮跳过。',
+    rule: '每轮第 150–170 秒读取 15 分钟盘按钮数字较大的一方；只有它与同一时刻 1 小时盘的热门方向相反，且 BTC 过去 60 分钟波动不高于 4.16 基点/分钟（R1 高波动过滤）时，才准备 $1 并自动买入；方向相同或波动过高则本轮跳过。',
   },
   btc15m_plus_4h: {
     label: '15 分钟盘反 1 小时 + 周末 4 小时高把握',
-    rule: '15 分钟部分同上。周末 4 小时盘在每刻钟第 5、10 分钟按 Binance 价格模型判断：模型把握 ≥95% 且比 Polymarket 卖价高 ≥3¢ 时，接下来 2 分钟切到 4 小时盘准备 $1 并自动买入，每轮最多一次。',
+    rule: '15 分钟部分同上（含 R1 高波动过滤）。周末 4 小时盘在每刻钟第 5、10 分钟按 Binance 价格模型判断：模型把握 ≥95% 且比 Polymarket 卖价高 ≥3¢ 时，接下来 2 分钟切到 4 小时盘准备 $1 并自动买入，每轮最多一次。',
   },
   btc5m_favorite: {
     label: '5 分钟盘 · 买热门方向',
