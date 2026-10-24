@@ -143,7 +143,7 @@ while true; do
     # launchd job restart the child when the fail-closed health probe fails.
     NOW=$(date +%s)
     if (( NOW - STARTED_AT >= STARTUP_GRACE_SECONDS )); then
-        if curl -fsS --max-time 5 "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1; then
+        if curl -fsS --max-time 5 "http://127.0.0.1:${BRIDGE_PORT}/live" >/dev/null 2>&1; then
             record_health_probe success
             if (( NOW - LAST_HEALTH_OK_EVENT_AT >= 3600 )); then
                 record_health_event health_ok

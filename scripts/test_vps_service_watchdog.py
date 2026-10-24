@@ -42,6 +42,35 @@ class FakeHttpResponse:
 
 
 class VpsServiceWatchdogTest(unittest.TestCase):
+    def test_upstream_or_stale_portfolio_alerts_without_restart(self):
+        for reason in ("upstream_http_429", "portfolio_stale", "portfolio_missing"):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as tmp:
+                status = {"ready": False, "executor_ready": True, "logged_in": True,
+                          "trading_ready": False, "trading_block_reasons": [reason]}
+                issue = watchdog_module.bridge_runtime_issue(status)
+                self.assertTrue(issue.startswith("bridge_trading:"))
+                restart = mock.Mock()
+                notifier = FakeNotifier()
+                monitor = watchdog_module.Watchdog(
+                    config=self.config(Path(tmp) / "state.json", threshold=1, auto_restart_bridge=True),
+                    notifier=notifier, issue_collector=lambda: [issue], bridge_restarter=restart,
+                )
+                monitor.run_once()
+                restart.assert_not_called()
+                self.assertIn("跟单不可用", notifier.messages[0][0])
+                self.assertIn("不自动重启", notifier.messages[0][1])
+
+    def test_restart_guard_rejects_upstream_denial_before_login_probe(self):
+        monitor = watchdog_module.Watchdog(config=self.config(Path("/tmp/unused")), notifier=FakeNotifier())
+        status = {"ready": False, "executor_ready": True, "logged_in": True,
+                  "trading_ready": False, "trading_block_reasons": ["upstream_http_429"]}
+        with mock.patch.object(monitor, "_fetch_json", return_value=status), \
+                mock.patch.object(monitor, "_post_json") as post, \
+                mock.patch.object(monitor, "_command") as command:
+            self.assertFalse(monitor.restart_bridge())
+        post.assert_not_called()
+        command.assert_not_called()
+
     def config(self, state_file, threshold=2, auto_restart_bridge=False):
         return watchdog_module.Config(
             state_file=state_file,

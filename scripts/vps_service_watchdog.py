@@ -15,6 +15,9 @@ from pathlib import Path
 
 def bridge_runtime_issue(body):
     """Describe the actionable Bridge runtime problem without masking login loss."""
+    if body.get("executor_ready", body.get("ready")) is True and body.get("trading_ready") is False:
+        reasons = ", ".join(body.get("trading_block_reasons") or ["readiness_unknown"])
+        return f"bridge_trading: {reasons}"
     if body.get("ready") is not True:
         return "bridge_status: ready=false"
     if body.get("logged_in") is not True:
@@ -218,7 +221,8 @@ class Watchdog:
             return False
 
         app_issue = any(issue.startswith(self.APP_ISSUE_PREFIXES) for issue in issues)
-        bridge_issue = any(issue.startswith("bridge_") for issue in issues)
+        bridge_issue = any(issue.startswith("bridge_") and not issue.startswith("bridge_trading:") for issue in issues)
+        trading_issue = any(issue.startswith("bridge_trading:") for issue in issues)
         public_only = all(issue.startswith(("public_site:", "public_dns:")) for issue in issues)
         action = ""
         if app_issue and self.config.auto_restart_app and not state.get("app_restart_attempted"):
@@ -236,6 +240,8 @@ class Watchdog:
             )
         elif bridge_issue:
             action = "未自动重启 Bridge：自动自愈未启用或本次故障已尝试过一次。"
+        elif trading_issue:
+            action = "上游受限或持仓未就绪；保留登录资料，不自动重启 Bridge，不绕过保护或补单。"
         elif public_only:
             action = "本机服务检查正常；DNS/公网入口故障不能通过重启应用修复，未重启服务。"
 
@@ -252,7 +258,7 @@ class Watchdog:
         if should_alert:
             details = "\n".join(f"- {issue}" for issue in issues)
             sent = self.notifier.send(
-                "🚨 PolyHermes 公网访问异常" if public_only else "🚨 PolyHermes 服务不可用",
+                "🚨 PolyHermes 公网访问异常" if public_only else "🚨 PolyHermes 跟单不可用" if trading_issue and not app_issue and not bridge_issue else "🚨 PolyHermes 服务不可用",
                 f"主机: {socket.gethostname()}\n连续失败: {failures} 次\n{details}\n{action}".rstrip(),
             )
             if sent:
@@ -276,7 +282,7 @@ class Watchdog:
         )
         self._check_http(self.config.public_url, "public_site", issues)
         self._check_json(
-            f"{self.config.bridge_url}/health",
+            f"{self.config.bridge_url}/live",
             "bridge_health",
             lambda body: body.get("status") == "ok" and body.get("executor_ready") is True,
             issues,
@@ -305,6 +311,9 @@ class Watchdog:
         """Restart Bridge only after a fresh browser login check and a full drain."""
         try:
             status = self._fetch_json(f"{self.config.bridge_url}/status")
+            if status.get("trading_ready") is False and status.get("executor_ready") is True:
+                print("PolyHermes watchdog: upstream/portfolio degradation is not fixed by a browser restart")
+                return False
             metrics = self._fetch_json(f"{self.config.bridge_url}/metrics").get("metrics", {})
             if status.get("logged_in") is not True:
                 print("PolyHermes watchdog: Bridge restart refused because login is absent")

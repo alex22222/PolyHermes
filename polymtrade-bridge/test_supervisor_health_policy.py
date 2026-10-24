@@ -77,7 +77,7 @@ record_health_probe success
                 """#!/bin/bash
 set -e
 url="${@: -1}"
-if [[ "$url" == *"/health" ]]; then
+if [[ "$url" == *"/live" ]]; then
     exit 0
 fi
 if [[ "$url" == *"/admin/drain"* ]]; then
@@ -144,7 +144,7 @@ exit 0
                 """#!/bin/bash
 set -e
 url="${@: -1}"
-if [[ "$url" == *"/health" ]]; then
+if [[ "$url" == *"/live" ]]; then
     exit 0
 fi
 if [[ "$url" == *"/admin/drain"* ]]; then
