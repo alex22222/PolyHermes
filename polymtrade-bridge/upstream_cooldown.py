@@ -70,7 +70,9 @@ class UpstreamCooldown:
                      and proof.get("from_service_worker") is False and proof.get("transfer_size", 0) > 0
                      and proof.get("denied_at") == entry.get("last_denied_at")
                      and math.isfinite(started) and entry["last_denied_at"] < started <= now
-                     and now - started < 3600)
+                     # Retained tabs can be checked after the short response
+                     # listener ends, throughout the maximum six-hour pause.
+                     and now - started < 21600)
         except (KeyError, TypeError, ValueError):
             return False
         if not valid:

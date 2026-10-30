@@ -689,6 +689,7 @@ class PolymtradeExecutor:
     async def fetch_portfolio_positions(self, *, force_refresh: bool = False) -> dict:
         # Fresh execution reads must not bypass an upstream access-denial cooldown
         # or fall back to an old, previously complete holdings snapshot.
+        await self._complete_retained_portfolio_challenge()
         try:
             self._upstream_cooldown.check(f"{self.base_url}/portfolio")
         except UpstreamAccessDeferred as e:
@@ -731,6 +732,35 @@ class PolymtradeExecutor:
             return result
         finally:
             self._schedule_portfolio_page_idle_close()
+
+    async def _complete_retained_portfolio_challenge(self) -> None:
+        """Observe a late official completion without navigating or using old holdings."""
+        url = f"{self.base_url}/portfolio"
+        entry = self._upstream_cooldown.entries.get(urllib.parse.urlsplit(url).hostname, {})
+        page = self.portfolio_page
+        if (entry.get("status") != 429 or entry.get("mitigation") != "challenge"
+                or time.time() >= entry.get("retry_at", 0) or not page or page.is_closed()):
+            return
+        try:
+            navigation = await page.evaluate("""() => {
+                const n = performance.getEntriesByType('navigation')[0];
+                if (!n) return null;
+                const text = (document.body?.innerText || '').toLowerCase();
+                return {url:n.name, status:n.responseStatus, started_at:performance.timeOrigin/1000,
+                    transfer_size:n.transferSize, main_frame:window === window.top,
+                    from_service_worker:!!navigator.serviceWorker.controller || n.workerStart > 0,
+                    checkpoint_visible:document.title.toLowerCase().includes('security checkpoint') ||
+                        text.includes('failed to verify your browser') || text.includes('verifying your browser')};
+            }""")
+            if not isinstance(navigation, dict) or navigation.get("checkpoint_visible", True) is not False:
+                return
+            proof = {**navigation, "denied_at": entry.get("last_denied_at")}
+            if self._upstream_cooldown.complete_challenge(url, proof):
+                self._portfolio_access_error = None
+                self._portfolio_access_retry_at = 0.0
+                self._portfolio_snapshot_cache = None
+        except Exception as e:
+            logger.debug("Retained portfolio challenge proof unavailable: %s", type(e).__name__)
 
     def _cached_portfolio_snapshot(self) -> Optional[dict]:
         if not self._portfolio_snapshot_cache or self._portfolio_snapshot_cache_ttl_seconds <= 0:
