@@ -1,5 +1,6 @@
 """Only an official, later same-document network success may finish a challenge."""
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -7,6 +8,31 @@ from playwright.async_api import async_playwright
 
 from polymtrade_executor import PolymtradeExecutor
 from upstream_cooldown import UpstreamAccessDeferred, UpstreamCooldown
+
+
+async def test_completed_navigation_does_not_create_a_playwright_finished_waiter(tmp_path, monkeypatch):
+    monkeypatch.setenv("BROWSER_PROFILE_DIR", str(tmp_path))
+    executor = PolymtradeExecutor()
+    accepted = SimpleNamespace(status=200, url="https://polym.trade/portfolio",
+        request=SimpleNamespace(is_navigation_request=lambda: True, frame=object()),
+        from_service_worker=False, finished=AsyncMock())
+    handlers = {}
+    async def goto(*args, **kwargs):
+        handlers["response"](accepted)
+        return SimpleNamespace(status=429, headers={"x-vercel-mitigated": "challenge"},
+            text=AsyncMock(return_value="Vercel Security Checkpoint"))
+    page = SimpleNamespace(url=accepted.url, main_frame=accepted.request.frame,
+        on=lambda event, callback: handlers.update({event: callback}),
+        remove_listener=lambda event, callback: handlers.pop(event), goto=goto,
+        evaluate=AsyncMock(side_effect=[proof(transfer_size=0), proof()]))
+    executor.page = page
+    with patch("time.time", return_value=1000), patch.object(
+        executor._upstream_cooldown, "complete_challenge", side_effect=lambda url, value: value["transfer_size"] > 0
+    ):
+        assert await asyncio.wait_for(executor._navigate_once(
+            accepted.url, wait_until="domcontentloaded", timeout_ms=1000), timeout=0.5) is accepted
+    accepted.finished.assert_not_awaited()
+    assert handlers == {}
 
 
 def proof(**overrides):
@@ -108,6 +134,8 @@ async def test_browser_can_finish_its_own_challenge_without_second_goto(tmp_path
             page.goto = AsyncMock(side_effect=original)
             response = await executor._navigate_once(executor.base_url+"/portfolio", wait_until="domcontentloaded", timeout_ms=10000)
             assert response.status == 200
+            assert not [task for task in asyncio.all_tasks()
+                        if "Response.finished.<locals>.on_finished" in task.get_coro().__qualname__]
             page.goto.assert_awaited_once()
             assert len(requests) == 2  # The second is the fixture browser's normal reload.
             executor._upstream_cooldown.check(executor.base_url+"/portfolio")

@@ -166,6 +166,7 @@ class UnifiedOnChainWsService(
         
         // 订阅ID计数器（用于请求 ID）
         private var requestIdCounter = AtomicInteger(0)
+        private val connectionGeneration = AtomicInteger(0)
         
         // 连接任务
         private var connectionJob: Job? = null
@@ -188,6 +189,7 @@ class UnifiedOnChainWsService(
         }
 
         fun stop() {
+            connectionGeneration.incrementAndGet()
             connectionJob?.cancel()
             connectionJob = null
             webSocket?.close(1000, "停止监听")
@@ -276,37 +278,46 @@ class UnifiedOnChainWsService(
         }
 
         private fun connectWebSocket(wsUrl: String, httpClient: OkHttpClient, rpcApi: EthereumRpcApi) {
+            val generation = connectionGeneration.incrementAndGet()
             webSocket?.close(1000, "重新连接")
             webSocket = null
-            isConnected = false
+            markDisconnected()
 
             val request = Request.Builder().url(wsUrl).build()
             
             webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                    if (generation != connectionGeneration.get()) return
                     isConnected = true
                     logger.info("[$address] 链上 WebSocket 连接成功")
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
-                    scope.launch { handleMessage(text, httpClient, rpcApi) }
+                    scope.launch {
+                        if (generation == connectionGeneration.get()) handleMessage(text, httpClient, rpcApi)
+                    }
                 }
 
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                    scope.launch { handleMessage(bytes.utf8(), httpClient, rpcApi) }
+                    scope.launch {
+                        if (generation == connectionGeneration.get()) handleMessage(bytes.utf8(), httpClient, rpcApi)
+                    }
                 }
 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    if (generation != connectionGeneration.get()) return
                     markDisconnected()
                     logger.warn("[$address] 链上 WebSocket 连接关闭: code=$code, reason=$reason")
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    if (generation != connectionGeneration.get()) return
                     markDisconnected()
                     logger.warn("[$address] 链上 WebSocket 连接已关闭: code=$code, reason=$reason")
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) {
+                    if (generation != connectionGeneration.get()) return
                     logger.error("[$address] 链上 WebSocket 连接失败: ${t.message}", t)
                     markDisconnected()
                 }

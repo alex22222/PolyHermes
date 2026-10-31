@@ -244,6 +244,8 @@ class Watchdog:
             action = "上游受限或持仓未就绪；保留登录资料，不自动重启 Bridge，不绕过保护或补单。"
         elif public_only:
             action = "本机服务检查正常；DNS/公网入口故障不能通过重启应用修复，未重启服务。"
+        elif any(issue.startswith("future_relay:") for issue in issues):
+            action = "Future 转发服务在主应用网络内不可达；未重启 Bridge，不补单，不改钱包或登录资料。"
 
         if not app_issue:
             state.pop("app_restart_attempted", None)
@@ -288,6 +290,7 @@ class Watchdog:
             issues,
         )
         self._check_bridge_status(issues)
+        self._check_future_relay(issues)
 
         memory = self._command(
             ["docker", "stats", "--no-stream", "--format", "{{.MemPerc}}", "polyhermes"]
@@ -305,7 +308,30 @@ class Watchdog:
         return issues
 
     def restart_app(self):
-        return self._command(["docker", "restart", "polyhermes"], check=False).strip() == "polyhermes"
+        if self._command(["docker", "restart", "polyhermes"], check=False).strip() != "polyhermes":
+            return False
+        app_id = self._command(["docker", "inspect", "--format", "{{.Id}}", "polyhermes"])
+        mode = self._command(["docker", "inspect", "--format", "{{.HostConfig.NetworkMode}}", "future-btc5m-relay"])
+        if app_id and mode == f"container:{app_id}":
+            # A running sidecar retains the old network namespace across app restart.
+            result = self._command(["docker", "restart", "future-btc5m-relay"], check=False)
+            if result != "future-btc5m-relay":
+                print("PolyHermes watchdog: Future relay network rejoin failed")
+        return True
+
+    def _check_future_relay(self, issues):
+        """Probe only relay liveness, from the consuming app's network namespace."""
+        probe = (
+            "import urllib.request; "
+            "print(urllib.request.urlopen('http://127.0.0.1:8766/live',timeout=3).read(256).decode())"
+        )
+        try:
+            raw = self._command(["docker", "exec", "polyhermes", "python3", "-c", probe])
+            if json.loads(raw).get("status") == "ok":
+                return
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        issues.append("future_relay: listener unavailable in app network")
 
     def restart_bridge(self):
         """Restart Bridge only after a fresh browser login check and a full drain."""

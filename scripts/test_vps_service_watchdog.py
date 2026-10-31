@@ -42,6 +42,56 @@ class FakeHttpResponse:
 
 
 class VpsServiceWatchdogTest(unittest.TestCase):
+    def test_relay_listener_failure_is_not_a_healthy_system_or_a_bridge_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            notifier = FakeNotifier()
+            monitor = watchdog_module.Watchdog(
+                config=self.config(Path(tmp) / "state.json", threshold=1, auto_restart_bridge=True),
+                notifier=notifier, app_diagnostics=mock.Mock(), app_restarter=mock.Mock(), bridge_restarter=mock.Mock(),
+            )
+            def command(args, **kwargs):
+                return "10%" if args[1] == "stats" else ""
+            with mock.patch.object(monitor, "_command", side_effect=command), \
+                    mock.patch.object(monitor, "_check_container"), \
+                    mock.patch.object(monitor, "_check_http"), \
+                    mock.patch.object(monitor, "_check_bridge_status"), \
+                    mock.patch.object(monitor, "_check_json"):
+                self.assertFalse(monitor.run_once())
+            monitor.app_restarter.assert_not_called()
+            monitor.bridge_restarter.assert_not_called()
+            self.assertIn("future_relay", notifier.messages[0][1])
+
+    def test_relay_transport_check_runs_inside_app_network_and_fails_closed(self):
+        monitor = watchdog_module.Watchdog(config=self.config(Path("/tmp/unused")), notifier=FakeNotifier())
+        for body, expected in [("{\"status\":\"ok\"}", []), ("", ["future_relay: listener unavailable in app network"]),
+                               ("{\"status\":\"blocked\"}", ["future_relay: listener unavailable in app network"])]:
+            with self.subTest(body=body), mock.patch.object(monitor, "_command", return_value=body) as command:
+                issues = []
+                monitor._check_future_relay(issues)
+                self.assertEqual(expected, issues)
+                self.assertEqual(["docker", "exec", "polyhermes", "python3", "-c"], command.call_args.args[0][:5])
+                self.assertIn("127.0.0.1:8766/live", command.call_args.args[0][-1])
+
+    def test_app_restart_rejoins_only_its_existing_network_sidecar(self):
+        monitor = watchdog_module.Watchdog(config=self.config(Path("/tmp/unused")), notifier=FakeNotifier())
+        for mode, should_restart in [("container:app-id", True), ("host", False), ("container:other-id", False)]:
+            with self.subTest(mode=mode):
+                def command(args, **kwargs):
+                    if args == ["docker", "restart", "polyhermes"]:
+                        return "polyhermes"
+                    if args == ["docker", "inspect", "--format", "{{.Id}}", "polyhermes"]:
+                        return "app-id"
+                    if args == ["docker", "inspect", "--format", "{{.HostConfig.NetworkMode}}", "future-btc5m-relay"]:
+                        return mode
+                    if args == ["docker", "restart", "future-btc5m-relay"]:
+                        return "future-btc5m-relay"
+                    return ""
+                with mock.patch.object(monitor, "_command", side_effect=command) as run:
+                    self.assertTrue(monitor.restart_app())
+                    restarts = [c.args[0] for c in run.call_args_list if c.args[0][:2] == ["docker", "restart"]]
+                    self.assertEqual([["docker", "restart", "polyhermes"]] +
+                                     ([["docker", "restart", "future-btc5m-relay"]] if should_restart else []), restarts)
+
     def test_upstream_or_stale_portfolio_alerts_without_restart(self):
         for reason in ("upstream_http_429", "portfolio_stale", "portfolio_missing"):
             with self.subTest(reason=reason), tempfile.TemporaryDirectory() as tmp:

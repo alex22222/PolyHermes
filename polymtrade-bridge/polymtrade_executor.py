@@ -2834,9 +2834,10 @@ class PolymtradeExecutor:
                 deadline = asyncio.get_running_loop().time() + 15.0
                 while asyncio.get_running_loop().time() < deadline:
                     if successes:
-                        accepted = successes.pop(0)
+                        accepted = successes[-1]
                         try:
-                            await asyncio.wait_for(accepted.finished(), timeout=2.0)
+                            # NavigationTiming supplies completion proof below. Playwright's
+                            # finished() leaves a target-close waiter alive on this version.
                             navigation = await page.evaluate("""() => {
                                 const n = performance.getEntriesByType('navigation')[0];
                                 return n ? {url:n.name,status:n.responseStatus,started_at:performance.timeOrigin/1000,

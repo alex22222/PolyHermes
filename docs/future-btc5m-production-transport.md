@@ -75,6 +75,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.polyhermes.future-bt
 ```bash
 docker run -d --name future-btc5m-relay \
   --network container:polyhermes \
+  --health-cmd 'curl --max-time 3 -fsS http://127.0.0.1:8766/live || exit 1' \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   --user 0:0 \
   --mount type=bind,src=/opt/polyhermes/future-btc5m,dst=/bridge,readonly \
@@ -90,6 +91,7 @@ docker run -d --name future-btc5m-relay \
 relay 只监听 `127.0.0.1:8766`，入站 Host 必须准确匹配，转发到 Mac 时 Host 固定为 `127.0.0.1:8766`。允许：
 
 - GET `/status`、`/draft`、`/bridge/status`、`/bridge/orders`，及严格匹配的 Future 订单详情路径。
+- GET `/live` 仅在 relay 本地返回 `status=ok`，不访问 Mac，不证明隧道、行情或交易就绪；仍执行相同 Host/Origin 校验。
 - POST `/bridge/control`，要求 `X-PolyHermes-Future-Control: 1`、JSON 对象和不超过 256 字节的请求体。
 - POST `/bridge/preflight`，要求 `X-PolyHermes-Future-Preflight: 1`、JSON 对象和不超过 1500 字节的请求体，与本机只读报告接口一致。
 
@@ -100,6 +102,8 @@ relay 只监听 `127.0.0.1:8766`，入站 Host 必须准确匹配，转发到 Ma
 ## app 重启和重建
 
 `--network container:polyhermes` 关联容器网络命名空间。app 重启后，应重新启动 relay 并验证两个容器的网络命名空间；**app 被重新创建后，必须重新创建 relay**，不能继续使用指向旧 app 容器的 sidecar。
+
+新版 watchdog 在自动重启 app 后，仅对明确共享该 app 容器 ID 的 relay 执行重启，使其重新加入网络；不触碰原 Polymtrade Bridge。巡检从 app 内请求 relay `/live`，断联会告警，不能以宿主服务正常代替 relay 可达。部署时须同时更新 relay 脚本与 watchdog；上面的专用健康命令覆盖 app 镜像继承的健康检查，不能继续检查 app 的 80 端口。此机制不自动重建 sidecar，也不恢复或重放订单。
 
 ```bash
 docker exec polyhermes readlink /proc/self/ns/net

@@ -100,7 +100,7 @@ def make_server(socket_path, address=LOCAL_ADDRESS):
                 allowed = True
             else:
                 allowed = not url.query and (
-                    url.path in ("/status", "/draft", "/bridge/status")
+                    url.path in ("/live", "/status", "/draft", "/bridge/status")
                     or re.fullmatch(r"/bridge/orders/future-btc5m:[0-9]{1,15}", urllib.parse.unquote(url.path))
                 )
             if not allowed:
@@ -151,6 +151,9 @@ def make_server(socket_path, address=LOCAL_ADDRESS):
                 return
             if self.headers.get("Content-Length", "0") != "0":
                 self.fail(400, "GET_BODY_NOT_ALLOWED")
+                return
+            if self.path == "/live":
+                self.reply(200, b'{"status":"ok"}', "application/json")
                 return
             self.forward()
 

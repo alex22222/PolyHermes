@@ -88,6 +88,16 @@ class FutureRelayTest(unittest.TestCase):
         return self.request("POST", path, body, {
             "Content-Type": "application/json", header: "1", **(headers or {})})
 
+    def test_liveness_is_local_and_does_not_touch_upstream_or_claim_trading_ready(self):
+        self.response_kind = "disconnect"
+        code, body, headers = self.request("GET", "/live")
+        self.assertEqual(200, code)
+        self.assertEqual({"status": "ok"}, json.loads(body))
+        self.assertEqual([], self.requests)
+        self.assertEqual("no-store", headers["Cache-Control"])
+        self.assertEqual(403, self.request("GET", "/live", headers={"Origin": "https://future.news"})[0])
+        self.assertEqual(404, self.request("GET", "/live?target=other")[0])
+
     def test_fixed_upstream_host_and_no_browser_auth_headers(self):
         code, body, headers = self.request("GET", "/bridge/status", headers={
             "Cookie": "fixture-cookie", "Authorization": "Bearer fixture-token"})
