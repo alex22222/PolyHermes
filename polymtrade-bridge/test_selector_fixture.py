@@ -434,6 +434,36 @@ KOSTYANTYNIVKA_MULTIDATE_HTML = """
 """
 
 
+US_IRAN_CEASEFIRE_MULTIDATE_HTML = """
+<!doctype html>
+<html>
+<body>
+  <main>
+    <section id="us-iran-event">
+      <h1>US-Iran ceasefire continues through...?</h1>
+      <div class="market-row">
+        <div><span>US</span> x <span>Iran</span> ceasefire continues through <span>October 31</span>?</div>
+        <div role="button">Yes 99.2¢</div>
+        <div role="button">No 0.9¢</div>
+      </div>
+      <div class="market-row">
+        <div><span>US</span> x <span>Iran</span> ceasefire continues through <span>November 8</span>?</div>
+        <div role="button">Yes 72¢</div>
+        <div role="button">No 28¢</div>
+      </div>
+    </section>
+  </main>
+  <script>
+    window.clickedLabels = [];
+    document.addEventListener("click", (event) => {
+      window.clickedLabels.push((event.target.innerText || event.target.textContent || "").trim());
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 async def _run_selector_fixture() -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -829,6 +859,43 @@ async def _run_selector_fixture() -> None:
             assert "December 31" in result["rowText"], result
             assert result["label"] == "No 47¢", result
             assert clicked_labels == ["No 47¢"], clicked_labels
+
+            # Regression: repeated generic words such as "US" and "Iran" must
+            # not beat the target date and select the first row in the event.
+            page = await browser.new_page()
+            await page.set_content(US_IRAN_CEASEFIRE_MULTIDATE_HTML)
+            keywords = PolymtradeExecutor._extract_market_keywords(
+                "us-x-iran-ceasefire-continues-through-november-8",
+                "US x Iran ceasefire continues through November 8?",
+            )
+            assert "november 8" in keywords, keywords
+            executor = PolymtradeExecutor()
+            executor.page = page
+            result = await executor._select_polymtrade_outcome(
+                "No",
+                market_slug="us-x-iran-ceasefire-continues-through-november-8",
+                market_title="US x Iran ceasefire continues through November 8?",
+                max_attempts=1,
+            )
+            clicked_labels = await page.evaluate("window.clickedLabels")
+            assert result["clicked"] is True, result
+            assert "November 8" in result["rowText"], result
+            assert result["label"] == "No 28¢", result
+            assert clicked_labels == ["No 28¢"], clicked_labels
+
+            page = await browser.new_page()
+            await page.set_content(US_IRAN_CEASEFIRE_MULTIDATE_HTML)
+            missing_keywords = PolymtradeExecutor._extract_market_keywords(
+                "us-x-iran-ceasefire-continues-through-november-15",
+                "US x Iran ceasefire continues through November 15?",
+            )
+            missing_result = await page.evaluate(
+                PolymtradeExecutor._select_outcome_script(),
+                ["No", ["否", "No", "Buy No", "Short"], missing_keywords, False],
+            )
+            assert missing_result["clicked"] is False, missing_result
+            assert "november 15" in missing_result["identityKeywords"], missing_result
+            assert await page.evaluate("window.clickedLabels") == []
         finally:
             await browser.close()
 

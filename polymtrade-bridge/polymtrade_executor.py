@@ -3808,9 +3808,25 @@ class PolymtradeExecutor:
         """
         return """
         (args) => {
-            const [outcome, sideLabels, keywords, binaryOutcomeMode, trustedClickMode] = args;
+            const [outcome, sideLabels, keywords, binaryOutcomeMode, trustedClickMode, identityKeywordsArg] = args;
             const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
             const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
+
+            function isDateIdentityKeyword(keyword) {
+                const value = norm(keyword);
+                return /^(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec) \\d{1,2}$/.test(value)
+                    || /^\\d{1,2}月\\d{1,2}日?$/.test(value);
+            }
+
+            const identityKeywords = Array.isArray(identityKeywordsArg) && identityKeywordsArg.length > 0
+                ? identityKeywordsArg
+                : keywords.filter(isDateIdentityKeyword);
+
+            function matchesRequiredIdentity(text) {
+                if (identityKeywords.length === 0) return true;
+                const value = norm(text);
+                return identityKeywords.some(keyword => value.includes(norm(keyword)));
+            }
 
             function matchesSideLabel(text) {
                 const t = norm(text);
@@ -3978,7 +3994,9 @@ class PolymtradeExecutor:
                 if (!t || t.length > 80) continue;
                 if (isInsideComments(leaf) || isInNoise(leaf)) continue;
                 const s = scoreText(t);
-                if (s > 0) anchors.push({ el: leaf, text: t, score: s });
+                if (s > 0 && matchesRequiredIdentity(t)) {
+                    anchors.push({ el: leaf, text: t, score: s });
+                }
             }
             // Prefer the most specific anchor (shortest exact text), then
             // highest keyword score.
@@ -3988,7 +4006,7 @@ class PolymtradeExecutor:
                 let el = anchor.el;
                 for (let depth = 0; depth < 8 && el; depth++) {
                     const btns = findSideButtons(el);
-                    if (btns.length >= 1) {
+                    if (btns.length >= 1 && matchesRequiredIdentity(textOf(el))) {
                         for (const sideLabel of sideLabels) {
                             const l = sideLabel.toLowerCase();
                             const target = btns.find(b => {
@@ -3997,12 +4015,12 @@ class PolymtradeExecutor:
                             });
                             if (target) {
                                 const clicked = clickTarget(target);
-                                return {clicked: true, label: textOf(clicked), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), strategy: "anchor"};
+                                return {clicked: true, label: textOf(clicked), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), identityMatched: true, strategy: "anchor"};
                             }
                         }
                         // Fallback: click the first side button we found.
                         const clicked = clickTarget(btns[0]);
-                        return {clicked: true, label: textOf(clicked), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), strategy: "anchor-fallback"};
+                        return {clicked: true, label: textOf(clicked), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), identityMatched: true, strategy: "anchor-fallback"};
                     }
                     el = el.parentElement;
                 }
@@ -4024,12 +4042,13 @@ class PolymtradeExecutor:
                         fullScore,
                         titleScore,
                         score: fullScore + titleScore * 2,
+                        identityMatch: matchesRequiredIdentity(rowText),
                         textLength: rowText.length,
                         btns,
                         rowText: rowText.slice(0, 80),
                     };
                 })
-                .filter(item => item.score > 0 && item.btns.length > 0)
+                .filter(item => item.score > 0 && item.identityMatch && item.btns.length > 0)
                 .sort((a, b) => {
                     if (b.score !== a.score) return b.score - a.score;
                     return a.textLength - b.textLength;
@@ -4045,7 +4064,7 @@ class PolymtradeExecutor:
                     });
                     if (target) {
                         const clicked = clickTarget(target);
-                        return {clicked: true, label: textOf(clicked), rowScore: score, rowText: textOf(row).slice(0, 80), strategy: "row-score"};
+                        return {clicked: true, label: textOf(clicked), rowScore: score, rowText: textOf(row).slice(0, 80), identityMatched: true, strategy: "row-score"};
                     }
                 }
             }
@@ -4081,7 +4100,13 @@ class PolymtradeExecutor:
             // keywords. On multi-market event pages, a global Yes/No fallback
             // can click the wrong row.
             if (keywords.length > 0) {
-                return {clicked: false, bestScore: bestScore, keywords: keywords, skippedGlobalFallback: true};
+                return {
+                    clicked: false,
+                    bestScore: bestScore,
+                    keywords: keywords,
+                    identityKeywords: identityKeywords,
+                    skippedGlobalFallback: true
+                };
             }
 
             const xpath = "//*[contains(text(), '" + outcome.replace(/'/g, "\\'") + "')]";
@@ -4109,6 +4134,21 @@ class PolymtradeExecutor:
             return {clicked: false, bestScore: bestScore, keywords: keywords};
         }
         """
+
+    @staticmethod
+    def _required_market_identity_keywords(keywords: list[str]) -> list[str]:
+        """Return date aliases that must be present in a selected market row."""
+        month_pattern = (
+            r"(?:january|february|march|april|may|june|july|august|"
+            r"september|october|november|december|jan|feb|mar|apr|jun|"
+            r"jul|aug|sep|oct|nov|dec)\s+\d{1,2}"
+        )
+        return [
+            keyword
+            for keyword in keywords
+            if re.fullmatch(month_pattern, keyword, re.IGNORECASE)
+            or re.fullmatch(r"\d{1,2}月\d{1,2}日?", keyword)
+        ]
 
     @staticmethod
     def _extract_quoted_price(label: str) -> Optional[float]:
@@ -4181,6 +4221,7 @@ class PolymtradeExecutor:
                     seen_keywords.add(keyword)
                     merged_keywords.append(keyword)
             keywords = merged_keywords
+        identity_keywords = self._required_market_identity_keywords(keywords)
         last_result = None
 
         for attempt in range(max_attempts):
@@ -4202,12 +4243,21 @@ class PolymtradeExecutor:
 
             result = await self._evaluate_with_navigation_retry(
                 self._select_outcome_script(),
-                [outcome, side_labels, keywords, binary_updown, True],
+                [outcome, side_labels, keywords, binary_updown, True, identity_keywords],
                 label="select_outcome.evaluate",
             )
             last_result = result
 
             if result and result.get("clicked"):
+                if (
+                    identity_keywords
+                    and not binary_updown
+                    and result.get("identityMatched") is not True
+                ):
+                    raise RuntimeError(
+                        "Selected outcome row does not match required market identity: "
+                        f"required={identity_keywords}, row={result.get('rowText')}"
+                    )
                 try:
                     clicked_el = await self.page.wait_for_selector(
                         '[data-polyhermes-outcome-target="true"]', timeout=1000
