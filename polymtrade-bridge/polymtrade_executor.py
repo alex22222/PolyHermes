@@ -832,7 +832,7 @@ class PolymtradeExecutor:
                     return m ? parseFloat(m[1]) : null;
                 };
                 const lis = Array.from(document.querySelectorAll(
-                    'li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer'
+                    'li[data-test="open-position-row"], li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer'
                 )).filter(li => li.offsetParent !== null);
 
                 const positions = [];
@@ -843,20 +843,46 @@ class PolymtradeExecutor:
                         .filter(t => t.length > 0);
                     if (lines.length < 3) continue;
 
-                    const title = lines[0];
-                    const currentValue = parseMoney(lines[1]);
+                    const titleEl = li.querySelector('.font-semibold [class*="line-clamp"]') || li.querySelector('.font-semibold');
+                    const sideNameEl = li.querySelector('.pos-tag__name');
+                    const sharesEl = li.querySelector('.pos-shares');
+                    const fieldValueEl = li.querySelector('.text-field-value');
+
+                    const title = (titleEl && titleEl.textContent.trim()) || lines[0];
+                    let currentValue = fieldValueEl ? parseMoney(fieldValueEl.textContent) : null;
+                    if (currentValue == null) currentValue = parseMoney(lines[1]);
                     // Polymtrade renders this as either "Yes • 1.22 shares"
                     // or the localized "Yes • 1.22 份".  Match the bullet,
                     // not one particular language, so the live row is not
                     // discarded when the browser locale changes.
-                    const sideQtyLine = lines.find(l => l.includes('•'));
-                    let side = '';
+                    // v2 rows instead expose .pos-tag__name ("No") and
+                    // .pos-shares ("17.4 shares") as separate elements.
+                    let side = sideNameEl ? sideNameEl.textContent.trim() : '';
                     let quantity = null;
-                    if (sideQtyLine) {
-                        const parts = sideQtyLine.split('•').map(t => t.trim());
-                        side = parts[0] || '';
-                        const qm = (parts[1] || '').match(/([0-9]+\.?[0-9]*)/);
-                        if (qm) quantity = parseFloat(qm[1]);
+                    if (sharesEl) {
+                        const sqm = sharesEl.textContent.replace(/,/g, '').match(/([0-9]+\.?[0-9]*)/);
+                        if (sqm) quantity = parseFloat(sqm[1]);
+                    }
+                    if (!side || quantity == null) {
+                        const sideQtyLine = lines.find(l => l.includes('•'));
+                        if (sideQtyLine) {
+                            const parts = sideQtyLine.split('•').map(t => t.trim());
+                            if (!side) side = parts[0] || '';
+                            if (quantity == null) {
+                                const qm = (parts[1] || '').match(/([0-9]+\.?[0-9]*)/);
+                                if (qm) quantity = parseFloat(qm[1]);
+                            }
+                        }
+                    }
+                    if (!side || quantity == null) {
+                        for (let idx = 0; idx < lines.length; idx++) {
+                            const l = lines[idx];
+                            if (!side && /^(Yes|No|Up|Down)$/i.test(l)) side = l;
+                            if (quantity == null) {
+                                const qm = l.replace(/,/g, '').match(/^([0-9]+\.?[0-9]*)\s*(shares|份)$/i);
+                                if (qm) quantity = parseFloat(qm[1]);
+                            }
+                        }
                     }
                     const pnlLine = lines.find(l => /^[+-]/.test(l));
                     const pnl = pnlLine ? parseMoney(pnlLine) : null;
@@ -961,18 +987,34 @@ class PolymtradeExecutor:
     async def _select_portfolio_positions(self) -> None:
         # New portfolio pages can default to History, whose rows share the
         # holdings selector. Never interpret transaction history as positions.
+        # polym.trade v2 (2026-11) renders tabs as <button class="tab-strip-item"
+        # data-test="portfolio-tab-positions" data-active="true">; older builds
+        # used div.cursor-pointer. Accept both.
         tab = await self.page.wait_for_selector(
-            'div.cursor-pointer:text-is("Positions"), div.cursor-pointer:text-is("持仓")',
+            '[data-test="portfolio-tab-positions"], div.cursor-pointer:text-is("Positions"), div.cursor-pointer:text-is("持仓")',
             state="visible", timeout=30000,
         )
         if not tab:
             raise RuntimeError("Portfolio positions tab missing; holdings unknown")
-        if "text-foreground" not in (await tab.get_attribute("class") or "").split():
+        tab_class = (await tab.get_attribute("class")) or ""
+        tab_data_active = (await tab.get_attribute("data-active")) or ""
+        if (
+            "text-foreground" not in tab_class.split()
+            and "active" not in tab_class.split()
+            and tab_data_active != "true"
+        ):
             await tab.click(timeout=3000)
         await self.page.wait_for_function(
-            """() => Array.from(document.querySelectorAll('div.cursor-pointer'))
-                .some(el => ['Positions', '持仓'].includes(el.textContent.trim())
-                    && el.classList.contains('text-foreground'))""",
+            """() => {
+                const tab = document.querySelector('[data-test="portfolio-tab-positions"]');
+                if (tab) {
+                    return tab.getAttribute('data-active') === 'true'
+                        || tab.classList.contains('active');
+                }
+                return Array.from(document.querySelectorAll('div.cursor-pointer'))
+                    .some(el => ['Positions', '持仓'].includes(el.textContent.trim())
+                        && el.classList.contains('text-foreground'));
+            }""",
             timeout=5000,
         )
 
@@ -988,7 +1030,7 @@ class PolymtradeExecutor:
                 """
                 () => {
                     window.scrollTo(0, document.body.scrollHeight);
-                    const selector = 'li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer';
+                    const selector = 'li[data-test="open-position-row"], li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer';
                     return {
                         height: document.body.scrollHeight,
                         rows: document.querySelectorAll(selector).length,
@@ -1012,7 +1054,7 @@ class PolymtradeExecutor:
         last_state = None
         js = """
         () => {
-            const rowSelector = 'li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer';
+            const rowSelector = 'li[data-test="open-position-row"], li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer';
             const rows = Array.from(document.querySelectorAll(rowSelector))
                 .filter(li => li.offsetParent !== null || li.getClientRects().length);
             const text = document.body ? (document.body.innerText || document.body.textContent || '') : '';
@@ -5817,6 +5859,22 @@ def apply_portfolio_position_line_fallback(position: dict) -> None:
             if not position.get("quantity") and quantity_match:
                 position["quantity"] = float(quantity_match.group(1))
             break
+
+    if not position.get("side") or not position.get("quantity"):
+        # v2 rows render side ("No") and quantity ("17.4 shares") as separate
+        # lines with no bullet separator.
+        for line in lines:
+            if not position.get("side") and re.fullmatch(r"(?i)yes|no|up|down", line):
+                position["side"] = line
+                continue
+            if not position.get("quantity"):
+                qty_match = re.fullmatch(
+                    r"([0-9]+(?:\.[0-9]+)?)\s*(?:shares|份)",
+                    line.replace(",", ""),
+                    re.IGNORECASE,
+                )
+                if qty_match:
+                    position["quantity"] = float(qty_match.group(1))
 
     if position.get("currentValue") is None:
         value_line = next(
