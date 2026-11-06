@@ -832,7 +832,7 @@ class PolymtradeExecutor:
                     return m ? parseFloat(m[1]) : null;
                 };
                 const lis = Array.from(document.querySelectorAll(
-                    'li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer'
+                    'li[data-test="open-position-row"], li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer'
                 )).filter(li => li.offsetParent !== null);
 
                 const positions = [];
@@ -843,20 +843,46 @@ class PolymtradeExecutor:
                         .filter(t => t.length > 0);
                     if (lines.length < 3) continue;
 
-                    const title = lines[0];
-                    const currentValue = parseMoney(lines[1]);
+                    const titleEl = li.querySelector('.font-semibold [class*="line-clamp"]') || li.querySelector('.font-semibold');
+                    const sideNameEl = li.querySelector('.pos-tag__name');
+                    const sharesEl = li.querySelector('.pos-shares');
+                    const fieldValueEl = li.querySelector('.text-field-value');
+
+                    const title = (titleEl && titleEl.textContent.trim()) || lines[0];
+                    let currentValue = fieldValueEl ? parseMoney(fieldValueEl.textContent) : null;
+                    if (currentValue == null) currentValue = parseMoney(lines[1]);
                     // Polymtrade renders this as either "Yes • 1.22 shares"
                     // or the localized "Yes • 1.22 份".  Match the bullet,
                     // not one particular language, so the live row is not
                     // discarded when the browser locale changes.
-                    const sideQtyLine = lines.find(l => l.includes('•'));
-                    let side = '';
+                    // v2 rows instead expose .pos-tag__name ("No") and
+                    // .pos-shares ("17.4 shares") as separate elements.
+                    let side = sideNameEl ? sideNameEl.textContent.trim() : '';
                     let quantity = null;
-                    if (sideQtyLine) {
-                        const parts = sideQtyLine.split('•').map(t => t.trim());
-                        side = parts[0] || '';
-                        const qm = (parts[1] || '').match(/([0-9]+\.?[0-9]*)/);
-                        if (qm) quantity = parseFloat(qm[1]);
+                    if (sharesEl) {
+                        const sqm = sharesEl.textContent.replace(/,/g, '').match(/([0-9]+\.?[0-9]*)/);
+                        if (sqm) quantity = parseFloat(sqm[1]);
+                    }
+                    if (!side || quantity == null) {
+                        const sideQtyLine = lines.find(l => l.includes('•'));
+                        if (sideQtyLine) {
+                            const parts = sideQtyLine.split('•').map(t => t.trim());
+                            if (!side) side = parts[0] || '';
+                            if (quantity == null) {
+                                const qm = (parts[1] || '').match(/([0-9]+\.?[0-9]*)/);
+                                if (qm) quantity = parseFloat(qm[1]);
+                            }
+                        }
+                    }
+                    if (!side || quantity == null) {
+                        for (let idx = 0; idx < lines.length; idx++) {
+                            const l = lines[idx];
+                            if (!side && /^(Yes|No|Up|Down)$/i.test(l)) side = l;
+                            if (quantity == null) {
+                                const qm = l.replace(/,/g, '').match(/^([0-9]+\.?[0-9]*)\s*(shares|份)$/i);
+                                if (qm) quantity = parseFloat(qm[1]);
+                            }
+                        }
                     }
                     const pnlLine = lines.find(l => /^[+-]/.test(l));
                     const pnl = pnlLine ? parseMoney(pnlLine) : null;
@@ -961,18 +987,34 @@ class PolymtradeExecutor:
     async def _select_portfolio_positions(self) -> None:
         # New portfolio pages can default to History, whose rows share the
         # holdings selector. Never interpret transaction history as positions.
+        # polym.trade v2 (2026-11) renders tabs as <button class="tab-strip-item"
+        # data-test="portfolio-tab-positions" data-active="true">; older builds
+        # used div.cursor-pointer. Accept both.
         tab = await self.page.wait_for_selector(
-            'div.cursor-pointer:text-is("Positions"), div.cursor-pointer:text-is("持仓")',
+            '[data-test="portfolio-tab-positions"], div.cursor-pointer:text-is("Positions"), div.cursor-pointer:text-is("持仓")',
             state="visible", timeout=30000,
         )
         if not tab:
             raise RuntimeError("Portfolio positions tab missing; holdings unknown")
-        if "text-foreground" not in (await tab.get_attribute("class") or "").split():
+        tab_class = (await tab.get_attribute("class")) or ""
+        tab_data_active = (await tab.get_attribute("data-active")) or ""
+        if (
+            "text-foreground" not in tab_class.split()
+            and "active" not in tab_class.split()
+            and tab_data_active != "true"
+        ):
             await tab.click(timeout=3000)
         await self.page.wait_for_function(
-            """() => Array.from(document.querySelectorAll('div.cursor-pointer'))
-                .some(el => ['Positions', '持仓'].includes(el.textContent.trim())
-                    && el.classList.contains('text-foreground'))""",
+            """() => {
+                const tab = document.querySelector('[data-test="portfolio-tab-positions"]');
+                if (tab) {
+                    return tab.getAttribute('data-active') === 'true'
+                        || tab.classList.contains('active');
+                }
+                return Array.from(document.querySelectorAll('div.cursor-pointer'))
+                    .some(el => ['Positions', '持仓'].includes(el.textContent.trim())
+                        && el.classList.contains('text-foreground'));
+            }""",
             timeout=5000,
         )
 
@@ -988,7 +1030,7 @@ class PolymtradeExecutor:
                 """
                 () => {
                     window.scrollTo(0, document.body.scrollHeight);
-                    const selector = 'li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer';
+                    const selector = 'li[data-test="open-position-row"], li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer';
                     return {
                         height: document.body.scrollHeight,
                         rows: document.querySelectorAll(selector).length,
@@ -1012,7 +1054,7 @@ class PolymtradeExecutor:
         last_state = None
         js = """
         () => {
-            const rowSelector = 'li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer';
+            const rowSelector = 'li[data-test="open-position-row"], li.flex.px-4.py-2.border-b.text-xs.items-center.cursor-pointer';
             const rows = Array.from(document.querySelectorAll(rowSelector))
                 .filter(li => li.offsetParent !== null || li.getClientRects().length);
             const text = document.body ? (document.body.innerText || document.body.textContent || '') : '';
@@ -3808,9 +3850,25 @@ class PolymtradeExecutor:
         """
         return """
         (args) => {
-            const [outcome, sideLabels, keywords, binaryOutcomeMode, trustedClickMode] = args;
+            const [outcome, sideLabels, keywords, binaryOutcomeMode, trustedClickMode, identityKeywordsArg] = args;
             const textOf = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
             const norm = (s) => (s || "").toLowerCase().replace(/\\s+/g, " ").trim();
+
+            function isDateIdentityKeyword(keyword) {
+                const value = norm(keyword);
+                return /^(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec) \\d{1,2}$/.test(value)
+                    || /^\\d{1,2}月\\d{1,2}日?$/.test(value);
+            }
+
+            const identityKeywords = Array.isArray(identityKeywordsArg) && identityKeywordsArg.length > 0
+                ? identityKeywordsArg
+                : keywords.filter(isDateIdentityKeyword);
+
+            function matchesRequiredIdentity(text) {
+                if (identityKeywords.length === 0) return true;
+                const value = norm(text);
+                return identityKeywords.some(keyword => value.includes(norm(keyword)));
+            }
 
             function matchesSideLabel(text) {
                 const t = norm(text);
@@ -3978,7 +4036,9 @@ class PolymtradeExecutor:
                 if (!t || t.length > 80) continue;
                 if (isInsideComments(leaf) || isInNoise(leaf)) continue;
                 const s = scoreText(t);
-                if (s > 0) anchors.push({ el: leaf, text: t, score: s });
+                if (s > 0 && matchesRequiredIdentity(t)) {
+                    anchors.push({ el: leaf, text: t, score: s });
+                }
             }
             // Prefer the most specific anchor (shortest exact text), then
             // highest keyword score.
@@ -3988,7 +4048,7 @@ class PolymtradeExecutor:
                 let el = anchor.el;
                 for (let depth = 0; depth < 8 && el; depth++) {
                     const btns = findSideButtons(el);
-                    if (btns.length >= 1) {
+                    if (btns.length >= 1 && matchesRequiredIdentity(textOf(el))) {
                         for (const sideLabel of sideLabels) {
                             const l = sideLabel.toLowerCase();
                             const target = btns.find(b => {
@@ -3997,12 +4057,12 @@ class PolymtradeExecutor:
                             });
                             if (target) {
                                 const clicked = clickTarget(target);
-                                return {clicked: true, label: textOf(clicked), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), strategy: "anchor"};
+                                return {clicked: true, label: textOf(clicked), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), identityMatched: true, strategy: "anchor"};
                             }
                         }
                         // Fallback: click the first side button we found.
                         const clicked = clickTarget(btns[0]);
-                        return {clicked: true, label: textOf(clicked), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), strategy: "anchor-fallback"};
+                        return {clicked: true, label: textOf(clicked), rowScore: anchor.score, rowText: textOf(el).slice(0, 80), identityMatched: true, strategy: "anchor-fallback"};
                     }
                     el = el.parentElement;
                 }
@@ -4024,12 +4084,13 @@ class PolymtradeExecutor:
                         fullScore,
                         titleScore,
                         score: fullScore + titleScore * 2,
+                        identityMatch: matchesRequiredIdentity(rowText),
                         textLength: rowText.length,
                         btns,
                         rowText: rowText.slice(0, 80),
                     };
                 })
-                .filter(item => item.score > 0 && item.btns.length > 0)
+                .filter(item => item.score > 0 && item.identityMatch && item.btns.length > 0)
                 .sort((a, b) => {
                     if (b.score !== a.score) return b.score - a.score;
                     return a.textLength - b.textLength;
@@ -4045,7 +4106,7 @@ class PolymtradeExecutor:
                     });
                     if (target) {
                         const clicked = clickTarget(target);
-                        return {clicked: true, label: textOf(clicked), rowScore: score, rowText: textOf(row).slice(0, 80), strategy: "row-score"};
+                        return {clicked: true, label: textOf(clicked), rowScore: score, rowText: textOf(row).slice(0, 80), identityMatched: true, strategy: "row-score"};
                     }
                 }
             }
@@ -4081,7 +4142,13 @@ class PolymtradeExecutor:
             // keywords. On multi-market event pages, a global Yes/No fallback
             // can click the wrong row.
             if (keywords.length > 0) {
-                return {clicked: false, bestScore: bestScore, keywords: keywords, skippedGlobalFallback: true};
+                return {
+                    clicked: false,
+                    bestScore: bestScore,
+                    keywords: keywords,
+                    identityKeywords: identityKeywords,
+                    skippedGlobalFallback: true
+                };
             }
 
             const xpath = "//*[contains(text(), '" + outcome.replace(/'/g, "\\'") + "')]";
@@ -4109,6 +4176,21 @@ class PolymtradeExecutor:
             return {clicked: false, bestScore: bestScore, keywords: keywords};
         }
         """
+
+    @staticmethod
+    def _required_market_identity_keywords(keywords: list[str]) -> list[str]:
+        """Return date aliases that must be present in a selected market row."""
+        month_pattern = (
+            r"(?:january|february|march|april|may|june|july|august|"
+            r"september|october|november|december|jan|feb|mar|apr|jun|"
+            r"jul|aug|sep|oct|nov|dec)\s+\d{1,2}"
+        )
+        return [
+            keyword
+            for keyword in keywords
+            if re.fullmatch(month_pattern, keyword, re.IGNORECASE)
+            or re.fullmatch(r"\d{1,2}月\d{1,2}日?", keyword)
+        ]
 
     @staticmethod
     def _extract_quoted_price(label: str) -> Optional[float]:
@@ -4181,6 +4263,7 @@ class PolymtradeExecutor:
                     seen_keywords.add(keyword)
                     merged_keywords.append(keyword)
             keywords = merged_keywords
+        identity_keywords = self._required_market_identity_keywords(keywords)
         last_result = None
 
         for attempt in range(max_attempts):
@@ -4202,12 +4285,21 @@ class PolymtradeExecutor:
 
             result = await self._evaluate_with_navigation_retry(
                 self._select_outcome_script(),
-                [outcome, side_labels, keywords, binary_updown, True],
+                [outcome, side_labels, keywords, binary_updown, True, identity_keywords],
                 label="select_outcome.evaluate",
             )
             last_result = result
 
             if result and result.get("clicked"):
+                if (
+                    identity_keywords
+                    and not binary_updown
+                    and result.get("identityMatched") is not True
+                ):
+                    raise RuntimeError(
+                        "Selected outcome row does not match required market identity: "
+                        f"required={identity_keywords}, row={result.get('rowText')}"
+                    )
                 try:
                     clicked_el = await self.page.wait_for_selector(
                         '[data-polyhermes-outcome-target="true"]', timeout=1000
@@ -5767,6 +5859,22 @@ def apply_portfolio_position_line_fallback(position: dict) -> None:
             if not position.get("quantity") and quantity_match:
                 position["quantity"] = float(quantity_match.group(1))
             break
+
+    if not position.get("side") or not position.get("quantity"):
+        # v2 rows render side ("No") and quantity ("17.4 shares") as separate
+        # lines with no bullet separator.
+        for line in lines:
+            if not position.get("side") and re.fullmatch(r"(?i)yes|no|up|down", line):
+                position["side"] = line
+                continue
+            if not position.get("quantity"):
+                qty_match = re.fullmatch(
+                    r"([0-9]+(?:\.[0-9]+)?)\s*(?:shares|份)",
+                    line.replace(",", ""),
+                    re.IGNORECASE,
+                )
+                if qty_match:
+                    position["quantity"] = float(qty_match.group(1))
 
     if position.get("currentValue") is None:
         value_line = next(
