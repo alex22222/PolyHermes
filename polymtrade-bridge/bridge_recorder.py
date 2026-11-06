@@ -123,7 +123,7 @@ class BridgeTradeRecorder:
         market_slug: Optional[str],
         leader_address: Optional[str],
     ) -> bool:
-        """Return True if this leader already has an active/success BUY on the market."""
+        """Return True for pending, confirmed or submitted-unverified BUY exposure."""
         if not leader_address:
             return False
         leader = leader_address.lower()
@@ -131,7 +131,7 @@ class BridgeTradeRecorder:
         SELECT 1 FROM bridge_trade_record
         WHERE bridge_id = %s
           AND side = 'BUY'
-          AND status IN ('PENDING', 'SUCCESS')
+          AND status IN ('PENDING', 'SUCCESS', 'SUBMITTED_UNVERIFIED')
           AND (
             market_id = %s
             OR (%s IS NOT NULL AND raw_payload LIKE %s)
@@ -162,12 +162,12 @@ class BridgeTradeRecorder:
         market_id: str,
         market_slug: Optional[str],
     ) -> bool:
-        """Return True if any leader already has an active/success BUY on the market."""
+        """Return True for any pending, confirmed or submitted-unverified BUY exposure."""
         sql = """
         SELECT 1 FROM bridge_trade_record
         WHERE bridge_id = %s
           AND side = 'BUY'
-          AND status IN ('PENDING', 'SUCCESS')
+          AND status IN ('PENDING', 'SUCCESS', 'SUBMITTED_UNVERIFIED')
           AND (
             market_id = %s
             OR (%s IS NOT NULL AND raw_payload LIKE %s)

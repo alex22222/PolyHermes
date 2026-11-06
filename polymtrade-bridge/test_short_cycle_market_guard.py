@@ -413,6 +413,78 @@ def test_generic_repeat_blocks_opposite_hedge_when_prior_buy_is_pending():
         bridge_main.recorder = original
 
 
+def test_generic_repeat_blocks_submitted_unverified_buy_for_both_outcomes():
+    original = bridge_main.recorder
+    try:
+        bridge_main.recorder = FakeRecorder(
+            recent_records=[
+                {
+                    "market_id": "0xmarket",
+                    "side": "BUY",
+                    "status": "SUBMITTED_UNVERIFIED",
+                    "outcome": "No",
+                    "outcome_index": 1,
+                    "quantity": Decimal("2.139843"),
+                    "price": Decimal("0.467324"),
+                    "amount": Decimal("1"),
+                    "raw_payload": '{"marketSlug":"same-market","outcome":"No"}',
+                }
+            ]
+        )
+        for outcome, outcome_index in (("No", 1), ("Yes", 0)):
+            signal = SimpleNamespace(
+                leader_address="0xLeader",
+                condition_id="0xmarket",
+                market_slug="same-market",
+                outcome=outcome,
+                outcome_index=outcome_index,
+            )
+            reason = _generic_repeat_buy_reason(
+                signal,
+                "BUY",
+                price=Decimal("0.345476"),
+                amount=Decimal("1"),
+                now_ms=1783234800000,
+                pending_wait_seconds=0,
+            )
+            assert reason is not None, (outcome, reason)
+            assert "Repeat same-market BUY skipped" in reason
+    finally:
+        bridge_main.recorder = original
+
+
+def test_generic_repeat_blocks_when_pending_transitions_to_unverified():
+    class SequenceRecorder(FakeRecorder):
+        def recent_leader_records_since(self, leader_address, since_ms, limit=200):
+            self.recent_calls.append((leader_address, since_ms, limit))
+            return [{
+                "market_id": "0xmarket",
+                "side": "BUY",
+                "status": "PENDING" if len(self.recent_calls) == 1 else "SUBMITTED_UNVERIFIED",
+                "outcome": "Yes",
+                "outcome_index": 0,
+            }]
+
+    original = bridge_main.recorder
+    try:
+        bridge_main.recorder = SequenceRecorder()
+        signal = SimpleNamespace(
+            leader_address="0xLeader",
+            condition_id="0xmarket",
+            market_slug="same-market",
+            outcome="Yes",
+            outcome_index=0,
+        )
+        reason = _generic_repeat_buy_reason(
+            signal, "BUY", now_ms=1783234800000,
+            pending_wait_seconds=0.1, pending_poll_seconds=0,
+        )
+        assert reason is not None, reason
+        assert len(bridge_main.recorder.recent_calls) == 2
+    finally:
+        bridge_main.recorder = original
+
+
 def test_generic_repeat_allows_retry_when_prior_pending_buy_fails():
     class SequenceRecorder(FakeRecorder):
         def __init__(self):
@@ -709,6 +781,8 @@ def main() -> int:
     test_generic_repeat_allows_safe_opposite_hedge_buy()
     test_generic_repeat_blocks_unsafe_opposite_hedge_buy()
     test_generic_repeat_blocks_opposite_hedge_when_prior_buy_is_pending()
+    test_generic_repeat_blocks_submitted_unverified_buy_for_both_outcomes()
+    test_generic_repeat_blocks_when_pending_transitions_to_unverified()
     test_generic_repeat_allows_retry_when_prior_pending_buy_fails()
     test_generic_repeat_blocks_retry_when_prior_pending_buy_remains_pending()
     test_near_expiry_small_news_buy_guard()

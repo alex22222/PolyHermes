@@ -2721,7 +2721,7 @@ def _matching_repeat_buy_records(
     for record in records:
         if str(record.get("side") or "").upper() != "BUY":
             continue
-        if str(record.get("status") or "").upper() not in {"PENDING", "SUCCESS"}:
+        if str(record.get("status") or "").upper() not in {"PENDING", "SUCCESS", STATUS_SUBMITTED_UNVERIFIED}:
             continue
         if _same_market_record_matches_signal(record, signal):
             matching_records.append(record)
@@ -2779,7 +2779,7 @@ def _generic_repeat_buy_reason(
         return None
 
     signal_key = _signal_outcome_key(signal)
-    if any(str(record.get("status") or "").upper() == "PENDING" for record in matching_records):
+    if any(str(record.get("status") or "").upper() != "SUCCESS" for record in matching_records):
         return (
             "Repeat same-market BUY skipped: "
             f"window={GENERIC_REPEAT_BUY_WINDOW_SECONDS}s"
