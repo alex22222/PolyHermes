@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Monitor the production Docker stack and notify Feishu on incidents."""
 
+import fcntl
 import json
 import os
 import re
@@ -11,6 +12,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+
+FUTURE_COMPOSE_FILE = Path("/opt/polyhermes/.migration/compose.json")
 
 
 def bridge_runtime_issue(body):
@@ -223,6 +227,7 @@ class Watchdog:
         app_issue = any(issue.startswith(self.APP_ISSUE_PREFIXES) for issue in issues)
         bridge_issue = any(issue.startswith("bridge_") and not issue.startswith("bridge_trading:") for issue in issues)
         trading_issue = any(issue.startswith("bridge_trading:") for issue in issues)
+        relay_issue = any(issue.startswith("future_relay:") for issue in issues)
         public_only = all(issue.startswith(("public_site:", "public_dns:")) for issue in issues)
         action = ""
         if app_issue and self.config.auto_restart_app and not state.get("app_restart_attempted"):
@@ -244,13 +249,21 @@ class Watchdog:
             action = "上游受限或持仓未就绪；保留登录资料，不自动重启 Bridge，不绕过保护或补单。"
         elif public_only:
             action = "本机服务检查正常；DNS/公网入口故障不能通过重启应用修复，未重启服务。"
-        elif any(issue.startswith("future_relay:") for issue in issues):
-            action = "Future 转发服务在主应用网络内不可达；未重启 Bridge，不补单，不改钱包或登录资料。"
+        elif relay_issue:
+            if self.config.auto_restart_app and not state.get("relay_restart_attempted"):
+                restored = self.rejoin_future_relay()
+                state["relay_restart_attempted"] = True
+                action = ("已自动恢复 Future 转发服务与主应用的本机连接。" if restored
+                          else "Future 转发服务不满足网络恢复条件或恢复未通过，保留其他服务。")
+            else:
+                action = "Future 转发服务不可达；自动恢复未启用或本次故障已尝试恢复。"
 
         if not app_issue:
             state.pop("app_restart_attempted", None)
         if not bridge_issue:
             state.pop("bridge_restart_attempted", None)
+        if not relay_issue:
+            state.pop("relay_restart_attempted", None)
 
         should_alert = not state.get("incident") or (
             now - int(state.get("last_alert_at", 0)) >= self.config.reminder_seconds
@@ -310,14 +323,7 @@ class Watchdog:
     def restart_app(self):
         if self._command(["docker", "restart", "polyhermes"], check=False).strip() != "polyhermes":
             return False
-        app_id = self._command(["docker", "inspect", "--format", "{{.Id}}", "polyhermes"])
-        mode = self._command(["docker", "inspect", "--format", "{{.HostConfig.NetworkMode}}", "future-btc5m-relay"])
-        if app_id and mode == f"container:{app_id}":
-            # A running sidecar retains the old network namespace across app restart.
-            result = self._command(["docker", "restart", "future-btc5m-relay"], check=False)
-            if result != "future-btc5m-relay":
-                print("PolyHermes watchdog: Future relay network rejoin failed")
-        return True
+        return self.rejoin_future_relay()
 
     def _check_future_relay(self, issues):
         """Probe only relay liveness, from the consuming app's network namespace."""
@@ -332,6 +338,91 @@ class Watchdog:
         except (OSError, ValueError, TypeError, AttributeError):
             pass
         issues.append("future_relay: listener unavailable in app network")
+
+    def rejoin_future_relay(self):
+        """Serialize relay-only recovery across deploys and independent watchdogs."""
+        directory = self.config.state_file.parent
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            with (directory / "future-relay.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return False
+                return self._rejoin_future_relay(directory / "future-relay-recovery.json")
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
+            print(f"Future relay recovery unavailable: {type(error).__name__}")
+            return False
+
+    def _relay_recreate_command(self):
+        config = json.loads(FUTURE_COMPOSE_FILE.read_text(encoding="utf-8"))
+        project = config.get("name")
+        services = config.get("services") or {}
+        app = services.get("app") or {}
+        relay = services.get("future-relay") or {}
+        if (not isinstance(project, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project)
+                or app.get("container_name") != "polyhermes"
+                or relay.get("container_name") != "future-btc5m-relay"
+                or relay.get("network_mode") != "service:app" or relay.get("ports") or relay.get("networks")):
+            return None
+        for name, service in (("polyhermes", "app"), ("future-btc5m-relay", "future-relay")):
+            for label, expected in (("project", project), ("service", service)):
+                template = '{{index .Config.Labels "com.docker.compose.' + label + '"}}'
+                if self._command(["docker", "inspect", "--format", template, name], timeout=5) != expected:
+                    return None
+        return ["docker", "compose", "--project-name", project, "-f", str(FUTURE_COMPOSE_FILE),
+                "--profile", "cutover", "up", "-d", "--no-deps", "--force-recreate", "future-relay"]
+
+    def _rejoin_future_relay(self, state_path):
+        app_id = self._command(["docker", "inspect", "--format", "{{.Id}}", "polyhermes"], timeout=5)
+        mode = self._command(["docker", "inspect", "--format", "{{.HostConfig.NetworkMode}}", "future-btc5m-relay"], timeout=5)
+        if not app_id or not mode.startswith("container:"):
+            return False
+        probe = "import os; print(os.readlink('/proc/self/ns/net'))"
+        app_namespace = self._command(["docker", "exec", "polyhermes", "python3", "-c", probe], timeout=5)
+        relay_namespace = self._command(["docker", "exec", "future-btc5m-relay", "python3", "-c", probe], timeout=5)
+        if not re.fullmatch(r"net:\[\d+\]", app_namespace):
+            return False
+        if mode == f"container:{app_id}":
+            if not re.fullmatch(r"net:\[\d+\]", relay_namespace):
+                return False
+            if app_namespace == relay_namespace:
+                issues = []
+                self._check_future_relay(issues)
+                if not issues:
+                    state_path.unlink(missing_ok=True)
+                    return True
+                if self._command(["docker", "inspect", "--format", "{{.State.Health.Status}}", "future-btc5m-relay"], timeout=5) != "unhealthy":
+                    return False
+            command = ["docker", "restart", "future-btc5m-relay"]
+        else:
+            command = self._relay_recreate_command()
+            if command is None:
+                return False
+        try:
+            previous = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+        generation = [app_id, app_namespace]
+        now = self.now()
+        attempts = previous.get("attempts", 0) if previous.get("generation") == generation else 0
+        if attempts >= 3 or attempts and now - previous.get("attemptedAt", 0) < 30:
+            return False
+        temporary = state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"generation": generation, "attempts": attempts + 1, "attemptedAt": now}))
+        temporary.replace(state_path)
+        result = self._command(command, check=True, timeout=20)
+        if command[1] == "restart" and result != "future-btc5m-relay":
+            return False
+        if (self._command(["docker", "inspect", "--format", "{{.Id}}", "polyhermes"], timeout=5) != app_id
+                or self._command(["docker", "inspect", "--format", "{{.HostConfig.NetworkMode}}", "future-btc5m-relay"], timeout=5) != f"container:{app_id}"
+                or self._command(["docker", "exec", "future-btc5m-relay", "python3", "-c", probe], timeout=5) != app_namespace):
+            return False
+        issues = []
+        self._check_future_relay(issues)
+        if not issues:
+            state_path.unlink(missing_ok=True)
+        return not issues
 
     def restart_bridge(self):
         """Restart Bridge only after a fresh browser login check and a full drain."""
@@ -505,13 +596,14 @@ class Watchdog:
             return json.loads(response.read().decode("utf-8"))
 
     @staticmethod
-    def _command(command, check=False, stderr=False):
+    def _command(command, check=False, stderr=False, timeout=None):
         result = subprocess.run(
             command,
             check=check,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if stderr else subprocess.PIPE,
+            timeout=timeout,
         )
         return result.stdout.strip()
 
@@ -530,6 +622,16 @@ class Watchdog:
 
 def main():
     config = Config.from_env()
+    if "--future-relay-only" in sys.argv:
+        monitor = Watchdog(config=config, notifier=None)
+        if config.auto_restart_app:
+            healthy = monitor.rejoin_future_relay()
+        else:
+            issues = []
+            monitor._check_future_relay(issues)
+            healthy = not issues
+        print(json.dumps({"futureRelay": "HEALTHY" if healthy else "UNAVAILABLE"}))
+        raise SystemExit(0 if healthy else 1)
     notifier = FeishuNotifier(timeout=config.request_timeout)
     if "--test-alert" in sys.argv:
         sent = notifier.send(

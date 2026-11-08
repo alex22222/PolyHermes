@@ -88,6 +88,23 @@ sudo systemctl enable --now polyhermes-bridge
 浏览器登录态成功、信号队列为空且成功关闭新信号入口时自动重启，每个连续故障周期最多尝试一次。
 服务恢复后会发送一次恢复通知。
 
+巡检也从主应用内检查 Future relay。独立的 `polyhermes-future-relay-guard.timer`
+每 10 秒执行一次 `--future-relay-only`，不受其他健康检查或飞书发送阻塞。
+沿用 `WATCHDOG_AUTO_RESTART_APP` 开关：网络错位时仅重启 relay；主应用 ID 变更时，
+先核对私有 Compose 与两侧项目/服务标签，再用 `--no-deps` 仅重建声明的 relay。
+并发操作共用文件锁；失败间隔至少 30 秒，同一应用网络最多尝试 3 次，连接恢复后重置。
+生产私有 Compose 的 `future-relay.restart` 应为 `unless-stopped`，运行容器也需同步该策略。
+
+发布和回滚都必须通过主应用内 relay 连接检查；后端 healthy 或首页 HTTP200 不足以通过发布验收。
+手工重启/重建主应用后，同样运行 `python3 scripts/vps_service_watchdog.py --future-relay-only` 并确认成功。
+
+```bash
+sudo cp scripts/systemd/polyhermes-future-relay-guard.service /etc/systemd/system/
+sudo cp scripts/systemd/polyhermes-future-relay-guard.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now polyhermes-future-relay-guard.timer
+```
+
 ```bash
 sudo mkdir -p /etc/polyhermes
 sudo cp scripts/systemd/polyhermes-watchdog.env.example /etc/polyhermes/watchdog.env

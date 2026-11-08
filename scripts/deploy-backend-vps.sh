@@ -73,15 +73,19 @@ BACKUP_JAR="$PROD_DIR/backups/app-before-${COMMIT:0:12}-$(date +%Y%m%d-%H%M%S).j
 REMOTE_SHA=$("${SSH[@]}" "sha256sum '$REMOTE_CANDIDATE'" | awk '{print $1}')
 [[ "$REMOTE_SHA" == "$LOCAL_SHA" ]] || { echo "ERROR: uploaded JAR SHA-256 mismatch" >&2; exit 1; }
 
+wait_for_services() {
+    "${SSH[@]}" "for i in \$(seq 1 48); do [ \"\$(docker inspect -f '{{.State.Health.Status}}' '$APP_CONTAINER' 2>/dev/null)\" = healthy ] && code=\$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8088/api/auth/check-first-use || true) && [ \"\$code\" = 200 ] && python3 '$PROD_DIR/scripts/vps_service_watchdog.py' --future-relay-only && exit 0; sleep 5; done; exit 1"
+}
+
 rollback() {
     echo "Deployment failed; restoring $BACKUP_JAR" >&2
     "${SSH[@]}" "docker cp '$BACKUP_JAR' '$APP_CONTAINER:/app/app.jar' && docker restart '$APP_CONTAINER' >/dev/null"
-    "${SSH[@]}" "for i in \$(seq 1 48); do [ \"\$(docker inspect -f '{{.State.Health.Status}}' '$APP_CONTAINER' 2>/dev/null)\" = healthy ] && exit 0; sleep 5; done; exit 1"
+    wait_for_services
 }
 
 "${SSH[@]}" "mkdir -p '$PROD_DIR/backups' && docker cp '$APP_CONTAINER:/app/app.jar' '$BACKUP_JAR' && chmod 600 '$BACKUP_JAR' && docker cp '$REMOTE_CANDIDATE' '$APP_CONTAINER:/app/app.jar' && docker restart '$APP_CONTAINER' >/dev/null"
 
-if ! "${SSH[@]}" "for i in \$(seq 1 48); do [ \"\$(docker inspect -f '{{.State.Health.Status}}' '$APP_CONTAINER' 2>/dev/null)\" = healthy ] && code=\$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8088/api/auth/check-first-use || true) && [ \"\$code\" = 200 ] && exit 0; sleep 5; done; exit 1"; then
+if ! wait_for_services; then
     rollback
     exit 1
 fi

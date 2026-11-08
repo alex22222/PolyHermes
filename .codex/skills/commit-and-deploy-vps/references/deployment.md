@@ -52,6 +52,14 @@ scripts/deploy-backend-vps.sh --commit <commit> --execute
 
 New migrations are rejected by default. Use `--allow-new-migrations` only when the exact migrations have been separately reviewed and explicitly authorized. Modified or removed existing migrations are always rejected. Never edit `flyway_schema_history` or overwrite the database to make a deployment pass.
 
+After every app container restart or recreation, including rollback, require
+`python3 /opt/polyhermes/scripts/vps_service_watchdog.py --future-relay-only` to
+succeed before declaring the release healthy. The backend deployment script
+enforces this gate. The independent `polyhermes-future-relay-guard.timer` checks
+every ten seconds; keep it enabled. The private Compose `future-relay` service
+and the running relay use `restart: unless-stopped`. The guard serializes recovery
+and recreates only that declared relay with `--no-deps` if the app ID changes.
+
 For frontend-only changes, build `frontend/dist`, copy the dist directory into `/usr/share/nginx/html` in `polyhermes`, then restart or commit the app image as appropriate. Verify the public page and its referenced asset URLs return 200.
 
 Persist reviewed artifacts using a clean derived image and update the explicit

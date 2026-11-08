@@ -42,6 +42,78 @@ class FakeHttpResponse:
 
 
 class VpsServiceWatchdogTest(unittest.TestCase):
+    def test_relay_only_incident_rejoins_once_without_restarting_trading_services(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            monitor = watchdog_module.Watchdog(
+                config=self.config(Path(tmp) / "state.json", threshold=1), notifier=FakeNotifier(),
+                issue_collector=lambda: ["future_relay: listener unavailable in app network"],
+                app_restarter=mock.Mock(), bridge_restarter=mock.Mock(),
+            )
+            monitor.rejoin_future_relay = mock.Mock(return_value=True)
+            monitor.run_once()
+            monitor.run_once()
+            monitor.rejoin_future_relay.assert_called_once()
+            monitor.app_restarter.assert_not_called()
+            monitor.bridge_restarter.assert_not_called()
+
+            monitor.issue_collector = lambda: []
+            monitor.run_once()
+            monitor.issue_collector = lambda: ["future_relay: listener unavailable in app network"]
+            monitor.run_once()
+            self.assertEqual(2, monitor.rejoin_future_relay.call_count)
+
+    def test_relay_rejoin_respects_existing_auto_recovery_opt_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self.config(Path(tmp) / "state.json", threshold=1)
+            config.auto_restart_app = False
+            monitor = watchdog_module.Watchdog(
+                config=config, notifier=FakeNotifier(),
+                issue_collector=lambda: ["future_relay: listener unavailable in app network"],
+            )
+            monitor.rejoin_future_relay = mock.Mock(return_value=True)
+            monitor.run_once()
+            monitor.rejoin_future_relay.assert_not_called()
+
+    def test_relay_rejoin_requires_proven_namespace_drift_and_its_current_app_owner(self):
+        cases = [
+            ("container:app-id", "net:[100]", "net:[101]", "future-btc5m-relay", '{"status":"ok"}', True),
+            ("host", "net:[100]", "net:[101]", "future-btc5m-relay", '{"status":"ok"}', False),
+            ("container:other-id", "net:[100]", "net:[101]", "future-btc5m-relay", '{"status":"ok"}', False),
+            ("container:app-id", "net:[100]", "net:[100]", "future-btc5m-relay", '{"status":"ok"}', True),
+            ("container:app-id", "", "net:[101]", "future-btc5m-relay", '{"status":"ok"}', False),
+            ("container:app-id", "net:[100]", "unreadable", "future-btc5m-relay", '{"status":"ok"}', False),
+            ("container:app-id", "net:[100]", "net:[101]", "", '{"status":"ok"}', False),
+            ("container:app-id", "net:[100]", "net:[101]", "future-btc5m-relay", "", False),
+        ]
+        for mode, app_namespace, relay_namespace, restart_result, health, expected in cases:
+            with self.subTest(mode=mode, app_namespace=app_namespace, relay_namespace=relay_namespace,
+                              restart=restart_result, health=health), tempfile.TemporaryDirectory() as tmp:
+                monitor = watchdog_module.Watchdog(config=self.config(Path(tmp) / "state.json"), notifier=FakeNotifier())
+                namespaces = {"polyhermes": app_namespace, "future-btc5m-relay": relay_namespace}
+
+                def command(args, **kwargs):
+                    if args == ["docker", "inspect", "--format", "{{.Id}}", "polyhermes"]:
+                        return "app-id"
+                    if args == ["docker", "inspect", "--format", "{{.HostConfig.NetworkMode}}", "future-btc5m-relay"]:
+                        return mode
+                    if args[:2] == ["docker", "exec"]:
+                        if "/proc/self/ns/net" in args[-1]:
+                            return namespaces[args[2]]
+                        if "127.0.0.1:8766/live" in args[-1]:
+                            return health
+                    if args == ["docker", "restart", "future-btc5m-relay"]:
+                        if restart_result == "future-btc5m-relay":
+                            namespaces["future-btc5m-relay"] = app_namespace
+                        return restart_result
+                    return ""
+
+                with mock.patch.object(monitor, "_command", side_effect=command) as run, \
+                        mock.patch.object(watchdog_module, "FUTURE_COMPOSE_FILE", Path(tmp) / "absent.json"):
+                    self.assertEqual(expected, monitor.rejoin_future_relay())
+                restarts = [call.args[0] for call in run.call_args_list if call.args[0][:2] == ["docker", "restart"]]
+                should_attempt = mode == "container:app-id" and app_namespace == "net:[100]" and relay_namespace == "net:[101]"
+                self.assertEqual([["docker", "restart", "future-btc5m-relay"]] if should_attempt else [], restarts)
+
     def test_relay_listener_failure_is_not_a_healthy_system_or_a_bridge_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             notifier = FakeNotifier()
@@ -73,9 +145,10 @@ class VpsServiceWatchdogTest(unittest.TestCase):
                 self.assertIn("127.0.0.1:8766/live", command.call_args.args[0][-1])
 
     def test_app_restart_rejoins_only_its_existing_network_sidecar(self):
-        monitor = watchdog_module.Watchdog(config=self.config(Path("/tmp/unused")), notifier=FakeNotifier())
         for mode, should_restart in [("container:app-id", True), ("host", False), ("container:other-id", False)]:
-            with self.subTest(mode=mode):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                monitor = watchdog_module.Watchdog(config=self.config(Path(tmp) / "state.json"), notifier=FakeNotifier())
+                namespaces = {"polyhermes": "net:[100]", "future-btc5m-relay": "net:[101]"}
                 def command(args, **kwargs):
                     if args == ["docker", "restart", "polyhermes"]:
                         return "polyhermes"
@@ -84,10 +157,17 @@ class VpsServiceWatchdogTest(unittest.TestCase):
                     if args == ["docker", "inspect", "--format", "{{.HostConfig.NetworkMode}}", "future-btc5m-relay"]:
                         return mode
                     if args == ["docker", "restart", "future-btc5m-relay"]:
+                        namespaces["future-btc5m-relay"] = namespaces["polyhermes"]
                         return "future-btc5m-relay"
+                    if args[:2] == ["docker", "exec"]:
+                        if "/proc/self/ns/net" in args[-1]:
+                            return namespaces[args[2]]
+                        if "127.0.0.1:8766/live" in args[-1]:
+                            return '{"status":"ok"}'
                     return ""
-                with mock.patch.object(monitor, "_command", side_effect=command) as run:
-                    self.assertTrue(monitor.restart_app())
+                with mock.patch.object(monitor, "_command", side_effect=command) as run, \
+                        mock.patch.object(watchdog_module, "FUTURE_COMPOSE_FILE", Path(tmp) / "absent.json"):
+                    self.assertEqual(should_restart, monitor.restart_app())
                     restarts = [c.args[0] for c in run.call_args_list if c.args[0][:2] == ["docker", "restart"]]
                     self.assertEqual([["docker", "restart", "polyhermes"]] +
                                      ([["docker", "restart", "future-btc5m-relay"]] if should_restart else []), restarts)

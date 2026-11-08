@@ -1,0 +1,13 @@
+[Unit]
+Description=Keep Future relay attached to the current PolyHermes app
+After=docker.service
+ConditionPathExists=/opt/polyhermes/.migration/compose.json
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/polyhermes
+EnvironmentFile=-/etc/polyhermes/watchdog.env
+ExecStart=/usr/bin/python3 /opt/polyhermes/scripts/vps_service_watchdog.py --future-relay-only
+StateDirectory=polyhermes-watchdog
+TimeoutStartSec=50
