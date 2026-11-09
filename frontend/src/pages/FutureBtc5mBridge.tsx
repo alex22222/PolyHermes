@@ -5,6 +5,7 @@ import { ReloadOutlined } from '@ant-design/icons'
 import { useMediaQuery } from 'react-responsive'
 import { apiService } from '../services/api'
 import FutureStrategyPerformance from '../components/FutureStrategyPerformance'
+import FutureBtc5mPaperRegimeCard from '../components/FutureBtc5mPaperRegime'
 import { referenceIsFresh } from '../utils/futureBtc5mPreflight'
 import type { FutureBtc5mAssets, FutureBtc5mAssetBuy, FutureBtc5mAssetPosition, FutureBtc5mBridgeStatus, FutureBtc5mFourHour, FutureBtc5mStrategy, FutureBtcStrategyPerformance } from '../types'
 
@@ -437,6 +438,8 @@ const FutureBtc5mBridge: React.FC = () => {
           : <Typography.Text type="secondary">{assetsLoading ? '正在读取买入记录…' : '买入历史暂未核实'}</Typography.Text>}
       </Space>
     </Card>
+
+    {runtime?.paperRegime && <FutureBtc5mPaperRegimeCard paper={runtime.paperRegime} />}
 
   </Space>
 }

@@ -100,6 +100,7 @@ const mountPage = (initialTime) => {
     }}},
     '../utils/futureBtc5mPreflight': guards.exports,
     '../components/FutureStrategyPerformance': {default: 'FutureStrategyPerformance'},
+    '../components/FutureBtc5mPaperRegime': {default: 'FutureBtc5mPaperRegime'},
   };
   const sandbox = {exports: {}, Date: class extends Date {static now() {return now;}},
     document,

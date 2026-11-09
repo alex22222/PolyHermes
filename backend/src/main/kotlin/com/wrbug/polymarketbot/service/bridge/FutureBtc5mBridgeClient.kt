@@ -238,6 +238,54 @@ class FutureBtc5mBridgeClient(
         }
         if (status.has("preflight") && !status.get("preflight").isJsonNull) validatePreflight(objectValue(status.get("preflight")), status)
         validatePreparation(objectValue(field(status, "preparation")), status)
+        if (status.has("paperRegime") && !status.get("paperRegime").isJsonNull) {
+            validatePaperRegime(objectValue(status.get("paperRegime")))
+        }
+    }
+
+    private fun validatePaperRegime(paper: JsonObject) {
+        check(string(paper, "rule") == PAPER_REGIME_RULE && number(paper, "minTrend60Bp") == 15.0 &&
+            string(paper, "resolutionSource") == "binance_15m_estimate") { "Future Bridge 纸上 regime 规则无效" }
+        fun stats(key: String): Triple<Long, Long, Long> {
+            val value = objectValue(field(paper, key))
+            val trades = integer(value, "trades")
+            val settled = integer(value, "settled")
+            val wins = integer(value, "wins")
+            check(trades in 0..1000000 && settled in 0..trades && wins in 0..settled &&
+                number(value, "totalUsd").let { it >= -1e6 && it <= 1e6 }) { "Future Bridge 纸上 regime 统计无效" }
+            val winRate = field(value, "winRate")
+            if (!winRate.isJsonNull) check(number(value, "winRate") in 0.0..1.0) { "Future Bridge 纸上 regime 胜率无效" }
+            val roi = field(value, "roiPerDollar")
+            if (!roi.isJsonNull) check(number(value, "roiPerDollar").let { it >= -1.0 && it <= 100.0 }) {
+                "Future Bridge 纸上 regime 收益率无效"
+            }
+            return Triple(trades, settled, wins)
+        }
+        val (baseTrades, baseSettled, _) = stats("baseline")
+        val (filteredTrades, _, _) = stats("filtered")
+        check(filteredTrades <= baseTrades) { "Future Bridge 纸上 regime 过滤统计超出基线" }
+        val recent = array(paper, "recent")
+        check(recent.size() <= 10) { "Future Bridge 纸上 regime 最近记录过多" }
+        var previous = Long.MAX_VALUE
+        var settledSeen = 0L
+        recent.forEach { element ->
+            val trade = objectValue(element)
+            val start = integer(trade, "periodStart")
+            check(start >= 0 && start % 900 == 0L && start <= previous) { "Future Bridge 纸上 regime 轮次无效" }
+            previous = start
+            check(string(trade, "side") in setOf("Up", "Down")) { "Future Bridge 纸上 regime 方向无效" }
+            check(number(trade, "priceCents") in 1.0..99.0) { "Future Bridge 纸上 regime 价格无效" }
+            boolean(trade, "g1Eligible")
+            val win = field(trade, "win")
+            if (!win.isJsonNull) {
+                settledSeen++
+                val won = win.asBoolean
+                check(number(trade, "roi") == (if (won) (100 - number(trade, "priceCents")) / number(trade, "priceCents") else -1.0)) {
+                    "Future Bridge 纸上 regime 盈亏不一致"
+                }
+            }
+        }
+        check(settledSeen <= baseSettled) { "Future Bridge 纸上 regime 最近记录与统计不一致" }
     }
 
     private fun validatePreparation(preparation: JsonObject, status: JsonObject) {
@@ -580,6 +628,7 @@ class FutureBtc5mBridgeClient(
 
     companion object {
         private const val OPEN_PRICE_SOURCE = "polymarket_crypto_price_fiveminute_twap60_openPrice"
+        private const val PAPER_REGIME_RULE = "G1 |trend60|>=15bp"
 
         // Round series of the strategies (same table as scripts/future_btc5m_series.py).
         private data class RoundSeries(val period: Long, val entryStart: Long?, val entryEnd: Long?, val slug: String,

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from future_btc5m_conditions import SOURCE as CONDITIONS_SOURCE, VOLATILITY_MAX_BP
 from future_btc5m_fourhour import SOURCE as FOUR_HOUR_SOURCE, evaluate as evaluate_four_hour
+from future_btc5m_paper_regime import record as record_paper, summary as paper_summary
 from future_btc5m_series import (CHECKPOINT_WINDOW, DEFAULT_STRATEGY, HOUR, SERIES, STRATEGIES, STRATEGY_SERIES,
                                  checkpoint_window, entry_bounds, is_et_weekend, market_url_round,
                                  preparation_id, round_start_of, series_of_preparation_id, slug_for)
@@ -417,6 +418,14 @@ class FutureBridge:
             ledger.flush()
             os.fsync(ledger.fileno())
         self.decisions[("15m", start)] = decision
+        if decision == "PREPARE":
+            try:
+                record_paper(self.state_dir, period_start=start, side=side,
+                             price_cents=max(self.browser_report["upQuoteCents"],
+                                             self.browser_report["downQuoteCents"]),
+                             trend60_bp=conditions["trend60Bp"], volatility_bp=conditions["volatilityBp"], now=now)
+            except OSError:
+                pass  # the paper shadow is best-effort; it never blocks a real decision
         return decision
 
     def _four_hour_inputs(self, source, start, checkpoint, now):
@@ -920,7 +929,16 @@ class FutureBridge:
             "preflight": self._preflight(source, source_error, now, persist_preflight),
             "preparation": self._preparation_view(source, source_error, now),
             "wallet": self._wallet_view(now),
+            "paperRegime": self._paper_regime_view(now),
         }
+
+    def _paper_regime_view(self, now):
+        if "15m" not in STRATEGY_SERIES[self.strategy]:
+            return None
+        try:
+            return paper_summary(self.state_dir, now)
+        except OSError:
+            return None
 
     def status(self):
         with self.lock:

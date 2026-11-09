@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import websockets
 from future_btc5m_bridge import FutureBridge, PreparationConflict, strict_json_object
 from future_btc5m_conditions import FIRST_FETCH_OFFSET, kline_url as condition_kline_url, round_conditions
+from future_btc5m_paper_regime import resolve as resolve_paper
 from future_btc5m_fourhour import kline_urls, model_state
 from future_btc5m_series import (CHECKPOINT_WINDOW, HOUR, SERIES, STRATEGY_SERIES, checkpoint_window, entry_bounds,
                                  hourly_slug, round_start_of, slug_for)
@@ -1055,6 +1056,7 @@ async def run(args):
         # The 15m decision skips high-volatility rounds (rule R1), from Binance 1m klines.
         conditions = RoundConditions(curl_json)
         assistant.conditions_fn = lambda: conditions.latest() if "15m" in legs() else None
+        paper_resolve_at = 0.0
         server = make_server(assistant, bridge=bridge, market_quote=market_quotes.quote)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         runtime_server = await start_runtime_server()
@@ -1075,6 +1077,12 @@ async def run(args):
             assistant.state["feed_reason"] = feed.error
             assistant.save_state()
             bridge.observe()
+            if "15m" in legs() and now >= paper_resolve_at:
+                paper_resolve_at = now + 15
+                try:
+                    resolve_paper(args.state_dir / "bridge", curl_json, time.time())
+                except Exception:
+                    pass  # transient network or ledger trouble; retried on the next tick
             await asyncio.sleep(0.5)
     finally:
         feed_task.cancel()

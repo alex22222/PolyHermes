@@ -3071,6 +3071,37 @@ export interface FutureBtcStrategyPerformance {
   curve: { at: number, netPnlUsd: number }[]
 }
 
+// Paper shadow of regime filter G1: every 15m PREPARE decision mirrored as a $1 paper trade,
+// resolved from Binance 15m klines (an estimate of the platform's Chainlink settlement).
+export interface FutureBtc5mPaperRegimeStats {
+  trades: number
+  settled: number
+  wins: number
+  winRate: number | null
+  roiPerDollar: number | null
+  totalUsd: number
+}
+
+export interface FutureBtc5mPaperRegimeTrade {
+  periodStart: number
+  side: 'Up' | 'Down'
+  priceCents: number
+  trend60Bp: number
+  g1Eligible: boolean
+  win: boolean | null
+  roi: number | null
+}
+
+export interface FutureBtc5mPaperRegime {
+  rule: string
+  minTrend60Bp: number
+  resolutionSource: string
+  baseline: FutureBtc5mPaperRegimeStats
+  filtered: FutureBtc5mPaperRegimeStats
+  recent: FutureBtc5mPaperRegimeTrade[]
+  updatedAt: number
+}
+
 export interface FutureBtc5mPreflight {
   mode: 'READ_ONLY'
   noSubmission: true
@@ -3146,6 +3177,7 @@ export interface FutureBtc5mBridgeStatus {
   executorReady: false
   preflight?: FutureBtc5mPreflight | null
   preparation: FutureBtc5mPreparation
+  paperRegime?: FutureBtc5mPaperRegime | null
   signal: {
     slug: string
     side: 'Up' | 'Down' | null

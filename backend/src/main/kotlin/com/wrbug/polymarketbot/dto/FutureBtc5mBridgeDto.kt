@@ -20,7 +20,40 @@ data class FutureBtc5mBridgeStatus(
     val signal: FutureBtc5mSignal?,
     val orderCounts: FutureBtc5mOrderCounts,
     val preflight: FutureBtc5mPreflight? = null,
-    val preparation: FutureBtc5mPreparation
+    val preparation: FutureBtc5mPreparation,
+    val paperRegime: FutureBtc5mPaperRegime? = null
+)
+
+// Paper shadow of regime filter G1 (scripts/future_btc5m_paper_regime.py): every 15m PREPARE
+// decision is mirrored by a $1 paper trade at the decision-time quote and resolved from Binance
+// 15m klines, so the page can compare baseline vs trend-filtered results without touching real orders.
+data class FutureBtc5mPaperRegime(
+    val rule: String,
+    val minTrend60Bp: Double,
+    val resolutionSource: String,
+    val baseline: FutureBtc5mPaperRegimeStats,
+    val filtered: FutureBtc5mPaperRegimeStats,
+    val recent: List<FutureBtc5mPaperRegimeTrade>,
+    val updatedAt: Double
+)
+
+data class FutureBtc5mPaperRegimeStats(
+    val trades: Int,
+    val settled: Int,
+    val wins: Int,
+    val winRate: Double?,
+    val roiPerDollar: Double?,
+    val totalUsd: Double
+)
+
+data class FutureBtc5mPaperRegimeTrade(
+    val periodStart: Long,
+    val side: String,
+    val priceCents: Double,
+    val trend60Bp: Double,
+    val g1Eligible: Boolean,
+    val win: Boolean?,
+    val roi: Double?
 )
 
 // The 4h weekend leg of the combined strategy: this round's decision and latest checkpoint evaluation.
