@@ -87,14 +87,9 @@ test('foreign documents, subframes and malformed profile paths cannot access con
   assert.equal(value.requests.length, 0);
 });
 
-test('the real account-page panel shows confirmed controls without preparing or buying', async () => {
+test('the real account-page panel shows confirmed controls without a weekend checkbox or buying', async () => {
   const now = 1792123265;
-  let weekendOnly = false;
-  const value = worker((url, options) => {
-    if (url.endsWith('/schedule')) {
-      if (options.method === 'POST') weekendOnly = JSON.parse(options.body).weekendOnly;
-      return {weekendOnly};
-    }
+  const value = worker((url) => {
     if (url.endsWith('/status')) return {schema_version: 1, mode: 'ASSIST_ONLY', live_enabled: false,
       amount_usd: 1, status: 'OBSERVING', reason: 'GEOBLOCK_BLOCKED', server_time: now,
       series: '15m', round_series: '15m', period_start: 1792123200, draft: null, signal: null};
@@ -127,19 +122,13 @@ test('the real account-page panel shows confirmed controls without preparing or 
     }}}});
   vm.runInContext(readFileSync(new URL('./future-btc5m-extension/content.js', import.meta.url), 'utf8'), sandbox);
   vm.runInContext(readFileSync(new URL('./future-btc5m-extension/buy_once.js', import.meta.url), 'utf8'), sandbox);
-  const checkbox = elements.find((element) => element.type === 'checkbox');
-  for (let turn = 0; turn < 8 && checkbox.disabled; turn++) {
+  for (let turn = 0; turn < 8 && !elements.some((element) => element.id === 'polyhermes-btc5m-current' &&
+      element.textContent?.includes('自动买入已开启')); turn++) {
     await new Promise((resolve) => setImmediate(resolve));
   }
-  assert.equal(checkbox.disabled, false, JSON.stringify({messages: messages.map(({type}) => type),
-    text: elements.map(({textContent}) => textContent).filter(Boolean)}));
-  assert.equal(checkbox.checked, false);
+  assert.equal(elements.find((element) => element.type === 'checkbox'), undefined);
   assert.match(elements.find((element) => element.id === 'polyhermes-btc5m-current').textContent, /自动买入已开启/);
-  checkbox.checked = true;
-  await checkbox.listeners.change();
-  assert.equal(checkbox.checked, true);
-  assert.equal(checkbox.disabled, false);
-  assert.equal(weekendOnly, true);
   assert.equal(clicks, 0);
-  assert.equal(messages.some(({type}) => /CLAIM|ACK|QUOTE|AUDIT|PREFLIGHT/.test(type)), false);
+  assert.equal(messages.some(({type}) => /SCHEDULE|CLAIM|ACK|QUOTE|AUDIT|PREFLIGHT/.test(type)), false,
+    JSON.stringify(messages.map(({type}) => type)));
 });

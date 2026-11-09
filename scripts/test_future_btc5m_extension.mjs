@@ -338,7 +338,7 @@ async function renderedPanel(value, url, time, ticketDoc, runtime = {}) {
   const contents = panelBody?.children || body.panel.children.slice(1);
   const details = contents.find((child) => child.id === 'polyhermes-btc5m-details');
   const children = details ? [panelBody ? body.panel.children[0].children[0] : body.panel.children[0],
-    ...details.children.slice(1), contents[2]] : body.panel.children;
+    ...details.children.slice(1)] : body.panel.children;
   children.currentSummary = contents.find((child) => child.id === 'polyhermes-btc5m-current');
   children.recentSummary = contents.find((child) => child.id === 'polyhermes-btc5m-recent');
   children.details = details;
@@ -2594,7 +2594,7 @@ test('the panel gives the auto-buyer a body-less Polymarket quote read and label
       if (message.type === 'FUTURE_BTC5M_PREFLIGHT') return {ok: true};
       return {ok: true, status: observing};
     }});
-  assert.equal(children.length, 12, 'the price gates add no element; 0.5.1 appends only the weekend-only row');
+  assert.equal(children.length, 11, 'the price gates add no element and the weekend-only row is removed');
   assert.equal(children[10].textContent.split('\n')[0],
     '自动买入：已开启，新票据准备好后点击一次买入（每轮最多一次；热门价 ≥60¢ 且与 Polymarket 盘口一致才买）');
   assert.match(children[7].textContent, /开启.*60.*80/);
@@ -2708,56 +2708,21 @@ test('the worker reads weekend-only with a GET and changes it only with an exact
   assert.equal(worker.requests.length, 2);
 });
 
-test('the panel shows weekend-only and turning it off needs a confirmation before the assistant is changed', async () => {
+test('the panel has no weekend schedule control or schedule traffic', async () => {
   const messages = [];
-  let weekendOnly = true;
-  let confirmAnswer = false;
-  let setOk = true;
   const children = await renderedPanel(observing, marketUrl, now, ticketFixture().doc, {messages,
-    globals: {confirm: () => confirmAnswer},
     reply(message) {
-      if (message.type === 'FUTURE_BTC5M_SCHEDULE') return {ok: true, status: {weekendOnly}};
-      if (message.type === 'FUTURE_BTC5M_SCHEDULE_SET') {
-        if (!setOk) return {ok: false};
-        weekendOnly = message.payload.weekendOnly;
-        return {ok: true, status: {weekendOnly}};
-      }
       if (message.type === 'FUTURE_BTC5M_PREPARATION') return {ok: true, status: {...preparation,
         preparation: {...preparation.preparation, enabled: false, state: 'DISABLED', intent: null}}};
       if (message.type === 'FUTURE_BTC5M_PREFLIGHT') return {ok: true};
       return {ok: true, status: observing};
     }});
-  const [checkbox, label] = children[11].children;
-  assert.equal(checkbox.type, 'checkbox');
-  assert.equal(checkbox.checked, true);
-  assert.equal(checkbox.disabled, false);
-  assert.match(label.textContent, /仅周末运行（美东周六、周日）/);
-  const change = async () => {
-    await checkbox.listeners.change();
-    await new Promise((resolve) => setImmediate(resolve));
-  };
-  checkbox.checked = false;
-  await change();
-  assert.equal(checkbox.checked, true, 'a declined confirmation keeps weekend-only');
-  assert.equal(messages.some((m) => m.type === 'FUTURE_BTC5M_SCHEDULE_SET'), false);
-  confirmAnswer = true;
-  checkbox.checked = false;
-  await change();
-  assert.equal(JSON.stringify(messages.filter((m) => m.type === 'FUTURE_BTC5M_SCHEDULE_SET').map((m) => m.payload)), '[{"weekendOnly":false}]');
-  assert.equal(checkbox.checked, false);
-  assert.match(label.textContent, /已关闭，工作日也会准备并自动买入/);
+  const text = children.map((child) => child.textContent).filter(Boolean).join('\n');
+  assert.doesNotMatch(text, /仅周末运行/);
+  assert.equal(children.some((child) => child.type === 'checkbox'), false);
+  assert.equal(messages.filter((message) => message.type.includes('SCHEDULE')).length, 0);
   await children.poll();
-  assert.equal(checkbox.checked, false, 'the confirmed value survives the next poll');
-  setOk = false;
-  checkbox.checked = true;
-  await change();
-  assert.equal(checkbox.checked, false, 'an unconfirmed change reverts');
-  assert.match(label.textContent, /未被本机助手确认/);
-  setOk = true;
-  checkbox.checked = true;
-  await change();
-  assert.equal(weekendOnly, true, 'turning weekend-only back on needs no confirmation');
-  assert.equal(checkbox.checked, true);
+  assert.equal(messages.filter((message) => message.type.includes('SCHEDULE')).length, 0);
 });
 
 test('the worker routes 15m claims and preflights by the 15m page round only', async () => {

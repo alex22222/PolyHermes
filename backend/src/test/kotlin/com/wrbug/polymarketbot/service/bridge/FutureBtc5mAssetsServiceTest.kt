@@ -4,6 +4,7 @@ import com.wrbug.polymarketbot.api.PolymarketDataApi
 import com.wrbug.polymarketbot.api.PositionResponse
 import com.wrbug.polymarketbot.api.UserActivityResponse
 import com.wrbug.polymarketbot.api.FutureBtc5mActivityPage
+import com.wrbug.polymarketbot.api.FutureBtc5mPositionsPage
 import com.wrbug.polymarketbot.api.FutureBtc5mActivityPagination
 import com.wrbug.polymarketbot.api.FutureBtc5mSettlementMarket
 import com.wrbug.polymarketbot.api.FutureBtc5mSettlementToken
@@ -37,7 +38,7 @@ class FutureBtc5mAssetsServiceTest {
         Mockito.`when`(factory.createDataApi()).thenReturn(api)
         Mockito.`when`(factory.createClobApiWithoutAuth()).thenReturn(clob)
         Mockito.`when`(clob.getSettlementMarket("condition")).thenReturn(Response.success(market()))
-        Mockito.`when`(positions()).thenReturn(Response.success(emptyList()))
+        Mockito.`when`(positions()).thenReturn(positionsPage(emptyList()))
         Mockito.`when`(buys()).thenReturn(activity(emptyList()))
     }
 
@@ -57,7 +58,7 @@ class FutureBtc5mAssetsServiceTest {
 
     @Test
     fun `queries same wallet and returns only BTC five minute positions and newest actual buys`() = runBlocking<Unit> {
-        Mockito.`when`(positions()).thenReturn(Response.success(listOf(position(),
+        Mockito.`when`(positions()).thenReturn(positionsPage(listOf(position(),
             position().copy(slug = "eth-updown-5m-$start"), position().copy(size = 0.0))))
         Mockito.`when`(buys()).thenReturn(activity(listOf(buy(now - 20), buy(now - 10),
             buy().copy(side = "SELL"), buy().copy(slug = "btc-updown-15m-$start"))))
@@ -198,7 +199,7 @@ class FutureBtc5mAssetsServiceTest {
 
     @Test
     fun `settled worthless tokens are excluded but winning redeemable and unresolved zero values remain`() = runBlocking {
-        Mockito.`when`(positions()).thenReturn(Response.success(listOf(
+        Mockito.`when`(positions()).thenReturn(positionsPage(listOf(
             position().copy(asset = "settled-loss", curPrice = 0.0, currentValue = 0.0, redeemable = true),
             position().copy(asset = "pending-resolution", curPrice = 0.0, currentValue = 0.0, redeemable = false),
             position().copy(asset = "redeemable-win", curPrice = 1.0, currentValue = 1.5, redeemable = true))))
@@ -258,12 +259,46 @@ class FutureBtc5mAssetsServiceTest {
     }
 
     @Test
-    fun `wrong wallet truncated positions and malformed quantities never become complete empty assets`() = runBlocking {
-        for (rows in listOf(listOf(position().copy(proxyWallet = other)),
-            List(500) { position() }, listOf(position().copy(size = Double.NaN)))) {
-            Mockito.`when`(positions()).thenReturn(Response.success(rows))
+    fun `wrong wallet and malformed quantities never become complete empty assets`() = runBlocking {
+        for (rows in listOf(listOf(position().copy(proxyWallet = other)), listOf(position().copy(size = Double.NaN)))) {
+            Mockito.`when`(positions()).thenReturn(positionsPage(rows))
             assertNull(service.assets().positionsValueUsd)
         }
+    }
+
+    @Test
+    fun `v2 position cursors read every page including a full five hundred row page`() = runBlocking<Unit> {
+        Mockito.`when`(positions()).thenReturn(positionsPage(List(500) { position() }, "next-page"))
+        Mockito.`when`(positions(cursor = "next-page")).thenReturn(positionsPage(listOf(position())))
+        val result = service.assets()
+        assertEquals(501, result.positions!!.size)
+        assertEquals(601.2, result.positionsValueUsd!!, 1e-9)
+        positions(Mockito.verify(api), "next-page")
+    }
+
+    @Test
+    fun `repeated position cursor cannot report complete assets`() = runBlocking {
+        Mockito.`when`(positions()).thenReturn(positionsPage(listOf(position()), "repeat"))
+        Mockito.`when`(positions(cursor = "repeat")).thenReturn(positionsPage(listOf(position()), "repeat"))
+        assertNull(service.assets().positionsValueUsd)
+    }
+
+    @Test
+    fun `v2 snake case positions decode to the existing asset fields`() {
+        val page = Gson().fromJson("""{"data":[{"proxy_wallet":"$address","token_id":"up-token",
+            "condition_id":"condition","current_size":1.5,"avg_price":0.65,"current_price":0.8,
+            "current_value":1.2,"total_pnl":0.225,"event_slug":"btc-updown-5m-$start","outcome":"Up",
+            "redeemable":false}],"pagination":{"has_more":false,"next_cursor":null}}""", FutureBtc5mPositionsPage::class.java)
+        val position = page.data!!.single()
+        assertEquals(address, position.proxyWallet)
+        assertEquals("up-token", position.asset)
+        assertEquals(1.5, position.size)
+        assertEquals(0.65, position.avgPrice)
+        assertEquals(0.8, position.curPrice)
+        assertEquals(1.2, position.currentValue)
+        assertEquals(0.225, position.cashPnl)
+        assertEquals("btc-updown-5m-$start", position.eventSlug)
+        assertEquals(false, page.pagination!!.hasMore)
     }
 
     @Test
@@ -283,11 +318,14 @@ class FutureBtc5mAssetsServiceTest {
         conditionId = "condition", type = "TRADE", side = "BUY", slug = "btc-updown-5m-$start",
         outcome = "Up", asset = "up-token", size = 1.5, price = 0.65, usdcSize = 0.975, transactionHash = "transaction")
 
-    private suspend fun positions(source: PolymarketDataApi = api) =
-        source.getPositions(user = address, sizeThreshold = 0.0, limit = 500, offset = 0)
+    private suspend fun positions(source: PolymarketDataApi = api, cursor: String? = null) =
+        source.getPositionsV2(user = address, sizeThreshold = 0.0, limit = 500, cursor = cursor)
 
     private suspend fun buys(source: PolymarketDataApi = api, cursor: String? = null) =
         source.getActivityHistory(user = address, cursor = cursor, type = "", side = "")
+
+    private fun positionsPage(rows: List<PositionResponse>, next: String? = null, more: Boolean = next != null) =
+        Response.success(FutureBtc5mPositionsPage(rows, FutureBtc5mActivityPagination(more, next)))
 
     private fun activity(rows: List<UserActivityResponse>, next: String? = null, more: Boolean = next != null) =
         Response.success(FutureBtc5mActivityPage(rows, FutureBtc5mActivityPagination(more, next)))

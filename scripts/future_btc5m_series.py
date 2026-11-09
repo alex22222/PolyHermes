@@ -3,7 +3,7 @@
 `5m` is the original BTC 5-minute favorite strategy. `15m` buys the 15-minute favorite only
 when the concurrent 1-hour market favors the other side (weekend backtest, 2026-10-15). `4h`
 buys the side a price model is >=95% sure of on weekend 4-hour rounds (docs/btc-4h-high-winrate-research.md);
-it only runs alongside 15m, in 2-minute windows that never overlap the 15m entry window.
+it can run alone or alongside 15m in 2-minute windows that never overlap the 15m entry window.
 """
 
 import re
@@ -24,7 +24,8 @@ SERIES = {
            "open_source": "polymarket_crypto_price_fourhour_twap60_openPrice"},
 }
 # Each strategy's series; the first is the default page, the others take over only in their windows.
-STRATEGY_SERIES = {"btc5m_favorite": ("5m",), "btc15m_counter_1h": ("15m",), "btc15m_plus_4h": ("15m", "4h")}
+STRATEGY_SERIES = {"btc5m_favorite": ("5m",), "btc15m_counter_1h": ("15m",),
+                   "btc15m_plus_4h": ("15m", "4h"), "btc4h_high_confidence": ("4h",)}
 STRATEGIES = {name: legs[0] for name, legs in STRATEGY_SERIES.items()}
 DEFAULT_STRATEGY = "btc15m_counter_1h"
 HOUR = 3600

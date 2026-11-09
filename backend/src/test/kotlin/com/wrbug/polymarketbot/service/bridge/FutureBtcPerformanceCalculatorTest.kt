@@ -105,4 +105,19 @@ class FutureBtcPerformanceCalculatorTest {
         assertEquals(-2.057758, fifteen.netPnlUsd)
         assertEquals(listOf(start + 900, start + 1800), fifteen.curve.map { it.at })
     }
+
+    @Test
+    fun `four hour settled positions form their own book keyed by the four hour period`() {
+        val fourHourStart = start - start % 14400
+        val f = flow().copy(conditionId = "four", slug = "btc-updown-4h-$fourHourStart", timestamp = fourHourStart + 356)
+        val b = buy("LOSS").copy(slug = f.slug!!, boughtAt = f.timestamp)
+        val results = FutureBtcPerformanceCalculator.calculate(listOf(flow(), f), listOf(buy("LOSS"), b), true)
+        val four = results.single { it.series == "4h" }
+        assertEquals(1, four.settledCount)
+        assertEquals(1, four.losses)
+        assertEquals(0, four.excludedCount)
+        assertEquals(-1.028879, four.netPnlUsd)
+        assertEquals(listOf(fourHourStart + 14400), four.curve.map { it.at }, "4h 曲线点必须按 4 小时周期对齐")
+        assertEquals(1, results.single { it.series == "15m" }.settledCount, "4h 记录不得混入 15m 账本")
+    }
 }

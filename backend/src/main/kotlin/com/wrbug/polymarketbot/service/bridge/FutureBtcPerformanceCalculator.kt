@@ -10,8 +10,10 @@ import java.math.BigDecimal
 object FutureBtcPerformanceCalculator {
     private data class Settled(val at: Long, val win: Boolean, val cost: BigDecimal, val payout: BigDecimal)
 
+    private val seriesPeriodSeconds = mapOf("5m" to 300L, "15m" to 900L, "4h" to 14400L)
+
     fun calculate(activity: List<UserActivityResponse>, buys: List<FutureBtc5mAssetBuy>, complete: Boolean): List<FutureBtcStrategyPerformance> =
-        listOf("5m", "15m").map { series ->
+        seriesPeriodSeconds.keys.map { series ->
             val groups = buys.filter { it.slug.startsWith("btc-updown-$series-") }.groupBy { it.slug to it.asset }
             val flowsByToken = activity.groupBy { (it.eventSlug ?: it.slug) to it.asset }
             val settled = if (!complete) emptyList() else groups.mapNotNull { (key, entries) ->
@@ -42,7 +44,7 @@ object FutureBtcPerformanceCalculator {
                 if (result == "LOSS" && sum(redeems) { it.usdcSize!! }.signum() != 0) return@mapNotNull null
                 val cost = sum(purchases) { it.usdcSize!! }
                 if (cost.signum() <= 0) return@mapNotNull null
-                Settled(key.first.substringAfterLast('-').toLong() + if (series == "5m") 300 else 900,
+                Settled(key.first.substringAfterLast('-').toLong() + seriesPeriodSeconds.getValue(series),
                     result == "WIN", cost, sum(sales + redeems) { it.usdcSize!! })
             }.sortedBy { it.at }
             val wins = settled.count { it.win }

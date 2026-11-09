@@ -153,6 +153,9 @@ class LeaderResearchActivityHistoryBackfillServiceTest {
             title: String?
         ): Response<List<PositionResponse>> = Response.success(emptyList())
 
+        override suspend fun getPositionsV2(user: String, sizeThreshold: Double?, limit: Int?, cursor: String?) =
+            error("Not used by v1 backfill")
+
         override suspend fun getTotalValue(user: String, market: List<String>?): Response<List<ValueResponse>> {
             return Response.success(emptyList())
         }
@@ -193,6 +196,9 @@ class LeaderResearchActivityHistoryBackfillServiceTest {
             sortDirection: String?,
             title: String?
         ): Response<List<PositionResponse>> = Response.success(emptyList())
+
+        override suspend fun getPositionsV2(user: String, sizeThreshold: Double?, limit: Int?, cursor: String?) =
+            error("Not used by v1 backfill")
 
         override suspend fun getTotalValue(user: String, market: List<String>?): Response<List<ValueResponse>> {
             return Response.success(emptyList())

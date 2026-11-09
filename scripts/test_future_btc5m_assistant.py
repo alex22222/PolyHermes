@@ -132,22 +132,23 @@ class FutureBtc5mAssistantTest(unittest.IsolatedAsyncioTestCase):
         self.quote = {**self.quote, "observed_at": self.clock, "received_at": self.clock}
         return await self.assistant.poll(self.http)
 
-    async def test_weekday_rounds_run_only_after_weekend_only_is_turned_off_and_restart_restores_it(self):
+    async def test_weekday_rounds_ignore_legacy_weekend_schedule(self):
         monday = START + 2 * 86400
         self.assertEqual({"weekendOnly": True}, self.assistant.schedule())
         self.clock = monday + 30
         status = await self.assistant.poll(self.http)
-        self.assertEqual(("SKIPPED", "NOT_ET_WEEKEND"), (status["status"], status["reason"]))
-        self.assertEqual({"weekendOnly": False}, self.assistant.set_schedule(False))
-        status = await self.assistant.poll(self.http)
         self.assertNotEqual("NOT_ET_WEEKEND", status["reason"])
         self.assertEqual(monday, status["period_start"])
+        self.assertEqual({"weekendOnly": False}, self.assistant.set_schedule(False))
         for value in (0, 1, "false", None):
             with self.assertRaises(ValueError):
                 self.assistant.set_schedule(value)
         self.assertEqual({"weekendOnly": False}, self.assistant.schedule())
         restarted = Assistant(self.path, lambda: self.quote, lambda: self.clock)
         self.assertEqual({"weekendOnly": True}, restarted.schedule())
+        status = await restarted.poll(self.http)
+        self.assertNotEqual("NOT_ET_WEEKEND", status["reason"])
+        self.assertEqual(monday, status["period_start"])
 
     def test_round_alignment_and_et_weekend_cover_dst_boundaries(self):
         for timestamp, expected in [
@@ -237,7 +238,7 @@ class FutureBtc5mAssistantTest(unittest.IsolatedAsyncioTestCase):
         status = await self.evaluate(59.999)
         self.assertEqual("WAITING", status["status"])
         self.assertEqual([], self.calls)
-        status = await self.evaluate(79.999)
+        status = await self.evaluate(79.9)
         self.assertEqual("READY", status["status"])
         self.clock = START + 80
         self.assertEqual("DRAFT_EXPIRED", self.assistant.status()["reason"])

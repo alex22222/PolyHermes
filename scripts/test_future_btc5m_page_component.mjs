@@ -175,7 +175,6 @@ const mountPage = (initialTime) => {
 const assertHealthy = (page) => {
   assert.equal(page.expiredAlert().length, 0, 'a successful current response must not flash an expired-status alert');
   assert.equal(page.field('观察方向'), 'Up', 'a fresh response must retain its valid direction');
-  assert.equal(page.field('Chrome 预检报告'), '新鲜', 'a fresh response must retain its browser evidence');
   assert.equal(page.elements((node) => node.type === 'Switch')[0].props.disabled, false);
 };
 
@@ -202,6 +201,26 @@ const buyTable = (page) => page.elements(node => node.type === 'Table' &&
   node.props.columns.some(column => column.dataIndex === 'price'))[0];
 const nodeText = (value) => Array.isArray(value) ? value.map(nodeText).join('') :
   value && typeof value === 'object' ? nodeText(value.props?.children) : value == null ? '' : String(value);
+
+const within = (root, predicate) => {
+  const matches = [];
+  const visit = (value) => {
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (!value || typeof value !== 'object' || !value.props) return;
+    if (predicate(value)) matches.push(value);
+    visit(value.props.children);
+  };
+  visit(root.props?.children);
+  return matches;
+};
+const assetsCard = (page) => page.elements((node) => node.type === 'Card' && node.props.title === '我的资产 · BTC 5/15 分钟')[0];
+const retiredCardTitles = ['自动准备票据控制', '票据准备状态', '下单前只读预检', '真实订单与历史跳过记录'];
+const assertRetiredCardsGone = (page) => {
+  for (const title of retiredCardTitles) {
+    assert.equal(page.elements((node) => node.type === 'Card' && node.props.title === title).length, 0,
+      `${title} 模块必须已从页面移除`);
+  }
+};
 
 const historyWithResults = (results, at = receipt) => {
   const assets = buyHistory(results.length, at);
@@ -230,6 +249,41 @@ test('strategy performance follows live assets polling and clears on stale or fa
   page.pollAssets(receipt + 136000);
   await page.fail('assets', 'unavailable');
   assert.equal(card().length, 0);
+});
+
+test('5-minute strategy performance is filtered out while 15m performance stays', async () => {
+  const page = mountPage(receipt);
+  await page.reply('assets', {...walletAssets(), performance: [
+    {series: '5m', historyComplete: true, netPnlUsd: 1.39242},
+    {series: '15m', historyComplete: true, netPnlUsd: 1.692414},
+  ]});
+  const card = page.elements((n) => n.type === 'FutureStrategyPerformance')[0];
+  assert.deepEqual(card.props.performance.map((point) => point.series), ['15m'], '5 分钟收益序列必须被过滤');
+  assert.deepEqual(Array.from(card.props.series ?? []), ['15m'], '收益组件必须只渲染 15 分钟序列');
+});
+
+test('the performance chart follows the strategy confirmed by the bridge', async () => {
+  const point = (series) => ({series, historyComplete: true, netPnlUsd: 1});
+  const performance = [point('5m'), point('15m'), point('4h')];
+  const card = (page) => page.elements((n) => n.type === 'FutureStrategyPerformance')[0];
+
+  const counter = mountPage(receipt);
+  await counter.reply('status', {...healthyStatus(), series: '15m', strategy: 'btc15m_counter_1h'});
+  await counter.reply('assets', {...walletAssets(), performance});
+  assert.deepEqual(Array.from(card(counter).props.series), ['15m'], '15 分钟默认策略只展示 15m 买点图');
+  assert.deepEqual(card(counter).props.performance.map((p) => p.series), ['15m']);
+
+  const combined = mountPage(receipt);
+  await combined.reply('status', {...healthyStatus(), series: '15m', strategy: 'btc15m_plus_4h', strategySeries: ['15m', '4h']});
+  await combined.reply('assets', {...walletAssets(), performance});
+  assert.deepEqual(Array.from(card(combined).props.series), ['15m', '4h'], '组合策略展示 15m 与 4h 买点图');
+  assert.deepEqual(card(combined).props.performance.map((p) => p.series), ['15m', '4h']);
+
+  const fourHour = mountPage(receipt);
+  await fourHour.reply('status', {...healthyStatus(), series: '4h', strategy: 'btc4h_high_confidence', strategySeries: ['4h']});
+  await fourHour.reply('assets', {...walletAssets(), performance});
+  assert.deepEqual(Array.from(card(fourHour).props.series), ['4h'], '4 小时策略只展示 4h 买点图');
+  assert.deepEqual(card(fourHour).props.performance.map((p) => p.series), ['4h']);
 });
 const assertRatioLegend = (page, {win, loss, pending, unknown}) => {
   assert.match(page.text(), new RegExp(`赢\\s*${win}\\s*笔`));
@@ -537,7 +591,7 @@ test('a wall-clock rollback after receipt remains invalid', async () => {
   await page.reply('status', healthyStatus());
   page.tick(receipt - 1);
   assert.equal(page.expiredAlert().length, 1);
-  assert.equal(page.field('Chrome 预检报告'), '未连接或已过期');
+  assert.equal(page.field('观察方向'), '采样已过期', '时钟回退后采样必须视为过期');
 });
 
 const preparationIntent = () => ({schemaVersion: 2, id: `future-btc5m-prepare:${start}`,
@@ -549,14 +603,19 @@ const preparationIntent = () => ({schemaVersion: 2, id: `future-btc5m-prepare:${
   authorizationSource: 'USER_REQUEST', claimToken: null, upQuoteCents: 54, downQuoteCents: 46,
   quoteObservedAt: start + 65, selectionSource: 'HIGHER_BUTTON_PRICE'});
 
-test('the switch controls ticket preparation and the extension buy with no running server executor', async () => {
+test('strategy and preparation controls live inside the assets card and retired cards are gone', async () => {
   const page = mountPage(receipt);
   await page.reply('status', healthyStatus());
-  assert.equal(page.elements((node) => node.type === 'Card' && node.props.title === '自动准备票据控制').length, 1);
+  await page.reply('assets', walletAssets());
+  assertRetiredCardsGone(page);
+  const card = assetsCard(page);
+  assert.ok(card, '我的资产模块必须保留');
+  assert.equal(within(card, (node) => node.type === 'Select' && node.props.placeholder === '策略未知').length, 1,
+    '策略选择必须位于我的资产内');
+  assert.equal(within(card, (node) => node.type === 'Switch').length, 1, '自动准备开关必须位于我的资产内');
+  assert.equal(within(card, (node) => node.type === 'Button' && node.props.danger).length, 1, '关闭按钮必须位于我的资产内');
   assert.equal(page.field('最终买入'), '浏览器扩展在票据准备好后自动点击（每轮最多一次）');
   assert.equal(page.field('实际下单'), '未运行');
-  assert.equal(page.field('准备阶段'), '已关闭');
-  assert.equal(page.elements((node) => node.type === 'Card' && node.props.title === '真实订单与历史跳过记录').length, 1);
   page.elements((node) => node.type === 'Switch')[0].props.onChange(true);
   const enabled = healthyStatus();
   enabled.requestedEnabled = true;
@@ -564,64 +623,8 @@ test('the switch controls ticket preparation and the extension buy with no runni
   enabled.preparation = {...enabled.preparation, enabled: true, state: 'WAITING_SIGNAL', reasons: ['WAITING_CURRENT_SIGNAL']};
   await page.reply('control', enabled);
   assert.equal(page.elements((node) => node.type === 'Switch')[0].props.checked, true);
-  assert.equal(page.field('准备阶段'), '等待有效信号');
   assert.equal(page.field('实际下单'), '未运行');
 });
-
-test('pending ticket evidence expires at the entry boundary between polls', async () => {
-  const page = mountPage(receipt);
-  const value = healthyStatus();
-  value.requestedEnabled = true;
-  value.mode = 'BLOCKED';
-  value.preparation = {...value.preparation, enabled: true, state: 'PENDING', intent: preparationIntent(), reasons: []};
-  await page.reply('status', value);
-  assert.equal(page.field('准备阶段'), '等待 Chrome 准备');
-  assert.equal(page.field('待准备方向 / 金额'), 'Up / $1');
-  page.tick(receipt + 5001);
-  assert.equal(page.field('准备阶段'), '等待有效信号');
-  assert.equal(page.field('待准备方向 / 金额'), '—');
-  page.tick((start + 80) * 1000);
-  assert.equal(page.field('准备阶段'), '已过期');
-  assert.equal(page.field('待准备方向 / 金额'), '—');
-});
-
-test('a ready operation report stays separate from real orders and never claims a fill', async () => {
-  const page = mountPage(receipt);
-  const value = healthyStatus();
-  value.requestedEnabled = true;
-  value.mode = 'BLOCKED';
-  value.preparation = {...value.preparation, enabled: true, state: 'READY', reasons: [],
-    lastAttempt: {...preparationIntent(), state: 'READY', claimToken: 'a'.repeat(32),
-      updatedAt: start + 65, claimedAt: start + 65, reason: null,
-      receipt: {checkedAt: start + 65, marketUrl: `https://future.news/zh/event/btc-updown-5m-${start}`,
-        amountUsd: 1, selectedSide: 'Up'}}};
-  await page.reply('status', value);
-  assert.equal(page.field('准备阶段'), '票据已准备，交由扩展自动买入');
-  assert.equal(page.field('准备报告金额 / 方向'), '$1 / Up');
-  assert.equal(page.field('实际下单'), '未运行');
-  assert.equal(page.field('待准备方向 / 金额'), '—');
-  assert.equal(page.elements((node) => node.type === 'Table')[0].props.dataSource.length, 0);
-  page.tick(receipt + 5001);
-  assert.equal(page.field('准备阶段'), '等待有效信号');
-  assert.equal(page.field('最近准备结果'), '票据已准备，交由扩展自动买入');
-  page.tick((start + 80) * 1000);
-  assert.equal(page.field('准备阶段'), '已过期');
-  assert.equal(page.field('最近准备结果'), '票据已准备，交由扩展自动买入');
-});
-
-test('disabled preparation retains its historical report without current permission', async () => {
-  const page = mountPage(receipt);
-  const value = healthyStatus();
-  value.preparation.lastAttempt = {...preparationIntent(), schemaVersion: 1, upQuoteCents: null, downQuoteCents: null,
-    quoteObservedAt: null, selectionSource: null, state: 'REVOKED',
-    updatedAt: start + 65, claimedAt: null, reason: 'PREPARATION_REVOKED', receipt: null};
-  await page.reply('status', value);
-  assert.equal(page.field('准备阶段'), '已关闭');
-  assert.equal(page.field('最近准备结果'), '已撤销');
-  assert.equal(page.field('待准备方向 / 金额'), '—');
-  assert.equal(page.field('实际下单'), '未运行');
-});
-
 
 const higherButtonStatus = (flat = false) => {
   const value = healthyStatus();
@@ -641,58 +644,47 @@ const higherButtonStatus = (flat = false) => {
   return value;
 };
 
-test('higher Down button quote remains READY when Chainlink points Up or is flat', async () => {
-  for (const flat of [false, true]) {
+test('preparation and preflight payloads still render through the status API without the retired cards', async () => {
+  const statuses = [];
+  const pending = healthyStatus();
+  pending.requestedEnabled = true;
+  pending.mode = 'BLOCKED';
+  pending.preparation = {...pending.preparation, enabled: true, state: 'PENDING', intent: preparationIntent(), reasons: []};
+  statuses.push(pending);
+  const ready = healthyStatus();
+  ready.requestedEnabled = true;
+  ready.mode = 'BLOCKED';
+  ready.preparation = {...ready.preparation, enabled: true, state: 'READY', reasons: [],
+    lastAttempt: {...preparationIntent(), state: 'READY', claimToken: 'a'.repeat(32),
+      updatedAt: start + 65, claimedAt: start + 65, reason: null,
+      receipt: {checkedAt: start + 65, marketUrl: `https://future.news/zh/event/btc-updown-5m-${start}`,
+        amountUsd: 1, selectedSide: 'Up'}}};
+  statuses.push(ready);
+  const revoked = healthyStatus();
+  revoked.preparation.lastAttempt = {...preparationIntent(), schemaVersion: 1, upQuoteCents: null, downQuoteCents: null,
+    quoteObservedAt: null, selectionSource: null, state: 'REVOKED',
+    updatedAt: start + 65, claimedAt: null, reason: 'PREPARATION_REVOKED', receipt: null};
+  statuses.push(revoked);
+  statuses.push(higherButtonStatus());
+  statuses.push(higherButtonStatus(true));
+  const tied = higherButtonStatus();
+  tied.preflight = {...tied.preflight, upQuoteCents: 88, preferredSide: null, result: 'BLOCKED',
+    sideMatches: false, reasons: ['BUTTON_QUOTES_TIED']};
+  statuses.push(tied);
+  const blocked = higherButtonStatus();
+  blocked.preflight = {...blocked.preflight, result: 'BLOCKED', reasons: ['BROWSER_CHECK_OUTSIDE_ENTRY']};
+  statuses.push(blocked);
+  for (const status of statuses) {
     const page = mountPage(receipt);
-    await page.reply('status', higherButtonStatus(flat));
-    assert.equal(page.field('准备阶段'), '票据已准备，交由扩展自动买入');
-    assert.equal(page.field('按钮报价方向'), 'Down');
-    assert.equal(page.field('观察方向'), flat ? '平价' : 'Up');
-    assert.equal(page.field('Up / Down 按钮报价'), '12¢ / 88¢');
-    assert.equal(page.field('准备报告金额 / 方向'), '$1 / Down');
-    assert.equal(page.field('实际下单'), '未运行');
+    await page.reply('status', status);
+    assertRetiredCardsGone(page);
+    assert.equal(page.field('实际下单'), '未运行', '任何准备状态下页面都不得声称已下单');
+    assert.equal(page.elements((node) => node.type === 'Switch')[0].props.disabled, false);
+    page.tick(receipt + 5001);
+    page.tick((start + 80) * 1000);
+    assertRetiredCardsGone(page);
+    page.unmount();
   }
-});
-
-test('frozen original quotes and changed current button winner revoke current READY between polls', async () => {
-  for (const change of [{quoteObservedAt: start + 59}, {schemaVersion: 1}]) {
-    const page = mountPage(receipt);
-    const value = higherButtonStatus();
-    value.preparation.lastAttempt = {...value.preparation.lastAttempt, ...change};
-    await page.reply('status', value);
-    assert.equal(page.field('准备阶段'), '等待有效信号');
-    assert.equal(page.field('最近准备结果'), '票据已准备，交由扩展自动买入');
-  }
-  const page = mountPage(receipt);
-  const value = higherButtonStatus();
-  value.preflight = {...value.preflight, upQuoteCents: 90, downQuoteCents: 10, preferredSide: 'Up',
-    sideMatches: false, result: 'BLOCKED', reasons: ['SIDE_MISMATCH']};
-  await page.reply('status', value);
-  assert.equal(page.field('准备阶段'), '等待有效信号');
-});
-
-
-test('a button quote tie or missing quote cannot display an active preparation or ready result', async () => {
-  for (const change of [{upQuoteCents: 88, preferredSide: null}, {downQuoteCents: null, preferredSide: null}]) {
-    const page = mountPage(receipt);
-    const value = higherButtonStatus();
-    value.preflight = {...value.preflight, ...change, result: 'BLOCKED', sideMatches: false, reasons: ['BUTTON_QUOTES_TIED']};
-    await page.reply('status', value);
-    assert.equal(page.field('准备阶段'), '等待有效信号');
-    assert.equal(page.field('按钮报价方向'), '等待不同且有效的按钮报价');
-    assert.equal(page.field('待准备方向 / 金额'), '—');
-    assert.equal(page.field('实际下单'), '未运行');
-  }
-});
-
-
-test('READY requires the current read-only preflight result to have passed', async () => {
-  const page = mountPage(receipt);
-  const value = higherButtonStatus();
-  value.preflight = {...value.preflight, result: 'BLOCKED', reasons: ['BROWSER_CHECK_OUTSIDE_ENTRY']};
-  await page.reply('status', value);
-  assert.equal(page.field('准备阶段'), '等待有效信号');
-  assert.equal(page.field('最近准备结果'), '票据已准备，交由扩展自动买入');
 });
 
 test('the page shows the confirmed strategy and switches it only through the bridge confirmation', async () => {
@@ -704,12 +696,12 @@ test('the page shows the confirmed strategy and switches it only through the bri
   const rule = page.elements((node) => node.type === 'Alert' && /开启后会前往当前策略的市场/.test(node.props.description ?? ''))[0];
   assert.match(rule.props.description, /波动不高于 4\.16 基点\/分钟（R1 高波动过滤）/, 'the 15m rule must state the R1 skip');
   assert.equal(JSON.stringify(select().props.options.map((option) => option.value)),
-    '["btc15m_counter_1h","btc15m_plus_4h","btc5m_favorite"]');
-  select().props.onChange('btc5m_favorite');
+    '["btc15m_counter_1h","btc15m_plus_4h","btc4h_high_confidence"]', '5 分钟策略不再出现在下拉框');
+  select().props.onChange('btc15m_plus_4h');
   assert.equal(page.pendingCount('strategy'), 1);
-  await page.reply('strategy', {...healthyStatus(), strategy: 'btc5m_favorite'});
-  assert.equal(select().props.value, 'btc5m_favorite');
-  assert.equal(page.field('当前策略'), '5 分钟盘 · 买热门方向');
+  await page.reply('strategy', {...healthyStatus(), series: '15m', strategy: 'btc15m_plus_4h', strategySeries: ['15m', '4h']});
+  assert.equal(select().props.value, 'btc15m_plus_4h');
+  assert.equal(page.field('当前策略'), '15 分钟盘反 1 小时 + 周末 4 小时高把握');
   select().props.onChange('btc15m_counter_1h');
   await page.reply('strategy', healthyStatus());
   assert.equal(select().props.value, undefined, 'an unconfirmed switch leaves the strategy unknown');
@@ -732,4 +724,13 @@ test('the combined strategy shows the weekend 4h decision or its latest checkpoi
   page.poll(receipt + 10000);
   await page.reply('status', {...healthyStatus(receipt + 10000), series: '15m', strategy: 'btc15m_counter_1h', fourHour: null});
   assert.equal(page.elements((node) => node.type === 'Descriptions.Item' && node.props.label === '周末 4 小时判断').length, 0);
+});
+
+test('the standalone 4h strategy shows its label and checkpoint decision', async () => {
+  const page = mountPage(receipt);
+  const start = Math.floor(receipt / 1000 / 14400) * 14400;
+  await page.reply('status', {...healthyStatus(), series: '4h', strategy: 'btc4h_high_confidence', strategySeries: ['4h'],
+    fourHour: {periodStart: start, weekend: true, decision: {checkpointAt: start + 600, side: 'Down'}, lastEvaluation: null}});
+  assert.equal(page.field('当前策略'), '4 小时盘 · 周末高把握');
+  assert.match(page.field('周末 4 小时判断'), /^本轮已决定买跌（.+ 起 2 分钟内准备，每轮一次）$/);
 });

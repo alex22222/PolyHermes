@@ -644,7 +644,7 @@ class Assistant:
         # The current 15m round's BTC conditions (volatility rule), when the strategy includes 15m.
         self.conditions_fn = lambda: None
         self.seen = set()
-        # Every start is weekend-only again, as every start turns the auto-ticket switch off.
+        # Legacy schedule preference retained for migration compatibility; trading no longer uses it.
         self.weekend_only = True
         ledger = self.state_dir / "rounds.jsonl"
         if ledger.exists():
@@ -745,9 +745,6 @@ class Assistant:
                 return self.status()
             self.state = empty_status(now)
             self.state.update(period_start=start, round_series=series)
-            if self.weekend_only and not is_et_weekend(start):
-                self.state.update(status="SKIPPED", reason="NOT_ET_WEEKEND")
-                return self.status()
             if now < first:
                 return self.status()
             self.claim_round(start, series)

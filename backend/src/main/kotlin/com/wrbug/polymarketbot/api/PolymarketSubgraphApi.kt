@@ -40,6 +40,14 @@ interface PolymarketDataApi {
         @Query("sortDirection") sortDirection: String? = null,
         @Query("title") title: String? = null
     ): Response<List<PositionResponse>>
+
+    @GET("/v2/positions")
+    suspend fun getPositionsV2(
+        @Query("user") user: String,
+        @Query("sizeThreshold") sizeThreshold: Double? = null,
+        @Query("limit") limit: Int? = null,
+        @Query("cursor") cursor: String? = null
+    ): Response<FutureBtc5mPositionsPage>
     
     /**
      * 获取用户仓位总价值
@@ -75,31 +83,31 @@ interface PolymarketDataApi {
  * 仓位响应（根据 Polymarket Data API 文档）
  */
 data class PositionResponse(
-    val proxyWallet: String,
-    val asset: String? = null,
-    val conditionId: String? = null,
-    val size: Double? = null,
-    val avgPrice: Double? = null,
-    val initialValue: Double? = null,
-    val currentValue: Double? = null,
-    val cashPnl: Double? = null,
-    val percentPnl: Double? = null,
-    val totalBought: Double? = null,
-    val realizedPnl: Double? = null,
-    val percentRealizedPnl: Double? = null,
-    val curPrice: Double? = null,
+    @SerializedName(value = "proxyWallet", alternate = ["proxy_wallet"]) val proxyWallet: String,
+    @SerializedName(value = "asset", alternate = ["token_id"]) val asset: String? = null,
+    @SerializedName(value = "conditionId", alternate = ["condition_id"]) val conditionId: String? = null,
+    @SerializedName(value = "size", alternate = ["current_size"]) val size: Double? = null,
+    @SerializedName(value = "avgPrice", alternate = ["avg_price"]) val avgPrice: Double? = null,
+    @SerializedName(value = "initialValue", alternate = ["entry_cost_usdc"]) val initialValue: Double? = null,
+    @SerializedName(value = "currentValue", alternate = ["current_value"]) val currentValue: Double? = null,
+    @SerializedName(value = "cashPnl", alternate = ["total_pnl"]) val cashPnl: Double? = null,
+    @SerializedName(value = "percentPnl", alternate = ["percent_pnl"]) val percentPnl: Double? = null,
+    @SerializedName(value = "totalBought", alternate = ["total_size"]) val totalBought: Double? = null,
+    @SerializedName(value = "realizedPnl", alternate = ["realized_pnl"]) val realizedPnl: Double? = null,
+    @SerializedName(value = "percentRealizedPnl", alternate = ["percent_realized_pnl"]) val percentRealizedPnl: Double? = null,
+    @SerializedName(value = "curPrice", alternate = ["current_price"]) val curPrice: Double? = null,
     val redeemable: Boolean? = null,
     val mergeable: Boolean? = null,
     val title: String? = null,
     val slug: String? = null,
     val icon: String? = null,
-    val eventSlug: String? = null,
+    @SerializedName(value = "eventSlug", alternate = ["event_slug"]) val eventSlug: String? = null,
     val outcome: String? = null,
-    val outcomeIndex: Int? = null,
-    val oppositeOutcome: String? = null,
-    val oppositeAsset: String? = null,
-    val endDate: String? = null,
-    val negativeRisk: Boolean? = null
+    @SerializedName(value = "outcomeIndex", alternate = ["outcome_index"]) val outcomeIndex: Int? = null,
+    @SerializedName(value = "oppositeOutcome", alternate = ["opposite_outcome"]) val oppositeOutcome: String? = null,
+    @SerializedName(value = "oppositeAsset", alternate = ["opposite_token_id"]) val oppositeAsset: String? = null,
+    @SerializedName(value = "endDate", alternate = ["end_date"]) val endDate: String? = null,
+    @SerializedName(value = "negativeRisk", alternate = ["negative_risk"]) val negativeRisk: Boolean? = null
 )
 
 /**

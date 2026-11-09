@@ -27,7 +27,8 @@ APP_FILES = {
 }
 TOP_FILES = {'install.py', 'install.command', 'manage.py', 'manage.command', 'profile.json',
              'README.md', 'HANDOFF.md', 'SHA256SUMS', 'server-known-hosts'}
-STRATEGIES = {'btc5m_favorite': '5m', 'btc15m_counter_1h': '15m'}
+STRATEGIES = {'btc5m_favorite': '5m', 'btc15m_counter_1h': '15m', 'btc15m_plus_4h': '15m',
+              'btc4h_high_confidence': '4h'}
 PROFILE_FIELDS = {'strategy', 'weekendOnly', 'amountUsd', 'serverHost', 'proxyHttp', 'proxySocks', 'extensionVersion'}
 DEFAULT_ROOT = Path.home() / 'Library/Application Support/PolyHermesFuture'
 REQUIRED = APP_FILES | {'install.py', 'install.command', 'manage.py', 'manage.command', 'profile.json', 'server-known-hosts'}

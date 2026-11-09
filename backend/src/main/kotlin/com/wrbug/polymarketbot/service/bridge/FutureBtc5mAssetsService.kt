@@ -62,10 +62,27 @@ class FutureBtc5mAssetsService(
         val api = retrofitFactory.createDataApi()
         val positions = async {
             runCatching {
-                val response = withTimeout(3500) { api.getPositions(user = wallet, sizeThreshold = 0.0, limit = 500, offset = 0) }
-                check(response.isSuccessful && response.body() != null)
-                val rows = response.body()!!
-                check(rows.size < 500 && rows.all { it.proxyWallet.equals(wallet, ignoreCase = true) })
+                val rows = mutableListOf<com.wrbug.polymarketbot.api.PositionResponse>()
+                val seen = mutableSetOf<String>()
+                var cursor: String? = null
+                var complete = false
+                withTimeout(3500) {
+                    do {
+                        val response = api.getPositionsV2(user = wallet, sizeThreshold = 0.0, limit = 500, cursor = cursor)
+                        check(response.isSuccessful)
+                        val page = checkNotNull(response.body())
+                        val pageRows = checkNotNull(page.data)
+                        val pagination = checkNotNull(page.pagination)
+                        check(pageRows.size <= 500 && pageRows.all { it.proxyWallet.equals(wallet, ignoreCase = true) })
+                        val more = checkNotNull(pagination.hasMore)
+                        val next = pagination.nextCursor
+                        check(if (more) !next.isNullOrBlank() && next !in seen && pageRows.isNotEmpty() else next == null)
+                        rows += pageRows
+                        cursor = next
+                        if (next != null) seen += next
+                        complete = !more
+                    } while (!complete)
+                }
                 rows.mapNotNull { row ->
                     val slug = btcSlug(row.eventSlug) ?: btcSlug(row.slug) ?: return@mapNotNull null
                     val quantity = row.size

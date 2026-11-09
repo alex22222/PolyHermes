@@ -23,7 +23,8 @@ from pathlib import Path
 ASSISTANT = "com.polyhermes.future-btc5m-assistant"
 TUNNEL = "com.polyhermes.future-btc5m-tunnel"
 LABELS = (ASSISTANT, TUNNEL)
-STRATEGIES = {"btc5m_favorite": "5m", "btc15m_counter_1h": "15m"}
+STRATEGIES = {"btc5m_favorite": "5m", "btc15m_counter_1h": "15m", "btc15m_plus_4h": "15m",
+              "btc4h_high_confidence": "4h"}
 HISTORY = {"rounds.jsonl", "bridge/control.json", "bridge/orders.jsonl", "bridge/preflight.jsonl",
            "bridge/preparations.jsonl", "bridge/strategy_decisions.jsonl", "bridge/buy_attempts.jsonl",
            "bridge/fills.jsonl", "bridge/resolutions.json"}

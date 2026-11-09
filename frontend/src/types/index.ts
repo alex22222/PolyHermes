@@ -3056,7 +3056,7 @@ export interface FutureBtc5mAssets {
 }
 
 export interface FutureBtcStrategyPerformance {
-  series: '5m' | '15m'
+  series: '5m' | '15m' | '4h'
   historyComplete: boolean
   settledCount: number
   wins: number
@@ -3108,7 +3108,7 @@ export interface FutureBtc5mPreflight {
   } | null
 }
 
-export type FutureBtc5mStrategy = 'btc15m_counter_1h' | 'btc15m_plus_4h' | 'btc5m_favorite'
+export type FutureBtc5mStrategy = 'btc15m_counter_1h' | 'btc15m_plus_4h' | 'btc4h_high_confidence' | 'btc5m_favorite'
 
 // The weekend 4h leg of the combined strategy: this round's decision and latest checkpoint evaluation.
 export interface FutureBtc5mFourHour {

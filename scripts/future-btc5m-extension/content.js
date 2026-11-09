@@ -843,17 +843,9 @@
   note.textContent = '当前策略：未核实，等待本地助手报告。';
   const autoBuyReport = document.createElement('p');
   autoBuyReport.style.whiteSpace = 'pre-line';
-  // Weekend-only is held by the local assistant and resets to on whenever it restarts.
-  const scheduleRow = document.createElement('p');
-  const weekendOnly = document.createElement('input');
-  weekendOnly.type = 'checkbox';
-  weekendOnly.disabled = true;
-  const scheduleText = document.createElement('span');
-  scheduleText.textContent = ' 仅周末运行：读取中';
-  scheduleRow.append(weekendOnly, scheduleText);
   details.append(detailsTitle, text, link, prepare, inspect, inspection, navigation, note, preflightReport,
     preparationReport, autoBuyReport);
-  panelBody.append(currentSummary, recentSummary, scheduleRow, details);
+  panelBody.append(currentSummary, recentSummary, details);
   panel.append(header, panelBody);
   document.body.append(panel);
   let latest = null;
@@ -866,8 +858,6 @@
   let runtimePort = null, lastRuntimeTick = null;
   let runtimeReconnectAllowed = true;
   let rendererState = 'UNAVAILABLE';
-  let scheduleVersion = 0;
-  let scheduleBusy = false;
   let orderTypeAttempt = {periodStart: null, phase: null, reason: null};
   let lastBlockers = [];
   let windowBlockerOutcomes = [];
@@ -1212,55 +1202,6 @@
     note.textContent += `\n锁屏渲染：${rendererText[rendererState]}`;
   }
 
-  function showSchedule(value) {
-    if (typeof value !== 'boolean') {
-      weekendOnly.disabled = true;
-      scheduleText.textContent = ' 仅周末运行：本机助手未连接';
-      return;
-    }
-    weekendOnly.checked = value;
-    weekendOnly.disabled = false;
-    scheduleText.textContent = value ? ' 仅周末运行（美东周六、周日）' : ' 仅周末运行：已关闭，工作日也会准备并自动买入';
-  }
-
-  async function scheduleRequest(payload) {
-    const status = await preparationRequest(payload ? 'FUTURE_BTC5M_SCHEDULE_SET' : 'FUTURE_BTC5M_SCHEDULE', payload);
-    if (!status || typeof status !== 'object' || Array.isArray(status) || Object.keys(status).length !== 1 ||
-        typeof status.weekendOnly !== 'boolean') throw preparationError('PREPARATION_FAILED');
-    return status.weekendOnly;
-  }
-
-  async function refreshSchedule() {
-    if (scheduleBusy) return;
-    const version = scheduleVersion;
-    let value = null;
-    try {
-      value = await scheduleRequest();
-    } catch {}
-    // A read that started before a change must not overwrite the confirmed new value.
-    if (!scheduleBusy && version === scheduleVersion) showSchedule(value);
-  }
-
-  weekendOnly.addEventListener('change', async () => {
-    const wanted = weekendOnly.checked;
-    if (!wanted && globalThis.confirm?.('关闭“仅周末运行”后，工作日也会自动准备票据并买入。回测里工作日比周末亏得更多。确定关闭吗？') !== true) {
-      weekendOnly.checked = true;
-      return;
-    }
-    scheduleVersion++;
-    scheduleBusy = true;
-    weekendOnly.disabled = true;
-    try {
-      showSchedule(await scheduleRequest({weekendOnly: wanted}));
-    } catch {
-      weekendOnly.checked = !wanted;
-      weekendOnly.disabled = false;
-      scheduleText.textContent = ' 仅周末运行：修改未被本机助手确认，请重试';
-    } finally {
-      scheduleBusy = false;
-    }
-  });
-
   async function pollPreparation() {
     try {
       const wrapper = await preparationRequest('FUTURE_BTC5M_PREPARATION');
@@ -1406,7 +1347,6 @@
         prepare.disabled = false;
       }
       await pollPreparation();
-      await refreshSchedule();
     } catch (error) {
       if (/extension context invalidated/i.test(error.message)) extensionContextInvalidated = true;
       latest = null;
@@ -1419,7 +1359,6 @@
       navigation.textContent = '自动换轮：暂停（本地助手未连接）';
       preparationReport.textContent = '自动票据：暂停（本地助手未连接，未提交订单）';
       showAutoBuy();
-      if (!scheduleBusy) showSchedule(null);
     } finally {
       polling = false;
     }

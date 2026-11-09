@@ -2,6 +2,11 @@ package com.wrbug.polymarketbot.api
 
 import com.google.gson.annotations.SerializedName
 
+data class FutureBtc5mPositionsPage(
+    val data: List<PositionResponse>? = null,
+    val pagination: FutureBtc5mActivityPagination? = null
+)
+
 data class FutureBtc5mActivityPage(
     val data: List<UserActivityResponse>? = null,
     val pagination: FutureBtc5mActivityPagination? = null

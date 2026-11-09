@@ -38,7 +38,7 @@ def sha256(path):
 
 def validate_profile(profile):
     if (not isinstance(profile, dict) or set(profile) != PROFILE_FIELDS or
-            profile['strategy'] not in ('btc5m_favorite', 'btc15m_counter_1h') or
+            profile['strategy'] not in ('btc5m_favorite', 'btc15m_counter_1h', 'btc15m_plus_4h', 'btc4h_high_confidence') or
             type(profile['weekendOnly']) is not bool or type(profile['amountUsd']) is not int or profile['amountUsd'] != 1 or
             not re.fullmatch(r'[A-Za-z0-9._-]+@[A-Za-z0-9.-]+', profile['serverHost']) or
             not re.fullmatch(r'\d+\.\d+\.\d+', profile['extensionVersion'])):

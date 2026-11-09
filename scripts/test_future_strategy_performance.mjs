@@ -48,3 +48,24 @@ test('curves are accessible finite and chronological for one point and negative 
     assert.equal(line.props.points.split(' ').length, values.length + 1);
   }
 });
+
+test('a restricted series list renders only the requested strategy cards', () => {
+  const tree = sandbox.exports.default({performance: [sample(), {...sample('5m'), wins: 3, losses: 5,
+    settledCount: 8, winRatePercent: 37.5, netPnlUsd: -2.123456}], series: ['15m']});
+  const cards = walk(tree).filter(n => n.type === 'Card');
+  assert.equal(cards.length, 1, '5 分钟卡片不得渲染');
+  assert.match(text(cards[0]), /77.78%/);
+  assert.doesNotMatch(text(tree), /(?<![0-9])5m|(?<![0-9])5 分钟/, '页面上不得再出现 5 分钟策略字样');
+});
+
+test('the 4h series renders its own titled card and a period-aligned curve', () => {
+  const data = {...sample('4h'), netPnlUsd: 0.5, curve: [{at: 1792195200 + 14400, netPnlUsd: 0.5}]};
+  const tree = sandbox.exports.default({performance: [data], series: ['4h']});
+  const cards = walk(tree).filter(n => n.type === 'Card');
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].props.title, '4 小时 · 周末高把握');
+  assert.match(text(tree), /BTC 4h 市场归类/);
+  const curve = sandbox.exports.PerformanceCurve({data});
+  const line = walk(curve).find(n => n.type === 'polyline');
+  assert.doesNotMatch(line.props.points, /NaN|Infinity/, '4h 曲线起点必须按 4 小时周期对齐，不产生非法坐标');
+});
