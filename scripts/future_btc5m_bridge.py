@@ -334,7 +334,7 @@ class FutureBridge:
             reason = "INTENT_EXPIRED" if record["state"] == "PENDING" else "PREPARATION_RECEIPT_UNKNOWN"
             self._save_preparation({**record, "state": "EXPIRED", "updatedAt": now, "reason": reason})
 
-    def _preparation_reasons(self, source, error, now):
+    def _preparation_reasons(self, source, error, now, ignore_disabled=False):
         if self.preparation_error:
             return [self.preparation_error]
         if self.storage_error:
@@ -345,13 +345,13 @@ class FutureBridge:
             return ["STOP_FILE_PRESENT"]
         if error:
             return [error]
-        if not self.requested_enabled:
+        if not ignore_disabled and not self.requested_enabled:
             return ["AUTO_PREPARATION_DISABLED"]
         series = self._series_at(now)
         # This round's persisted refusal remains the cause after its source sample expires.
         if series == "15m" and self.decisions.get(("15m", self._start(now))) in SKIP_REASONS:
             return [SKIP_REASONS[self.decisions[("15m", self._start(now))]]]
-        if not self._current_signal(source, now, allow_flat=True):
+        if not self._current_signal(source, now, require_enabled=not ignore_disabled, allow_flat=True):
             return ["WAITING_CURRENT_SIGNAL"]
         report = self.browser_report
         if (not report or self.browser_received_at is None or not 0 <= now - self.browser_received_at <= 5
@@ -1058,7 +1058,15 @@ class FutureBridge:
                 self._decide_four_hour(source, error, now)
             except OSError:
                 self.preparation_error = "DECISION_LEDGER_WRITE_FAILED"
-            signal = self._current_signal(source, now, allow_flat=True) if not self._preparation_reasons(source, error, now) else None
+            reasons = self._preparation_reasons(source, error, now)
+            paper_only = False
+            if reasons == ["AUTO_PREPARATION_DISABLED"]:
+                # Toggle off = paper mode: decisions and the paper shadow keep
+                # recording; only the preparation hand-off stays disabled.
+                if not self._preparation_reasons(source, error, now, ignore_disabled=True):
+                    paper_only = True
+                    reasons = []
+            signal = self._current_signal(source, now, require_enabled=not paper_only, allow_flat=True) if not reasons else None
             if signal:
                 series = self._series_at(now)
                 start = signal["period_start"]
@@ -1073,7 +1081,7 @@ class FutureBridge:
                         except OSError:
                             self.preparation_error = "DECISION_LEDGER_WRITE_FAILED"
                             decision = None
-                if (decision == "PREPARE" and id not in self.preparations
+                if (decision == "PREPARE" and not paper_only and id not in self.preparations
                         and (series != "5m" or f"{BRIDGE_ID}:{start}" not in self.seen)):
                     record = {
                         "schemaVersion": 2, "id": id, "slug": signal["slug"],

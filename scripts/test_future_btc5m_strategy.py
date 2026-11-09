@@ -123,6 +123,18 @@ class FifteenMinuteBridgeTest(unittest.TestCase):
         self.at(152, up=61, down=40)
         self.assertEqual(1, len(self.decisions()), "one decision per round")
 
+    def test_disabled_toggle_records_decision_and_paper_without_preparing(self):
+        self.bridge.control(False)
+        status = self.at(151)
+        self.assertEqual({}, self.bridge.preparations)
+        self.assertEqual(0, self.bridge.orders()["total"])
+        [decision] = self.decisions()
+        self.assertEqual(("PREPARE", "Up"), (decision["decision"], decision["buttonSide"]))
+        [entry] = [json.loads(line) for line in (self.dir / "paper_regime.jsonl").read_text().splitlines()]
+        self.assertEqual(("PENDING", "Up", 66, False),
+                         (entry["state"], entry["side"], entry["priceCents"], entry["g1Eligible"]))
+        self.assertNotEqual("PENDING", status["preparation"]["state"])
+
     def test_same_direction_as_the_1h_favorite_skips_the_round_for_good(self):
         status = self.at(151, up=70, down=31)
         self.assertEqual({}, self.bridge.preparations)
