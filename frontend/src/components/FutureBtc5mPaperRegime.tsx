@@ -33,7 +33,19 @@ const columns: ColumnsType<FutureBtc5mPaperRegimeTrade> = [
 ]
 
 // Live paper comparison of regime filter G1 against the unfiltered baseline; it never places orders.
-export default function FutureBtc5mPaperRegimeCard({ paper }: { paper: FutureBtc5mPaperRegime }) {
+export default function FutureBtc5mPaperRegimeCard({ paper }: { paper: FutureBtc5mPaperRegime | null }) {
+  if (!paper) {
+    return <Card title="趋势过滤器纸上验证 · G1 |trend60|>=15bp">
+      <Space direction="vertical" size={4}>
+        <Typography.Text type="secondary">
+          每轮 15m PREPARE 决策会镜像一笔 $1 影子单（决策时价格），按 Binance 15m K线估算结算；只记录不下单，不影响真实交易。真实规则不变。
+        </Typography.Text>
+        <Typography.Text type="secondary">
+          还没有影子单：上一轮 PREPARE 决策出现后自动开始累计（SKIP 轮次不产生影子单）。数据出现后本卡片展示基线与 G1 过滤后的对比。
+        </Typography.Text>
+      </Space>
+    </Card>
+  }
   return <Card title={`趋势过滤器纸上验证 · ${paper.rule}`}>
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Typography.Text type="secondary">

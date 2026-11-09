@@ -324,6 +324,24 @@ const FutureBtc5mBridge: React.FC = () => {
     : '状态未知'
   const performanceSeries: FutureBtcStrategyPerformance['series'][] =
     currentStrategy ? strategyPerformanceSeries[currentStrategy] : ['15m']
+  const browserConnected = runtime?.preflight?.browserConnected === true
+  // EXECUTOR_NOT_CONNECTED 是协议常驻标记（服务端不执行订单、由扩展点击），不是真实阻断。
+  const blockReasonText: Record<string, string> = {
+    STOP_FILE_PRESENT: '已手动停止（STOP 文件存在）',
+    CONTROL_STATE_WRITE_FAILED: '开关状态写入失败',
+    SIGNAL_SOURCE_INVALID: '信号源数据无效',
+    SIGNAL_SOURCE_UNAVAILABLE: '信号源不可用',
+  }
+  const realBlockers = (runtime?.blockReasons ?? [])
+    .filter((reason) => reason !== 'EXECUTOR_NOT_CONNECTED')
+    .map((reason) => blockReasonText[reason] ?? reason)
+  const orderBlockText = !runtime || statusStale ? '—'
+    : !runtime.requestedEnabled ? '开关已关闭'
+    : [...(browserConnected ? [] : ['浏览器扩展未连接']), ...realBlockers].join('；') || '无'
+  const actualOrderText = !runtime || statusStale ? '未知'
+    : !runtime.requestedEnabled ? '已关闭'
+    : !browserConnected ? '等待浏览器扩展连接'
+    : '扩展待机中（票据就绪即自动点击）'
 
   return <Space direction="vertical" size="middle" style={{ width: '100%' }}>
     <div>
@@ -354,19 +372,19 @@ const FutureBtc5mBridge: React.FC = () => {
         </Space>
         {statusError && <Alert type="error" showIcon message="Bridge 状态未知" description={statusError} />}
         {statusStale && <Alert type="error" showIcon message="运行状态已过期，请刷新核对" description="当前状态时间已失效，开关与准备情况未知；仍可点击关闭自动准备票据。" />}
-        {runtime && !runtime.executorReady && <Alert type="info" showIcon message="当前尚未接入 Future 交易执行器"
+        {runtime && !runtime.executorReady && <Alert type="info" showIcon message="执行方式：浏览器扩展自动点击买入"
           description={`开启后会前往当前策略的市场。${currentStrategy ? strategyText[currentStrategy].rule : ''}报价缺失或相同则等待。Chainlink 价格仅作参考。票据准备好后，浏览器扩展会自动点击一次 Future 买入（每轮最多一次）；实际成交以 Future 订单为准。`} />}
         <Descriptions size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="当前策略">{currentStrategy ? strategyText[currentStrategy].label : '未知'}</Descriptions.Item>
           {runtime?.fourHour && <Descriptions.Item label="周末 4 小时判断" span={isMobile ? 1 : 3}>{fourHourText(runtime.fourHour)}</Descriptions.Item>}
           <Descriptions.Item label="Bridge 连接">{runtime ? runtime.online ? '在线' : '离线' : '未知'}</Descriptions.Item>
-          <Descriptions.Item label="执行器">{runtime ? '未接入' : '未知'}</Descriptions.Item>
-          <Descriptions.Item label="实际下单">{runtime && !statusStale ? '未运行' : '未知'}</Descriptions.Item>
+          <Descriptions.Item label="执行器">{runtime ? '浏览器扩展（自动点击）' : '未知'}</Descriptions.Item>
+          <Descriptions.Item label="实际下单">{actualOrderText}</Descriptions.Item>
           <Descriptions.Item label="最终买入">浏览器扩展在票据准备好后自动点击（每轮最多一次）</Descriptions.Item>
           <Descriptions.Item label="行情状态">{runtime?.feedStatus || '—'}</Descriptions.Item>
           <Descriptions.Item label="当前轮次">{formatTime(runtime?.periodStart)}</Descriptions.Item>
           <Descriptions.Item label="服务器更新时间">{formatTime(runtime?.serverTime)}</Descriptions.Item>
-          <Descriptions.Item label="下单阻断原因" span={isMobile ? 1 : 3}>{runtime?.blockReasons.join('；') || '—'}</Descriptions.Item>
+          <Descriptions.Item label="下单阻断原因" span={isMobile ? 1 : 3}>{orderBlockText}</Descriptions.Item>
         </Descriptions>
         {runtime?.signal && <Descriptions title="Chainlink 参考采样（不用于选择准备方向）" size="small" column={isMobile ? 1 : 3}>
           <Descriptions.Item label="市场" span={isMobile ? 1 : 3}>{marketLink(runtime.signal.slug)}</Descriptions.Item>
@@ -439,7 +457,7 @@ const FutureBtc5mBridge: React.FC = () => {
       </Space>
     </Card>
 
-    {runtime?.paperRegime && <FutureBtc5mPaperRegimeCard paper={runtime.paperRegime} />}
+    <FutureBtc5mPaperRegimeCard paper={runtime?.paperRegime ?? null} />
 
   </Space>
 }

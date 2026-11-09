@@ -55,3 +55,13 @@ test('empty or unsettled stats render placeholders instead of fabricated zero pe
   const table = walk(tree).find(n => n.type === 'Table');
   assert.equal(table.props.locale.emptyText, '暂无已结算的影子单');
 });
+
+test('null paper keeps the card visible with a waiting state', () => {
+  const tree = sandbox.exports.default({paper: null});
+  const output = text(tree);
+  const card = walk(tree).find(n => n.type === 'Card');
+  assert.equal(card.props.title, '趋势过滤器纸上验证 · G1 |trend60|>=15bp');
+  assert.match(output, /还没有影子单/);
+  assert.match(output, /只记录不下单/);
+  assert.doesNotMatch(output, /基线（全部影子单）/);
+});
