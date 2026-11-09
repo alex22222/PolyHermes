@@ -53,16 +53,44 @@ def _save(state_dir, rows):
 
 
 def record(state_dir, *, period_start, side, price_cents, trend60_bp, volatility_bp, now):
-    """Shadow one 15m PREPARE decision with a pending $1 paper trade; idempotent per round."""
+    """Shadow one 15m PREPARE decision with a pending $1 paper trade; idempotent per round.
+    Returns True when the entry was appended, False when the round was already shadowed."""
     rows = _load(state_dir)
     if any(row["periodStart"] == period_start for row in rows):
-        return
+        return False
     rows.append({"schemaVersion": 1, "rule": RULE, "periodStart": period_start, "side": side,
                  "priceCents": price_cents, "trend60Bp": trend60_bp, "volatilityBp": volatility_bp,
                  "g1Eligible": abs(trend60_bp) >= MIN_TREND60_BP, "state": "PENDING", "createdAt": now,
                  "outcome": None, "win": None, "roi": None, "binanceOpen": None, "binanceClose": None,
                  "resolvedAt": None})
     _save(state_dir, rows)
+    return True
+
+
+def backfill(state_dir, decisions_path, now):
+    """Import historical 15m PREPARE decisions from strategy_decisions.jsonl as pending paper
+    trades (one-time history import; rounds already in the ledger are skipped). Returns the count."""
+    imported = 0
+    with decisions_path.open(encoding="utf-8") as decisions:
+        for line in decisions:
+            if not line.strip():
+                continue
+            record_ = json.loads(line)
+            if (record_.get("series") != "15m" or record_.get("decision") != "PREPARE"
+                    or type(record_.get("periodStart")) is not int
+                    or record_.get("buttonSide") not in ("Up", "Down")
+                    or not isinstance(record_.get("conditions"), dict)
+                    or not isinstance(record_["conditions"].get("trend60Bp"), (int, float))
+                    or not isinstance(record_["conditions"].get("volatilityBp"), (int, float))
+                    or not isinstance(record_.get("upQuoteCents"), (int, float))
+                    or not isinstance(record_.get("downQuoteCents"), (int, float))):
+                continue
+            imported += record(state_dir, period_start=record_["periodStart"], side=record_["buttonSide"],
+                               price_cents=max(record_["upQuoteCents"], record_["downQuoteCents"]),
+                               trend60_bp=record_["conditions"]["trend60Bp"],
+                               volatility_bp=record_["conditions"]["volatilityBp"],
+                               now=record_.get("decidedAt") if isinstance(record_.get("decidedAt"), (int, float)) else now)
+    return imported
 
 
 def _kline_url(start, end):
@@ -80,7 +108,9 @@ def resolve(state_dir, fetch_json, now):
     if not due:
         return 0
     start = min(row["periodStart"] for row in due)
-    end = max(row["periodStart"] for row in due) + ROUND_SECONDS
+    # Binance returns at most 1000 klines per call; cap the window so a large backlog
+    # (e.g. the history backfill) makes progress in chunks instead of stalling.
+    end = min(max(row["periodStart"] for row in due) + ROUND_SECONDS, start + 1000 * ROUND_SECONDS)
     candles = fetch_json(_kline_url(start, end))
     by_open = {int(row[0]) // 1000: (float(row[1]), float(row[4])) for row in candles}
     resolved = 0
@@ -124,3 +154,11 @@ def summary(state_dir, now):
                         "trend60Bp": row["trend60Bp"], "g1Eligible": row["g1Eligible"], "win": row["win"],
                         "roi": row["roi"]} for row in recent],
             "updatedAt": now}
+
+
+if __name__ == "__main__":
+    import sys
+    import time
+    from pathlib import Path
+
+    print(backfill(Path(sys.argv[1]), Path(sys.argv[2]), time.time()))

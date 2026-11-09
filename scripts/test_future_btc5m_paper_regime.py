@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from future_btc5m_paper_regime import MIN_TREND60_BP, record, resolve, summary
+from future_btc5m_paper_regime import MIN_TREND60_BP, backfill, record, resolve, summary
 
 
 S = 1791705600  # a 15m boundary
@@ -84,6 +84,48 @@ class PaperRegimeTest(unittest.TestCase):
 
     def test_summary_empty_without_ledger(self):
         self.assertIsNone(summary(self.state, 0))
+
+    def test_backfill_imports_prepare_decisions_once(self):
+        decisions = self.state / "strategy_decisions.jsonl"
+        rows = [
+            {"series": "15m", "decision": "PREPARE", "periodStart": S, "buttonSide": "Up",
+             "upQuoteCents": 61, "downQuoteCents": 40, "decidedAt": S + 150.0,
+             "conditions": {"trend60Bp": 21.3, "volatilityBp": 3.1}},
+            {"series": "15m", "decision": "PREPARE", "periodStart": S + 900, "buttonSide": "Down",
+             "upQuoteCents": 30, "downQuoteCents": 71, "decidedAt": S + 1050.0,
+             "conditions": {"trend60Bp": -4.9, "volatilityBp": 2.0}},
+            {"series": "15m", "decision": "SKIP_SAME_AS_1H", "periodStart": S + 1800},
+            {"series": "5m", "decision": "PREPARE", "periodStart": S + 2700},
+            {"broken": True},
+        ]
+        decisions.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        self.assertEqual(backfill(self.state, decisions, 2000.0), 2)
+        self.assertEqual(backfill(self.state, decisions, 2000.0), 0)
+        entries = [json.loads(line) for line in (self.state / "paper_regime.jsonl").open()]
+        self.assertEqual(len(entries), 2)
+        self.assertEqual((entries[0]["side"], entries[0]["priceCents"], entries[0]["g1Eligible"],
+                          entries[0]["state"], entries[0]["createdAt"]), ("Up", 61, True, "PENDING", S + 150.0))
+        self.assertEqual((entries[1]["side"], entries[1]["priceCents"], entries[1]["g1Eligible"]),
+                         ("Down", 71, False))
+
+    def test_resolve_chunks_a_large_backlog(self):
+        rounds = 1000 + 5
+        for index in range(rounds):
+            self.add(S + index * 900, now=float(index))
+        now = S + rounds * 900 + 60
+
+        def fetch(url):
+            query = dict(pair.split("=") for pair in url.split("?", 1)[1].split("&"))
+            start, end = int(query["startTime"]) // 1000, int(query["endTime"]) // 1000
+            return [kline(S + index * 900, 100.0, 101.0)
+                    for index in range(rounds) if start <= S + index * 900 < end]
+
+        first = resolve(self.state, fetch, now)
+        self.assertEqual(first, 1000)
+        second = resolve(self.state, fetch, now)
+        self.assertEqual(second, 5)
+        rows = [json.loads(line) for line in (self.state / "paper_regime.jsonl").open()]
+        self.assertTrue(all(row["state"] == "RESOLVED" for row in rows))
 
 
 if __name__ == "__main__":
