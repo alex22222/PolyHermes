@@ -3290,3 +3290,35 @@ export interface FutureBtc5mOrderListResponse {
   page: number
   size: number
 }
+
+// Full paginated ledger rows of the paper regime shadow (see FutureBtc5mPaperRegime).
+export interface FutureBtc5mPaperListRequest {
+  page: number
+  size: number
+}
+
+export interface FutureBtc5mPaperListEntry {
+  schemaVersion: number
+  rule: string
+  periodStart: number
+  side: 'Up' | 'Down'
+  priceCents: number
+  trend60Bp: number
+  volatilityBp: number
+  g1Eligible: boolean
+  state: 'PENDING' | 'RESOLVED'
+  createdAt: number
+  outcome: 'Up' | 'Down' | 'Flat' | null
+  win: boolean | null
+  roi: number | null
+  binanceOpen: number | null
+  binanceClose: number | null
+  resolvedAt: number | null
+}
+
+export interface FutureBtc5mPaperListResponse {
+  list: FutureBtc5mPaperListEntry[]
+  total: number
+  page: number
+  size: number
+}

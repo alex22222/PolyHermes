@@ -18,6 +18,8 @@ import type {
   FutureBtc5mOrder,
   FutureBtc5mOrderListRequest,
   FutureBtc5mOrderListResponse,
+  FutureBtc5mPaperListRequest,
+  FutureBtc5mPaperListResponse,
   LeaderPoolAddRequest,
   LeaderPoolCreateTrialConfigRequest,
   LeaderPoolItem,
@@ -1217,7 +1219,10 @@ export const apiService = {
       apiClient.post<ApiResponse<FutureBtc5mOrderListResponse>>('/future-btc5m/orders/list', data),
 
     detail: (data: { id: string }) =>
-      apiClient.post<ApiResponse<FutureBtc5mOrder>>('/future-btc5m/orders/detail', data)
+      apiClient.post<ApiResponse<FutureBtc5mOrder>>('/future-btc5m/orders/detail', data),
+
+    paperList: (data: FutureBtc5mPaperListRequest) =>
+      apiClient.post<ApiResponse<FutureBtc5mPaperListResponse>>('/future-btc5m/paper/list', data)
   },
 
   /**

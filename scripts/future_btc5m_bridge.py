@@ -12,7 +12,7 @@ from pathlib import Path
 
 from future_btc5m_conditions import SOURCE as CONDITIONS_SOURCE, VOLATILITY_MAX_BP
 from future_btc5m_fourhour import SOURCE as FOUR_HOUR_SOURCE, evaluate as evaluate_four_hour
-from future_btc5m_paper_regime import record as record_paper, summary as paper_summary
+from future_btc5m_paper_regime import record as record_paper, summary as paper_summary, listing as paper_listing
 from future_btc5m_series import (CHECKPOINT_WINDOW, DEFAULT_STRATEGY, HOUR, SERIES, STRATEGIES, STRATEGY_SERIES,
                                  checkpoint_window, entry_bounds, is_et_weekend, market_url_round,
                                  preparation_id, round_start_of, series_of_preparation_id, slug_for)
@@ -1002,6 +1002,10 @@ class FutureBridge:
             records = [record for record in reversed(self.records) if not status or record["status"] == status]
             offset = (page - 1) * size
             return {"list": copy.deepcopy(records[offset:offset + size]), "total": len(records), "page": page, "size": size}
+
+    def paper(self, page=1, size=20):
+        with self.lock:
+            return paper_listing(self.state_dir, page, size)
 
     def detail(self, id):
         with self.lock:

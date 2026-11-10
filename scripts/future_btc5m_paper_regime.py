@@ -141,6 +141,15 @@ def _stats(rows):
             "totalUsd": round(total, 4)}
 
 
+def listing(state_dir, page, size):
+    """All paper trades, newest round first, paginated for the page's history table."""
+    if type(page) is not int or type(size) is not int or page < 1 or not 1 <= size <= 100:
+        raise ValueError("INVALID_PAGINATION")
+    rows = sorted(_load(state_dir), key=lambda row: row["periodStart"], reverse=True)
+    offset = (page - 1) * size
+    return {"list": rows[offset:offset + size], "total": len(rows), "page": page, "size": size}
+
+
 def summary(state_dir, now):
     """The status payload: baseline (all paper trades) vs the G1-filtered subset."""
     rows = _load(state_dir)

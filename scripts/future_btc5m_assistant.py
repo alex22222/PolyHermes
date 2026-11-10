@@ -941,6 +941,11 @@ def make_server(assistant, address=LOCAL_ADDRESS, bridge=None, market_quote=None
                     if status is not None and status not in {"PENDING", "SKIPPED", "FAILED", "SUBMITTED_UNVERIFIED", "FILLED"}:
                         raise ValueError("INVALID_STATUS")
                     self.reply(bridge.orders(int(params.get("page", ["1"])[0]), int(params.get("size", ["20"])[0]), status))
+                elif url.path == "/bridge/paper":
+                    params = urllib.parse.parse_qs(url.query, keep_blank_values=True)
+                    if set(params) - {"page", "size"} or any(len(values) != 1 for values in params.values()):
+                        raise ValueError("INVALID_QUERY")
+                    self.reply(bridge.paper(int(params.get("page", ["1"])[0]), int(params.get("size", ["20"])[0])))
                 elif url.path.startswith("/bridge/orders/") and not url.query:
                     record = bridge.detail(urllib.parse.unquote(url.path[len("/bridge/orders/"):]))
                     if record is None:

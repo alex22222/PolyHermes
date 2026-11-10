@@ -3,6 +3,7 @@ package com.wrbug.polymarketbot.service.bridge
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.sun.net.httpserver.HttpServer
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListRequest
+import com.wrbug.polymarketbot.dto.FutureBtc5mPaperListRequest
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -733,6 +734,73 @@ class FutureBtc5mBridgeClientTest {
             responseBody = mapper.writeValueAsString(status() + ("paperRegime" to payload))
             assertThrows(IllegalStateException::class.java) { client.status() }
         }
+    }
+
+    @Test
+    fun `paper list paginates the full ledger and rejects inconsistent entries`() {
+        val entries = (0 until 25).map { index -> paperEntry(1791705600 - index * 900L, if (index % 5 == 4) null else "Up") }
+        responseBody = mapper.writeValueAsString(mapOf("list" to entries.take(20), "total" to 25, "page" to 1, "size" to 20))
+        val firstPage = client.paper(FutureBtc5mPaperListRequest())
+        assertEquals(25, firstPage.total)
+        assertEquals(20, firstPage.list.size)
+        assertEquals(1791705600, firstPage.list.first().periodStart)
+        assertEquals("PENDING", firstPage.list[4].state)
+        assertNull(firstPage.list[4].win)
+        assertEquals(0.5625, firstPage.list[0].roi)
+        assertEquals("/bridge/paper", requests.last().rawPath)
+        assertEquals("page=1&size=20", requests.last().query)
+        responseBody = mapper.writeValueAsString(mapOf("list" to entries.takeLast(5), "total" to 25, "page" to 2, "size" to 20))
+        assertEquals(5, client.paper(FutureBtc5mPaperListRequest(2, 20)).list.size)
+
+        listOf(FutureBtc5mPaperListRequest(0, 20), FutureBtc5mPaperListRequest(1, 0),
+            FutureBtc5mPaperListRequest(1, 101)).forEach { request ->
+            assertThrows(IllegalArgumentException::class.java) { client.paper(request) }
+        }
+        val before = requests.size
+        val valid = mapOf("list" to listOf(paperEntry(1791705600)), "total" to 1, "page" to 1, "size" to 20)
+        val pending = paperEntry(1791704700, null)
+        val flat = paperEntry(1791703800, "Flat")
+        val invalid = listOf(
+            valid + ("page" to 2), valid + ("size" to 10), valid + ("total" to -1), valid + ("total" to 0),
+            valid + ("list" to listOf(paperEntry(1791705600), paperEntry(1791705600))),
+            valid + ("list" to listOf(paperEntry(1791704700), paperEntry(1791705600))),
+            valid + ("list" to listOf(paperEntry(1791705600) + ("schemaVersion" to 2))),
+            valid + ("list" to listOf(paperEntry(1791705600) + ("rule" to "G2 |trend60|>=20bp"))),
+            valid + ("list" to listOf(paperEntry(1791705600) + ("periodStart" to 1791705601))),
+            valid + ("list" to listOf(paperEntry(1791705600) + ("side" to "Left"))),
+            valid + ("list" to listOf(paperEntry(1791705600) + ("priceCents" to 100))),
+            valid + ("list" to listOf(paperEntry(1791705600) + ("g1Eligible" to false))),
+            valid + ("list" to listOf(paperEntry(1791705600) + ("volatilityBp" to -1))),
+            valid + ("list" to listOf(paperEntry(1791705600) + ("state" to "SETTLED"))),
+            valid + ("list" to listOf(pending + ("outcome" to "Up"))),
+            valid + ("list" to listOf(paperEntry(1791705600, "Down") + ("win" to true))),
+            valid + ("list" to listOf(paperEntry(1791705600) + ("roi" to 1.0))),
+            valid + ("list" to listOf(flat + ("win" to true))),
+            valid + ("list" to listOf(paperEntry(1791705600) - "binanceOpen")),
+        )
+        invalid.forEach { payload ->
+            responseBody = mapper.writeValueAsString(payload)
+            assertThrows(IllegalStateException::class.java) { client.paper(FutureBtc5mPaperListRequest()) }
+        }
+        assertEquals(before + invalid.size, requests.size)
+        responseBody = mapper.writeValueAsString(valid + mapOf("list" to listOf(paperEntry(1791705600, "Down"), pending, flat), "total" to 3))
+        val mixed = client.paper(FutureBtc5mPaperListRequest(1, 20))
+        assertEquals(listOf(false, null, null), mixed.list.map { it.win })
+        assertEquals(-1.0, mixed.list[0].roi)
+        assertEquals(0.0, mixed.list[2].roi)
+    }
+
+    private fun paperEntry(start: Long, outcome: String? = "Up", side: String = "Up"): Map<String, Any?> {
+        val base = mapOf("schemaVersion" to 1, "rule" to "G1 |trend60|>=15bp", "periodStart" to start, "side" to side,
+            "priceCents" to 64.0, "trend60Bp" to 20.0, "volatilityBp" to 5.0, "g1Eligible" to true,
+            "createdAt" to start + 160.0)
+        if (outcome == null) return base + mapOf("state" to "PENDING", "outcome" to null, "win" to null, "roi" to null,
+            "binanceOpen" to null, "binanceClose" to null, "resolvedAt" to null)
+        val win: Boolean? = if (outcome == "Flat") null else outcome == side
+        val roi = if (win == null) 0.0 else if (win) 0.5625 else -1.0
+        return base + mapOf("state" to "RESOLVED", "outcome" to outcome, "win" to win, "roi" to roi,
+            "binanceOpen" to 83000.0, "binanceClose" to if (outcome == "Up") 83100.0 else if (outcome == "Down") 82900.0 else 83000.0,
+            "resolvedAt" to start + 960.0)
     }
 
     private fun intent4() = preparationIntent() + mapOf(

@@ -170,4 +170,28 @@ data class FutureBtc5mOrder(
 
 data class FutureBtc5mOrderListRequest(val page: Int = 1, val size: Int = 20, val status: String? = null)
 data class FutureBtc5mOrderListResponse(val list: List<FutureBtc5mOrder>, val total: Int, val page: Int, val size: Int)
+
+// Full paginated ledger of paper trades (scripts/future_btc5m_paper_regime.py listing()), for the
+// history table below the paper regime card. Unlike FutureBtc5mPaperRegimeTrade (recent summary),
+// every field of the ledger row is exposed.
+data class FutureBtc5mPaperListRequest(val page: Int = 1, val size: Int = 20)
+data class FutureBtc5mPaperListResponse(val list: List<FutureBtc5mPaperListEntry>, val total: Int, val page: Int, val size: Int)
+data class FutureBtc5mPaperListEntry(
+    val schemaVersion: Int,
+    val rule: String,
+    val periodStart: Long,
+    val side: String,
+    val priceCents: Double,
+    val trend60Bp: Double,
+    val volatilityBp: Double,
+    val g1Eligible: Boolean,
+    val state: String,
+    val createdAt: Double,
+    val outcome: String?,
+    val win: Boolean?,
+    val roi: Double?,
+    val binanceOpen: Double?,
+    val binanceClose: Double?,
+    val resolvedAt: Double?
+)
 data class FutureBtc5mOrderDetailRequest(val id: String)

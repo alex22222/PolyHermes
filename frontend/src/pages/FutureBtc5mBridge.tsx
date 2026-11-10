@@ -5,7 +5,7 @@ import { ReloadOutlined } from '@ant-design/icons'
 import { useMediaQuery } from 'react-responsive'
 import { apiService } from '../services/api'
 import FutureStrategyPerformance from '../components/FutureStrategyPerformance'
-import FutureBtc5mPaperRegimeCard from '../components/FutureBtc5mPaperRegime'
+import FutureBtc5mPaperRegimeCard, { type FutureBtc5mPaperHistory } from '../components/FutureBtc5mPaperRegime'
 import { referenceIsFresh } from '../utils/futureBtc5mPreflight'
 import type { FutureBtc5mAssets, FutureBtc5mAssetBuy, FutureBtc5mAssetPosition, FutureBtc5mBridgeStatus, FutureBtc5mFourHour, FutureBtc5mStrategy, FutureBtcStrategyPerformance } from '../types'
 
@@ -95,12 +95,16 @@ const FutureBtc5mBridge: React.FC = () => {
   const [assetsLoading, setAssetsLoading] = useState(false)
   const [assetsReceivedAt, setAssetsReceivedAt] = useState(0)
   const [buyPagination, setBuyPagination] = useState({ current: 1, pageSize: 20 })
+  const [paperHistory, setPaperHistory] = useState<FutureBtc5mPaperHistory | null>(null)
   const mounted = useRef(true)
   const controlPending = useRef(false)
   const statusRequestSeq = useRef(0)
   const assetsRequestSeq = useRef(0)
   const statusInFlight = useRef<number | null>(null)
   const assetsInFlight = useRef<number | null>(null)
+  const paperRequestSeq = useRef(0)
+  const paperInFlight = useRef<number | null>(null)
+  const paperView = useRef({ page: 1, pageSize: 20 })
   const assetsRequestedAt = useRef(0)
   const buyHistorySnapshot = useRef<{ walletAddress: string | null, count: number }>({ walletAddress: null, count: 0 })
 
@@ -180,6 +184,35 @@ const FutureBtc5mBridge: React.FC = () => {
     const interval = window.setInterval(fetchStatus, 5000)
     return () => window.clearInterval(interval)
   }, [fetchStatus])
+
+  // Full paginated paper ledger for the regime card; refetch when the ledger grows or settles a trade.
+  const fetchPaperList = useCallback(async (page: number, pageSize: number) => {
+    paperView.current = { page, pageSize }
+    const requestSeq = ++paperRequestSeq.current
+    paperInFlight.current = requestSeq
+    setPaperHistory((prev) => prev ? { ...prev, loading: true } : null)
+    try {
+      const response = await apiService.futureBtc5mBridge.paperList({ page, size: pageSize })
+      if (!mounted.current || requestSeq !== paperRequestSeq.current) return
+      if (response.data.code !== 0 || !response.data.data) {
+        throw new Error(response.data.msg || '获取影子单记录失败')
+      }
+      const data = response.data.data
+      setPaperHistory({ list: data.list, total: data.total, page: data.page, pageSize: data.size, loading: false, error: null })
+    } catch (error: unknown) {
+      if (!mounted.current || requestSeq !== paperRequestSeq.current) return
+      setPaperHistory((prev) => ({ list: prev?.list ?? [], total: prev?.total ?? 0, page, pageSize,
+        loading: false, error: errorText(error, '获取影子单记录失败') }))
+    } finally {
+      if (paperInFlight.current === requestSeq) paperInFlight.current = null
+    }
+  }, [])
+
+  const paperLedger = runtime?.paperRegime?.baseline
+  const paperLedgerKey = paperLedger ? `${paperLedger.trades}:${paperLedger.settled}` : null
+  useEffect(() => {
+    if (paperLedgerKey != null) fetchPaperList(paperView.current.page, paperView.current.pageSize)
+  }, [fetchPaperList, paperLedgerKey])
 
   useEffect(() => {
     fetchAssets()
@@ -457,7 +490,8 @@ const FutureBtc5mBridge: React.FC = () => {
       </Space>
     </Card>
 
-    <FutureBtc5mPaperRegimeCard paper={runtime?.paperRegime ?? null} />
+    <FutureBtc5mPaperRegimeCard paper={runtime?.paperRegime ?? null} history={paperHistory}
+      onHistoryPageChange={fetchPaperList} />
 
   </Space>
 }

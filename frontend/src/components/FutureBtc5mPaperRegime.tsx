@@ -1,10 +1,11 @@
 import { Card, Space, Table, Tag, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import type { FutureBtc5mPaperRegime, FutureBtc5mPaperRegimeStats, FutureBtc5mPaperRegimeTrade } from '../types'
+import type { FutureBtc5mPaperListEntry, FutureBtc5mPaperRegime, FutureBtc5mPaperRegimeStats } from '../types'
 
 const percent = (value: number | null) => value == null ? '—' : `${(value * 100).toFixed(1)}%`
 const money = (value: number | null) => value == null ? '—' : `${value < 0 ? '-' : '+'}$${Math.abs(value).toFixed(2)}`
 const cents = (value: number) => `${value.toFixed(0)}¢`
+const price = (value: number | null) => value == null ? '—' : value.toLocaleString('en-US', { maximumFractionDigits: 2 })
 const time = (value: number) => new Date(value * 1000).toLocaleString('zh-CN', { hour12: false })
 
 const statsText = (label: string, stats: FutureBtc5mPaperRegimeStats, color?: string) =>
@@ -16,7 +17,16 @@ const statsText = (label: string, stats: FutureBtc5mPaperRegimeStats, color?: st
     <Typography.Text strong style={color ? { color } : undefined}>累计纸面盈亏 {money(stats.settled > 0 ? stats.totalUsd : null)}</Typography.Text>
   </Space>
 
-const columns: ColumnsType<FutureBtc5mPaperRegimeTrade> = [
+export interface FutureBtc5mPaperHistory {
+  list: FutureBtc5mPaperListEntry[]
+  total: number
+  page: number
+  pageSize: number
+  loading: boolean
+  error: string | null
+}
+
+const columns: ColumnsType<FutureBtc5mPaperListEntry> = [
   { title: '轮次开始', dataIndex: 'periodStart', width: 170, render: time },
   { title: '方向', dataIndex: 'side', width: 70,
     render: (side: string) => <Tag color={side === 'Up' ? 'green' : 'red'}>{side === 'Up' ? '涨' : '跌'}</Tag> },
@@ -25,15 +35,23 @@ const columns: ColumnsType<FutureBtc5mPaperRegimeTrade> = [
     render: (value: number) => `${value >= 0 ? '+' : ''}${value.toFixed(1)}bp` },
   { title: 'G1 合格', dataIndex: 'g1Eligible', width: 90,
     render: (value: boolean) => value ? <Tag color="processing">合格</Tag> : <Tag>过滤</Tag> },
+  { title: 'Binance 开→收', width: 170,
+    render: (_, record) => record.binanceOpen == null ? '—' : `${price(record.binanceOpen)} → ${price(record.binanceClose)}` },
   { title: '结果', dataIndex: 'win', width: 90,
-    render: (win: boolean | null) => win == null ? <Tag>平局/待定</Tag>
+    render: (win: boolean | null, record) => record.state === 'PENDING' ? <Tag>待结算</Tag>
+      : win == null ? <Tag>平局</Tag>
       : <Tag color={win ? 'green' : 'red'}>{win ? '赢' : '亏'}</Tag> },
   { title: '纸面盈亏', dataIndex: 'roi', width: 110,
-    render: (roi: number | null) => <Typography.Text>{money(roi)}</Typography.Text> },
+    render: (roi: number | null, record) => <Typography.Text>{record.state === 'PENDING' ? '—' : money(roi)}</Typography.Text> },
 ]
 
 // Live paper comparison of regime filter G1 against the unfiltered baseline; it never places orders.
-export default function FutureBtc5mPaperRegimeCard({ paper }: { paper: FutureBtc5mPaperRegime | null }) {
+// The history table is fed by the page through /future-btc5m/paper/list so every shadow trade can be browsed.
+export default function FutureBtc5mPaperRegimeCard({ paper, history, onHistoryPageChange }: {
+  paper: FutureBtc5mPaperRegime | null
+  history: FutureBtc5mPaperHistory | null
+  onHistoryPageChange: (page: number, pageSize: number) => void
+}) {
   if (!paper) {
     return <Card title="趋势过滤器纸上验证 · G1 |trend60|>=15bp">
       <Space direction="vertical" size={4}>
@@ -41,7 +59,7 @@ export default function FutureBtc5mPaperRegimeCard({ paper }: { paper: FutureBtc
           每轮 15m PREPARE 决策会镜像一笔 $1 影子单（决策时价格），按 Binance 15m K线估算结算；只记录不下单，不影响真实交易。真实规则不变。
         </Typography.Text>
         <Typography.Text type="secondary">
-          还没有影子单：上一轮 PREPARE 决策出现后自动开始累计（SKIP 轮次不产生影子单）。数据出现后本卡片展示基线与 G1 过滤后的对比。
+          还没有影子单：上一轮 PREPARE 决策出现后自动开始累计（SKIP 轮次不产生影子单）。数据出现后本卡片展示基线与 G1 过滤后的对比和全部影子单记录。
         </Typography.Text>
       </Space>
     </Card>
@@ -55,9 +73,18 @@ export default function FutureBtc5mPaperRegimeCard({ paper }: { paper: FutureBtc
         {statsText('基线（全部影子单）', paper.baseline)}
         {statsText('G1 过滤后（仅 |1小时趋势| ≥ 15bp）', paper.filtered, '#237804')}
       </Space>
-      <Table rowKey={(record) => `${record.periodStart}`} size="small" dataSource={paper.recent} columns={columns}
-        pagination={false} scroll={{ x: 720 }} locale={{ emptyText: '暂无已结算的影子单' }} />
-      <Typography.Text type="secondary">最近 {paper.recent.length} 笔已结算影子单 · 汇总更新于 {time(paper.updatedAt)}</Typography.Text>
+      <Table rowKey={(record) => `${record.periodStart}`} size="small" columns={columns} scroll={{ x: 900 }}
+        dataSource={history?.list ?? []} loading={history == null || history.loading}
+        pagination={history == null ? false : {
+          current: history.page, pageSize: history.pageSize, total: history.total,
+          showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'],
+          showTotal: (total) => `共 ${total} 笔影子单`,
+          onChange: onHistoryPageChange,
+        }}
+        locale={{ emptyText: history?.error ?? '暂无影子单记录' }} />
+      <Typography.Text type="secondary">
+        {history?.error ? `影子单记录读取失败：${history.error}` : '全部影子单（含待结算），最新轮次在前'} · 汇总更新于 {time(paper.updatedAt)}
+      </Typography.Text>
     </Space>
   </Card>
 }

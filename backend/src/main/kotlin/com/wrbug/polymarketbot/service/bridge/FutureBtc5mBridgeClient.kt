@@ -9,6 +9,8 @@ import com.wrbug.polymarketbot.dto.FutureBtc5mBridgeStatus
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrder
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListRequest
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListResponse
+import com.wrbug.polymarketbot.dto.FutureBtc5mPaperListRequest
+import com.wrbug.polymarketbot.dto.FutureBtc5mPaperListResponse
 import com.wrbug.polymarketbot.dto.FutureBtc5mWalletEnvelope
 import com.wrbug.polymarketbot.dto.FutureBtc5mWalletSnapshot
 import org.springframework.beans.factory.annotation.Value
@@ -138,6 +140,30 @@ class FutureBtc5mBridgeClient(
         return request("/bridge/orders/${encode(id)}", FutureBtc5mOrder::class.java) {
             validateOrder(it)
             check(string(it, "id") == id) { "Future Bridge 返回的订单ID不匹配" }
+        }
+    }
+
+    fun paper(request: FutureBtc5mPaperListRequest): FutureBtc5mPaperListResponse {
+        require(request.page >= 1 && request.size in 1..100) { "page 必须大于0，size 必须在1-100之间" }
+        return request("/bridge/paper?page=${request.page}&size=${request.size}", FutureBtc5mPaperListResponse::class.java) {
+            check(integer(it, "page") == request.page.toLong() && integer(it, "size") == request.size.toLong()) {
+                "Future Bridge 返回的分页不匹配"
+            }
+            val total = integer(it, "total")
+            check(total in 0..Int.MAX_VALUE.toLong()) { "Future Bridge 返回的纸上记录总数无效" }
+            val list = array(it, "list")
+            val offset = (request.page.toLong() - 1) * request.size
+            check(list.size() == (total - offset).coerceIn(0, request.size.toLong()).toInt()) {
+                "Future Bridge 返回的纸上记录数量不匹配"
+            }
+            var previous = Long.MAX_VALUE
+            list.forEach { element ->
+                val trade = objectValue(element)
+                validatePaperEntry(trade)
+                val start = integer(trade, "periodStart")
+                check(start < previous) { "Future Bridge 返回重复或乱序的纸上记录" }
+                previous = start
+            }
         }
     }
 
@@ -286,6 +312,49 @@ class FutureBtc5mBridgeClient(
             }
         }
         check(settledSeen <= baseSettled) { "Future Bridge 纸上 regime 最近记录与统计不一致" }
+    }
+
+    // One ledger row of scripts/future_btc5m_paper_regime.py: schemaVersion 1, PENDING rows carry
+    // no resolution fields; RESOLVED rows resolve win/roi from the Binance 15m kline estimate.
+    private fun validatePaperEntry(trade: JsonObject) {
+        check(integer(trade, "schemaVersion") == 1L && string(trade, "rule") == PAPER_REGIME_RULE) {
+            "Future Bridge 纸上记录版本或规则无效"
+        }
+        val start = integer(trade, "periodStart")
+        check(start >= 0 && start % 900 == 0L) { "Future Bridge 纸上记录轮次无效" }
+        val side = string(trade, "side")
+        check(side in setOf("Up", "Down")) { "Future Bridge 纸上记录方向无效" }
+        val price = number(trade, "priceCents")
+        check(price in 1.0..99.0) { "Future Bridge 纸上记录价格无效" }
+        val trend = number(trade, "trend60Bp")
+        check(number(trade, "volatilityBp") >= 0) { "Future Bridge 纸上记录波动率无效" }
+        check(boolean(trade, "g1Eligible") == (kotlin.math.abs(trend) >= 15.0)) { "Future Bridge 纸上记录 G1 判定无效" }
+        check(number(trade, "createdAt") >= 0) { "Future Bridge 纸上记录创建时间无效" }
+        val outcome = nullableString(trade, "outcome")
+        val win = field(trade, "win")
+        val roi = field(trade, "roi")
+        val binanceOpen = field(trade, "binanceOpen")
+        val binanceClose = field(trade, "binanceClose")
+        val resolvedAt = field(trade, "resolvedAt")
+        when (string(trade, "state")) {
+            "PENDING" -> check(outcome == null && win.isJsonNull && roi.isJsonNull &&
+                binanceOpen.isJsonNull && binanceClose.isJsonNull && resolvedAt.isJsonNull) {
+                "Future Bridge 未结算纸上记录不能携带结算字段"
+            }
+            "RESOLVED" -> {
+                check(outcome in setOf("Up", "Down", "Flat") && number(trade, "binanceOpen") > 0 &&
+                    number(trade, "binanceClose") > 0 && number(trade, "resolvedAt") >= number(trade, "createdAt")) {
+                    "Future Bridge 已结算纸上记录缺少结算事实"
+                }
+                val expectedWin = if (outcome == "Flat") null else outcome == side
+                check((if (expectedWin == null) win.isJsonNull else !win.isJsonNull && win.asBoolean == expectedWin)) {
+                    "Future Bridge 纸上记录胜负与结果不一致"
+                }
+                val expectedRoi = if (expectedWin == null) 0.0 else if (expectedWin) (100 - price) / price else -1.0
+                check(!roi.isJsonNull && number(trade, "roi") == expectedRoi) { "Future Bridge 纸上记录盈亏不一致" }
+            }
+            else -> throw IllegalStateException("Future Bridge 纸上记录状态无效")
+        }
     }
 
     private fun validatePreparation(preparation: JsonObject, status: JsonObject) {

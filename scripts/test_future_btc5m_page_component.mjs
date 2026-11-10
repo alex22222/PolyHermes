@@ -52,7 +52,7 @@ const mountPage = (initialTime) => {
     removeEventListener(type, callback) {listeners.get(type)?.delete(callback);},
   };
   const document = {visibilityState: 'visible', ...events};
-  const requests = {status: [], control: [], assets: [], strategy: []};
+  const requests = {status: [], control: [], assets: [], strategy: [], paperList: []};
   const sameDeps = (left, right) => left && right && left.length === right.length &&
     left.every((value, index) => Object.is(value, right[index]));
   const react = {
@@ -82,7 +82,7 @@ const mountPage = (initialTime) => {
       }
     },
   };
-  const pending = (kind) => () => new Promise((resolve) => requests[kind].push(resolve));
+  const pending = (kind) => (...args) => new Promise((resolve) => requests[kind].push({resolve, args}));
   const antd = Object.fromEntries(['Alert', 'Button', 'Card', 'Drawer', 'Empty', 'Progress', 'Select', 'Space',
     'Spin', 'Switch', 'Table', 'Tag'].map((name) => [name, name]));
   antd.Descriptions = Object.assign('Descriptions', {Item: 'Descriptions.Item'});
@@ -97,6 +97,7 @@ const mountPage = (initialTime) => {
     '../services/api': {apiService: {futureBtc5mBridge: {
       status: pending('status'), control: pending('control'), assets: pending('assets'), strategy: pending('strategy'),
       list: async () => ({data: {code: 0, data: {list: [], total: 0}}}),
+      paperList: pending('paperList'),
     }}},
     '../utils/futureBtc5mPreflight': guards.exports,
     '../components/FutureStrategyPerformance': {default: 'FutureStrategyPerformance'},
@@ -161,12 +162,14 @@ const mountPage = (initialTime) => {
     },
     async reply(kind, value) {
       assert.ok(requests[kind].length, `${kind} request must already be pending`);
-      requests[kind].shift()({data: {code: 0, data: value}});
+      const request = requests[kind].shift();
+      request.resolve({data: {code: 0, data: value}});
       await new Promise((resolve) => setImmediate(resolve));
       render();
+      return request.args;
     },
     async fail(kind, msg) {
-      requests[kind].shift()({data: {code: -1, msg}});
+      requests[kind].shift().resolve({data: {code: -1, msg}});
       await new Promise((resolve) => setImmediate(resolve));
       render();
     },
@@ -616,15 +619,47 @@ test('strategy and preparation controls live inside the assets card and retired 
   assert.equal(within(card, (node) => node.type === 'Switch').length, 1, '自动准备开关必须位于我的资产内');
   assert.equal(within(card, (node) => node.type === 'Button' && node.props.danger).length, 1, '关闭按钮必须位于我的资产内');
   assert.equal(page.field('最终买入'), '浏览器扩展在票据准备好后自动点击（每轮最多一次）');
-  assert.equal(page.field('实际下单'), '未运行');
+  assert.equal(page.field('执行器'), '浏览器扩展（自动点击）');
+  assert.equal(page.field('实际下单'), '已关闭');
+  assert.equal(page.field('下单阻断原因'), '开关已关闭');
   page.elements((node) => node.type === 'Switch')[0].props.onChange(true);
   const enabled = healthyStatus();
   enabled.requestedEnabled = true;
   enabled.mode = 'BLOCKED';
+  enabled.blockReasons = ['EXECUTOR_NOT_CONNECTED'];
   enabled.preparation = {...enabled.preparation, enabled: true, state: 'WAITING_SIGNAL', reasons: ['WAITING_CURRENT_SIGNAL']};
   await page.reply('control', enabled);
   assert.equal(page.elements((node) => node.type === 'Switch')[0].props.checked, true);
-  assert.equal(page.field('实际下单'), '未运行');
+  assert.equal(page.field('实际下单'), '扩展待机中（票据就绪即自动点击）');
+  assert.equal(page.field('下单阻断原因'), '无', 'EXECUTOR_NOT_CONNECTED 是协议常驻标记，不得显示为阻断原因');
+});
+
+test('block reason display hides the executor marker and translates only real blockers', async () => {
+  const armed = (blockReasons, browserConnected = true) => {
+    const status = healthyStatus();
+    status.requestedEnabled = true;
+    status.mode = 'BLOCKED';
+    status.blockReasons = blockReasons;
+    status.preflight = {...status.preflight, browserConnected};
+    status.preparation = {...status.preparation, enabled: true, state: 'WAITING_SIGNAL', reasons: ['WAITING_CURRENT_SIGNAL']};
+    return status;
+  };
+  const cases = [
+    [armed(['EXECUTOR_NOT_CONNECTED', 'STOP_FILE_PRESENT']), '已手动停止（STOP 文件存在）'],
+    [armed(['EXECUTOR_NOT_CONNECTED'], false), '浏览器扩展未连接'],
+    [armed(['EXECUTOR_NOT_CONNECTED', 'SIGNAL_SOURCE_UNAVAILABLE']), '信号源不可用'],
+    [armed(['EXECUTOR_NOT_CONNECTED', 'CONTROL_STATE_WRITE_FAILED', 'SIGNAL_SOURCE_INVALID']),
+      '开关状态写入失败；信号源数据无效'],
+  ];
+  for (const [status, expected] of cases) {
+    const page = mountPage(receipt);
+    await page.reply('status', status);
+    assert.equal(page.field('执行器'), '浏览器扩展（自动点击）');
+    assert.equal(page.field('下单阻断原因'), expected);
+    assert.equal(page.field('实际下单'),
+      status.preflight.browserConnected ? '扩展待机中（票据就绪即自动点击）' : '等待浏览器扩展连接');
+    page.unmount();
+  }
 });
 
 const higherButtonStatus = (flat = false) => {
@@ -679,7 +714,10 @@ test('preparation and preflight payloads still render through the status API wit
     const page = mountPage(receipt);
     await page.reply('status', status);
     assertRetiredCardsGone(page);
-    assert.equal(page.field('实际下单'), '未运行', '任何准备状态下页面都不得声称已下单');
+    const orderText = page.field('实际下单');
+    assert.ok(!/已下单|已成交/.test(orderText), '任何准备状态下页面都不得声称已下单');
+    assert.ok(['已关闭', '等待浏览器扩展连接', '扩展待机中（票据就绪即自动点击）'].includes(orderText),
+      `实际下单显示意外文案: ${orderText}`);
     assert.equal(page.elements((node) => node.type === 'Switch')[0].props.disabled, false);
     page.tick(receipt + 5001);
     page.tick((start + 80) * 1000);
@@ -734,4 +772,56 @@ test('the standalone 4h strategy shows its label and checkpoint decision', async
     fourHour: {periodStart: start, weekend: true, decision: {checkpointAt: start + 600, side: 'Down'}, lastEvaluation: null}});
   assert.equal(page.field('当前策略'), '4 小时盘 · 周末高把握');
   assert.match(page.field('周末 4 小时判断'), /^本轮已决定买跌（.+ 起 2 分钟内准备，每轮一次）$/);
+});
+
+test('paper history loads for the regime card and repaginates through the api', async () => {
+  const page = mountPage(receipt);
+  const paperRegime = {rule: 'G1 |trend60|>=15bp', minTrend60Bp: 15, resolutionSource: 'binance_15m_estimate',
+    baseline: {trades: 3, settled: 2, wins: 1, winRate: 0.5, roiPerDollar: -0.2, totalUsd: -0.4},
+    filtered: {trades: 1, settled: 1, wins: 1, winRate: 1, roiPerDollar: 0.5625, totalUsd: 0.5625},
+    recent: [], updatedAt: receipt / 1000};
+  await page.reply('status', {...healthyStatus(), series: '15m', paperRegime});
+  assert.equal(page.pendingCount('paperList'), 1, '纸面影子单记录必须随状态出现而拉取');
+  const waiting = page.elements((node) => node.type === 'FutureBtc5mPaperRegime')[0];
+  assert.equal(waiting.props.history, null, '响应到达前保持加载占位而不是编造空表');
+  const shadow = {schemaVersion: 1, rule: 'G1 |trend60|>=15bp', periodStart: start, side: 'Up',
+    priceCents: 64, trend60Bp: 21.3, volatilityBp: 2.1, g1Eligible: true, state: 'RESOLVED', createdAt: start + 160,
+    outcome: 'Up', win: true, roi: 0.5625, binanceOpen: 83000.5, binanceClose: 83100.25, resolvedAt: start + 960};
+  const firstArgs = await page.reply('paperList', {list: [shadow], total: 3, page: 1, size: 20});
+  assert.deepEqual(JSON.parse(JSON.stringify(firstArgs)), [{page: 1, size: 20}]);
+  const card = page.elements((node) => node.type === 'FutureBtc5mPaperRegime')[0];
+  assert.equal(card.props.history.total, 3);
+  assert.equal(card.props.history.loading, false);
+  card.props.onHistoryPageChange(2, 50);
+  assert.equal(page.pendingCount('paperList'), 1);
+  const pageArgs = await page.reply('paperList', {list: [], total: 3, page: 2, size: 50});
+  assert.deepEqual(JSON.parse(JSON.stringify(pageArgs)), [{page: 2, size: 50}]);
+  page.poll(receipt + 5000);
+  const grown = {...paperRegime, baseline: {...paperRegime.baseline, trades: 4, settled: 3}};
+  await page.reply('status', {...healthyStatus(receipt + 5000), series: '15m', paperRegime: grown});
+  assert.equal(page.pendingCount('paperList'), 1, '新增或结算影子单后必须重新拉取当前页');
+  const reloaded = await page.reply('paperList', {list: [], total: 4, page: 2, size: 50});
+  assert.deepEqual(JSON.parse(JSON.stringify(reloaded)), [{page: 2, size: 50}], '重新拉取必须保持用户当前翻页位置');
+  const failed = page.elements((node) => node.type === 'FutureBtc5mPaperRegime')[0];
+  assert.equal(failed.props.history.error, null);
+});
+
+test('paper history fetch failures surface as an error without clearing loaded rows', async () => {
+  const page = mountPage(receipt);
+  const paperRegime = {rule: 'G1 |trend60|>=15bp', minTrend60Bp: 15, resolutionSource: 'binance_15m_estimate',
+    baseline: {trades: 1, settled: 1, wins: 1, winRate: 1, roiPerDollar: 0.5625, totalUsd: 0.5625},
+    filtered: {trades: 1, settled: 1, wins: 1, winRate: 1, roiPerDollar: 0.5625, totalUsd: 0.5625},
+    recent: [], updatedAt: receipt / 1000};
+  await page.reply('status', {...healthyStatus(), series: '15m', paperRegime});
+  await page.reply('paperList', {list: [], total: 1, page: 1, size: 20});
+  const loaded = page.elements((node) => node.type === 'FutureBtc5mPaperRegime')[0];
+  assert.equal(loaded.props.history.total, 1);
+  page.poll(receipt + 5000);
+  const grown = {...paperRegime, baseline: {...paperRegime.baseline, trades: 2}};
+  await page.reply('status', {...healthyStatus(receipt + 5000), series: '15m', paperRegime: grown});
+  await page.fail('paperList', 'Future Bridge 未连接');
+  const errored = page.elements((node) => node.type === 'FutureBtc5mPaperRegime')[0];
+  assert.equal(errored.props.history.error, 'Future Bridge 未连接');
+  assert.equal(errored.props.history.total, 1, '失败必须保留已加载的记录');
+  assert.equal(errored.props.history.loading, false);
 });

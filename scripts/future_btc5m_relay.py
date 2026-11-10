@@ -89,9 +89,9 @@ def make_server(socket_path, address=LOCAL_ADDRESS):
                 return False
             if self.command == "POST":
                 allowed = url.path in ("/bridge/control", "/bridge/preflight") and not url.query
-            elif url.path == "/bridge/orders":
+            elif url.path in ("/bridge/orders", "/bridge/paper"):
                 params = urllib.parse.parse_qs(url.query, keep_blank_values=True)
-                if set(params) - {"page", "size", "status"}:
+                if set(params) - ({"page", "size", "status"} if url.path == "/bridge/orders" else {"page", "size"}):
                     self.fail(404, "RELAY_PATH_NOT_ALLOWED")
                     return False
                 if any(len(values) != 1 for values in params.values()):

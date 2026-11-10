@@ -53,6 +53,7 @@ class FutureBtc5mBridgeControllerTest {
             val payload = responseOverride ?: when (path) {
                 "/bridge/orders" -> mapper.writeValueAsString(mapOf("list" to listOf(order()), "total" to 1, "page" to 1, "size" to 20))
                 "/bridge/orders/future-btc5m:1791706200" -> mapper.writeValueAsString(order())
+                "/bridge/paper" -> mapper.writeValueAsString(mapOf("list" to listOf(paperEntry()), "total" to 1, "page" to 1, "size" to 20))
                 else -> mapper.writeValueAsString(status())
             }
             val bytes = payload.toByteArray(Charsets.UTF_8)
@@ -133,7 +134,8 @@ class FutureBtc5mBridgeControllerTest {
     @Test
     fun `all Future endpoints require a valid jwt and never forward it to local bridge`() {
         val bodies = mapOf("/status" to "{}", "/control" to """{"enabled":false}""",
-            "/assets" to "{}", "/orders/list" to "{}", "/orders/detail" to """{"id":"future-btc5m:1791706200"}""")
+            "/assets" to "{}", "/orders/list" to "{}", "/orders/detail" to """{"id":"future-btc5m:1791706200"}""",
+            "/paper/list" to "{}")
         bodies.forEach { (path, body) ->
             assertEquals(ErrorCode.AUTH_ERROR.code, api(path, body, null).path("code").asInt())
             assertEquals(ErrorCode.AUTH_ERROR.code, api(path, body, "invalid-test-token").path("code").asInt())
@@ -158,6 +160,22 @@ class FutureBtc5mBridgeControllerTest {
         assertEquals("EXECUTOR_NOT_CONNECTED", record.path("reason").asText())
         listOf("submittedAt", "filledAt", "platformOrderId", "filledQuantity", "avgFilledPrice", "feeUsd")
             .forEach { assertTrue(record.path(it).isNull, it) }
+    }
+
+    @Test
+    fun `paper list validates paging and returns ledger entries`() {
+        listOf("""{"page":0,"size":20}""", """{"page":1,"size":0}""", """{"page":1,"size":101}""").forEach { body ->
+            assertEquals(ErrorCode.PARAM_ERROR.code, api("/paper/list", body).path("code").asInt(), body)
+        }
+        assertTrue(requests.isEmpty())
+        val result = api("/paper/list", """{"page":1,"size":20}""")
+        assertEquals(0, result.path("code").asInt())
+        assertEquals(1, result.path("data").path("total").asInt())
+        val record = result.path("data").path("list")[0]
+        assertEquals("G1 |trend60|>=15bp", record.path("rule").asText())
+        assertEquals("RESOLVED", record.path("state").asText())
+        assertTrue(record.path("win").asBoolean())
+        assertEquals(0.5625, record.path("roi").asDouble())
     }
 
     @Test
@@ -250,4 +268,11 @@ class FutureBtc5mBridgeControllerTest {
         "events" to listOf(mapOf("stage" to "SIGNAL_ACCEPTED", "at" to 1791706265.0, "reason" to null),
             mapOf("stage" to "EXECUTION_BLOCKED", "at" to 1791706265.0, "reason" to "EXECUTOR_NOT_CONNECTED"))
     )
+
+    private fun paperEntry() = mapOf(
+        "schemaVersion" to 1, "rule" to "G1 |trend60|>=15bp", "periodStart" to 1791705600, "side" to "Up",
+        "priceCents" to 64.0, "trend60Bp" to 20.0, "volatilityBp" to 5.0, "g1Eligible" to true,
+        "state" to "RESOLVED", "createdAt" to 1791705760.0, "outcome" to "Up", "win" to true, "roi" to 0.5625,
+        "binanceOpen" to 83000.0, "binanceClose" to 83100.0, "resolvedAt" to 1791706560.0)
 }
+

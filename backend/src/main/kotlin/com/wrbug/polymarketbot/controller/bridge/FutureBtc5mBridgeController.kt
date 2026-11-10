@@ -7,6 +7,8 @@ import com.wrbug.polymarketbot.dto.FutureBtc5mOrder
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderDetailRequest
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListRequest
 import com.wrbug.polymarketbot.dto.FutureBtc5mOrderListResponse
+import com.wrbug.polymarketbot.dto.FutureBtc5mPaperListRequest
+import com.wrbug.polymarketbot.dto.FutureBtc5mPaperListResponse
 import com.wrbug.polymarketbot.dto.FutureBtc5mAssets
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.bridge.FutureBtc5mBridgeClient
@@ -53,6 +55,10 @@ class FutureBtc5mBridgeController(private val client: FutureBtc5mBridgeClient, p
     @PostMapping("/orders/detail")
     fun detail(@RequestBody request: FutureBtc5mOrderDetailRequest): ResponseEntity<ApiResponse<FutureBtc5mOrder>> =
         respond { client.detail(request.id) }
+
+    @PostMapping("/paper/list")
+    fun paper(@RequestBody request: FutureBtc5mPaperListRequest): ResponseEntity<ApiResponse<FutureBtc5mPaperListResponse>> =
+        respond { client.paper(request) }
 
     private fun <T> respond(action: () -> T): ResponseEntity<ApiResponse<T>> = try {
         ResponseEntity.ok(ApiResponse.success(action()))
