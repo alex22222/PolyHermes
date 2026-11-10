@@ -3071,8 +3071,9 @@ export interface FutureBtcStrategyPerformance {
   curve: { at: number, netPnlUsd: number }[]
 }
 
-// Paper shadow of regime filter G1: every 15m PREPARE decision mirrored as a $1 paper trade,
+// Paper shadow of the regime filters: every 15m PREPARE decision mirrored as a $1 paper trade,
 // resolved from Binance 15m klines (an estimate of the platform's Chainlink settlement).
+// G1 keeps only |trend60Bp| >= 15; G2 skips just the 5-15bp chop band.
 export interface FutureBtc5mPaperRegimeStats {
   trades: number
   settled: number
@@ -3088,6 +3089,7 @@ export interface FutureBtc5mPaperRegimeTrade {
   priceCents: number
   trend60Bp: number
   g1Eligible: boolean
+  g2Eligible?: boolean | null
   win: boolean | null
   roi: number | null
 }
@@ -3096,8 +3098,10 @@ export interface FutureBtc5mPaperRegime {
   rule: string
   minTrend60Bp: number
   resolutionSource: string
+  ruleG2?: string | null
   baseline: FutureBtc5mPaperRegimeStats
   filtered: FutureBtc5mPaperRegimeStats
+  filteredG2?: FutureBtc5mPaperRegimeStats | null
   recent: FutureBtc5mPaperRegimeTrade[]
   updatedAt: number
 }
@@ -3306,6 +3310,7 @@ export interface FutureBtc5mPaperListEntry {
   trend60Bp: number
   volatilityBp: number
   g1Eligible: boolean
+  g2Eligible?: boolean | null
   state: 'PENDING' | 'RESOLVED'
   createdAt: number
   outcome: 'Up' | 'Down' | 'Flat' | null

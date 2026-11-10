@@ -20,15 +20,17 @@ const text = value => Array.isArray(value) ? value.map(text).join('') : value?.p
 const stats = (trades, settled, wins, winRate, roiPerDollar, totalUsd) => ({trades, settled, wins, winRate, roiPerDollar, totalUsd});
 const sample = () => ({
   rule: 'G1 |trend60|>=15bp', minTrend60Bp: 15, resolutionSource: 'binance_15m_estimate',
+  ruleG2: 'G2 |trend60|<5bp or >=15bp',
   baseline: stats(12, 10, 6, 0.6, -0.0312, -0.3123),
   filtered: stats(5, 4, 3, 0.75, 0.1523, 0.6092),
-  recent: [{periodStart: 1791705600, side: 'Up', priceCents: 64, trend60Bp: 21.3, g1Eligible: true, win: true, roi: 0.5625},
-           {periodStart: 1791704700, side: 'Down', priceCents: 70, trend60Bp: 4.9, g1Eligible: false, win: false, roi: -1}],
+  filteredG2: stats(8, 7, 5, 0.714, 0.21, 1.47),
+  recent: [{periodStart: 1791705600, side: 'Up', priceCents: 64, trend60Bp: 21.3, g1Eligible: true, g2Eligible: true, win: true, roi: 0.5625},
+           {periodStart: 1791704700, side: 'Down', priceCents: 70, trend60Bp: 4.9, g1Eligible: false, g2Eligible: true, win: false, roi: -1}],
   updatedAt: 1791706265,
 });
 const entry = (overrides = {}) => ({
   schemaVersion: 1, rule: 'G1 |trend60|>=15bp', periodStart: 1791705600, side: 'Up', priceCents: 64,
-  trend60Bp: 21.3, volatilityBp: 2.1, g1Eligible: true, state: 'RESOLVED', createdAt: 1791705760,
+  trend60Bp: 21.3, volatilityBp: 2.1, g1Eligible: true, g2Eligible: true, state: 'RESOLVED', createdAt: 1791705760,
   outcome: 'Up', win: true, roi: 0.5625, binanceOpen: 83000.5, binanceClose: 83100.25, resolvedAt: 1791706560,
   ...overrides,
 });
@@ -45,7 +47,7 @@ test('baseline and filtered paper stats are both shown with their own precision'
   const tree = sandbox.exports.default({paper: sample(), history: history(), onHistoryPageChange: noop});
   const output = text(tree);
   const card = walk(tree).find(n => n.type === 'Card');
-  assert.equal(card.props.title, '趋势过滤器纸上验证 · G1 |trend60|>=15bp');
+  assert.equal(card.props.title, '趋势过滤器纸上验证 · G1 |trend60|>=15bp + G2 |trend60|<5bp or >=15bp');
   assert.match(output, /基线（全部影子单）/);
   assert.match(output, /影子单 12 笔 · 已结算 10 笔/);
   assert.match(output, /胜率 60\.0%（赢 6 笔）/);
@@ -54,9 +56,24 @@ test('baseline and filtered paper stats are both shown with their own precision'
   assert.match(output, /胜率 75\.0%（赢 3 笔）/);
   assert.match(output, /平均每笔收益率 15\.2%/);
   assert.match(output, /累计纸面盈亏 \+\$0\.61/);
+  assert.match(output, /G2 过滤后（避开 5–15bp 震荡带）/);
+  assert.match(output, /影子单 8 笔 · 已结算 7 笔/);
+  assert.match(output, /累计纸面盈亏 \+\$1\.47/);
   assert.match(output, /-\$0\.31/);
   assert.match(output, /只记录不下单/);
   assert.match(output, /Binance 15m K线估算结算/);
+});
+
+test('missing G2 fields keep the card on G1 only', () => {
+  const paper = sample();
+  delete paper.ruleG2;
+  delete paper.filteredG2;
+  const tree = sandbox.exports.default({paper, history: history(), onHistoryPageChange: noop});
+  const output = text(tree);
+  const card = walk(tree).find(n => n.type === 'Card');
+  assert.equal(card.props.title, '趋势过滤器纸上验证 · G1 |trend60|>=15bp');
+  assert.match(output, /G1 过滤后/);
+  assert.doesNotMatch(output, /G2 过滤后/);
 });
 
 test('history table paginates the full ledger and forwards page changes', () => {
@@ -75,16 +92,21 @@ test('history table paginates the full ledger and forwards page changes', () => 
   onChange(3, 50);
   assert.deepEqual(changed, [3, 50]);
   const titles = table.props.columns.map(column => column.title);
-  assert.deepEqual([...titles], ['轮次开始', '方向', '价格', '1小时趋势', 'G1 合格', 'Binance 开→收', '结果', '纸面盈亏']);
+  assert.deepEqual([...titles], ['轮次开始', '方向', '价格', '1小时趋势', 'G1 合格', 'G2 合格', 'Binance 开→收', '结果', '纸面盈亏']);
   // A pending row renders 待结算 and no fabricated PnL; a settled row shows the Binance estimate prices.
   const pending = table.props.dataSource[2];
-  const winColumn = table.props.columns[6];
+  const winColumn = table.props.columns[7];
   assert.equal(text(winColumn.render(pending.win, pending)), '待结算');
-  const pnlColumn = table.props.columns[7];
+  const pnlColumn = table.props.columns[8];
   assert.equal(text(pnlColumn.render(pending.roi, pending)), '—');
-  const klineColumn = table.props.columns[5];
+  const klineColumn = table.props.columns[6];
   assert.equal(text(klineColumn.render(undefined, table.props.dataSource[0])), '83,000.5 → 83,100.25');
   assert.equal(klineColumn.render(undefined, pending), '—');
+  // The G2 column tolerates legacy rows without the flag.
+  const g2Column = table.props.columns[5];
+  assert.equal(g2Column.render(null), '—');
+  assert.equal(text(g2Column.render(true)), '合格');
+  assert.equal(text(g2Column.render(false)), '过滤');
 });
 
 test('history loading and error states never fabricate rows', () => {
@@ -113,7 +135,7 @@ test('null paper keeps the card visible with a waiting state', () => {
   const tree = sandbox.exports.default({paper: null, history: null, onHistoryPageChange: noop});
   const output = text(tree);
   const card = walk(tree).find(n => n.type === 'Card');
-  assert.equal(card.props.title, '趋势过滤器纸上验证 · G1 |trend60|>=15bp');
+  assert.equal(card.props.title, '趋势过滤器纸上验证 · G1 |trend60|>=15bp + G2 避开5-15bp');
   assert.match(output, /还没有影子单/);
   assert.match(output, /只记录不下单/);
   assert.match(output, /全部影子单记录/);

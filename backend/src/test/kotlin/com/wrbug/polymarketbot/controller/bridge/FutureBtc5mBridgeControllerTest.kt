@@ -271,7 +271,7 @@ class FutureBtc5mBridgeControllerTest {
 
     private fun paperEntry() = mapOf(
         "schemaVersion" to 1, "rule" to "G1 |trend60|>=15bp", "periodStart" to 1791705600, "side" to "Up",
-        "priceCents" to 64.0, "trend60Bp" to 20.0, "volatilityBp" to 5.0, "g1Eligible" to true,
+        "priceCents" to 64.0, "trend60Bp" to 20.0, "volatilityBp" to 5.0, "g1Eligible" to true, "g2Eligible" to true,
         "state" to "RESOLVED", "createdAt" to 1791705760.0, "outcome" to "Up", "win" to true, "roi" to 0.5625,
         "binanceOpen" to 83000.0, "binanceClose" to 83100.0, "resolvedAt" to 1791706560.0)
 }

@@ -290,6 +290,13 @@ class FutureBtc5mBridgeClient(
         val (baseTrades, baseSettled, _) = stats("baseline")
         val (filteredTrades, _, _) = stats("filtered")
         check(filteredTrades <= baseTrades) { "Future Bridge 纸上 regime 过滤统计超出基线" }
+        if (paper.has("ruleG2") && !paper.get("ruleG2").isJsonNull) {
+            check(string(paper, "ruleG2") == PAPER_REGIME_RULE_G2) { "Future Bridge 纸上 regime G2 规则无效" }
+            val (filteredG2Trades, _, _) = stats("filteredG2")
+            check(filteredG2Trades <= baseTrades) { "Future Bridge 纸上 regime G2 过滤统计超出基线" }
+        } else {
+            check(!paper.has("filteredG2") || paper.get("filteredG2").isJsonNull) { "Future Bridge 纸上 regime G2 统计缺规则" }
+        }
         val recent = array(paper, "recent")
         check(recent.size() <= 10) { "Future Bridge 纸上 regime 最近记录过多" }
         var previous = Long.MAX_VALUE
@@ -302,6 +309,12 @@ class FutureBtc5mBridgeClient(
             check(string(trade, "side") in setOf("Up", "Down")) { "Future Bridge 纸上 regime 方向无效" }
             check(number(trade, "priceCents") in 1.0..99.0) { "Future Bridge 纸上 regime 价格无效" }
             boolean(trade, "g1Eligible")
+            if (trade.has("g2Eligible") && !trade.get("g2Eligible").isJsonNull) {
+                val trend = number(trade, "trend60Bp")
+                check(boolean(trade, "g2Eligible") == (kotlin.math.abs(trend) < 5.0 || kotlin.math.abs(trend) >= 15.0)) {
+                    "Future Bridge 纸上 regime G2 判定无效"
+                }
+            }
             val win = field(trade, "win")
             if (!win.isJsonNull) {
                 settledSeen++
@@ -329,6 +342,11 @@ class FutureBtc5mBridgeClient(
         val trend = number(trade, "trend60Bp")
         check(number(trade, "volatilityBp") >= 0) { "Future Bridge 纸上记录波动率无效" }
         check(boolean(trade, "g1Eligible") == (kotlin.math.abs(trend) >= 15.0)) { "Future Bridge 纸上记录 G1 判定无效" }
+        if (trade.has("g2Eligible") && !trade.get("g2Eligible").isJsonNull) {
+            check(boolean(trade, "g2Eligible") == (kotlin.math.abs(trend) < 5.0 || kotlin.math.abs(trend) >= 15.0)) {
+                "Future Bridge 纸上记录 G2 判定无效"
+            }
+        }
         check(number(trade, "createdAt") >= 0) { "Future Bridge 纸上记录创建时间无效" }
         val outcome = nullableString(trade, "outcome")
         val win = field(trade, "win")
@@ -698,6 +716,7 @@ class FutureBtc5mBridgeClient(
     companion object {
         private const val OPEN_PRICE_SOURCE = "polymarket_crypto_price_fiveminute_twap60_openPrice"
         private const val PAPER_REGIME_RULE = "G1 |trend60|>=15bp"
+        private const val PAPER_REGIME_RULE_G2 = "G2 |trend60|<5bp or >=15bp"
 
         // Round series of the strategies (same table as scripts/future_btc5m_series.py).
         private data class RoundSeries(val period: Long, val entryStart: Long?, val entryEnd: Long?, val slug: String,

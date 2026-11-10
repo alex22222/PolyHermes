@@ -701,34 +701,47 @@ class FutureBtc5mBridgeClientTest {
         assertNull(client.status().paperRegime)
         val paper = mapOf(
             "rule" to "G1 |trend60|>=15bp", "minTrend60Bp" to 15.0, "resolutionSource" to "binance_15m_estimate",
+            "ruleG2" to "G2 |trend60|<5bp or >=15bp",
             "baseline" to mapOf("trades" to 3, "settled" to 2, "wins" to 1, "winRate" to 0.5,
                 "roiPerDollar" to -0.2, "totalUsd" to -0.4),
             "filtered" to mapOf("trades" to 1, "settled" to 1, "wins" to 1, "winRate" to 1.0,
                 "roiPerDollar" to 0.5625, "totalUsd" to 0.5625),
+            "filteredG2" to mapOf("trades" to 2, "settled" to 2, "wins" to 1, "winRate" to 0.5,
+                "roiPerDollar" to -0.2, "totalUsd" to -0.4375),
             "recent" to listOf(
                 mapOf("periodStart" to 1791705600, "side" to "Up", "priceCents" to 64.0,
-                    "trend60Bp" to 20.0, "g1Eligible" to true, "win" to true, "roi" to 0.5625),
+                    "trend60Bp" to 20.0, "g1Eligible" to true, "g2Eligible" to true, "win" to true, "roi" to 0.5625),
                 mapOf("periodStart" to 1791704700, "side" to "Down", "priceCents" to 70.0,
-                    "trend60Bp" to 5.0, "g1Eligible" to false, "win" to null, "roi" to null)),
+                    "trend60Bp" to 5.0, "g1Eligible" to false, "g2Eligible" to false, "win" to null, "roi" to null)),
             "updatedAt" to 1791706265.0
         )
         responseBody = mapper.writeValueAsString(status() + ("paperRegime" to paper))
         val parsed = client.status().paperRegime
         assertEquals(3, parsed?.baseline?.trades)
         assertEquals(1, parsed?.filtered?.wins)
+        assertEquals("G2 |trend60|<5bp or >=15bp", parsed?.ruleG2)
+        assertEquals(2, parsed?.filteredG2?.trades)
         assertEquals(true, parsed?.recent?.first()?.g1Eligible)
+        assertEquals(false, parsed?.recent?.last()?.g2Eligible)
 
         val invalid = listOf(
             paper + ("rule" to "G2 |trend60|>=20bp"),
+            paper + ("ruleG2" to "G2 |trend60|>=20bp"),
+            paper + ("ruleG2" to null),
+            paper + mapOf("filteredG2" to mapOf("trades" to 5, "settled" to 0, "wins" to 0, "winRate" to null,
+                "roiPerDollar" to null, "totalUsd" to 0.0)),
+            paper + mapOf("recent" to listOf(
+                mapOf("periodStart" to 1791705600, "side" to "Up", "priceCents" to 64.0,
+                    "trend60Bp" to 5.0, "g1Eligible" to false, "g2Eligible" to true, "win" to null, "roi" to null))),
             paper + ("baseline" to mapOf("trades" to 1, "settled" to 2, "wins" to 1, "winRate" to null,
                 "roiPerDollar" to null, "totalUsd" to 0.0)),
             paper + ("filtered" to mapOf("trades" to 5, "settled" to 0, "wins" to 0, "winRate" to null,
                 "roiPerDollar" to null, "totalUsd" to 0.0)),
             paper + ("recent" to listOf(
                 mapOf("periodStart" to 1791704700, "side" to "Down", "priceCents" to 70.0,
-                    "trend60Bp" to 5.0, "g1Eligible" to false, "win" to null, "roi" to null),
+                    "trend60Bp" to 5.0, "g1Eligible" to false, "g2Eligible" to false, "win" to null, "roi" to null),
                 mapOf("periodStart" to 1791705600, "side" to "Up", "priceCents" to 64.0,
-                    "trend60Bp" to 20.0, "g1Eligible" to true, "win" to true, "roi" to 0.5625)))
+                    "trend60Bp" to 20.0, "g1Eligible" to true, "g2Eligible" to true, "win" to true, "roi" to 0.5625)))
         )
         invalid.forEach { payload ->
             responseBody = mapper.writeValueAsString(status() + ("paperRegime" to payload))
@@ -770,6 +783,8 @@ class FutureBtc5mBridgeClientTest {
             valid + ("list" to listOf(paperEntry(1791705600) + ("side" to "Left"))),
             valid + ("list" to listOf(paperEntry(1791705600) + ("priceCents" to 100))),
             valid + ("list" to listOf(paperEntry(1791705600) + ("g1Eligible" to false))),
+            valid + ("list" to listOf(paperEntry(1791705600) + ("g2Eligible" to false))),
+            valid + ("list" to listOf(paperEntry(1791705600) + ("trend60Bp" to 10.0))),
             valid + ("list" to listOf(paperEntry(1791705600) + ("volatilityBp" to -1))),
             valid + ("list" to listOf(paperEntry(1791705600) + ("state" to "SETTLED"))),
             valid + ("list" to listOf(pending + ("outcome" to "Up"))),
@@ -792,7 +807,7 @@ class FutureBtc5mBridgeClientTest {
 
     private fun paperEntry(start: Long, outcome: String? = "Up", side: String = "Up"): Map<String, Any?> {
         val base = mapOf("schemaVersion" to 1, "rule" to "G1 |trend60|>=15bp", "periodStart" to start, "side" to side,
-            "priceCents" to 64.0, "trend60Bp" to 20.0, "volatilityBp" to 5.0, "g1Eligible" to true,
+            "priceCents" to 64.0, "trend60Bp" to 20.0, "volatilityBp" to 5.0, "g1Eligible" to true, "g2Eligible" to true,
             "createdAt" to start + 160.0)
         if (outcome == null) return base + mapOf("state" to "PENDING", "outcome" to null, "win" to null, "roi" to null,
             "binanceOpen" to null, "binanceClose" to null, "resolvedAt" to null)

@@ -35,6 +35,9 @@ const columns: ColumnsType<FutureBtc5mPaperListEntry> = [
     render: (value: number) => `${value >= 0 ? '+' : ''}${value.toFixed(1)}bp` },
   { title: 'G1 合格', dataIndex: 'g1Eligible', width: 90,
     render: (value: boolean) => value ? <Tag color="processing">合格</Tag> : <Tag>过滤</Tag> },
+  { title: 'G2 合格', dataIndex: 'g2Eligible', width: 90,
+    render: (value: boolean | null | undefined) => value == null ? '—'
+      : value ? <Tag color="warning">合格</Tag> : <Tag>过滤</Tag> },
   { title: 'Binance 开→收', width: 170,
     render: (_, record) => record.binanceOpen == null ? '—' : `${price(record.binanceOpen)} → ${price(record.binanceClose)}` },
   { title: '结果', dataIndex: 'win', width: 90,
@@ -45,7 +48,7 @@ const columns: ColumnsType<FutureBtc5mPaperListEntry> = [
     render: (roi: number | null, record) => <Typography.Text>{record.state === 'PENDING' ? '—' : money(roi)}</Typography.Text> },
 ]
 
-// Live paper comparison of regime filter G1 against the unfiltered baseline; it never places orders.
+// Live paper comparison of regime filters G1/G2 against the unfiltered baseline; it never places orders.
 // The history table is fed by the page through /future-btc5m/paper/list so every shadow trade can be browsed.
 export default function FutureBtc5mPaperRegimeCard({ paper, history, onHistoryPageChange }: {
   paper: FutureBtc5mPaperRegime | null
@@ -53,27 +56,29 @@ export default function FutureBtc5mPaperRegimeCard({ paper, history, onHistoryPa
   onHistoryPageChange: (page: number, pageSize: number) => void
 }) {
   if (!paper) {
-    return <Card title="趋势过滤器纸上验证 · G1 |trend60|>=15bp">
+    return <Card title="趋势过滤器纸上验证 · G1 |trend60|>=15bp + G2 避开5-15bp">
       <Space direction="vertical" size={4}>
         <Typography.Text type="secondary">
           每轮 15m PREPARE 决策会镜像一笔 $1 影子单（决策时价格），按 Binance 15m K线估算结算；只记录不下单，不影响真实交易。真实规则不变。
         </Typography.Text>
         <Typography.Text type="secondary">
-          还没有影子单：上一轮 PREPARE 决策出现后自动开始累计（SKIP 轮次不产生影子单）。数据出现后本卡片展示基线与 G1 过滤后的对比和全部影子单记录。
+          还没有影子单：上一轮 PREPARE 决策出现后自动开始累计（SKIP 轮次不产生影子单）。数据出现后本卡片展示基线与 G1/G2 过滤后的对比和全部影子单记录。
         </Typography.Text>
       </Space>
     </Card>
   }
-  return <Card title={`趋势过滤器纸上验证 · ${paper.rule}`}>
+  return <Card title={`趋势过滤器纸上验证 · ${paper.rule}${paper.ruleG2 ? ` + ${paper.ruleG2}` : ''}`}>
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Typography.Text type="secondary">
         每轮 15m PREPARE 决策镜像一笔 $1 影子单（决策时价格），按 Binance 15m K线估算结算；只记录不下单，不影响真实交易。真实规则不变。
+        G1 只保留趋势明显的轮次（|1小时趋势| ≥ 15bp）；G2 只避开 5–15bp 的震荡带（太平的 &lt;5bp 照常出手）。
       </Typography.Text>
       <Space size="large" wrap align="start">
         {statsText('基线（全部影子单）', paper.baseline)}
         {statsText('G1 过滤后（仅 |1小时趋势| ≥ 15bp）', paper.filtered, '#237804')}
+        {paper.filteredG2 ? statsText('G2 过滤后（避开 5–15bp 震荡带）', paper.filteredG2, '#ad6800') : null}
       </Space>
-      <Table rowKey={(record) => `${record.periodStart}`} size="small" columns={columns} scroll={{ x: 900 }}
+      <Table rowKey={(record) => `${record.periodStart}`} size="small" columns={columns} scroll={{ x: 990 }}
         dataSource={history?.list ?? []} loading={history == null || history.loading}
         pagination={history == null ? false : {
           current: history.page, pageSize: history.pageSize, total: history.total,

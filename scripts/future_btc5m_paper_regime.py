@@ -1,4 +1,4 @@
-"""Paper shadow evaluation of regime filter G1 for the btc15m_counter_1h strategy.
+"""Paper shadow evaluation of regime filters for the btc15m_counter_1h strategy.
 
 Rule G1 (pre-registered 2026-11-09; research: btc-15m-research/round5.py on the
 2026-10-17..11-07 live decisions and three years of 15m klines): a 15m PREPARE round
@@ -6,6 +6,11 @@ qualifies only when |trend60Bp| >= 15 at decision time. Real trading rules are
 unchanged; this module shadows every 15m PREPARE decision with a $1 paper trade at
 the decision-time button quote and resolves it from Binance 15m klines (open vs close
 of the round), so the page can compare baseline vs filtered paper results live.
+
+Rule G2 (added 2026-11-10 after the first 219 shadow trades): skip only the 5-15bp
+chop band — a round qualifies when |trend60Bp| < 5 or |trend60Bp| >= 15. Live data
+showed the very flat rounds (<5bp) actually won, while the 5-15bp band was the one
+bleeding money. Also paper-only; real trading rules remain unchanged.
 
 Paper P&L per $1 staked at price p cents: win -> (100 - p) / p dollars, loss -> -1.
 The platform settles on the Chainlink TWAP, so a Binance-resolved outcome is an
@@ -20,9 +25,15 @@ from future_btc5m_conditions import BINANCE_KLINES
 LEDGER_NAME = "paper_regime.jsonl"
 RULE = "G1 |trend60|>=15bp"
 MIN_TREND60_BP = 15.0
+RULE_G2 = "G2 |trend60|<5bp or >=15bp"
+G2_BLOCK_LO_BP = 5.0
 ROUND_SECONDS = 900
 # Binance's final 15m close is published within seconds of round end; 60s is conservative.
 RESOLVE_AFTER_END = 60
+
+
+def _g2_eligible(trend60_bp):
+    return abs(trend60_bp) < G2_BLOCK_LO_BP or abs(trend60_bp) >= MIN_TREND60_BP
 
 
 def _path(state_dir):
@@ -39,6 +50,11 @@ def _load(state_dir):
         raise OSError("PAPER_LEDGER_INVALID") from error
     if any(not isinstance(row, dict) or type(row.get("periodStart")) is not int for row in rows):
         raise OSError("PAPER_LEDGER_INVALID")
+    # Rows written before G2 existed lack g2Eligible; derive it from trend60Bp in memory
+    # (persisted on the next save) so old history joins the G2 comparison too.
+    for row in rows:
+        if "g2Eligible" not in row and isinstance(row.get("trend60Bp"), (int, float)):
+            row["g2Eligible"] = _g2_eligible(row["trend60Bp"])
     return rows
 
 
@@ -60,7 +76,8 @@ def record(state_dir, *, period_start, side, price_cents, trend60_bp, volatility
         return False
     rows.append({"schemaVersion": 1, "rule": RULE, "periodStart": period_start, "side": side,
                  "priceCents": price_cents, "trend60Bp": trend60_bp, "volatilityBp": volatility_bp,
-                 "g1Eligible": abs(trend60_bp) >= MIN_TREND60_BP, "state": "PENDING", "createdAt": now,
+                 "g1Eligible": abs(trend60_bp) >= MIN_TREND60_BP, "g2Eligible": _g2_eligible(trend60_bp),
+                 "state": "PENDING", "createdAt": now,
                  "outcome": None, "win": None, "roi": None, "binanceOpen": None, "binanceClose": None,
                  "resolvedAt": None})
     _save(state_dir, rows)
@@ -151,16 +168,19 @@ def listing(state_dir, page, size):
 
 
 def summary(state_dir, now):
-    """The status payload: baseline (all paper trades) vs the G1-filtered subset."""
+    """The status payload: baseline (all paper trades) vs the G1- and G2-filtered subsets."""
     rows = _load(state_dir)
     if not rows:
         return None
     resolved = [row for row in rows if row["state"] == "RESOLVED"]
     recent = sorted(resolved, key=lambda row: row["periodStart"], reverse=True)[:10]
     return {"rule": RULE, "minTrend60Bp": MIN_TREND60_BP, "resolutionSource": "binance_15m_estimate",
+            "ruleG2": RULE_G2,
             "baseline": _stats(rows), "filtered": _stats([row for row in rows if row["g1Eligible"]]),
+            "filteredG2": _stats([row for row in rows if row.get("g2Eligible")]),
             "recent": [{"periodStart": row["periodStart"], "side": row["side"], "priceCents": row["priceCents"],
-                        "trend60Bp": row["trend60Bp"], "g1Eligible": row["g1Eligible"], "win": row["win"],
+                        "trend60Bp": row["trend60Bp"], "g1Eligible": row["g1Eligible"],
+                        "g2Eligible": row.get("g2Eligible"), "win": row["win"],
                         "roi": row["roi"]} for row in recent],
             "updatedAt": now}
 

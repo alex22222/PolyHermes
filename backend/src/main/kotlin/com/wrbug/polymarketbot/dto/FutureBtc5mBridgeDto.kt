@@ -24,15 +24,18 @@ data class FutureBtc5mBridgeStatus(
     val paperRegime: FutureBtc5mPaperRegime? = null
 )
 
-// Paper shadow of regime filter G1 (scripts/future_btc5m_paper_regime.py): every 15m PREPARE
+// Paper shadow of regime filters (scripts/future_btc5m_paper_regime.py): every 15m PREPARE
 // decision is mirrored by a $1 paper trade at the decision-time quote and resolved from Binance
 // 15m klines, so the page can compare baseline vs trend-filtered results without touching real orders.
+// G1 keeps only |trend60Bp| >= 15; G2 (added 2026-11-10) skips just the 5-15bp chop band.
 data class FutureBtc5mPaperRegime(
     val rule: String,
     val minTrend60Bp: Double,
     val resolutionSource: String,
+    val ruleG2: String? = null,
     val baseline: FutureBtc5mPaperRegimeStats,
     val filtered: FutureBtc5mPaperRegimeStats,
+    val filteredG2: FutureBtc5mPaperRegimeStats? = null,
     val recent: List<FutureBtc5mPaperRegimeTrade>,
     val updatedAt: Double
 )
@@ -52,6 +55,7 @@ data class FutureBtc5mPaperRegimeTrade(
     val priceCents: Double,
     val trend60Bp: Double,
     val g1Eligible: Boolean,
+    val g2Eligible: Boolean? = null,
     val win: Boolean?,
     val roi: Double?
 )
@@ -185,6 +189,7 @@ data class FutureBtc5mPaperListEntry(
     val trend60Bp: Double,
     val volatilityBp: Double,
     val g1Eligible: Boolean,
+    val g2Eligible: Boolean? = null,
     val state: String,
     val createdAt: Double,
     val outcome: String?,

@@ -46,6 +46,40 @@ class PaperRegimeTest(unittest.TestCase):
         rows = [json.loads(line) for line in (self.state / "paper_regime.jsonl").open()]
         self.assertTrue(rows[1]["g1Eligible"])
 
+    def test_g2_threshold(self):
+        cases = [(4.9, True), (5.0, False), (14.9, False), (15.0, True),
+                 (-4.9, True), (-5.0, False), (-14.9, False), (-15.0, True)]
+        for index, (trend60, expected) in enumerate(cases):
+            self.add(S + index * 900, trend60=trend60)
+        rows = [json.loads(line) for line in (self.state / "paper_regime.jsonl").open()]
+        for row, (_, expected) in zip(rows, cases):
+            self.assertEqual(row["g2Eligible"], expected, row["trend60Bp"])
+
+    def test_summary_includes_g2_filtered(self):
+        self.add(S, trend60=3.0)         # G2 eligible (<5bp), wins
+        self.add(S + 900, trend60=10.0)  # G2 blocked (5-15bp), loses
+        self.add(S + 1800, trend60=20.0) # G2 eligible (>=15bp), wins
+        fetch = lambda url: [kline(S, 100.0, 101.0), kline(S + 900, 100.0, 99.0),
+                             kline(S + 1800, 100.0, 101.0)]
+        resolve(self.state, fetch, S + 3 * 900 + 60)
+        result = summary(self.state, S + 3 * 900 + 60)
+        self.assertEqual(result["ruleG2"], "G2 |trend60|<5bp or >=15bp")
+        self.assertEqual(result["filteredG2"]["trades"], 2)
+        self.assertEqual(result["filteredG2"]["settled"], 2)
+        self.assertEqual(result["filteredG2"]["wins"], 2)
+        self.assertEqual([row["g2Eligible"] for row in result["recent"]],
+                         [True, False, True])
+
+    def test_g2_backfilled_for_legacy_rows(self):
+        self.add(S, trend60=3.0)
+        ledger = self.state / "paper_regime.jsonl"
+        row = json.loads(ledger.read_text().strip())
+        del row["g2Eligible"]
+        ledger.write_text(json.dumps(row) + "\n")
+        result = summary(self.state, S + 100)
+        self.assertEqual(result["filteredG2"]["trades"], 1)
+        self.assertTrue(result["baseline"]["trades"], 1)
+
     def test_resolve_waits_for_round_end(self):
         self.add(S)
         fetch = lambda url: [kline(S, 100.0, 101.0)]
