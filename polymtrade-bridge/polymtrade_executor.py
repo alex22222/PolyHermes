@@ -931,6 +931,7 @@ class PolymtradeExecutor:
             self._record_portfolio_render_result(rendered and not has_error_banner)
             for position in positions:
                 apply_portfolio_position_line_fallback(position)
+                apply_redeemable_quantity_derivation(position)
             if has_error_banner:
                 return self._defer_portfolio_read({
                     "positions": [pos for pos in positions if validate_portfolio_position(pos)],
@@ -5904,6 +5905,21 @@ def apply_portfolio_position_line_fallback(position: dict) -> None:
         and position["percentPnl"] > 0
     ):
         position["percentPnl"] = -position["percentPnl"]
+
+
+def apply_redeemable_quantity_derivation(position: dict) -> None:
+    """Fill quantity for settled (redeemable) rows whose card shows no share count.
+
+    A redeemable row is a resolved market: winning shares redeem at exactly $1.00 each,
+    so the displayed value equals the share count. Live positions stay fail-closed —
+    this only applies when the page itself marks the row redeemable.
+    """
+    if position.get("quantity") or not position.get("redeemable"):
+        return
+    value = position.get("currentValue")
+    if isinstance(value, (int, float)) and value > 0:
+        position["quantity"] = float(value)
+        logger.info(f"Derived quantity from redeem value for {position.get('marketTitle')}: {value}")
 
 
 def validate_portfolio_position(position: dict) -> bool:

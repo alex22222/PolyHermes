@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from polymtrade_executor import (  # noqa: E402
     apply_portfolio_position_line_fallback,
+    apply_redeemable_quantity_derivation,
     validate_portfolio_position,
 )
 
@@ -116,3 +117,64 @@ def test_combined_side_quantity_line_remains_supported():
     assert position["quantity"] == 12.5
     assert position["currentValue"] == 10.0
     assert position["percentPnl"] == 12.0
+
+
+def test_redeemable_row_derives_quantity_from_value():
+    """Settled rows show no share count; winning shares redeem at $1 each."""
+    position = {
+        "marketTitle": "Will the Democratic Party candidate win by 20%-25%?",
+        "side": "No",
+        "quantity": None,
+        "currentValue": 0.75,
+        "redeemable": True,
+    }
+
+    apply_redeemable_quantity_derivation(position)
+
+    assert position["quantity"] == 0.75
+    assert validate_portfolio_position(position) is True
+
+
+def test_live_row_without_quantity_still_fails_closed():
+    """The derivation must never rescue a live (non-redeemable) position."""
+    position = {
+        "marketTitle": "Will France win?",
+        "side": "Yes",
+        "quantity": None,
+        "currentValue": 10.0,
+        "redeemable": False,
+    }
+
+    apply_redeemable_quantity_derivation(position)
+
+    assert position["quantity"] is None
+    assert validate_portfolio_position(position) is False
+
+
+def test_redeemable_row_without_value_stays_dropped():
+    position = {
+        "marketTitle": "Will France win?",
+        "side": "Yes",
+        "quantity": None,
+        "currentValue": None,
+        "redeemable": True,
+    }
+
+    apply_redeemable_quantity_derivation(position)
+
+    assert position["quantity"] is None
+    assert validate_portfolio_position(position) is False
+
+
+def test_redeemable_row_with_real_quantity_untouched():
+    position = {
+        "marketTitle": "Will France win?",
+        "side": "Yes",
+        "quantity": 12.5,
+        "currentValue": 9.9,
+        "redeemable": True,
+    }
+
+    apply_redeemable_quantity_derivation(position)
+
+    assert position["quantity"] == 12.5
