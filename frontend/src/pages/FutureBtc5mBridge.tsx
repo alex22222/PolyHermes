@@ -4,6 +4,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined } from '@ant-design/icons'
 import { useMediaQuery } from 'react-responsive'
 import { apiService } from '../services/api'
+import FutureAltcoinPaper from '../components/FutureAltcoinPaper'
 import FutureStrategyPerformance from '../components/FutureStrategyPerformance'
 import FutureBtc5mPaperRegimeCard, { type FutureBtc5mPaperHistory } from '../components/FutureBtc5mPaperRegime'
 import { referenceIsFresh } from '../utils/futureBtc5mPreflight'
@@ -492,6 +493,7 @@ const FutureBtc5mBridge: React.FC = () => {
 
     <FutureBtc5mPaperRegimeCard paper={runtime?.paperRegime ?? null} history={paperHistory}
       onHistoryPageChange={fetchPaperList} />
+    <FutureAltcoinPaper />
 
   </Space>
 }

@@ -1,3 +1,4 @@
+import type { PaperObserverStatus } from '../types/futurePaperObserver'
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import type {
   ApiResponse,
@@ -1203,6 +1204,9 @@ export const apiService = {
   },
 
   futureBtc5mBridge: {
+    observerStatus: () =>
+      apiClient.post<ApiResponse<PaperObserverStatus>>('/future-btc5m/paper/observe/status', {}),
+
     status: () =>
       apiClient.post<ApiResponse<FutureBtc5mBridgeStatus>>('/future-btc5m/status', {}),
 
