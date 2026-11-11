@@ -686,6 +686,54 @@ class PolymtradeExecutor:
         finally:
             self._schedule_portfolio_page_idle_close()
 
+    async def _fetch_positions_via_data_api(self, scraped: dict) -> Optional[dict]:
+        """Last-resort holdings from Polymarket's data-api when the page scrape drops rows.
+
+        The scrape and the API read the same wallet's public positions, so a clean API
+        payload is at least as authoritative as the page. Two guards keep this
+        fail-closed: the payload must map completely (any unusable row voids it), and
+        it must cover every holding the scrape did see — conflicting evidence means
+        we keep the deferral instead of trading on unknown holdings.
+        """
+        wallet = self.cached_wallet_address
+        if not wallet:
+            return None
+        try:
+            async with self._http_client_context() as client:
+                response = await client.get(DATA_API_POSITIONS_URL, params={"user": wallet, "limit": 500})
+            if response.status_code != 200:
+                logger.warning("data-api positions fallback HTTP %s", response.status_code)
+                return None
+            positions = parse_data_api_positions(response.json())
+        except Exception as e:
+            logger.warning("data-api positions fallback failed: %s: %s", type(e).__name__, e)
+            return None
+        if not positions:
+            # An empty list either means an unusable payload or a claim of zero holdings
+            # that contradicts the scrape's dropped rows; neither is safe to trade on.
+            logger.warning("data-api positions fallback returned no usable positions")
+            return None
+        scraped_titles = {p.get("marketTitle") for p in scraped.get("positions", [])}
+        missing = [t for t in scraped_titles if t and not any(p["marketTitle"] == t for p in positions)]
+        if missing:
+            logger.warning("data-api fallback conflicts with scrape, missing: %s", missing[:3])
+            return None
+        synced_at = int(time.time() * 1000)
+        self._last_portfolio_synced_at = synced_at
+        redeemable = [p for p in positions if p.get("redeemable")]
+        logger.warning("Page scrape incomplete; using data-api positions fallback (%d positions)", len(positions))
+        return {
+            "positions": positions,
+            "synced_at": synced_at,
+            "wallet_address": wallet,
+            "portfolio_complete": True,
+            "empty_state_confirmed": False,
+            "positions_source": "data_api_fallback",
+            "pending_redeem_value": sum(float(p.get("quantity") or 0) for p in redeemable),
+            "redeemable_position_count": len(redeemable),
+            "redeem_valuation_status": "COMPLETE",
+        }
+
     async def fetch_portfolio_positions(self, *, force_refresh: bool = False) -> dict:
         # Fresh execution reads must not bypass an upstream access-denial cooldown
         # or fall back to an old, previously complete holdings snapshot.
@@ -727,7 +775,8 @@ class PolymtradeExecutor:
             with self._page_scope(fresh_page):
                 result = await self._fetch_portfolio_positions_on_active_page()
                 if result.get("portfolio_complete") is False and not result.get("error"):
-                    result = self._defer_portfolio_read(result)
+                    fallback = await self._fetch_positions_via_data_api(result)
+                    result = fallback if fallback is not None else self._defer_portfolio_read(result)
             self._cache_portfolio_snapshot(result)
             return result
         finally:
@@ -971,6 +1020,7 @@ class PolymtradeExecutor:
                 "wallet_address": wallet_address,
                 "portfolio_complete": portfolio_complete,
                 "empty_state_confirmed": empty_state_confirmed,
+                "positions_source": "polymtrade_scrape",
                 "pending_redeem_value": pending_redeem_value if portfolio_complete else None,
                 "redeemable_position_count": len(redeemable_positions) if portfolio_complete else None,
                 "redeem_valuation_status": "COMPLETE" if portfolio_complete else "UNKNOWN",
@@ -5920,6 +5970,60 @@ def apply_redeemable_quantity_derivation(position: dict) -> None:
     if isinstance(value, (int, float)) and value > 0:
         position["quantity"] = float(value)
         logger.info(f"Derived quantity from redeem value for {position.get('marketTitle')}: {value}")
+
+
+DATA_API_POSITIONS_URL = "https://data-api.polymarket.com/v2/positions"
+
+
+def map_data_api_position(row: dict) -> dict | None:
+    """Map one Polymarket data-api v2 position to the scraper shape; None when unusable."""
+    title = row.get("title")
+    outcome = row.get("outcome")
+    size = row.get("current_size")
+    if not isinstance(title, str) or not title.strip():
+        return None
+    if not isinstance(outcome, str) or not outcome.strip():
+        return None
+    if not isinstance(size, (int, float)) or size <= 0:
+        return None
+
+    def num(key):
+        value = row.get(key)
+        return float(value) if isinstance(value, (int, float)) else None
+
+    return {
+        "marketTitle": title,
+        "side": outcome,
+        "quantity": float(size),
+        "currentValue": num("current_value"),
+        "pnl": num("unrealized_pnl"),
+        "percentPnl": num("percent_pnl"),
+        "marketIcon": row.get("icon") if isinstance(row.get("icon"), str) else None,
+        "href": None,
+        "redeemable": bool(row.get("redeemable")),
+        "conditionId": row.get("condition_id") if isinstance(row.get("condition_id"), str) else None,
+        "marketSlug": row.get("slug") if isinstance(row.get("slug"), str) else None,
+        "eventSlug": row.get("event_slug") if isinstance(row.get("event_slug"), str) else None,
+    }
+
+
+def parse_data_api_positions(payload) -> list[dict] | None:
+    """Validate the v2 envelope and map every row. Dust/closed rows (size <= 0) are
+    skipped; any other unusable row voids the whole fallback (fail-closed)."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        return None
+    positions = []
+    for row in payload["data"]:
+        if not isinstance(row, dict):
+            return None
+        size = row.get("current_size")
+        if isinstance(size, (int, float)) and size <= 0:
+            continue
+        mapped = map_data_api_position(row)
+        if mapped is None:
+            return None
+        positions.append(mapped)
+    return positions
 
 
 def validate_portfolio_position(position: dict) -> bool:

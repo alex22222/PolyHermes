@@ -8,6 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from polymtrade_executor import (  # noqa: E402
     apply_portfolio_position_line_fallback,
     apply_redeemable_quantity_derivation,
+    map_data_api_position,
+    parse_data_api_positions,
     validate_portfolio_position,
 )
 
@@ -178,3 +180,64 @@ def test_redeemable_row_with_real_quantity_untouched():
     apply_redeemable_quantity_derivation(position)
 
     assert position["quantity"] == 12.5
+
+
+def api_row(**overrides):
+    row = {
+        "title": "Will the U.S. invade Iran before 2027?",
+        "outcome": "No",
+        "current_size": 17.368,
+        "current_value": 16.2391,
+        "unrealized_pnl": 1.131,
+        "percent_pnl": 7.5,
+        "icon": "https://example.com/icon.jpg",
+        "redeemable": False,
+        "condition_id": "0x5db999",
+        "slug": "will-the-us-invade-iran-before-2027",
+        "event_slug": "us-iran-2027",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_data_api_position_maps_to_scraper_shape():
+    mapped = map_data_api_position(api_row())
+    assert mapped == {
+        "marketTitle": "Will the U.S. invade Iran before 2027?",
+        "side": "No",
+        "quantity": 17.368,
+        "currentValue": 16.2391,
+        "pnl": 1.131,
+        "percentPnl": 7.5,
+        "marketIcon": "https://example.com/icon.jpg",
+        "href": None,
+        "redeemable": False,
+        "conditionId": "0x5db999",
+        "marketSlug": "will-the-us-invade-iran-before-2027",
+        "eventSlug": "us-iran-2027",
+    }
+    assert validate_portfolio_position(mapped) is True
+
+
+def test_data_api_position_rejects_missing_critical_fields():
+    assert map_data_api_position(api_row(title="")) is None
+    assert map_data_api_position(api_row(outcome=None)) is None
+    assert map_data_api_position(api_row(current_size="17.4")) is None
+    assert map_data_api_position(api_row(current_size=0)) is None
+
+
+def test_data_api_envelope_skips_dust_and_maps_the_rest():
+    payload = {"data": [api_row(), api_row(title="Dust market", current_size=0),
+                        api_row(title="Settled win", current_size=0.75, redeemable=True)]}
+    positions = parse_data_api_positions(payload)
+    assert [p["marketTitle"] for p in positions] == [
+        "Will the U.S. invade Iran before 2027?", "Settled win"]
+    assert positions[1]["redeemable"] is True
+    assert positions[1]["quantity"] == 0.75
+
+
+def test_data_api_fallback_is_voided_by_any_bad_row():
+    assert parse_data_api_positions({"data": [api_row(), api_row(title=None)]}) is None
+    assert parse_data_api_positions({"data": "not-a-list"}) is None
+    assert parse_data_api_positions(["not-a-dict"]) is None
+    assert parse_data_api_positions({"data": ["not-a-dict"]}) is None
