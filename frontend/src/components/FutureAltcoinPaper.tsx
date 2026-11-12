@@ -33,14 +33,20 @@ export function AltcoinPaperView({ data, error }: { data: PaperObserverStatus | 
               <Typography.Text>单位本金收益 {pct(strategy.roiPerDollar)}</Typography.Text>
               <Typography.Text>过滤原亏单 {strategy.filteredLosses ?? 0} / {asset.baseline.losses} · 同时过滤赢家 {strategy.filteredWins ?? 0}</Typography.Text>
             </Space>)}</Space>
-            <Table size="small" rowKey="periodStart" dataSource={asset.recent} scroll={{ x: 600 }} pagination={{ pageSize: 5, showSizeChanger: false }}
+            <Table size="small" rowKey="periodStart" dataSource={asset.recent} scroll={{ x: asset.strategies.length > 1 ? 710 : 620 }}
+              pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: ['10', '20'], showTotal: total => `最近 ${total} 笔影子单` }}
               locale={{ emptyText: '尚无前瞻影子单，等待符合条件的轮次' }} columns={[
-                { title: '轮次', dataIndex: 'periodStart', render: time },
-                { title: '方向', dataIndex: 'side' },
-                { title: '模拟均价', dataIndex: 'priceCents', render: (v: number) => `${v.toFixed(2)}¢` },
-                { title: '通过规则', dataIndex: 'rules', render: (v: string[]) => v.join(' / ') || '仅基线' },
-                { title: '平台结果', dataIndex: 'win', render: (v: boolean | null) => v == null ? '待核实' : v ? '赢' : '亏' },
-                { title: '纸面净盈亏', dataIndex: 'netPnlUsd', render: money },
+                { title: '轮次开始', dataIndex: 'periodStart', width: 170, render: time },
+                { title: '方向', dataIndex: 'side', width: 70,
+                  render: (side: string) => <Tag color={side === 'Up' ? 'green' : 'red'}>{side === 'Up' ? '涨' : '跌'}</Tag> },
+                { title: '模拟均价', dataIndex: 'priceCents', width: 90, render: (v: number) => `${v.toFixed(0)}¢` },
+                ...asset.strategies.map(strategy => ({ title: `${strategy.rule} 合格`, key: strategy.rule, dataIndex: 'rules', width: 90,
+                  render: (rules: string[]) => rules.includes(strategy.rule)
+                    ? <Tag color={strategy.rule === 'G1' ? 'processing' : 'warning'}>合格</Tag> : <Tag>过滤</Tag> })),
+                { title: '平台结果', dataIndex: 'win', width: 90,
+                  render: (v: boolean | null) => v == null ? <Tag>待核实</Tag> : <Tag color={v ? 'green' : 'red'}>{v ? '赢' : '亏'}</Tag> },
+                { title: '纸面盈亏', dataIndex: 'netPnlUsd', width: 110,
+                  render: (v: number | null) => <Typography.Text>{v == null ? '—' : `${v < 0 ? '-' : '+'}$${Math.abs(v).toFixed(2)}`}</Typography.Text> },
               ]} />
           </Space>
         </Card>)}

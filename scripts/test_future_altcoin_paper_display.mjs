@@ -22,3 +22,21 @@ test('new panel has no trading controls and uses only observer read API',()=>{
  assert.match(source,/observerStatus/);assert.doesNotMatch(source,/\.control\(|\.strategy\(|\.list\(|买入按钮/);
  assert.match(render(data),/不导入历史回测盈亏/);
 });
+test('paper rows use BTC direction, rule and result tags without inventing settlement',()=>{
+ const recent=[
+  {periodStart:100,side:'Up',priceCents:61,rules:['G1','G2'],win:true,netPnlUsd:0.612},
+  {periodStart:200,side:'Down',priceCents:73,rules:[],win:false,netPnlUsd:-1.028},
+  {periodStart:300,side:'Up',priceCents:84,rules:['G2'],win:null,netPnlUsd:null},
+ ];
+ const html=render({...data,assets:[{...data.assets[0],recent}]});
+ for(const [color,label] of [['green','涨'],['red','跌'],['processing','合格'],['warning','合格'],['green','赢'],['red','亏']])
+  assert.match(html,new RegExp(`ant-tag-${color}[^>]*>${label}</span>`));
+ assert.match(html,/G1 合格/);assert.match(html,/G2 合格/);assert.match(html,/>过滤<\/span>/);
+ assert.match(html,/>待核实<\/span>/);assert.doesNotMatch(html,/>平局<\/span>/);
+ assert.match(html,/\+\$0\.61</);assert.match(html,/-\$1\.03</);
+ assert.match(html,/最近 3 笔影子单/);assert.doesNotMatch(html,/>Up<|>Down</);
+});
+test('SOL table only shows its enrolled G1 rule',()=>{
+ const html=render({...data,assets:[data.assets[1]]});
+ assert.match(html,/G1 合格/);assert.doesNotMatch(html,/G2 合格/);
+});
