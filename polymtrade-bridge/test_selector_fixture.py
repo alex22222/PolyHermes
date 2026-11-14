@@ -1278,6 +1278,71 @@ ICON_ONLY_SELL_CONFIRM_DIALOG_HTML = """
 """
 
 
+# Mirrors the production Polymtrade sell dialog (dumped 2026-11 on an active
+# market): the real submit key is button[data-test="trade-sell-button"] with
+# text like "Sell 16.4 shares · $15.4", next to Buy/Sell side toggles.
+PRODUCTION_SELL_DIALOG_HTML = """
+<!doctype html>
+<html>
+<body>
+  <div role="dialog" class="trade-modal">
+    <button id="close-dialog" aria-label="Close">×</button>
+    <div class="side-toggle">
+      <button id="side-buy" data-test="trade-side-buy">Buy</button>
+      <button id="side-sell" data-test="trade-side-sell">Sell</button>
+    </div>
+    <div class="tabs">
+      <button>Market</button>
+      <button>Orderbook</button>
+    </div>
+    <input name="soldAmount" inputmode="decimal" value="16.4" />
+    <button id="decrease">−</button>
+    <button id="increase">+</button>
+    <button>25%</button>
+    <button>50%</button>
+    <button>75%</button>
+    <button id="max">Max</button>
+    <button id="submit-sell" data-test="trade-sell-button">Sell 16.4 shares · $15.4</button>
+  </div>
+  <script>
+    window.clickedIds = [];
+    document.addEventListener("click", (event) => {
+      window.clickedIds.push(event.target.id || (event.target.innerText || "").trim());
+    });
+  </script>
+</body>
+</html>
+"""
+
+
+# The 2026-11 SELL failure mode: the dialog has an amount input and only
+# side/outcome toggles whose data-test contains "sell" (trade-side-sell,
+# sell-outcome-yes). There is no submit button; the fallback scorer must
+# refuse to click instead of flipping a toggle (old code scored such a
+# toggle 14 >= threshold 4 and clicked it).
+SELL_DIALOG_TOGGLE_TRAP_HTML = """
+<!doctype html>
+<html>
+<body>
+  <div role="dialog" class="trade-modal">
+    <h2>Sell</h2>
+    <input name="soldAmount" inputmode="decimal" value="10" />
+    <button id="toggle-buy" data-test="trade-side-buy">Buy</button>
+    <button id="toggle-sell" data-test="trade-side-sell">Sell</button>
+    <button id="toggle-yes" data-test="sell-outcome-yes">Yes</button>
+    <button id="toggle-no" data-test="sell-outcome-no">No</button>
+  </div>
+  <script>
+    window.clickedIds = [];
+    document.addEventListener("click", (event) => {
+      window.clickedIds.push(event.target.id || (event.target.innerText || "").trim());
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 async def _run_network_modal_fixture() -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -1451,6 +1516,35 @@ async def _run_trade_form_fixture() -> None:
             await executor._click_sell_button()
             clicked_ids = await page.evaluate("window.clickedIds")
             assert "confirm-sell" in clicked_ids, clicked_ids
+
+            # Production dialog: the English submit key with
+            # data-test="trade-sell-button" must be clicked directly, without
+            # touching the Buy/Sell side toggles.
+            await page.set_content(PRODUCTION_SELL_DIALOG_HTML)
+            is_open = await executor._is_sell_dialog_open(timeout=0.5)
+            assert is_open is True, "Production sell dialog with data-test submit should be recognized"
+            await executor._click_sell_button()
+            clicked_ids = await page.evaluate("window.clickedIds")
+            assert "submit-sell" in clicked_ids, clicked_ids
+            assert "side-sell" not in clicked_ids, clicked_ids
+            assert "side-buy" not in clicked_ids, clicked_ids
+
+            # Regression for the 2026-11 mori SELL failure: when the dialog has
+            # no real submit button, the fallback scorer must not click the
+            # Buy/Sell/Yes/No toggles whose data-test happens to contain the
+            # side word.
+            await page.set_content(SELL_DIALOG_TOGGLE_TRAP_HTML)
+            is_open = await executor._is_sell_dialog_open(timeout=0.5)
+            assert is_open is True, "soldAmount input alone still counts as a sell dialog"
+            fallback_clicked = await executor._click_trade_submit_button("SELL")
+            assert fallback_clicked is False, "Side/outcome toggles must not be clicked as submit"
+            try:
+                await executor._click_sell_button(timeout=1.2)
+                raise AssertionError("Expected _click_sell_button to refuse a dialog without submit")
+            except RuntimeError as exc:
+                assert "Could not click sell button" in str(exc), exc
+            clicked_ids = await page.evaluate("window.clickedIds")
+            assert clicked_ids == [], clicked_ids
         finally:
             await browser.close()
 

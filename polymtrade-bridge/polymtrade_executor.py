@@ -2738,6 +2738,7 @@ class PolymtradeExecutor:
         """Return True if a real sell form/dialog is open."""
         selectors = [
             "input[name='soldAmount']",
+            "[role='dialog'] button[data-test='trade-sell-button']",
             "[role='dialog'] input[inputmode='decimal']",
             "[role='dialog'] input[type='number']",
             "[role='dialog'] input[placeholder*='Shares' i]",
@@ -5486,6 +5487,9 @@ class PolymtradeExecutor:
             )
             raise RuntimeError("Sell dialog disappeared before submit")
         selectors = [
+            "[role='dialog'] button[data-test='trade-sell-button']",
+            "[role='dialog'] [data-test='trade-sell-button']",
+            "button[data-test='trade-sell-button']",
             "button#sellbtn",
             "[role='dialog'] button:has-text('确认卖出')",
             "[role='dialog'] button:has-text('卖出')",
@@ -5575,6 +5579,13 @@ class PolymtradeExecutor:
                         cls.includes('disabled') ||
                         window.getComputedStyle(btn).pointerEvents === 'none'
                     ) continue;
+                    // Side/outcome pickers inside the trade dialog (Buy/Sell/Yes/No
+                    // toggles) are never the submit button, even when their
+                    // data-test contains the side word (e.g. "trade-side-sell").
+                    const dataTestAttr = (btn.getAttribute('data-test') || btn.getAttribute('data-testid') || '').toLowerCase();
+                    if (dataTestAttr.includes('side') || dataTestAttr.includes('outcome')) continue;
+                    const bareLabel = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+                    if (['yes', 'no', 'up', 'down', '是', '否'].includes(bareLabel)) continue;
                     const text = textOf(btn).toLowerCase();
                     if (negative.some(word => text.includes(word))) continue;
                     let score = 0;
