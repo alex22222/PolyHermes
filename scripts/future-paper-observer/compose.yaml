@@ -3,7 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: scripts/future-paper-observer/Dockerfile
-    image: polyhermes-paper-observer:altcoin-20261112
+    image: polyhermes-paper-observer:btc-forward-20261114
     container_name: future-paper-observer
     restart: unless-stopped
     user: '10001:10001'
@@ -17,6 +17,31 @@ services:
     volumes:
       - /opt/polyhermes/paper-observer/state:/state
     networks: [polyhermes]
+    command: [python, future_altcoin_paper.py, --state-dir, /state, --btc-forward]
+    depends_on:
+      paper-source:
+        condition: service_healthy
+  paper-source:
+    image: polyhermes-paper-observer:btc-forward-20261114
+    container_name: future-paper-source
+    restart: unless-stopped
+    user: '0:0'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: 0.2
+    volumes:
+      - /opt/polyhermes/future-btc5m:/bridge:ro
+    networks: [polyhermes]
+    command: [python, future_paper_source.py, --socket, /bridge/assistant.sock]
+    healthcheck:
+      test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1',8778),timeout=2); s.sendall(b'GET /health HTTP/1.0'+bytes([13,10,13,10])); assert b' 200 ' in s.recv(128); s.close()"]
+      interval: 10s
+      start_period: 0s
+      timeout: 5s
+      retries: 3
 networks:
   polyhermes:
     external: true

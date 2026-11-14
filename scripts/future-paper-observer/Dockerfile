@@ -1,7 +1,8 @@
 FROM python:3.13-slim
 RUN apt-get update && apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY scripts/future_altcoin_paper.py scripts/future_btc5m_conditions.py /app/
+COPY scripts/future_altcoin_paper.py scripts/future_btc5m_conditions.py scripts/future_btc5m_series.py /app/
+COPY scripts/future_btc_paper_forward.py scripts/future_btc_paper_legacy.py scripts/future_paper_source.py /app/
 USER 10001:10001
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 CMD ["python", "future_altcoin_paper.py", "--state-dir", "/state"]

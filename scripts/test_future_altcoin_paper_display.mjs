@@ -7,7 +7,7 @@ const require=createRequire(new URL('../frontend/package.json',import.meta.url))
 const ts=require('typescript'),React=require('react'),{renderToStaticMarkup}=require('react-dom/server');
 const source=readFileSync(new URL('../frontend/src/components/FutureAltcoinPaper.tsx',import.meta.url),'utf8');
 const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText;
-const context={exports:{},require:name=>name==='../services/api'?{apiService:{}}:require(name)};
+const context={exports:{},require:name=>name==='../services/api'?{apiService:{}}:name==='./FutureBtcPaperValidation'?{default:()=>null}:require(name)};
 vm.runInNewContext(code,context);
 const render=(data,error=null)=>renderToStaticMarkup(React.createElement(context.exports.AltcoinPaperView,{data,error}));
 const stats=rule=>({rule,trades:0,pending:0,settled:0,wins:0,losses:0,winRate:null,netPnlUsd:null,roiPerDollar:null});

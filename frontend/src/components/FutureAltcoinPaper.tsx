@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Alert, Card, Space, Table, Tag, Typography } from 'antd'
 import { apiService } from '../services/api'
+import FutureBtcPaperValidation from './FutureBtcPaperValidation'
 import type { PaperObserverStatus } from '../types/futurePaperObserver'
 
 const pct = (v: number | null) => v == null ? '—' : `${(v * 100).toFixed(2)}%`
@@ -80,5 +81,8 @@ export default function FutureAltcoinPaper() {
     const timer = window.setInterval(refresh, 10000)
     return () => { active = false; window.clearInterval(timer) }
   }, [])
-  return <AltcoinPaperView data={data} error={error} />
+  return <Space direction="vertical" size="large" style={{ width: '100%' }}>
+    <FutureBtcPaperValidation data={data?.btc ?? null} error={error} />
+    <AltcoinPaperView data={data} error={error} />
+  </Space>
 }

@@ -58,6 +58,7 @@ export default function FutureBtc5mPaperRegimeCard({ paper, history, onHistoryPa
   if (!paper) {
     return <Card title="趋势过滤器纸上验证 · G1 |trend60|>=15bp + G2 避开5-15bp">
       <Space direction="vertical" size={4}>
+        <Tag color="orange">旧版历史PREPARE · 非完整入场 · 未扣费估算</Tag>
         <Typography.Text type="secondary">
           每轮 15m PREPARE 决策会镜像一笔 $1 影子单（决策时价格），按 Binance 15m K线估算结算；只记录不下单，不影响真实交易。真实规则不变。
         </Typography.Text>
@@ -69,6 +70,8 @@ export default function FutureBtc5mPaperRegimeCard({ paper, history, onHistoryPa
   }
   return <Card title={`趋势过滤器纸上验证 · ${paper.rule}${paper.ruleG2 ? ` + ${paper.ruleG2}` : ''}`}>
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      <Tag color="orange">旧版历史PREPARE · 含回填 · 非完整入场 · 未扣费估算</Tag>
+      <Typography.Text strong>此处保留原始Binance估算用于核对；正式平台结果见“旧记录 · 平台结算校正”，新增策略成绩见“BTC策略前瞻验证”。</Typography.Text>
       <Typography.Text type="secondary">
         每轮 15m PREPARE 决策镜像一笔 $1 影子单（决策时价格），按 Binance 15m K线估算结算；只记录不下单，不影响真实交易。真实规则不变。
         G1 只保留趋势明显的轮次（|1小时趋势| ≥ 15bp）；G2 只避开 5–15bp 的震荡带（太平的 &lt;5bp 照常出手）。

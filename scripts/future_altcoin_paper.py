@@ -188,6 +188,13 @@ class Store:
                 'futureQuoteVerified': False, 'quoteSource': 'CLOB_PUBLIC_BOOK', 'resolutionSource': 'PLATFORM_PAYOUT',
                 'assets': assets, 'lastResolveError': meta.get('resolveError')}
 
+    def health(self, now):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM meta WHERE key='heartbeat'").fetchone()
+        heartbeat = json.loads(row[0]) if row else None
+        return {'paperOnly': True, 'heartbeat': heartbeat,
+                'fresh': heartbeat is not None and 0 <= now-heartbeat <= 30}
+
 
 class Observer:
     def __init__(self, store):
@@ -278,12 +285,16 @@ class Observer:
         self.store.meta('heartbeat', time.time())
 
 
-def serve(store, port):
+def serve(store, port, btc_status=None):
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path not in ('/status','/health'):
                 self.send_error(404); return
-            body = json.dumps(store.status(time.time()), allow_nan=False).encode()
+            now = time.time()
+            value = store.health(now) if self.path == '/health' else store.status(now)
+            if self.path == '/status' and btc_status is not None:
+                value['btc'] = btc_status(now)
+            body = json.dumps(value, allow_nan=False).encode()
             self.send_response(200); self.send_header('Content-Type','application/json')
             self.send_header('Cache-Control','no-store'); self.send_header('Content-Length',str(len(body)))
             self.end_headers(); self.wfile.write(body)
@@ -291,16 +302,59 @@ def serve(store, port):
             pass
     server = http.server.ThreadingHTTPServer(('0.0.0.0',port),Handler)
     threading.Thread(target=server.serve_forever,daemon=True).start()
+    return server
+
+
+def start_btc_observers(state_dir):
+    # Isolated paper threads: historical reconciliation can never delay the short entry window.
+    from future_btc_paper_forward import BtcForward
+    from future_btc_paper_legacy import BtcLegacy
+    from future_paper_source import read_bridge
+
+    observers = {}
+    errors = {}
+    for name, factory in [('forward', BtcForward), ('legacy', BtcLegacy)]:
+        try:
+            observers[name] = factory(state_dir/f'btc-{name}.db', read_bridge, public_get)
+        except Exception as error:
+            errors[name] = type(error).__name__
+
+    def run(name, observer):
+        while True:
+            try:
+                observer.tick()
+                errors.pop(name, None)
+            except Exception as error:
+                errors[name] = type(error).__name__
+            time.sleep(.2 if name == 'forward' and 120 <= time.time()%900 < 170 else 5)
+
+    for name, observer in observers.items():
+        threading.Thread(target=run,args=(name,observer),daemon=True).start()
+
+    def status(now):
+        result = {'forward': None, 'legacy': None}
+        for name, observer in observers.items():
+            try:
+                result[name] = observer.status(now)
+                if name in errors:
+                    result[name].update(fresh=False, lastError=errors[name])
+            except Exception as error:
+                errors[name] = type(error).__name__
+                result[name] = None
+        return result
+    return status
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--state-dir',type=Path,required=True)
     parser.add_argument('--port',type=int,default=8777)
+    parser.add_argument('--btc-forward',action='store_true')
     args = parser.parse_args()
     args.state_dir.mkdir(parents=True,exist_ok=True)
     store = Store(args.state_dir/'paper.db')
-    serve(store,args.port)
+    btc_status = start_btc_observers(args.state_dir) if args.btc_forward else None
+    serve(store,args.port,btc_status)
     observer = Observer(store)
     while True:
         observer.tick()
