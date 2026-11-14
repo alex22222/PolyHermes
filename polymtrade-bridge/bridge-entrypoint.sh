@@ -16,4 +16,10 @@ if [ "${HEADLESS:-false}" != "true" ]; then
   /usr/share/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 >/tmp/novnc.log 2>&1 &
 fi
 
+# A previous container's Chromium leaves Singleton* symlinks in the persistent
+# profile pointing at a dead hostname/pid. Headed Chromium refuses to launch
+# while they exist; no Chromium runs at entrypoint time, so clearing is safe.
+profile_dir="${BROWSER_PROFILE_DIR:-/app/browser_profile}"
+rm -f "$profile_dir/SingletonLock" "$profile_dir/SingletonCookie" "$profile_dir/SingletonSocket"
+
 exec uvicorn main:app --host 0.0.0.0 --port 8080
