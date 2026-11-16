@@ -300,7 +300,9 @@
 
   function orderTypeTicket(doc, url, now, series = pathRound(new URL(url).pathname)?.series ?? '5m') {
     const start = roundStart(now, series);
-    if (!matchesMarket(url, {slug: `${SERIES[series].slug}${start}`}) || endedMarketButtons(doc).length) {
+    // The ticket-title period check below is what proves the round; the banner
+    // button also appears for logged-in accounts on the current round.
+    if (!matchesMarket(url, {slug: `${SERIES[series].slug}${start}`})) {
       throw preparationError('MARKET_NOT_CURRENT');
     }
     const inputs = [...doc.querySelectorAll('input[placeholder="订单大小"]')]
@@ -435,9 +437,12 @@
     const pagePeriodStart = page && page.start;
     if (parsed.origin !== 'https://future.news' || parsed.username || parsed.password || !page ||
         !Number.isFinite(now)) return null;
-    // Current, ended or mismatched relative to the page's own series.
+    // Current, ended or mismatched relative to the page's own series. A logged-in
+    // account can show a "前往实时市场" banner even on the current round, so the
+    // button cannot decide navigation; a genuinely stale page still fails the
+    // ticket-title period check below.
     const start = roundStart(now, page.series);
-    const navigation = pagePeriodStart < start ? 'ENDED' : pagePeriodStart !== start || endedMarketButtons(doc).length ? 'MISMATCH' : 'CURRENT';
+    const navigation = pagePeriodStart < start ? 'ENDED' : pagePeriodStart !== start ? 'MISMATCH' : 'CURRENT';
     // Only origin/path leave the tab. Query parameters, DOM text and errors do not.
     const report = {schemaVersion: 2, marketUrl: parsed.origin + parsed.pathname, pagePeriodStart,
       checkedAt: now, navigation, ticketStatus: 'FAIL', amountUsd: null, selectedSide: null, buyButtonEnabled: false,
@@ -1327,8 +1332,7 @@
         (target) => location.replace(target));
       const target = navigationTarget(latest, location.href, now);
       if (sourceUrl === location.href && target &&
-          matchesMarket(location.href, {slug: new URL(target).pathname.split('/').pop()}) &&
-          typeof document.querySelectorAll === 'function' && !endedMarketButtons(document).length) {
+          matchesMarket(location.href, {slug: new URL(target).pathname.split('/').pop()})) {
         if (autoCheckedUrl !== location.href && inspectPage()) autoCheckedUrl = location.href;
       } else {
         inspection.textContent = '';

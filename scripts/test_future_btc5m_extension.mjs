@@ -859,7 +859,9 @@ test('the polling flow navigates an ended round once, clears old inspection and 
 });
 
 test('a changed SPA URL does not validate the old ticket while the ended-market control remains', async () => {
-  const fixture = ticketFixture();
+  // The banner button alone no longer marks the page (logged-in accounts show it on the
+  // current round too); the stale ticket title is what must fail the check.
+  const fixture = ticketFixture({title: 'Bitcoin Up or Down - October 10, 12:40PM-12:45PM ET'});
   const location = {href: `https://future.news/zh/event/btc-updown-5m-${start - 300}`};
   let ended = true;
   let clicks = 0;
@@ -871,8 +873,11 @@ test('a changed SPA URL does not validate the old ticket while the ended-market 
   assert.equal(location.href, marketUrl);
   assert.equal(children[5].textContent, '');
   await children.poll();
-  assert.equal(children[5].textContent, '', 'wait for the ended market DOM to disappear');
+  assert.match(children[5].textContent, /当前票据标题或页面轮次未核对/,
+    'a stale ticket title must fail even though the banner no longer marks the page');
+  assert.equal(fixture.writes(), 0);
   ended = false;
+  fixture.setTitle('Bitcoin Up or Down - October 10, 12:45PM-12:50PM ET');
   fixture.input.amount = '1';
   await children.poll();
   assert.match(children[5].textContent, /检查时金额为 \$1/);
@@ -1045,12 +1050,14 @@ test('preflight rejects old DOM under a new URL and ambiguous tickets without tr
     assert.equal(fixture.writes(), 0);
     assert.equal(fixture.clicks(), 0);
   }
+  // A "前往实时市场" banner also appears for logged-in accounts on the current
+  // round, so it must not mark navigation; the ticket checks still decide.
   const fixture = ticketFixture();
   const original = fixture.doc.querySelectorAll;
   fixture.doc.querySelectorAll = (selector) => selector === 'button' ? navigationFixture().doc.querySelectorAll(selector) : original(selector);
-  const mismatch = readPreflight(fixture.doc, marketUrl, now);
-  assert.equal(mismatch.navigation, 'MISMATCH');
-  assert.equal(mismatch.ticketStatus, 'FAIL');
+  const current = readPreflight(fixture.doc, marketUrl, now);
+  assert.equal(current.navigation, 'CURRENT');
+  assert.equal(current.ticketStatus, 'PASS');
   assert.equal(readPreflight(ticketFixture().doc, `https://future.news/zh/event/btc-updown-5m-${start - 300}`, now).navigation, 'ENDED');
   for (const suffix of ['?m=public-market-id', '#fragment']) {
     const canonical = readPreflight(ticketFixture().doc, marketUrl + suffix, now);
