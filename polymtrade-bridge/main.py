@@ -33,6 +33,13 @@ from bridge_reliability_audit import (
 )
 from bridge_metrics import metrics
 from portfolio_risk_client import PortfolioRiskCheck, PortfolioRiskClient
+from chain_trade_verifier import (
+    AVAILABILITY_CLOSED,
+    AVAILABILITY_NOT_FOUND,
+    fetch_wallet_trades,
+    find_matching_fill,
+    get_market_availability,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -95,6 +102,16 @@ SHORT_CYCLE_TRADE_LOCK_TIMEOUT_SECONDS = float(
 )
 UI_RETRY_ENABLED = os.getenv("BRIDGE_UI_RETRY_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 UI_RETRY_DELAY_SECONDS = max(0.0, float(os.getenv("BRIDGE_UI_RETRY_DELAY_SECONDS", "2")))
+CHAIN_VERIFY_ENABLED = os.getenv("BRIDGE_CHAIN_VERIFY_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
+RECONCILE_INTERVAL_SECONDS = max(
+    60.0, float(os.getenv("BRIDGE_RECONCILE_INTERVAL_SECONDS", "600"))
+)
+RECONCILE_WINDOW_HOURS = max(
+    1.0, float(os.getenv("BRIDGE_RECONCILE_WINDOW_HOURS", "48"))
+)
+MARKET_AVAILABILITY_CHECK_ENABLED = os.getenv(
+    "BRIDGE_MARKET_AVAILABILITY_CHECK_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes"}
 
 # Singleton PID lock to prevent multiple bridge instances from competing for the
 # same browser profile and opening multiple Chrome windows.
@@ -211,6 +228,7 @@ _portfolio_lock = asyncio.Lock()
 _signal_queue: Optional[asyncio.Queue[LeaderTradeSignal]] = None
 _signal_workers: list[asyncio.Task] = []
 _verification_tasks: set[asyncio.Task] = set()
+_reconcile_task: Optional[asyncio.Task] = None
 _retry_record_ids: dict[str, int] = {}
 _accepting_signals = False
 _signal_drain_reason: Optional[str] = None
@@ -393,6 +411,71 @@ async def _stop_verification_tasks():
         await asyncio.gather(*pending, return_exceptions=True)
 
 
+async def _reconcile_unverified_trades_once() -> int:
+    """Confirm SUBMITTED_UNVERIFIED records against on-chain fills.
+
+    polym.trade "market" orders are resting limit orders that can fill minutes
+    after the bridge gives up verifying. The chain keeps the truth, so records
+    that later filled are flipped to SUCCESS instead of staying ambiguous.
+    """
+    if not CHAIN_VERIFY_ENABLED or not recorder or not executor:
+        return 0
+    try:
+        wallet = executor.cached_wallet_address
+    except Exception:
+        wallet = None
+    if not wallet:
+        return 0
+    since_ms = int((time.time() - RECONCILE_WINDOW_HOURS * 3600) * 1000)
+    records = await _recorder_call(
+        "list_records_by_status_since", STATUS_SUBMITTED_UNVERIFIED, since_ms, 200
+    )
+    if not records:
+        return 0
+    trades = await fetch_wallet_trades(wallet, limit=500)
+    if not trades:
+        return 0
+    confirmed = 0
+    for record in records:
+        try:
+            fill = find_matching_fill(
+                trades,
+                condition_id=str(record.get("market_id") or ""),
+                side=str(record.get("side") or ""),
+                outcome=record.get("outcome"),
+                since_epoch_s=float(record.get("created_at") or 0) / 1000,
+            )
+        except Exception as e:
+            logger.warning("Reconciliation match failed for record %s: %s", record.get("id"), e)
+            continue
+        if not fill:
+            continue
+        await _recorder_call(
+            "update_status",
+            record["id"],
+            "SUCCESS",
+            f"confirmed by on-chain reconciliation tx={fill.get('transaction_hash')}",
+        )
+        confirmed += 1
+    return confirmed
+
+
+async def _reconcile_unverified_trades_loop():
+    while True:
+        await asyncio.sleep(RECONCILE_INTERVAL_SECONDS)
+        try:
+            confirmed = await _reconcile_unverified_trades_once()
+            if confirmed:
+                logger.warning(
+                    "Reconciled %s previously unverified trades via on-chain fills",
+                    confirmed,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unverified-trade reconciliation iteration failed")
+
+
 def bridge_runtime_status() -> dict[str, Any]:
     readiness = executor.trading_readiness() if executor else {
         "trading_ready": False, "trading_block_reasons": ["executor_not_ready"],
@@ -469,7 +552,7 @@ def apply_runtime_status_to_audit_result(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global executor, rule_engine, recorder, position_ledger
+    global executor, rule_engine, recorder, position_ledger, _reconcile_task
 
     if not acquire_singleton_lock():
         logger.error("Singleton lock not acquired, shutting down.")
@@ -530,12 +613,24 @@ async def lifespan(app: FastAPI):
             SIGNAL_WORKER_COUNT,
         )
 
+        if CHAIN_VERIFY_ENABLED:
+            _reconcile_task = asyncio.create_task(_reconcile_unverified_trades_loop())
+            logger.info(
+                "Unverified-trade reconciliation scheduled: interval=%ss window=%sh",
+                RECONCILE_INTERVAL_SECONDS,
+                RECONCILE_WINDOW_HOURS,
+            )
+
         yield
 
     finally:
         try:
             await _stop_signal_workers()
             await _stop_verification_tasks()
+            if _reconcile_task:
+                _reconcile_task.cancel()
+                await asyncio.gather(_reconcile_task, return_exceptions=True)
+                _reconcile_task = None
             logger.info("Shutting down Polymtrade executor...")
             if executor:
                 async with _trade_lock:
@@ -1131,6 +1226,36 @@ async def _wait_for_live_position_increase(
     )
 
 
+async def _find_onchain_fill(
+    *,
+    market_id: str,
+    side: str,
+    outcome: Optional[str],
+    since_epoch_s: float,
+) -> Optional[dict]:
+    """Best-effort on-chain fill lookup; returns None when unavailable or unmatched."""
+    if not CHAIN_VERIFY_ENABLED:
+        return None
+    if not executor or not _is_condition_id(market_id or ""):
+        return None
+    try:
+        wallet = executor.cached_wallet_address
+    except Exception:
+        wallet = None
+    if not wallet:
+        return None
+    trades = await fetch_wallet_trades(wallet, limit=100)
+    if not trades:
+        return None
+    return find_matching_fill(
+        trades,
+        condition_id=market_id,
+        side=side,
+        outcome=outcome,
+        since_epoch_s=since_epoch_s,
+    )
+
+
 async def _verify_submitted_buy(
     *,
     record_id: Optional[int],
@@ -1140,6 +1265,7 @@ async def _verify_submitted_buy(
     before_quantity: Optional[Decimal],
 ):
     started_at = time.perf_counter()
+    submitted_epoch_s = time.time()
     try:
         if before_quantity is None:
             raise RuntimeError("BUY baseline position quantity is unknown; cannot confirm a change")
@@ -1164,25 +1290,52 @@ async def _verify_submitted_buy(
             status="confirmed",
             market_id=market_id,
         )
+        return
     except Exception as verify_error:
-        metrics.buy_verifications_unconfirmed += 1
-        logger.warning(
-            "BUY asynchronous verification did not confirm portfolio increase: %s",
-            verify_error,
+        portfolio_error = verify_error
+
+    fill = await _find_onchain_fill(
+        market_id=market_id,
+        side="BUY",
+        outcome=outcome,
+        since_epoch_s=submitted_epoch_s,
+    )
+    if fill:
+        metrics.buy_verifications_success += 1
+        metrics.trades_buy_success += 1
+        logger.info(
+            "BUY verified by on-chain fill after portfolio check failed (%s): tx=%s",
+            portfolio_error,
+            fill.get("transaction_hash"),
         )
         if record_id and recorder:
-            await _recorder_call(
-                "update_status",
-                record_id,
-                STATUS_SUBMITTED_UNVERIFIED,
-                f"BUY submitted; asynchronous verification unconfirmed: {verify_error}",
-            )
+            await _recorder_call("update_status", record_id, "SUCCESS")
         metrics.observe_latency(
             "buy_verification_ms",
             (time.perf_counter() - started_at) * 1000,
-            status="unconfirmed",
+            status="confirmed",
             market_id=market_id,
         )
+        return
+
+    metrics.buy_verifications_unconfirmed += 1
+    logger.warning(
+        "BUY asynchronous verification did not confirm portfolio increase: %s",
+        portfolio_error,
+    )
+    if record_id and recorder:
+        await _recorder_call(
+            "update_status",
+            record_id,
+            STATUS_SUBMITTED_UNVERIFIED,
+            f"BUY submitted; asynchronous verification unconfirmed: {portfolio_error}",
+        )
+    metrics.observe_latency(
+        "buy_verification_ms",
+        (time.perf_counter() - started_at) * 1000,
+        status="unconfirmed",
+        market_id=market_id,
+    )
 
 
 async def _verify_submitted_sell(
@@ -1194,6 +1347,7 @@ async def _verify_submitted_sell(
     before_quantity: Decimal,
 ):
     started_at = time.perf_counter()
+    submitted_epoch_s = time.time()
     try:
         after_quantity = await _wait_for_live_position_decrease(
             market_id=market_id,
@@ -1216,25 +1370,52 @@ async def _verify_submitted_sell(
             status="confirmed",
             market_id=market_id,
         )
+        return
     except Exception as verify_error:
-        metrics.sell_verifications_unconfirmed += 1
-        logger.warning(
-            "SELL asynchronous verification did not confirm portfolio decrease: %s",
-            verify_error,
+        portfolio_error = verify_error
+
+    fill = await _find_onchain_fill(
+        market_id=market_id,
+        side="SELL",
+        outcome=outcome,
+        since_epoch_s=submitted_epoch_s,
+    )
+    if fill:
+        metrics.sell_verifications_success += 1
+        metrics.trades_sell_success += 1
+        logger.info(
+            "SELL verified by on-chain fill after portfolio check failed (%s): tx=%s",
+            portfolio_error,
+            fill.get("transaction_hash"),
         )
         if record_id and recorder:
-            await _recorder_call(
-                "update_status",
-                record_id,
-                STATUS_SUBMITTED_UNVERIFIED,
-                f"SELL submitted; asynchronous verification unconfirmed: {verify_error}",
-            )
+            await _recorder_call("update_status", record_id, "SUCCESS")
         metrics.observe_latency(
             "sell_verification_ms",
             (time.perf_counter() - started_at) * 1000,
-            status="unconfirmed",
+            status="confirmed",
             market_id=market_id,
         )
+        return
+
+    metrics.sell_verifications_unconfirmed += 1
+    logger.warning(
+        "SELL asynchronous verification did not confirm portfolio decrease: %s",
+        portfolio_error,
+    )
+    if record_id and recorder:
+        await _recorder_call(
+            "update_status",
+            record_id,
+            STATUS_SUBMITTED_UNVERIFIED,
+            f"SELL submitted; asynchronous verification unconfirmed: {portfolio_error}",
+        )
+    metrics.observe_latency(
+        "sell_verification_ms",
+        (time.perf_counter() - started_at) * 1000,
+        status="unconfirmed",
+        market_id=market_id,
+    )
 
 
 @app.post("/signal")
@@ -1376,6 +1557,56 @@ async def execute_trade(request: ExecuteRequest, background_tasks: BackgroundTas
     }
 
 
+def _is_market_render_failure(reason: str) -> bool:
+    """True for failures that happen while rendering/clicking the market page."""
+    text = (reason or "").lower()
+    if not text:
+        return False
+    if is_retryable_pre_submit_failure(reason):
+        return True
+    return (
+        "could not click buy button" in text
+        or "could not click sell button" in text
+        or "could not click selected outcome" in text
+    )
+
+
+async def _record_pre_submit_failure(
+    record_id: int, reason: str, condition_id: Optional[str]
+) -> str:
+    """Record a pre-submit failure, downgrading gone/closed markets to SKIPPED.
+
+    UI-only failures on markets that still exist keep the original FAILED
+    semantics (and stay eligible for the one-shot UI retry). Markets Polymarket
+    no longer lists cannot be fixed by a retry, so they become SKIPPED to stop
+    the retry and the failure noise.
+    """
+    if (
+        MARKET_AVAILABILITY_CHECK_ENABLED
+        and recorder
+        and _is_condition_id(condition_id or "")
+        and _is_market_render_failure(reason)
+    ):
+        availability = await get_market_availability(condition_id or "")
+        note = None
+        if availability == AVAILABILITY_NOT_FOUND:
+            note = (
+                "Unsupported market: not listed on Polymarket (gamma-api); "
+                f"original error: {reason}"
+            )
+        elif availability == AVAILABILITY_CLOSED:
+            note = (
+                "Market closed on Polymarket (gamma-api); "
+                f"original error: {reason}"
+            )
+        if note:
+            logger.warning("Pre-submit failure downgraded to SKIPPED: %s", note)
+            await _recorder_call("update_status", record_id, "SKIPPED", note)
+            return "SKIPPED"
+    await _recorder_call("update_status", record_id, "FAILED", reason)
+    return "FAILED"
+
+
 async def _execute_and_record(record_id: int, request: ExecuteRequest, external_trade_id: str):
     """执行交易并更新 bridge_trade_record 状态。"""
     manual_risk_correlation = f"bridge:{external_trade_id}:manual"
@@ -1479,7 +1710,7 @@ async def _execute_and_record(record_id: int, request: ExecuteRequest, external_
             _track_verification_task(_verify_submitted_sell(**sell_verification))
     except Exception as e:
         logger.error(f"Manual trade failed: {external_trade_id}, error={e}", exc_info=True)
-        await _recorder_call("update_status", record_id, "FAILED", error_message=str(e))
+        await _record_pre_submit_failure(record_id, str(e), request.condition_id)
         if request.side.upper() == "BUY":
             await _complete_manual_buy_risk(manual_risk_correlation, "FAILED")
 
@@ -2408,9 +2639,12 @@ async def handle_signal(
                     metrics.trades_sell_failed += 1
                 if record_id and recorder:
                     failure_reason = str(exec_err)
-                    await _recorder_call("update_status", record_id, "FAILED", failure_reason)
+                    recorded_status = await _record_pre_submit_failure(
+                        record_id, failure_reason, signal.condition_id
+                    )
                     if (
-                        UI_RETRY_ENABLED
+                        recorded_status != "SKIPPED"
+                        and UI_RETRY_ENABLED
                         and retry_attempt == 0
                         and is_retryable_pre_submit_failure(failure_reason)
                     ):

@@ -101,6 +101,26 @@ class BridgeTradeRecorder:
                 conn.commit()
         logger.info(f"Updated bridge trade {record_id} to {status}")
 
+    def list_records_by_status_since(
+        self, status: str, since_ms: int, limit: int = 200
+    ) -> list[dict]:
+        """List recent records in a given status, newest first."""
+        sql = """
+        SELECT id, market_id, market_title, side, outcome, price, amount, created_at
+        FROM bridge_trade_record
+        WHERE bridge_id = %s AND status = %s AND created_at >= %s
+        ORDER BY id DESC
+        LIMIT %s
+        """
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (self.bridge_id, status, since_ms, limit))
+                    return list(cur.fetchall())
+        except Exception as e:
+            logger.warning(f"Failed to list records by status {status}: {e}")
+            return []
+
     def exists(self, external_trade_id: str) -> bool:
         """Check whether a record with the given external trade id already exists."""
         sql = """
