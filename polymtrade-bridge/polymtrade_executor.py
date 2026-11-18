@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import time
 import urllib.parse
@@ -70,7 +71,7 @@ class PolymtradeExecutor:
         # reload the headed Polymtrade page.
         self._portfolio_snapshot_cache_ttl_seconds = max(
             0.0,
-            float(os.getenv("BRIDGE_PORTFOLIO_SNAPSHOT_CACHE_TTL_SECONDS", "55")),
+            float(os.getenv("BRIDGE_PORTFOLIO_SNAPSHOT_CACHE_TTL_SECONDS", "180")),
         )
         self._cached_wallet_address: Optional[str] = None
         self._cached_wallet_at: int = 0
@@ -93,6 +94,11 @@ class PolymtradeExecutor:
         self._gamma_next_request_at = 0.0
         self._navigation_lock = asyncio.Lock()
         self._next_navigation_at = 0.0
+        # Human browsing is never metronome-exact. Jitter the shared navigation
+        # cadence so repeated portfolio reads do not arrive at fixed intervals.
+        self._navigation_jitter_enabled = (
+            os.getenv("BRIDGE_NAVIGATION_JITTER_ENABLED", "true").lower() == "true"
+        )
         self._upstream_cooldown = UpstreamCooldown(os.path.join(self.profile_dir, ".polyhermes-upstream-cooldowns.json"))
         self._gamma_search_denials = GammaSearchDenials(os.path.join(self.profile_dir, ".polyhermes-gamma-search-denials.json"))
         self._portfolio_page_idle_close_seconds = float(
@@ -200,16 +206,22 @@ class PolymtradeExecutor:
             # Use persistent context to keep login session.
             # ignore_default_args removes Playwright's --enable-automation flag,
             # which often triggers OAuth "browser or app may not be secure" errors.
-            self.context = await self.playwright.chromium.launch_persistent_context(
-                self.profile_dir,
+            # Do not override the User-Agent by default: a spoofed UA that does
+            # not match the real Chromium version/platform (sec-ch-ua) is a
+            # strong bot signal for upstream protection. BROWSER_USER_AGENT can
+            # restore an explicit UA if one is ever needed again.
+            launch_options = dict(
                 headless=self.headless,
                 args=browser_args,
                 ignore_default_args=["--enable-automation"],
                 viewport={"width": 1280, "height": 900},
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
+            )
+            user_agent = os.getenv("BROWSER_USER_AGENT", "").strip()
+            if user_agent:
+                launch_options["user_agent"] = user_agent
+            self.context = await self.playwright.chromium.launch_persistent_context(
+                self.profile_dir,
+                **launch_options,
             )
 
             restored_pages = list(self.context.pages)
@@ -3008,7 +3020,10 @@ class PolymtradeExecutor:
                 logger.info("Browser navigation paced for %.1fs", delay)
                 await asyncio.sleep(delay)
             self._upstream_cooldown.check(url)
-            self._next_navigation_at = time.monotonic() + self._upstream_cooldown.navigation_interval(url)
+            interval = self._upstream_cooldown.navigation_interval(url)
+            if self._navigation_jitter_enabled:
+                interval *= random.uniform(1.0, 1.8)
+            self._next_navigation_at = time.monotonic() + interval
 
     async def _goto_with_retry(
         self,
